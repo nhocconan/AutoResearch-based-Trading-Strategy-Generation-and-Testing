@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 12h Donchian breakout with volume confirmation and ADX trend filter
-# The 12h Donchian channel (20-period) identifies major support/resistance levels.
-# Breakouts above the upper channel or below the lower channel with volume > 1.5x 20-period average
-# indicate strong momentum. ADX > 25 confirms trending markets to avoid whipsaws in ranging conditions.
-# Works in bull/bear markets: breakouts capture trends, ADX filter avoids false breakouts in ranges.
-# Target: 75-200 total trades over 4 years (19-50/year) with 0.25 position sizing.
+# Hypothesis: 6h strategy using weekly pivot points with volume confirmation and momentum filter
+# Weekly pivots provide key support/resistance on higher timeframe. Breakouts above weekly R1 or below S1 
+# with volume > 2x 20-period average indicate strong momentum. Momentum filter (RSI > 55 for long, < 45 for short) 
+# ensures trend alignment. Weekly context reduces noise and improves performance in both bull and bear markets.
+# Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing.
 
-name = "4h_12hDonchian20_Volume_ADXFilter_v1"
-timeframe = "4h"
+name = "6h_1wPivot_R1S1_MomVol_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,65 +23,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 12h Donchian channel (20-period) ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Calculate weekly pivot points ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_12h) < 20:
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # 12h Donchian channel: 20-period high and low
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Previous week's OHLC for pivot calculation
+    prev_close = df_1w['close'].shift(1).values
+    prev_high = df_1w['high'].shift(1).values
+    prev_low = df_1w['low'].shift(1).values
     
-    # Calculate rolling max/min for 20-period Donchian channels
-    high_max_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    low_min_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # Pivot point calculation
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_ = prev_high - prev_low
     
-    # Align 12h Donchian levels to 4h timeframe
-    upper_channel = align_htf_to_ltf(prices, df_12h, high_max_20)
-    lower_channel = align_htf_to_ltf(prices, df_12h, low_min_20)
+    # Support and Resistance levels
+    r1 = pivot + range_
+    s1 = pivot - range_
     
-    # Volume confirmation: >1.5x 20-period average
+    # Align weekly levels to 6h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    
+    # Volume confirmation: >2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_20)
+    volume_filter = volume > (2.0 * vol_ma_20)
     
-    # ADX trend filter (14-period)
-    # Calculate True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    # Calculate Directional Movement
-    dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    
-    # Smooth TR, DM+ and DM- using Wilder's smoothing (equivalent to EMA with alpha=1/14)
-    def wilder_smooth(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nanmean(arr[1:period])
-        # Subsequent values: smoothed = previous_smoothed - (previous_smoothed/period) + current_value
-        for i in range(period, len(arr)):
-            result[i] = result[i-1] - (result[i-1]/period) + arr[i]
-        return result
-    
-    atr = wilder_smooth(tr, 14)
-    dm_plus_smooth = wilder_smooth(dm_plus, 14)
-    dm_minus_smooth = wilder_smooth(dm_minus, 14)
-    
-    # Calculate DI+ and DI-
-    di_plus = np.where(atr > 0, 100 * dm_plus_smooth / atr, 0)
-    di_minus = np.where(atr > 0, 100 * dm_minus_smooth / atr, 0)
-    
-    # Calculate DX and ADX
-    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = wilder_smooth(dx, 14)
-    adx_filter = adx > 25
+    # Momentum filter: RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_long = rsi > 55
+    rsi_short = rsi < 45
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -93,8 +70,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
-            np.isnan(volume_filter[i]) or np.isnan(adx_filter[i]) or
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(volume_filter[i]) or np.isnan(rsi_long[i]) or np.isnan(rsi_short[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -102,24 +79,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long breakout: price breaks above upper channel with volume and trend confirmation
-            if close[i] > upper_channel[i] and volume_filter[i] and adx_filter[i]:
+            # Long breakout: price breaks above weekly R1 with volume and momentum confirmation
+            if close[i] > r1_aligned[i] and volume_filter[i] and rsi_long[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short breakout: price breaks below lower channel with volume and trend confirmation
-            elif close[i] < lower_channel[i] and volume_filter[i] and adx_filter[i]:
+            # Short breakout: price breaks below weekly S1 with volume and momentum confirmation
+            elif close[i] < s1_aligned[i] and volume_filter[i] and rsi_short[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below lower channel (failed resistance) or ADX turns weak
-            if close[i] < lower_channel[i] or adx[i] < 20:
+            # Exit long: price breaks below weekly S1 (failed support) or RSI turns bearish
+            if close[i] < s1_aligned[i] or rsi[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above upper channel (failed support) or ADX turns weak
-            if close[i] > upper_channel[i] or adx[i] < 20:
+            # Exit short: price breaks above weekly R1 (failed resistance) or RSI turns bullish
+            if close[i] > r1_aligned[i] or rsi[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
