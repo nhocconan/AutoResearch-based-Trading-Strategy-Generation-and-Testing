@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Donchian breakout with volume confirmation and ADX filter
-# Donchian(20) breakout from daily timeframe captures strong trends
-# Volume > 2.0x 20-period average confirms momentum
-# ADX(14) > 25 filters choppy markets, ensuring trend strength
-# Works in bull/bear markets: breakouts capture trends, ADX filter avoids whipsaws
-# Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
+# Hypothesis: 4h strategy using 1d pivot points with volume confirmation and ADX trend filter
+# 1-day pivot points (R1/S1 for breakouts, R2/S2 for reversals) provide key daily levels
+# Breakout above R1 or below S1 with volume > 1.5x 20-period average indicates strong momentum
+# ADX(14) > 25 ensures we only trade in trending markets, avoiding chop
+# Works in bull/bear markets: breakouts capture trends, reversals capture pullbacks within trend
+# Target: 75-200 total trades over 4 years (19-50/year) with 0.25 position sizing
 
-name = "12h_1dDonchian20_VolumeADXFilter_v2"
-timeframe = "12h"
+name = "4h_1dPivot_R1S2_VolumeADX_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,52 +24,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Donchian channels ONCE before loop
+    # Calculate 1d pivot points ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Donchian channels: 20-period high and low
-    high_20 = df_1d['high'].rolling(window=20, min_periods=20).max().values
-    low_20 = df_1d['low'].rolling(window=20, min_periods=20).min().values
+    # Previous 1d bar's OHLC for pivot calculation
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Align 1d levels to 12h timeframe
-    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
+    # Pivot point calculation
+    # Pivot = (previous high + previous low + previous close) / 3
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_ = prev_high - prev_low
     
-    # Volume confirmation: >2.0x 20-period average
+    # Support and Resistance levels
+    r1 = pivot + (range_ * 1.0)
+    r2 = pivot + (range_ * 2.0)
+    s1 = pivot - (range_ * 1.0)
+    s2 = pivot - (range_ * 2.0)
+    
+    # Align 1d levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    
+    # Volume confirmation: >1.5x 20-period average (balanced to reduce trades)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (2.0 * vol_ma_20)
+    volume_filter = volume > (1.5 * vol_ma_20)
     
-    # ADX filter: >25 for trend strength
-    # Calculate True Range
+    # ADX trend filter: >25 indicates trending market
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(np.maximum(tr1, tr2), tr3)])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Directional Movement
-    dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    up_move = high[1:] - high[:-1]
+    down_move = low[:-1] - low[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
-    # Smoothed ATR, DM+ , DM-
-    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
-    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
-    
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_14 / tr_14
-    di_minus = 100 * dm_minus_14 / tr_14
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     adx_filter = adx > 25
     
-    # Session filter: 08-20 UTC
+    # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     session_filter = (hours >= 8) & (hours <= 20)
     
@@ -78,8 +83,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
-            np.isnan(volume_filter[i]) or np.isnan(adx_filter[i]) or
+        if (np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(s2_aligned[i]) or np.isnan(volume_filter[i]) or np.isnan(adx_filter[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -87,24 +92,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long breakout: price breaks above 20-day high with volume and trend
-            if close[i] > high_20_aligned[i] and volume_filter[i] and adx_filter[i]:
+            # Long breakout: price breaks above R1 with volume confirmation and trend
+            if close[i] > r1_aligned[i] and volume_filter[i] and adx_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short breakout: price breaks below 20-day low with volume and trend
-            elif close[i] < low_20_aligned[i] and volume_filter[i] and adx_filter[i]:
+            # Short breakout: price breaks below S1 with volume confirmation and trend
+            elif close[i] < s1_aligned[i] and volume_filter[i] and adx_filter[i]:
+                signals[i] = -0.25
+                position = -1
+            # Long reversal: price rejects S2 with volume confirmation and trend
+            elif close[i] < s2_aligned[i] and close[i] > s2_aligned[i] * 0.995 and volume_filter[i] and adx_filter[i]:
+                signals[i] = 0.25
+                position = 1
+            # Short reversal: price rejects R2 with volume confirmation and trend
+            elif close[i] > r2_aligned[i] and close[i] < r2_aligned[i] * 1.005 and volume_filter[i] and adx_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below 20-day low (stop) or reaches 20-day high (take profit)
-            if close[i] < low_20_aligned[i] or close[i] > high_20_aligned[i]:
+            # Exit long: price breaks below S1 (failed support) or reaches R2 (take profit)
+            if close[i] < s1_aligned[i] or close[i] > r2_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above 20-day high (stop) or reaches 20-day low (take profit)
-            if close[i] > high_20_aligned[i] or close[i] < low_20_aligned[i]:
+            # Exit short: price breaks above R1 (failed resistance) or reaches S2 (take profit)
+            if close[i] > r1_aligned[i] or close[i] < s2_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
