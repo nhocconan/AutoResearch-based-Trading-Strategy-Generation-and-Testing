@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 12h Choppiness Index for regime detection and 1d EMA crossover for trend
-# - Uses 12h Choppiness Index to identify trending vs ranging markets
-# - Uses 1d EMA crossover (8/21) to determine trend direction
-# - Enters long when market is trending (CHOP < 38.2) and EMA 8 crosses above EMA 21
-# - Enters short when market is trending (CHOP < 38.2) and EMA 8 crosses below EMA 21
-# - Uses volume spike as confirmation for entry
-# - Exits when market becomes ranging (CHOP > 61.8) or opposite EMA crossover occurs
-# - Designed to capture trending moves while avoiding choppy markets
-# - Target: 100-200 total trades over 4 years (25-50/year) with 0.25 position sizing
+# Hypothesis: 12h strategy using 1d Donchian channel breakout with volume confirmation and 1w ADX trend filter
+# - Uses 1d Donchian channel (20) for breakout levels
+# - Uses 1w ADX (14) to filter for trending markets (ADX > 25)
+# - Enters long when price breaks above 1d Donchian high with volume spike in trending market
+# - Enters short when price breaks below 1d Donchian low with volume spike in trending market
+# - Exits when price crosses back below/above 1d close
+# - Designed to capture breakouts in trending markets with volume confirmation
+# - Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
 
-name = "4h_12hChop_1dEMA_Crossover"
-timeframe = "4h"
+name = "12h_1dDonchian_1wADX_Volume_Breakout"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,29 +26,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Choppiness Index calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 14:
-        return np.zeros(n)
-    
-    # Get 1d data for EMA calculation
+    # Get 1d data for Donchian channel calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 21:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 12h Choppiness Index (14)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Get 1w data for ADX calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
+        return np.zeros(n)
+    
+    # Calculate 1d Donchian channel (20)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Donchian upper and lower bands
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 1w ADX (14)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     # True Range
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    tr[0] = tr1[0]  # First period
     
-    # ATR using Wilder's smoothing
+    # Directional Movement
+    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w), 
+                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)), 
+                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
+    
+    # Wilder's smoothing function
     def wilders_smoothing(data, period):
         result = np.zeros_like(data)
         if len(data) < period:
@@ -59,70 +73,67 @@ def generate_signals(prices):
             result[i] = result[i-1] - (result[i-1] / period) + data[i]
         return result
     
-    atr_12h = wilders_smoothing(tr, 14)
+    # Smoothed TR, DM+, DM-
+    atr = wilders_smoothing(tr, 14)
+    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
+    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
     
-    # Calculate highest high and lowest low over 14 periods
-    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / atr
+    di_minus = 100 * dm_minus_smooth / atr
     
-    # Chop = 100 * log10(sum(ATR14) / (HH14 - LL14)) / log10(14)
-    sum_atr = pd.Series(atr_12h).rolling(window=14, min_periods=14).sum().values
-    chop = 100 * np.log10(sum_atr / (highest_high - lowest_low)) / np.log10(14)
-    chop = np.where((highest_high - lowest_low) == 0, 50, chop)  # Avoid division by zero
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    dx = np.where((di_plus + di_minus) == 0, 0, dx)
+    adx = wilders_smoothing(dx, 14)
     
-    # Calculate 1d EMA crossover (8, 21)
-    close_1d = df_1d['close'].values
-    ema_8 = pd.Series(close_1d).ewm(span=8, adjust=False, min_periods=8).mean().values
-    ema_21 = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Align 1d indicators to 12h timeframe
+    donchian_high_12h = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_12h = align_htf_to_ltf(prices, df_1d, donchian_low)
+    close_1d_12h = align_htf_to_ltf(prices, df_1d, close_1d)
     
-    # EMA crossover signals
-    ema_cross_up = np.where((ema_8 > ema_21) & (np.roll(ema_8, 1) <= np.roll(ema_21, 1)), 1, 0)
-    ema_cross_down = np.where((ema_8 < ema_21) & (np.roll(ema_8, 1) >= np.roll(ema_21, 1)), 1, 0)
+    # Align 1w ADX to 12h timeframe
+    adx_12h = align_htf_to_ltf(prices, df_1w, adx)
     
-    # Align 12h Choppiness Index to 4h timeframe
-    chop_4h = align_htf_to_ltf(prices, df_12h, chop)
-    
-    # Align 1d EMA and crossover signals to 4h timeframe
-    ema_8_4h = align_htf_to_ltf(prices, df_1d, ema_8)
-    ema_21_4h = align_htf_to_ltf(prices, df_1d, ema_21)
-    ema_cross_up_4h = align_htf_to_ltf(prices, df_1d, ema_cross_up)
-    ema_cross_down_4h = align_htf_to_ltf(prices, df_1d, ema_cross_down)
-    
-    # Volume filters (4h timeframe)
-    vol_ma_10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
-    volume_spike = volume > (1.5 * vol_ma_10)
+    # Volume filters (12h timeframe)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma_20)  # Strong volume confirmation
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after warmup
         # Skip if any critical value is NaN
-        if (np.isnan(chop_4h[i]) or np.isnan(ema_8_4h[i]) or np.isnan(ema_21_4h[i]) or
-            np.isnan(ema_cross_up_4h[i]) or np.isnan(ema_cross_down_4h[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(donchian_high_12h[i]) or np.isnan(donchian_low_12h[i]) or np.isnan(close_1d_12h[i]) or
+            np.isnan(adx_12h[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: trending market (CHOP < 38.2) + EMA bullish crossover + volume spike
-            if chop_4h[i] < 38.2 and ema_cross_up_4h[i] == 1 and volume_spike[i]:
-                signals[i] = 0.25
-                position = 1
-            # Enter short: trending market (CHOP < 38.2) + EMA bearish crossover + volume spike
-            elif chop_4h[i] < 38.2 and ema_cross_down_4h[i] == 1 and volume_spike[i]:
-                signals[i] = -0.25
-                position = -1
+            # Look for trending market (ADX > 25) and volume spike
+            trending = adx_12h[i] > 25
+            
+            if trending:
+                # Long: price breaks above 1d Donchian high with volume spike
+                if close[i] > donchian_high_12h[i] and volume_spike[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # Short: price breaks below 1d Donchian low with volume spike
+                elif close[i] < donchian_low_12h[i] and volume_spike[i]:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Exit long: market becomes ranging (CHOP > 61.8) OR EMA bearish crossover
-            if chop_4h[i] > 61.8 or ema_cross_down_4h[i] == 1:
+            # Exit long: price crosses below 1d close
+            if close[i] < close_1d_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: market becomes ranging (CHOP > 61.8) OR EMA bullish crossover
-            if chop_4h[i] > 61.8 or ema_cross_up_4h[i] == 1:
+            # Exit short: price crosses above 1d close
+            if close[i] > close_1d_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
