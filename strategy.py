@@ -3,14 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using daily high/low from prior day for mean reversion with volume confirmation
-# - Long when price touches prior day's low with volume confirmation and closes back above it
-# - Short when price touches prior day's high with volume confirmation and closes back below it
-# - Uses 1d EMA50 to only take trades in direction of daily trend (long above EMA50, short below)
-# - Designed to work in ranging markets by fading extreme daily levels
+# Hypothesis: 4h strategy using 1w pivot levels with breakout and fade logic
+# - Fade (counter-trend) at S2/R2 levels when price reverses from these levels with volume confirmation
+# - Breakout (trend-following) at S3/R3 levels when price breaks through with volume expansion
+# - Uses 1w pivot levels calculated from prior weekly bar's range
+# - Adds 1d EMA50 filter to only take trades in direction of daily trend
+# - Designed to work in ranging markets (fades at S2/R2) and trending markets (breakouts at S3/R3)
 # - Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
+# - Focus on BTC/ETH with SOL as secondary confirmation
 
-name = "4h_PriorDayHL_MeanReversion_1dEMA50_TrendFilter"
+name = "4h_1wPivot_S2R2_S3R3_1dEMA50_Trend_Filter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,71 +26,107 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for prior day's high/low and EMA50
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 1w data for pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Prior day's high and low (shifted by 1 to avoid look-ahead)
-    prior_high = df_1d['high'].shift(1).values
-    prior_low = df_1d['low'].shift(1).values
+    # Calculate weekly pivot levels: based on prior weekly bar's range
+    # R3 = high + 2*(high - low), R2 = pivot + (high - low)
+    # S2 = pivot - (high - low), S3 = low - 2*(high - low)
+    # pivot = (high + low + close) / 3
+    prev_high = df_1w['high'].shift(1)
+    prev_low = df_1w['low'].shift(1)
+    prev_close = df_1w['close'].shift(1)
     
-    # Align prior day's high/low to 4h timeframe
-    prior_high_4h = align_htf_to_ltf(prices, df_1d, prior_high)
-    prior_low_4h = align_htf_to_ltf(prices, df_1d, prior_low)
+    pivot = (prev_high + prev_low + prev_close) / 3
+    price_range = prev_high - prev_low
+    
+    R3 = prev_high + 2 * price_range
+    R2 = pivot + price_range
+    S2 = pivot - price_range
+    S3 = prev_low - 2 * price_range
+    
+    # Align weekly pivot levels to 4h timeframe
+    R3_4h = align_htf_to_ltf(prices, df_1w, R3.values)
+    R2_4h = align_htf_to_ltf(prices, df_1w, R2.values)
+    S2_4h = align_htf_to_ltf(prices, df_1w, S2.values)
+    S3_4h = align_htf_to_ltf(prices, df_1w, S3.values)
     
     # 1d EMA50 for trend filter
+    df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
     ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume filter: current volume > 1.5x 20-period moving average
+    # Volume filters
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_20)
+    volume_filter = volume > (1.5 * vol_ma_20)  # Volume confirmation
+    volume_expansion = volume > np.roll(volume, 1)  # Current volume > previous
+    volume_expansion[0] = False
+    
+    # Session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):  # Start after warmup
-        # Skip if any critical value is NaN
-        if (np.isnan(prior_high_4h[i]) or np.isnan(prior_low_4h[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_filter[i])):
+        # Skip if any critical value is NaN or outside session
+        if (np.isnan(R3_4h[i]) or np.isnan(R2_4h[i]) or np.isnan(S2_4h[i]) or np.isnan(S3_4h[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_filter[i]) or np.isnan(volume_expansion[i]) or
+            not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long setup: price touches prior day's low and closes back above it with volume
-            if low[i] <= prior_low_4h[i] * 1.001 and close[i] > prior_low_4h[i] and volume_filter[i]:
-                # Only take long if above daily EMA50 (bullish bias)
+            # Fade at S2/R2: counter-trend entry when price reverses from these levels
+            # Long fade at S2: price touches S2 and closes back above it
+            if close[i] <= S2_4h[i] * 1.001 and close[i] > S2_4h[i] and volume_filter[i]:
+                # Only take long fade if below daily EMA (bearish context)
+                if close[i] < ema_50_1d_aligned[i]:
+                    signals[i] = 0.25
+                    position = 1
+            # Short fade at R2: price touches R2 and closes back below it
+            elif close[i] >= R2_4h[i] * 0.999 and close[i] < R2_4h[i] and volume_filter[i]:
+                # Only take short fade if above daily EMA (bullish context)
+                if close[i] > ema_50_1d_aligned[i]:
+                    signals[i] = -0.25
+                    position = -1
+            # Breakout at S3/R3: trend-following entry when price breaks through
+            # Long breakout at R3: price breaks above R3 with volume expansion
+            elif close[i] > R3_4h[i] and volume_expansion[i]:
+                # Only take long breakout if above daily EMA (bullish context)
                 if close[i] > ema_50_1d_aligned[i]:
                     signals[i] = 0.25
                     position = 1
-            # Short setup: price touches prior day's high and closes back below it with volume
-            elif high[i] >= prior_high_4h[i] * 0.999 and close[i] < prior_high_4h[i] and volume_filter[i]:
-                # Only take short if below daily EMA50 (bearish bias)
+            # Short breakout at S3: price breaks below S3 with volume expansion
+            elif close[i] < S3_4h[i] and volume_expansion[i]:
+                # Only take short breakout if below daily EMA (bearish context)
                 if close[i] < ema_50_1d_aligned[i]:
                     signals[i] = -0.25
                     position = -1
         elif position == 1:
-            # Exit long: price reaches prior day's high (target) or breaks below prior day's low (stop)
-            if high[i] >= prior_high_4h[i] * 0.999:  # Take profit at prior day's high
+            # Exit long: price reaches R2 (profit target) or breaks below S3 (stop)
+            if close[i] >= R2_4h[i] * 0.999:  # Take profit at R2
                 signals[i] = 0.0
                 position = 0
-            elif low[i] < prior_low_4h[i]:  # Stop loss if breaks below prior day's low
+            elif close[i] < S3_4h[i]:  # Stop loss if breaks below S3
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price reaches prior day's low (target) or breaks above prior day's high (stop)
-            if low[i] <= prior_low_4h[i] * 1.001:  # Take profit at prior day's low
+            # Exit short: price reaches S2 (profit target) or breaks above R3 (stop)
+            if close[i] <= S2_4h[i] * 1.001:  # Take profit at S2
                 signals[i] = 0.0
                 position = 0
-            elif high[i] > prior_high_4h[i]:  # Stop loss if breaks above prior day's high
+            elif close[i] > R3_4h[i]:  # Stop loss if breaks above R3
                 signals[i] = 0.0
                 position = 0
             else:
