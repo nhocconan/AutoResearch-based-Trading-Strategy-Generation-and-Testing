@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator breakout with 1d EMA50 trend filter and volume confirmation
-# Uses 12h Williams Alligator (Jaw=13, Teeth=8, Lips=5) to identify trend direction and entry
-# 1d EMA50 for higher timeframe trend alignment (reduces whipsaw in choppy markets)
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation
+# Uses 4h Donchian channel breakouts for structure, 12h EMA50 for trend alignment (reduces whipsaw)
 # Volume spike (>1.8x 30-bar average) confirms breakout strength
 # ATR-based trailing stop via signal=0 when price retraces 25% of ATR from extreme
-# Discrete sizing 0.25 to balance profit potential and fee drag; target 80-120 total trades over 4 years (20-30/year)
-# Works in both bull/bear: Alligator catches emerging trends, EMA filter avoids counter-trend traps, volume ensures participation
+# Discrete sizing 0.25 to balance profit potential and fee drag; target 80-150 total trades over 4 years (20-38/year)
+# Works in both bull/bear: breakouts capture momentum, trend filter avoids counter-trend traps, volume filter ensures participation
 
-name = "12h_WilliamsAlligator_1dEMA50_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Donchian20_12hEMA50_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,60 +25,34 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Calculate HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_1d) < 50:
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate 1d EMA50 trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 12h EMA50 trend filter
+    close_12h_series = pd.Series(close_12h)
+    ema50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate Williams Alligator on 12h timeframe
-    # Jaw (Blue): 13-period SMMA, shifted 8 bars ahead
-    # Teeth (Red): 8-period SMMA, shifted 5 bars ahead  
-    # Lips (Green): 5-period SMMA, shifted 3 bars ahead
-    def smma(source, period):
-        """Smoothed Moving Average"""
-        if len(source) < period:
-            return np.full_like(source, np.nan, dtype=float)
-        result = np.full_like(source, np.nan, dtype=float)
-        # First value is SMA
-        result[period-1] = np.mean(source[:period])
-        # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CURRENT_PRICE) / period
-        for i in range(period, len(source)):
-            result[i] = (result[i-1] * (period-1) + source[i]) / period
-        return result
-    
-    jaw = smma(close, 13)
-    teeth = smma(close, 8)
-    lips = smma(close, 5)
-    
-    # Shift as per Alligator definition
-    jaw_shifted = np.roll(jaw, 8)
-    teeth_shifted = np.roll(teeth, 5)
-    lips_shifted = np.roll(lips, 3)
-    
-    # Calculate ATR(21) for stoploss
+    # Calculate ATR(14) for stoploss
     tr1 = np.abs(high[1:] - low[1:])
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=21, min_periods=21).mean().values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate volume spike filter (>1.8x 30-bar average)
+    # Calculate Donchian(20) channels on 4h
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate volume confirmation filter (>1.8x 30-bar average)
     vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     volume_filter = volume > (1.8 * vol_ma_30)
     
-    # Align HTF indicators to 12h timeframe
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    jaw_aligned = align_htf_to_ltf(prices, None, jaw_shifted)  # Same timeframe
-    teeth_aligned = align_htf_to_ltf(prices, None, teeth_shifted)
-    lips_aligned = align_htf_to_ltf(prices, None, lips_shifted)
+    # Align HTF indicators to 4h timeframe
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
     # Pre-compute session filter (08-20 UTC)
     hours = prices.index.hour
@@ -92,8 +65,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(atr[i]) or np.isnan(volume_filter[i]) or
+        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(highest_20[i]) or 
+            np.isnan(lowest_20[i]) or np.isnan(atr[i]) or np.isnan(volume_filter[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -103,20 +76,20 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long entry: Lips > Teeth > Jaw (bullish alignment) AND price > EMA50 AND volume spike
-            if lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i] and close[i] > ema50_1d_aligned[i] and volume_filter[i]:
+            # Long breakout: price > Donchian upper AND uptrend (price > EMA50) AND volume spike
+            if close[i] > highest_20[i] and close[i] > ema50_12h_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
                 long_extreme = close[i]
-            # Short entry: Jaw > Teeth > Lips (bearish alignment) AND price < EMA50 AND volume spike
-            elif jaw_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > lips_aligned[i] and close[i] < ema50_1d_aligned[i] and volume_filter[i]:
+            # Short breakdown: price < Donchian lower AND downtrend (price < EMA50) AND volume spike
+            elif close[i] < lowest_20[i] and close[i] < ema50_12h_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
                 short_extreme = close[i]
         elif position == 1:
             # Update long extreme
             long_extreme = max(long_extreme, close[i])
-            # Exit long: price retraces 25% of ATR from extreme
+            # Exit long: price retraces 25% of ATR from extreme (tighter stop for 4h)
             if close[i] <= long_extreme - 0.25 * atr[i]:
                 signals[i] = 0.0
                 position = 0
