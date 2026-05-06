@@ -3,22 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams Alligator with 1h trend filter and volume confirmation
-# Uses Williams Alligator (Jaw, Teeth, Lips) on 1d timeframe for trend direction
-# Requires price to be above/below all three lines for strong trend confirmation
-# Uses 1h ADX(25) to filter for trending markets only
-# Volume confirmation (>1.5x 20-bar average) ensures participation
-# Williams Alligator is effective in trending markets and avoids whipsaws in ranging markets
-# Designed for 1d timeframe to target 30-100 total trades over 4 years (7-25/year)
-# Works in both bull/bear: captures strong trends, avoids false signals in consolidation
+# Hypothesis: 6-hour trend following using 12-hour Donchian breakout with volume confirmation
+# Uses 12-hour Donchian channels (20-period) for trend direction and breakout signals
+# Requires price to break above/below Donchian bands with volume > 1.5x 20-bar average
+# Includes volatility filter using 12-hour ATR to avoid whipsaws in low volatility periods
+# Designed for 6h timeframe to target 50-150 total trades over 4 years (12-37/year)
+# Works in both bull/bear markets by capturing breakouts from consolidation with volume confirmation
 
-name = "1d_WilliamsAlligator_1hADX25_VolumeConfirm_v1"
-timeframe = "1d"
+name = "6h_DonchianBreakout_12hVolatilityFilter_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -27,97 +25,37 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Calculate HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    df_1h = get_htf_data(prices, '1h')
+    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_1d) < 13 or len(df_1h) < 35:
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Calculate Williams Alligator on 1d timeframe
-    # Jaw: 13-period SMMA shifted by 8 bars
-    # Teeth: 8-period SMMA shifted by 5 bars
-    # Lips: 5-period SMMA shifted by 3 bars
-    def smma(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) >= period:
-            result[period-1] = np.mean(data[:period])
-            for i in range(period, len(data)):
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    # Calculate 12-hour Donchian channels (20-period)
+    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    jaw = smma(close_1d, 13)
-    jaw = np.roll(jaw, 8)  # Shift forward by 8 bars
-    teeth = smma(close_1d, 8)
-    teeth = np.roll(teeth, 5)  # Shift forward by 5 bars
-    lips = smma(close_1d, 5)
-    lips = np.roll(lips, 3)  # Shift forward by 3 bars
-    
-    # Calculate 1h ADX(25) trend filter
-    high_1h = df_1h['high'].values
-    low_1h = df_1h['low'].values
-    close_1h = df_1h['close'].values
-    
-    # TR = max(high-low, |high-prev_close|, |low-prev_close|)
-    tr1 = np.abs(high_1h[1:] - low_1h[1:])
-    tr2 = np.abs(high_1h[1:] - close_1h[:-1])
-    tr3 = np.abs(low_1h[1:] - close_1h[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    # +DM = max(high - prev_high, 0) if high - prev_high > prev_low - low else 0
-    dm_plus = np.where((high_1h[1:] - high_1h[:-1]) > (low_1h[:-1] - low_1h[1:]), 
-                       np.maximum(high_1h[1:] - high_1h[:-1], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    
-    # -DM = max(prev_low - low, 0) if prev_low - low > high - prev_high else 0
-    dm_minus = np.where((low_1h[:-1] - low_1h[1:]) > (high_1h[1:] - high_1h[:-1]), 
-                        np.maximum(low_1h[:-1] - low_1h[1:], 0), 0)
-    dm_minus = np.concatenate([[0], dm_minus])
-    
-    # Smooth TR, +DM, -DM with Wilder's smoothing (alpha = 1/period)
-    def wilder_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        alpha = 1.0 / period
-        # First value is simple average
-        if len(data) >= period:
-            result[period-1] = np.nanmean(data[:period])
-            for i in range(period, len(data)):
-                result[i] = result[i-1] + alpha * (data[i] - result[i-1])
-        return result
-    
-    atr_1h = wilder_smooth(tr, 25)
-    dm_plus_smooth = wilder_smooth(dm_plus, 25)
-    dm_minus_smooth = wilder_smooth(dm_minus, 25)
-    
-    # DI+ = 100 * smoothed +DM / ATR, DI- = 100 * smoothed -DM / ATR
-    di_plus = np.where(atr_1h != 0, 100 * dm_plus_smooth / atr_1h, 0)
-    di_minus = np.where(atr_1h != 0, 100 * dm_minus_smooth / atr_1h, 0)
-    
-    # DX = 100 * |DI+ - DI-| / (DI+ + DI-)
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    
-    # ADX = smoothed DX
-    adx_1h = wilder_smooth(dx, 25)
-    
-    # Calculate ATR(14) for 1d timeframe (for stoploss)
-    tr1_1d = np.abs(high_1d[1:] - low_1d[1:])
-    tr2_1d = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3_1d = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.concatenate([[np.nan], np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))])
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    # Calculate 12-hour ATR for volatility filter
+    tr1_12h = np.abs(high_12h[1:] - low_12h[1:])
+    tr2_12h = np.abs(high_12h[1:] - close_12h[:-1]) if len(df_12h) > 1 else np.array([])
+    tr3_12h = np.abs(low_12h[1:] - close_12h[:-1]) if len(df_12h) > 1 else np.array([])
+    if len(df_12h) > 1:
+        close_12h = df_12h['close'].values
+        tr_12h = np.concatenate([[np.nan], np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))])
+    else:
+        tr_12h = np.full(len(high_12h), np.nan)
+    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
     
     # Calculate volume confirmation filter (>1.5x 20-bar average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma_20)
     
-    # Align HTF indicators to 1d timeframe (primary)
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
-    adx_1h_aligned = align_htf_to_ltf(prices, df_1h, adx_1h)
+    # Align HTF indicators to 6h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -125,52 +63,42 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    long_extreme = 0.0
-    short_extreme = 0.0
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or 
-            np.isnan(adx_1h_aligned[i]) or np.isnan(atr_1d[i]) or np.isnan(volume_filter[i]) or
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(atr_12h_aligned[i]) or np.isnan(volume_filter[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                long_extreme = 0.0
-                short_extreme = 0.0
             continue
         
         if position == 0:
-            # Long entry: price above all three Alligator lines AND trending market (ADX > 25) AND volume confirmation
-            if (close[i] > jaw_aligned[i] and close[i] > teeth_aligned[i] and close[i] > lips_aligned[i] and 
-                adx_1h_aligned[i] > 25 and volume_filter[i]):
+            # Long entry: price breaks above Donchian high with volume confirmation and sufficient volatility
+            if (close[i] > donchian_high_aligned[i] and 
+                volume_filter[i] and 
+                atr_12h_aligned[i] > 0):
                 signals[i] = 0.25
                 position = 1
-                long_extreme = close[i]
-            # Short entry: price below all three Alligator lines AND trending market (ADX > 25) AND volume confirmation
-            elif (close[i] < jaw_aligned[i] and close[i] < teeth_aligned[i] and close[i] < lips_aligned[i] and 
-                  adx_1h_aligned[i] > 25 and volume_filter[i]):
+            # Short entry: price breaks below Donchian low with volume confirmation and sufficient volatility
+            elif (close[i] < donchian_low_aligned[i] and 
+                  volume_filter[i] and 
+                  atr_12h_aligned[i] > 0):
                 signals[i] = -0.25
                 position = -1
-                short_extreme = close[i]
         elif position == 1:
-            # Update long extreme
-            long_extreme = max(long_extreme, close[i])
-            # Exit long: price closes below the Lips line (most sensitive Alligator line)
-            if close[i] < lips_aligned[i]:
+            # Exit long: price closes below Donchian low
+            if close[i] < donchian_low_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-                long_extreme = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Update short extreme
-            short_extreme = min(short_extreme, close[i])
-            # Exit short: price closes above the Lips line (most sensitive Alligator line)
-            if close[i] > lips_aligned[i]:
+            # Exit short: price closes above Donchian high
+            if close[i] > donchian_high_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-                short_extreme = 0.0
             else:
                 signals[i] = -0.25
     
