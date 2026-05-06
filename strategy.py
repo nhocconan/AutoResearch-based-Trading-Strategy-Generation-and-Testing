@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d EMA34 trend filter and volume confirmation
-# Long when price breaks above Donchian(20) high AND 1d EMA34 > EMA34 previous (uptrend) AND volume > 2.0 * avg_volume(20) on 4h
-# Short when price breaks below Donchian(20) low AND 1d EMA34 < EMA34 previous (downtrend) AND volume > 2.0 * avg_volume(20) on 4h
-# Exit when price closes back inside Donchian(20) channel
+# Hypothesis: 12h strategy using 1d Bollinger Band squeeze + 1w Supertrend filter + volume confirmation
+# Long when 1d BBWidth < 0.03 (squeeze) AND 1w Supertrend = bullish AND volume > 1.5 * avg_volume(20) on 12h
+# Short when 1d BBWidth < 0.03 (squeeze) AND 1w Supertrend = bearish AND volume > 1.5 * avg_volume(20) on 12h
+# Exit when price crosses 1d EMA20 (mean reversion to middle band)
 # Uses discrete sizing 0.25 to balance return and risk
-# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
-# Donchian breakouts capture strong momentum moves
-# 1d EMA34 trend filter ensures we trade with the dominant daily trend
-# Volume spike confirmation (2.0x) validates breakout strength while limiting overtrading
-# Works in both bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend) markets
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# Bollinger Band squeeze identifies low volatility periods primed for breakout
+# 1w Supertrend filter ensures we trade with the dominant weekly trend
+# Volume confirmation (1.5x) validates breakout strength while limiting overtrading
+# Works in both bull (buy breakouts) and bear (sell breakdowns) markets
 
-name = "4h_Donchian20_1dEMA34_VolumeSpike_Trend"
-timeframe = "4h"
+name = "12h_1dBBSqueeze_1wSupertrend_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,23 +28,96 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for EMA34 trend filter
+    # Get 1d data ONCE before loop for Bollinger Band calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:  # Need at least 34 completed 1d bars for EMA34
+    if len(df_1d) < 20:  # Need at least 20 completed 1d bars for BBands
         return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA34
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1d Bollinger Bands (20, 2)
+    sma_20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std_20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_bb_1d = sma_20_1d + (2 * std_20_1d)
+    lower_bb_1d = sma_20_1d - (2 * std_20_1d)
+    bb_width_1d = (upper_bb_1d - lower_bb_1d) / sma_20_1d
+    # Handle division by zero
+    bb_width_1d = np.where(sma_20_1d == 0, 1.0, bb_width_1d)
     
-    # Calculate Donchian(20) channels on 4h
-    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align 1d BBWidth to 12h timeframe (wait for completed 1d bar)
+    bb_width_aligned = align_htf_to_ltf(prices, df_1d, bb_width_1d)
     
-    # Calculate volume confirmation: volume > 2.0 * 20-period average volume on 4h
+    # Get 1w data ONCE before loop for Supertrend calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:  # Need at least 10 completed weekly bars for Supertrend
+        return np.zeros(n)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate 1w Supertrend (10, 3.0)
+    atr_period = 10
+    multiplier = 3.0
+    
+    # True Range
+    tr1 = pd.Series(high_1w - low_1w)
+    tr2 = pd.Series(np.abs(high_1w - pd.Series(close_1w).shift(1)))
+    tr3 = pd.Series(np.abs(low_1w - pd.Series(close_1w).shift(1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
+    
+    # Basic Upper and Lower Bands
+    hl_avg = (high_1w + low_1w) / 2
+    upper_basic = hl_avg + (multiplier * atr)
+    lower_basic = hl_avg - (multiplier * atr)
+    
+    # Final Upper and Lower Bands
+    upper_band = np.zeros_like(close_1w)
+    lower_band = np.zeros_like(close_1w)
+    upper_band[0] = upper_basic[0]
+    lower_band[0] = lower_basic[0]
+    
+    for i in range(1, len(close_1w)):
+        if upper_basic[i] < upper_band[i-1] or close_1w[i-1] > upper_band[i-1]:
+            upper_band[i] = upper_basic[i]
+        else:
+            upper_band[i] = upper_band[i-1]
+            
+        if lower_basic[i] > lower_band[i-1] or close_1w[i-1] < lower_band[i-1]:
+            lower_band[i] = lower_basic[i]
+        else:
+            lower_band[i] = lower_band[i-1]
+    
+    # Supertrend
+    supertrend = np.zeros_like(close_1w)
+    supertrend[0] = upper_band[0]
+    direction = np.ones_like(close_1w, dtype=int)  # 1 for uptrend, -1 for downtrend
+    
+    for i in range(1, len(close_1w)):
+        if close_1w[i] > upper_band[i-1]:
+            direction[i] = 1
+        elif close_1w[i] < lower_band[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+        
+        if direction[i] == 1:
+            supertrend[i] = lower_band[i]
+        else:
+            supertrend[i] = upper_band[i]
+    
+    # Supertrend signal: 1 = bullish, -1 = bearish
+    supertrend_signal = direction
+    supertrend_signal_aligned = align_htf_to_ltf(prices, df_1w, supertrend_signal)
+    
+    # Calculate 1d EMA20 for exit signal
+    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    
+    # Calculate volume confirmation: volume > 1.5 * 20-period average volume on 12h
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * avg_volume_20)
+    volume_confirm = volume > (1.5 * avg_volume_20)
     
     # Session filter: 08-20 UTC (pre-compute for efficiency)
     hours = prices.index.hour
@@ -55,36 +128,36 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN or outside session
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(highest_high_20[i]) or 
-            np.isnan(lowest_low_20[i]) or np.isnan(avg_volume_20[i]) or not in_session[i]):
+        if (np.isnan(bb_width_aligned[i]) or np.isnan(supertrend_signal_aligned[i]) or 
+            np.isnan(ema_20_1d_aligned[i]) or np.isnan(avg_volume_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Donchian breakout above upper band, 1d EMA34 uptrend, volume spike, in session
-            if (close[i] > highest_high_20[i] and 
-                ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and 
+            # Long: BB squeeze, 1w Supertrend bullish, volume spike, in session
+            if (bb_width_aligned[i] < 0.03 and 
+                supertrend_signal_aligned[i] == 1 and 
                 volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Donchian breakdown below lower band, 1d EMA34 downtrend, volume spike, in session
-            elif (close[i] < lowest_low_20[i] and 
-                  ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and 
+            # Short: BB squeeze, 1w Supertrend bearish, volume spike, in session
+            elif (bb_width_aligned[i] < 0.03 and 
+                  supertrend_signal_aligned[i] == -1 and 
                   volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price closes back inside Donchian channel
-            if close[i] < highest_high_20[i]:
+            # Exit long: price crosses above 1d EMA20 (mean reversion)
+            if close[i] > ema_20_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price closes back inside Donchian channel
-            if close[i] > lowest_low_20[i]:
+            # Exit short: price crosses below 1d EMA20 (mean reversion)
+            if close[i] < ema_20_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
