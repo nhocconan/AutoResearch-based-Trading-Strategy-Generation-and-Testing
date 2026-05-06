@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1w Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
-# Long when price breaks above 20-period weekly high AND 1d EMA50 > EMA50 previous (uptrend) AND volume > 2.0 * avg_volume(20) on 6h
-# Short when price breaks below 20-period weekly low AND 1d EMA50 < EMA50 previous (downtrend) AND volume > 2.0 * avg_volume(20) on 6h
-# Exit when price crosses back through weekly midpoint (mean reversion)
+# Hypothesis: 12h strategy using 1d Camarilla pivot levels (R3/S3) with 1d EMA34 trend filter and volume spike confirmation
+# Long when price touches or breaks above S3 (support) AND 1d EMA34 > EMA34 previous (uptrend) AND volume > 2.0 * avg_volume(20) on 12h
+# Short when price touches or breaks below R3 (resistance) AND 1d EMA34 < EMA34 previous (downtrend) AND volume > 2.0 * avg_volume(20) on 12h
+# Exit when price crosses back through the 1d EMA34 (mean reversion to trend)
 # Uses discrete sizing 0.25 to balance return and risk
-# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
-# Weekly Donchian breakouts capture major trend shifts while avoiding noise
-# 1d EMA50 trend filter ensures we trade with the dominant daily trend
-# Volume spike confirmation (2.0x) validates breakout strength while limiting overtrading
-# Works in both bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend) markets
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# Camarilla R3/S3 levels provide high-probability reversal points in ranging markets
+# 1d EMA34 trend filter ensures we trade with the dominant daily trend
+# Volume spike confirmation (2.0x) validates reversal strength while limiting overtrading
+# Works in both bull (buy support dips) and bear (sell resistance rallies) markets
 
-name = "6h_1wDonchian20_Breakout_1dEMA50_Trend_VolumeSpike"
-timeframe = "6h"
+name = "12h_1dCamarilla_R3S3_1dEMA34_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,34 +28,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data ONCE before loop for Donchian calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:  # Need at least 20 completed weekly bars for Donchian
-        return np.zeros(n)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    
-    # Calculate 1w Donchian channels: 20-period high and low
-    highest_high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    lowest_low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    weekly_midpoint = (highest_high_20 + lowest_low_20) / 2.0
-    
-    # Align 1w Donchian to 6h timeframe (wait for completed weekly bar)
-    highest_high_20_aligned = align_htf_to_ltf(prices, df_1w, highest_high_20)
-    lowest_low_20_aligned = align_htf_to_ltf(prices, df_1w, lowest_low_20)
-    weekly_midpoint_aligned = align_htf_to_ltf(prices, df_1w, weekly_midpoint)
-    
-    # Get 1d data ONCE before loop for EMA50 calculation
+    # Get 1d data ONCE before loop for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:  # Need at least 50 completed daily bars for EMA50
+    if len(df_1d) < 2:  # Need at least 2 completed daily bars for pivot calculation
         return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA50
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 1d Camarilla pivot levels (based on previous day's OHLC)
+    # Pivot = (High + Low + Close) / 3
+    # R3 = Pivot + (High - Low) * 1.1/2
+    # S3 = Pivot - (High - Low) * 1.1/2
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    r3_1d = pivot_1d + (range_1d * 1.1 / 2.0)
+    s3_1d = pivot_1d - (range_1d * 1.1 / 2.0)
     
-    # Calculate volume confirmation: volume > 2.0 * 20-period average volume on 6h
+    # Align 1d Camarilla levels to 12h timeframe (wait for completed 1d bar)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    
+    # Calculate 1d EMA34
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate volume confirmation: volume > 2.0 * 20-period average volume on 12h
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (2.0 * avg_volume_20)
     
@@ -68,8 +66,7 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN or outside session
-        if (np.isnan(highest_high_20_aligned[i]) or np.isnan(lowest_low_20_aligned[i]) or 
-            np.isnan(weekly_midpoint_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(avg_volume_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -77,28 +74,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above weekly high, 1d EMA50 > EMA50 previous (uptrend), volume spike, in session
-            if (close[i] > highest_high_20_aligned[i] and 
-                ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1] and 
+            # Long: price <= S3 (touch/break support), 1d EMA34 > EMA34 previous (uptrend), volume spike, in session
+            if (close[i] <= s3_aligned[i] and 
+                ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and 
                 volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly low, 1d EMA50 < EMA50 previous (downtrend), volume spike, in session
-            elif (close[i] < lowest_low_20_aligned[i] and 
-                  ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1] and 
+            # Short: price >= R3 (touch/break resistance), 1d EMA34 < EMA34 previous (downtrend), volume spike, in session
+            elif (close[i] >= r3_aligned[i] and 
+                  ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and 
                   volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses back below weekly midpoint (mean reversion)
-            if close[i] < weekly_midpoint_aligned[i]:
+            # Exit long: price crosses back above 1d EMA34 (mean reversion to trend)
+            if close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses back above weekly midpoint (mean reversion)
-            if close[i] > weekly_midpoint_aligned[i]:
+            # Exit short: price crosses back below 1d EMA34 (mean reversion to trend)
+            if close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
