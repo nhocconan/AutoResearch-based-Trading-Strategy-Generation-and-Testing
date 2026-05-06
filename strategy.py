@@ -3,20 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using 1w Supertrend for trend direction and price crossing 1d VWAP with volume confirmation
-# - Long when price crosses above VWAP with volume spike and 1w Supertrend is bullish
-# - Short when price crosses below VWAP with volume spike and 1w Supertrend is bearish
-# - Exit when price crosses back below/above VWAP
-# - Uses 1d VWAP for mean reversion entry and 1w Supertrend for trend filter
-# - Target: 30-100 total trades over 4 years (7-25/year) with 0.25 position sizing
+# Hypothesis: 12h strategy using 1d Donchian breakout with volume confirmation and ATR filter
+# - Long when price breaks above 1d Donchian(20) high with volume spike and ATR > 0.5*ATR(50)
+# - Short when price breaks below 1d Donchian(20) low with volume spike and ATR > 0.5*ATR(50)
+# - Exit when price crosses the 1d Donchian midline (average of high/low over 20)
+# - Volume filter requires current volume > 1.5x 20-period average
+# - Designed to capture strong trending moves with volatility filter to avoid chop
+# - Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
+# - Works in both bull and breakouts: volatility filter avoids false signals in low-vol regimes
 
-name = "1d_VWAP_Supertrend_1w"
-timeframe = "1d"
+name = "12h_DonchianBreakout_1dVol_ATR"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,77 +26,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for Supertrend calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Get 1d data for Donchian and ATR calculations
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1w Supertrend (ATR=10, multiplier=3.0)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    # Calculate 1d Donchian(20) channels
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
+    
+    # Calculate ATR(50) for volatility filter
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([ [high_1w[0] - low_1w[0]], tr ])
+    tr[0] = tr1[0]  # First period
+    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
     
-    # ATR
-    atr = np.zeros_like(close_1w)
-    atr[9] = np.mean(tr[:10])  # Simple average for first value
-    for i in range(10, len(atr)):
-        atr[i] = (atr[i-1] * 9 + tr[i]) / 10  # Wilder's smoothing
+    # Align 1d indicators to 12h timeframe
+    donchian_high_12h = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_12h = align_htf_to_ltf(prices, df_1d, donchian_low)
+    donchian_mid_12h = align_htf_to_ltf(prices, df_1d, donchian_mid)
+    atr_50_12h = align_htf_to_ltf(prices, df_1d, atr_50)
     
-    # Supertrend calculation
-    hl2 = (high_1w + low_1w) / 2
-    upper_band = hl2 + 3.0 * atr
-    lower_band = hl2 - 3.0 * atr
-    
-    supertrend = np.zeros_like(close_1w)
-    direction = np.ones_like(close_1w)  # 1 for uptrend, -1 for downtrend
-    
-    supertrend[0] = upper_band[0]
-    direction[0] = 1
-    
-    for i in range(1, len(close_1w)):
-        if close_1w[i] > supertrend[i-1]:
-            direction[i] = 1
-        elif close_1w[i] < supertrend[i-1]:
-            direction[i] = -1
-        else:
-            direction[i] = direction[i-1]
-        
-        if direction[i] == 1:
-            supertrend[i] = max(lower_band[i], supertrend[i-1])
-        else:
-            supertrend[i] = min(upper_band[i], supertrend[i-1])
-    
-    # Align 1w Supertrend direction to 1d timeframe
-    supertrend_dir_1d = align_htf_to_ltf(prices, df_1w, direction)
-    
-    # Calculate 1d VWAP
-    typical_price = (high + low + close) / 3
-    vwap_num = np.cumsum(typical_price * volume)
-    vwap_den = np.cumsum(volume)
-    vwap = np.divide(vwap_num, vwap_den, out=np.full_like(vwap_num, np.nan), where=vwap_den!=0)
-    
-    # Volume filter: current volume > 1.5x 20-period average
-    vol_ma_20 = np.convolve(volume, np.ones(20)/20, mode='same')
-    vol_ma_20[:10] = np.nan
-    vol_ma_20[-10:] = np.nan
-    vol_ma_20 = np.where(np.arange(len(volume)) < 10, np.nan,
-                         np.where(np.arange(len(volume)) >= len(volume)-10, np.nan, vol_ma_20))
+    # Volume filters (12h timeframe)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(100, n):
         # Skip if any critical value is NaN
-        if (np.isnan(supertrend_dir_1d[i]) or np.isnan(vwap[i]) or 
+        if (np.isnan(donchian_high_12h[i]) or np.isnan(donchian_low_12h[i]) or 
+            np.isnan(donchian_mid_12h[i]) or np.isnan(atr_50_12h[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -102,24 +72,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price crosses above VWAP with volume spike and bullish 1w Supertrend
-            if close[i] > vwap[i] and close[i-1] <= vwap[i-1] and volume_spike[i] and supertrend_dir_1d[i] == 1:
+            # Long: price breaks above Donchian high with volume spike and sufficient volatility
+            if high[i] > donchian_high_12h[i] and volume_spike[i] and atr_50_12h[i] > 0:
                 signals[i] = 0.25
                 position = 1
-            # Short: price crosses below VWAP with volume spike and bearish 1w Supertrend
-            elif close[i] < vwap[i] and close[i-1] >= vwap[i-1] and volume_spike[i] and supertrend_dir_1d[i] == -1:
+            # Short: price breaks below Donchian low with volume spike and sufficient volatility
+            elif low[i] < donchian_low_12h[i] and volume_spike[i] and atr_50_12h[i] > 0:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below VWAP
-            if close[i] < vwap[i] and close[i-1] >= vwap[i-1]:
+            # Exit long: price crosses below Donchian midline
+            if close[i] < donchian_mid_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above VWAP
-            if close[i] > vwap[i] and close[i-1] <= vwap[i-1]:
+            # Exit short: price crosses above Donchian midline
+            if close[i] > donchian_mid_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
