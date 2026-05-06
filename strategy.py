@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d ADX for trend strength and 1w Bollinger Band width for volatility regime
-# - Uses 1w Bollinger Band width percentile to identify low volatility regimes (squeeze) - contrarian indicator
-# - Uses 1d ADX > 25 to confirm trend strength for breakout direction
-# - Enters long when price breaks above 1d high with volume spike in low vol + strong trend
-# - Enters short when price breaks below 1d low with volume spike in low vol + strong trend
-# - Exits when price crosses back below/above 1d close or volatility expands (BB width > 80th percentile)
-# - Designed to capture volatility breakouts after weekly consolidation with daily trend confirmation
-# - Target: 80-160 total trades over 4 years (20-40/year) with 0.25 position sizing
+# Hypothesis: 6h strategy using 1d Williams %R for momentum and 1w ATR percentile for volatility regime
+# - Uses 1w ATR percentile to identify low volatility regimes (squeeze) - contraction phase
+# - Uses 1d Williams %R < -80 for oversold and > -20 for overbought conditions
+# - Enters long when price closes above 1d high with Williams %R crossing above -80 in low vol
+# - Enters short when price closes below 1d low with Williams %R crossing below -20 in low vol
+# - Exits when Williams %R returns to neutral range (-80 to -20) or volatility expands
+# - Designed to capture mean reversion bursts after weekly consolidation with momentum confirmation
+# - Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
 
-name = "4h_1wBBWidth_1dADX_Breakout"
-timeframe = "4h"
+name = "6h_1wATRPercentile_1dWilliamsR_MeanReversion"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,38 +26,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for 1d high/low and ADX calculation
+    # Get 1d data for Williams %R and high/low levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Get 1w data for Bollinger Band width calculation
+    # Get 1w data for ATR calculation
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    if len(df_1w) < 14:
         return np.zeros(n)
     
-    # Calculate 1d high and low for breakout levels
+    # Calculate 1d Williams %R (14)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d ADX (14)
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low + 1e-10)
+    
+    # Calculate 1w ATR (14)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
     # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # First period
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Wilder's smoothing function
+    # Wilder's smoothing for ATR
     def wilders_smoothing(data, period):
         result = np.zeros_like(data)
         if len(data) < period:
@@ -67,88 +67,65 @@ def generate_signals(prices):
             result[i] = result[i-1] - (result[i-1] / period) + data[i]
         return result
     
-    tr14 = wilders_smoothing(tr, 14)
-    dm_plus_14 = wilders_smoothing(dm_plus, 14)
-    dm_minus_14 = wilders_smoothing(dm_minus, 14)
+    atr_14 = wilders_smoothing(tr, 14)
     
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_14 / (tr14 + 1e-10)
-    di_minus = 100 * dm_minus_14 / (tr14 + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = wilders_smoothing(dx, 14)
-    
-    # Calculate 1w Bollinger Bands (20, 2)
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    
-    # Middle band (SMA20)
-    sma_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
-    # Standard deviation
-    std_dev = pd.Series(close_1w).rolling(window=20, min_periods=20).std().values
-    # Upper and lower bands
-    upper_bb = sma_20 + (2 * std_dev)
-    lower_bb = sma_20 - (2 * std_dev)
-    # Bollinger Band width
-    bb_width = (upper_bb - lower_bb) / sma_20
-    
-    # Calculate 1w BB width percentile rank (lookback 50 periods)
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=20).apply(
+    # Calculate 1w ATR percentile rank (lookback 50 periods)
+    atr_series = pd.Series(atr_14)
+    atr_percentile = atr_series.rolling(window=50, min_periods=20).apply(
         lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
     ).values
     
-    # Align 1d indicators to 4h timeframe
-    high_1d_4h = align_htf_to_ltf(prices, df_1d, high_1d)
-    low_1d_4h = align_htf_to_ltf(prices, df_1d, low_1d)
-    close_1d_4h = align_htf_to_ltf(prices, df_1d, close_1d)
-    adx_4h = align_htf_to_ltf(prices, df_1d, adx)
+    # Get 1d high and low for breakout levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Align 1w BB width percentile to 4h timeframe
-    bb_width_percentile_4h = align_htf_to_ltf(prices, df_1w, bb_width_percentile)
+    # Align 1d indicators to 6h timeframe
+    williams_r_6h = align_htf_to_ltf(prices, df_1d, williams_r)
+    high_1d_6h = align_htf_to_ltf(prices, df_1d, high_1d)
+    low_1d_6h = align_htf_to_ltf(prices, df_1d, low_1d)
     
-    # Volume filters (4h timeframe)
+    # Align 1w ATR percentile to 6h timeframe
+    atr_percentile_6h = align_htf_to_ltf(prices, df_1w, atr_percentile)
+    
+    # Volume filter (6h timeframe) - moderate threshold to avoid overtrading
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)  # Strong volume confirmation
+    volume_avg = volume > vol_ma_20  # Above average volume
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after warmup
         # Skip if any critical value is NaN
-        if (np.isnan(high_1d_4h[i]) or np.isnan(low_1d_4h[i]) or np.isnan(close_1d_4h[i]) or
-            np.isnan(adx_4h[i]) or np.isnan(bb_width_percentile_4h[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(williams_r_6h[i]) or np.isnan(high_1d_6h[i]) or np.isnan(low_1d_6h[i]) or
+            np.isnan(atr_percentile_6h[i]) or np.isnan(volume_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Look for low volatility regime (BB width < 20th percentile) and strong trend (ADX > 25)
-            low_vol_regime = bb_width_percentile_4h[i] < 20
-            strong_trend = adx_4h[i] > 25
+            # Look for low volatility regime (ATR < 30th percentile) 
+            low_vol_regime = atr_percentile_6h[i] < 30
             
-            if low_vol_regime and strong_trend:
-                # Long: price breaks above 1d high with volume spike
-                if close[i] > high_1d_4h[i] and volume_spike[i]:
+            if low_vol_regime and volume_avg[i]:
+                # Long: Williams %R crosses above -80 (oversold recovery) and price > 1d high
+                if williams_r_6h[i] > -80 and williams_r_6h[i-1] <= -80 and close[i] > high_1d_6h[i]:
                     signals[i] = 0.25
                     position = 1
-                # Short: price breaks below 1d low with volume spike
-                elif close[i] < low_1d_4h[i] and volume_spike[i]:
+                # Short: Williams %R crosses below -20 (overbought decline) and price < 1d low
+                elif williams_r_6h[i] < -20 and williams_r_6h[i-1] >= -20 and close[i] < low_1d_6h[i]:
                     signals[i] = -0.25
                     position = -1
         elif position == 1:
-            # Exit long: price crosses below 1d close OR volatility expands (BB width > 80th percentile)
-            if close[i] < close_1d_4h[i] or bb_width_percentile_4h[i] > 80:
+            # Exit long: Williams %R returns to neutral (> -50) or volatility expands (ATR > 70th percentile)
+            if williams_r_6h[i] > -50 or atr_percentile_6h[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above 1d close OR volatility expands (BB width > 80th percentile)
-            if close[i] > close_1d_4h[i] or bb_width_percentile_4h[i] > 80:
+            # Exit short: Williams %R returns to neutral (< -50) or volatility expands (ATR > 70th percentile)
+            if williams_r_6h[i] < -50 or atr_percentile_6h[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
