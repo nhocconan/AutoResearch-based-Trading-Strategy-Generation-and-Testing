@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI mean reversion with 4h trend filter and volume spike
-# Uses 4h EMA50 for trend alignment to avoid counter-trend trades
-# RSI(14) < 30 for long, > 70 for short with volume confirmation (>1.5x 20-bar avg)
-# Works in both bull/bear: mean reversion works in ranges, trend filter avoids whipsaws in trends
-# Target: 80-160 total trades over 4 years (20-40/year) to stay within fee limits
+# Hypothesis: 6h Donchian(20) breakout with weekly EMA200 trend filter and volume confirmation
+# Uses weekly EMA200 for primary trend alignment to avoid counter-trend trades in both bull/bear markets
+# Donchian breakout captures momentum bursts, volume filter ensures participation
+# Designed for 6h timeframe with target of 60-120 total trades over 4 years (15-30/year)
+# Discrete sizing 0.25 to manage risk and minimize fee churn
 
-name = "1h_RSI_MeanRev_4hEMA50_Volume_v1"
-timeframe = "1h"
+name = "6h_Donchian20_WeeklyEMA200_VolumeFilter_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,27 +23,39 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 4h EMA50 trend filter ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Calculate HTF data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    df_1d = get_htf_data(prices, '1d')
+    
+    if len(df_1w) < 200 or len(df_1d) < 20:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Calculate weekly EMA200 trend filter
+    close_1w = df_1w['close'].values
+    close_1w_series = pd.Series(close_1w)
+    ema200_1w = close_1w_series.ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Calculate RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate daily ATR(14) for stoploss
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate volume spike filter (>1.5x 20-bar average)
+    # Calculate volume filter (>1.5x 20-bar average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma_20)
+    
+    # Calculate 6h Donchian channels (20-period)
+    high_rolling_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_rolling_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Align HTF indicators to 6h timeframe
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -51,10 +63,13 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    long_stop = 0.0
+    short_stop = 0.0
     
-    for i in range(14, n):
+    for i in range(100, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(rsi[i]) or 
+        if (np.isnan(ema200_1w_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(high_rolling_max[i]) or np.isnan(low_rolling_min[i]) or 
             np.isnan(volume_filter[i]) or not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -62,27 +77,33 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: RSI < 30 (oversold) AND uptrend (price > EMA50) AND volume spike
-            if rsi[i] < 30 and close[i] > ema50_4h_aligned[i] and volume_filter[i]:
-                signals[i] = 0.20
+            # Long breakout: price > Donchian high AND above weekly EMA200 AND volume filter
+            if close[i] > high_rolling_max[i] and close[i] > ema200_1w_aligned[i] and volume_filter[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: RSI > 70 (overbought) AND downtrend (price < EMA50) AND volume spike
-            elif rsi[i] > 70 and close[i] < ema50_4h_aligned[i] and volume_filter[i]:
-                signals[i] = -0.20
+                long_stop = low_rolling_min[i]  # Initial stop at Donchian low
+            # Short breakdown: price < Donchian low AND below weekly EMA200 AND volume filter
+            elif close[i] < low_rolling_min[i] and close[i] < ema200_1w_aligned[i] and volume_filter[i]:
+                signals[i] = -0.25
                 position = -1
+                short_stop = high_rolling_max[i]  # Initial stop at Donchian high
         elif position == 1:
-            # Exit long: RSI > 50 (mean reversion complete) or trend reversal
-            if rsi[i] > 50 or close[i] < ema50_4h_aligned[i]:
+            # Trail stop: raise stop to Donchian low if price moves favorably
+            long_stop = max(long_stop, low_rolling_min[i])
+            # Exit if price hits trailing stop
+            if close[i] <= long_stop:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: RSI < 50 (mean reversion complete) or trend reversal
-            if rsi[i] < 50 or close[i] > ema50_4h_aligned[i]:
+            # Trail stop: lower stop to Donchian high if price moves favorably
+            short_stop = min(short_stop, high_rolling_max[i])
+            # Exit if price hits trailing stop
+            if close[i] >= short_stop:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
