@@ -3,60 +3,43 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1-day Williams %R with Bollinger Band squeeze filter
-# Long when %R crosses above -80 (oversold exit) with Bollinger Band width < 20th percentile (low volatility)
-# Short when %R crosses below -20 (overbought entry) with Bollinger Band width < 20th percentile
-# Uses daily Williams %R for mean reversion signals and Bollinger Band width for volatility regime filter
-# Designed to work in both bull and bear markets by capturing mean reversion in low volatility regimes
-# Target: 20-30 trades per year (80-120 over 4 years) with 0.25 position sizing
+# Hypothesis: 12h strategy using 1-day Donchian breakout with volume confirmation and session filter
+# Long when price breaks above 1-day Donchian upper channel (20-period high) with volume > 1.5x 20-period average and session active
+# Short when price breaks below 1-day Donchian lower channel (20-period low) with volume > 1.5x 20-period average and session active
+# Uses daily Donchian channels for key support/resistance levels, volume for confirmation
+# Session filter (8-20 UTC) reduces whipsaw and improves win rate
+# Target: 15-25 trades per year (60-100 over 4 years) with 0.25 position sizing
 
-name = "12h_1dWilliamsR_BollingerSqueeze_v1"
+name = "12h_1dDonchian20_Volume_Session_v1"
 timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Calculate 1-day Williams %R (14-period)
+    # Calculate 1-day Donchian Channel (20-period high/low)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = df_1d['high'].rolling(window=14, min_periods=14).max()
-    lowest_low = df_1d['low'].rolling(window=14, min_periods=14).min()
-    williams_r = -100 * (highest_high - df_1d['close']) / (highest_high - lowest_low)
-    williams_r = williams_r.replace([np.inf, -np.inf], np.nan).fillna(50).values  # Handle division by zero
+    # 20-period high and low for Donchian channels
+    high_20 = df_1d['high'].rolling(window=20, min_periods=20).max().values
+    low_20 = df_1d['low'].rolling(window=20, min_periods=20).min().values
     
-    # Calculate 1-day Bollinger Band Width (20-period, 2 std dev)
-    sma_20 = df_1d['close'].rolling(window=20, min_periods=20).mean()
-    std_20 = df_1d['close'].rolling(window=20, min_periods=20).std()
-    upper_bb = sma_20 + (2 * std_20)
-    lower_bb = sma_20 - (2 * std_20)
-    bb_width = ((upper_bb - lower_bb) / sma_20) * 100  # Percentage width
-    bb_width = bb_width.replace([np.inf, -np.inf], np.nan).fillna(0).values
+    # Align Donchian levels to 12h timeframe
+    upper_donchian = align_htf_to_ltf(prices, df_1d, high_20)
+    lower_donchian = align_htf_to_ltf(prices, df_1d, low_20)
     
-    # Bollinger Band squeeze: width < 20th percentile (low volatility regime)
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile_20 = bb_width_series.rolling(window=50, min_periods=20).quantile(0.20)
-    bb_squeeze = bb_width < bb_width_percentile_20.values
-    
-    # Align indicators to 12h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    bb_squeeze_aligned = align_htf_to_ltf(prices, df_1d, bb_squeeze.astype(float))
-    
-    # Williams %R signal generation: cross above -80 for long, cross below -20 for short
-    williams_r_series = pd.Series(williams_r_aligned)
-    williams_r_prev = williams_r_series.shift(1).fillna(50).values
-    
-    long_signal = (williams_r_aligned > -80) & (williams_r_prev <= -80)  # Cross above -80
-    short_signal = (williams_r_aligned < -20) & (williams_r_prev >= -20)  # Cross below -20
+    # Volume confirmation: >1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma_20)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -65,9 +48,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):  # Start from 1 to have previous value
+    for i in range(20, n):  # Start after Donchian warmup
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(bb_squeeze_aligned[i]) or
+        if (np.isnan(upper_donchian[i]) or np.isnan(lower_donchian[i]) or 
+            np.isnan(volume_filter[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -75,24 +59,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long entry: Williams %R crosses above -80 (exiting oversold) with Bollinger squeeze
-            if long_signal[i] and bb_squeeze_aligned[i]:
+            # Long breakout: price breaks above upper Donchian with volume confirmation
+            if close[i] > upper_donchian[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Williams %R crosses below -20 (entering overbought) with Bollinger squeeze
-            elif short_signal[i] and bb_squeeze_aligned[i]:
+            # Short breakout: price breaks below lower Donchian with volume confirmation
+            elif close[i] < lower_donchian[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R crosses below -50 (momentum weakening)
-            if williams_r_aligned[i] < -50 and williams_r_prev > -50:
+            # Exit long: price breaks below lower Donchian (support break)
+            if close[i] < lower_donchian[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R crosses above -50 (momentum weakening)
-            if williams_r_aligned[i] > -50 and williams_r_prev < -50:
+            # Exit short: price breaks above upper Donchian (resistance break)
+            if close[i] > upper_donchian[i]:
                 signals[i] = 0.0
                 position = 0
             else:
