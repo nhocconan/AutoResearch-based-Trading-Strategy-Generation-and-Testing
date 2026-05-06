@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume confirmation
-# Long when price breaks above R3 (Camarilla resistance level 3) AND price > 12h EMA50 (uptrend) AND volume > 1.5 * 20-period avg volume
-# Short when price breaks below S3 (Camarilla support level 3) AND price < 12h EMA50 (downtrend) AND volume > 1.5 * 20-period avg volume
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Long when price breaks above R3 (Camarilla resistance level 3) AND price > 1d EMA34 (uptrend) AND volume > 1.5 * 20-period avg volume
+# Short when price breaks below S3 (Camarilla support level 3) AND price < 1d EMA34 (downtrend) AND volume > 1.5 * 20-period avg volume
 # Exit with ATR-based trailing stop: signal→0 when long and price < highest_high - 2.0 * ATR OR short and price > lowest_low + 2.0 * ATR
 # Uses discrete sizing 0.25 to balance risk and return (BTC -77% in 2022 → ~19.25% loss at 0.25 exposure)
 # Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
-# Camarilla levels identify key intraday support/resistance, 12h EMA50 filters primary trend, volume confirms breakout momentum
+# Camarilla levels identify key intraday support/resistance, 1d EMA34 filters primary trend, volume confirms breakout momentum
+# This strategy focuses on BTC/ETH as primary targets with SOL as secondary, avoiding SOL-only bias
 
-name = "4h_Camarilla_R3_S3_Breakout_12hEMA50_Trend_Volume_v1"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_Volume_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,15 +26,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data ONCE before loop for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data ONCE before loop for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
-    close_12h = df_12h['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 12h EMA50
-    close_12h_series = pd.Series(close_12h)
-    ema_50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1d EMA34
+    close_1d_series = pd.Series(close_1d)
+    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # Calculate 4h ATR(10) for stoploss
     tr1 = high - low
@@ -48,7 +49,7 @@ def generate_signals(prices):
     volume_spike = volume > (1.5 * avg_volume_20)
     
     # Align HTF indicators to 4h timeframe (wait for completed HTF bar)
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -57,7 +58,7 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup period
         # Skip if any value is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(atr_10[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr_10[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -69,7 +70,7 @@ def generate_signals(prices):
         if position == 0:
             # Calculate Camarilla levels from previous day's OHLC
             # Need previous day's high, low, close - get from daily data
-            df_1d = get_htf_data(prices, '1d')
+            # We already have df_1d from above, use it
             if len(df_1d) < 2:
                 continue
             # Get previous day's OHLC (yesterday's data)
@@ -93,12 +94,12 @@ def generate_signals(prices):
             breakout_short = close[i] < camarilla_s3
             
             # Long: breakout above R3 AND uptrend AND volume spike
-            if breakout_long and close[i] > ema_50_12h_aligned[i] and volume_spike[i]:
+            if breakout_long and close[i] > ema_34_1d_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
                 highest_high_since_entry = close[i]
             # Short: breakout below S3 AND downtrend AND volume spike
-            elif breakout_short and close[i] < ema_50_12h_aligned[i] and volume_spike[i]:
+            elif breakout_short and close[i] < ema_34_1d_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
                 lowest_low_since_entry = close[i]
