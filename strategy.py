@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Band squeeze breakout with 12h volume confirmation and 1d EMA50 trend filter
-# Long when BB width < 20th percentile (squeeze) AND price breaks above upper BB AND 12h volume > 1.5 * 20-bar avg AND 1d close > 1d EMA50
-# Short when BB width < 20th percentile (squeeze) AND price breaks below lower BB AND 12h volume > 1.5 * 20-bar avg AND 1d close < 1d EMA50
-# Exit when price retests the 20-period SMA (mean reversion within the squeeze context)
+# Hypothesis: 4h Williams %R mean reversion with 1d EMA34 trend filter and volume spike confirmation
+# Long when Williams %R < -80 (oversold) AND 1d close > 1d EMA34 AND volume > 1.5 * 20-bar average volume
+# Short when Williams %R > -20 (overbought) AND 1d close < 1d EMA34 AND volume > 1.5 * 20-bar average volume
+# Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts)
 # Uses discrete sizing 0.25 to balance return and fee drag
-# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
-# Bollinger squeeze identifies low volatility periods preceding breakouts
-# Volume confirmation ensures participation, EMA50 filters for trend alignment
-# Works in both bull and bear markets by following the 1d trend and trading breakouts from consolidation
+# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
+# Williams %R identifies overextended moves likely to reverse
+# 1d EMA34 ensures trades align with higher timeframe trend
+# Volume confirmation reduces false signals during low participation
+# Mean reversion works in both bull (buy dips) and bear (sell rallies) markets
 
-name = "6h_BB_Squeeze_Breakout_12hVol_1dEMA50_v1"
-timeframe = "6h"
+name = "4h_WilliamsR_MeanRev_1dEMA34_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,83 +28,70 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Bollinger Bands and EMA50 ONCE before loop
-    df_6h = get_htf_data(prices, '6h')  # Actually gets 6h data for BB
-    df_12h = get_htf_data(prices, '12h')  # For volume confirmation
-    df_1d = get_htf_data(prices, '1d')   # For EMA50 trend filter
+    # Calculate 4h Williams %R and 1d EMA34 ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_6h) < 20 or len(df_12h) < 20 or len(df_1d) < 50:
+    if len(df_4h) < 14 or len(df_1d) < 34:
         return np.zeros(n)
     
-    close_6h = df_6h['close'].values
-    volume_12h = df_12h['volume'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 20-period Bollinger Bands for 6h timeframe
-    close_6h_series = pd.Series(close_6h)
-    sma_20 = close_6h_series.rolling(window=20, min_periods=20).mean().values
-    std_20 = close_6h_series.rolling(window=20, min_periods=20).std().values
-    bb_upper = sma_20 + (2.0 * std_20)
-    bb_lower = sma_20 - (2.0 * std_20)
-    bb_width = bb_upper - bb_lower
+    # Calculate 14-period Williams %R for 4h timeframe
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close_4h) / (highest_high - lowest_low) * -100
+    # Replace division by zero with -50 (neutral)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Calculate BB width percentile (20th) for squeeze detection
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile_20 = bb_width_series.rolling(window=50, min_periods=50).quantile(0.20).values
-    squeeze_condition = bb_width < bb_width_percentile_20
-    
-    # Calculate 1d EMA50 trend filter
+    # Calculate 1d EMA34 trend filter
     close_1d_series = pd.Series(close_1d)
-    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Volume confirmation: volume > 1.5 * 20-bar average volume (12h timeframe)
-    volume_12h_series = pd.Series(volume_12h)
-    avg_volume_20 = volume_12h_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume_12h > (1.5 * avg_volume_20)
+    # Align HTF indicators to 4h timeframe (wait for completed bars)
+    williams_r_aligned = align_htf_to_ltf(prices, df_4h, williams_r)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Align HTF indicators to 6h timeframe (wait for completed bars)
-    sma_20_aligned = align_htf_to_ltf(prices, df_6h, sma_20)
-    bb_upper_aligned = align_htf_to_ltf(prices, df_6h, bb_upper)
-    bb_lower_aligned = align_htf_to_ltf(prices, df_6h, bb_lower)
-    squeeze_aligned = align_htf_to_ltf(prices, df_6h, squeeze_condition.astype(float))
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_12h, volume_spike.astype(float))
+    # Volume confirmation: volume > 1.5 * 20-bar average volume (spike filter)
+    volume_series = pd.Series(volume)
+    avg_volume_20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * avg_volume_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN
-        if (np.isnan(sma_20_aligned[i]) or np.isnan(bb_upper_aligned[i]) or 
-            np.isnan(bb_lower_aligned[i]) or np.isnan(squeeze_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_spike_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        squeeze = bool(squeeze_aligned[i])
-        vol_spike = bool(volume_spike_aligned[i])
-        
         if position == 0:
-            # Long breakout: squeeze AND price > upper BB AND uptrend AND volume spike
-            if squeeze and close[i] > bb_upper_aligned[i] and close[i] > ema50_1d_aligned[i] and vol_spike:
+            # Long entry: oversold AND uptrend AND volume spike
+            if williams_r_aligned[i] < -80 and close[i] > ema34_1d_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: squeeze AND price < lower BB AND downtrend AND volume spike
-            elif squeeze and close[i] < bb_lower_aligned[i] and close[i] < ema50_1d_aligned[i] and vol_spike:
+            # Short entry: overbought AND downtrend AND volume spike
+            elif williams_r_aligned[i] > -20 and close[i] < ema34_1d_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price retests 20-period SMA from above
-            if close[i] <= sma_20_aligned[i]:
+            # Exit long: Williams %R crosses above -50
+            if williams_r_aligned[i] > -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price retests 20-period SMA from below
-            if close[i] >= sma_20_aligned[i]:
+            # Exit short: Williams %R crosses below -50
+            if williams_r_aligned[i] < -50:
                 signals[i] = 0.0
                 position = 0
             else:
