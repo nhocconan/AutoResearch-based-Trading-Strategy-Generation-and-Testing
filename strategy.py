@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1w Bollinger Bands width regime filter with 1d Donchian breakout
-# - Uses 1w Bollinger Bands width percentile to detect low volatility (squeeze) conditions
-# - Enters on 1d Donchian(20) breakout in direction of 1w trend when volatility is low
-# - Bollinger Bands width < 20th percentile indicates compression (pre-breakout setup)
-# - 1w trend: price above/below 50-period SMA on weekly chart
-# - Volume confirmation: current volume > 1.5x 20-period average
-# - Designed to capture explosive moves after consolidation in both bull and bear markets
-# - Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
+# Hypothesis: 1d strategy using weekly Donchian breakout with volume confirmation and ADX trend filter
+# - Long when price breaks above weekly Donchian high (20) with volume expansion and ADX > 25
+# - Short when price breaks below weekly Donchian low (20) with volume expansion and ADX > 25
+# - Uses 1w Donchian channels calculated from prior weekly bar's range to avoid look-ahead
+# - Adds volume confirmation (volume > 1.5x 20-day average) to filter false breakouts
+# - Uses ADX(14) on daily timeframe to ensure trending market conditions
+# - Designed to capture strong trends in both bull and bear markets
+# - Target: 30-100 total trades over 4 years (7-25/year) with 0.25 position sizing
 
-name = "12h_BBW_Squeeze_DonchianBreakout_1wTrend_Volume"
-timeframe = "12h"
+name = "1d_WeeklyDonchian20_Volume_ADX_Trend"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,101 +26,98 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for Bollinger Bands width and trend
+    # Get weekly data for Donchian calculation
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate 1w Bollinger Bands width (20, 2)
-    bb_period = 20
-    bb_std = 2
-    ma_20 = pd.Series(df_1w['close']).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std_20 = pd.Series(df_1w['close']).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_bb = ma_20 + bb_std * std_20
-    lower_bb = ma_20 - bb_std * std_20
-    bb_width = upper_bb - lower_bb
+    # Calculate weekly Donchian channels (20 periods) based on prior week's range
+    # Upper = max(high) over last 20 weeks, Lower = min(low) over last 20 weeks
+    # We use the prior week's values to avoid look-ahead
+    high_series = pd.Series(df_1w['high'])
+    low_series = pd.Series(df_1w['low'])
     
-    # Calculate Bollinger Bands width percentile (lookback 50 periods)
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=10).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100 if len(x) > 0 else 50, raw=False
-    ).values
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().shift(1)
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().shift(1)
     
-    # 1w trend: 50-period SMA
-    sma_50_1w = pd.Series(df_1w['close']).rolling(window=50, min_periods=50).mean().values
+    # Align Donchian levels to daily timeframe
+    donchian_high_daily = align_htf_to_ltf(prices, df_1w, donchian_high.values)
+    donchian_low_daily = align_htf_to_ltf(prices, df_1w, donchian_low.values)
     
-    # Align 1w indicators to 12h timeframe
-    bb_width_percentile_12h = align_htf_to_ltf(prices, df_1w, bb_width_percentile)
-    sma_50_1w_12h = align_htf_to_ltf(prices, df_1w, sma_50_1w)
-    
-    # Get 1d data for Donchian channels
+    # Get daily data for ADX calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d Donchian channels (20 period)
-    donchian_period = 20
-    upper_dc = pd.Series(df_1d['high']).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    lower_dc = pd.Series(df_1d['low']).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    # Calculate ADX(14) on daily timeframe
+    high_1d = pd.Series(df_1d['high'])
+    low_1d = pd.Series(df_1d['low'])
+    close_1d = pd.Series(df_1d['close'])
     
-    # Align 1d Donchian channels to 12h timeframe
-    upper_dc_12h = align_htf_to_ltf(prices, df_1d, upper_dc)
-    lower_dc_12h = align_htf_to_ltf(prices, df_1d, lower_dc)
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = abs(high_1d - close_1d.shift(1))
+    tr3 = abs(low_1d - close_1d.shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     
-    # Volume filter
+    # Directional Movement
+    dm_plus = high_1d - high_1d.shift(1)
+    dm_minus = low_1d.shift(1) - low_1d
+    dm_plus = np.where((dm_plus > dm_minus) & (dm_plus > 0), dm_plus, 0)
+    dm_minus = np.where((dm_minus > dm_plus) & (dm_minus > 0), dm_minus, 0)
+    
+    # Smoothed values
+    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum()
+    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum()
+    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum()
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_14 / tr_14
+    di_minus = 100 * dm_minus_14 / tr_14
+    
+    # DX and ADX
+    dx = 100 * abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean()
+    
+    # Align ADX to daily timeframe (already daily, but ensure alignment)
+    adx_values = adx.values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_values)
+    
+    # Volume filters
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_20)
-    
-    # Session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    volume_filter = volume > (1.5 * vol_ma_20)  # Volume expansion
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):  # Start after warmup
-        # Skip if any critical value is NaN or outside session
-        if (np.isnan(bb_width_percentile_12h[i]) or np.isnan(sma_50_1w_12h[i]) or
-            np.isnan(upper_dc_12h[i]) or np.isnan(lower_dc_12h[i]) or
-            np.isnan(volume_filter[i]) or not session_filter[i]):
+        # Skip if any critical value is NaN
+        if (np.isnan(donchian_high_daily[i]) or np.isnan(donchian_low_daily[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Low volatility squeeze condition: BB width < 20th percentile
-            squeeze_condition = bb_width_percentile_12h[i] < 20
-            
-            if squeeze_condition:
-                # Determine 1w trend direction
-                uptrend = close[i] > sma_50_1w_12h[i]
-                downtrend = close[i] < sma_50_1w_12h[i]
-                
-                # Long entry: Donchian breakout above upper band in uptrend
-                if uptrend and close[i] > upper_dc_12h[i] and volume_filter[i]:
-                    signals[i] = 0.25
-                    position = 1
-                # Short entry: Donchian breakout below lower band in downtrend
-                elif downtrend and close[i] < lower_dc_12h[i] and volume_filter[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # Long entry: price breaks above weekly Donchian high with volume expansion and ADX > 25
+            if close[i] > donchian_high_daily[i] and volume_filter[i] and adx_aligned[i] > 25:
+                signals[i] = 0.25
+                position = 1
+            # Short entry: price breaks below weekly Donchian low with volume expansion and ADX > 25
+            elif close[i] < donchian_low_daily[i] and volume_filter[i] and adx_aligned[i] > 25:
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Exit long: price reaches lower Donchian band or volatility expands
-            if close[i] < lower_dc_12h[i]:
-                signals[i] = 0.0
-                position = 0
-            elif bb_width_percentile_12h[i] > 80:  # Volatility expansion exit
+            # Exit long: price breaks below weekly Donchian low
+            if close[i] < donchian_low_daily[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price reaches upper Donchian band or volatility expands
-            if close[i] > upper_dc_12h[i]:
-                signals[i] = 0.0
-                position = 0
-            elif bb_width_percentile_12h[i] > 80:  # Volatility expansion exit
+            # Exit short: price breaks above weekly Donchian high
+            if close[i] > donchian_high_daily[i]:
                 signals[i] = 0.0
                 position = 0
             else:
