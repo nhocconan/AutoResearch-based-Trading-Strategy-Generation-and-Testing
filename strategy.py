@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 1d_1wKAMA_Trend_Filtered_By_RSI
-# Uses weekly KAMA for trend direction and daily RSI for overbought/oversold entries.
-# Long when weekly trend is up and daily RSI < 30 (oversold).
-# Short when weekly trend is down and daily RSI > 70 (overbought).
-# Designed for 1d timeframe to capture swing reversals in both bull and bear markets.
-# Target: 30-100 total trades over 4 years (7-25/year) with 0.25 position sizing.
+# 6h_1dIchimoku_Cloud_TK_Cross_Trend_Filter
+# Uses daily Ichimoku cloud and TK cross for trend direction with price relative to cloud.
+# Long when price above cloud and TK cross bullish, short when price below cloud and TK cross bearish.
+# Cloud acts as dynamic support/resistance, working in both bull and bear markets.
+# Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing.
 
-name = "1d_1wKAMA_Trend_Filtered_By_RSI"
-timeframe = "1d"
+name = "6h_1dIchimoku_Cloud_TK_Cross_Trend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -16,92 +15,87 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # Get weekly data for KAMA trend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get daily data for Ichimoku
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 52:
         return np.zeros(n)
     
-    # Calculate weekly KAMA (adaptive moving average)
-    close_1w = df_1w['close'].values
-    # Efficiency Ratio (ER)
-    change = np.abs(np.diff(close_1w, prepend=close_1w[0]))
-    volatility = np.sum(np.abs(np.diff(close_1w)), axis=0)  # placeholder, will compute properly below
-    # Recompute volatility properly: sum of absolute changes over window
-    volatility = np.zeros_like(close_1w)
-    for i in range(len(close_1w)):
-        if i == 0:
-            volatility[i] = 0
-        else:
-            volatility[i] = np.sum(np.abs(np.diff(close_1w[max(0, i-9):i+1])))
-    # Avoid division by zero
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
-    # KAMA calculation
-    kama = np.zeros_like(close_1w)
-    kama[0] = close_1w[0]
-    for i in range(1, len(close_1w)):
-        kama[i] = kama[i-1] + sc[i] * (close_1w[i] - kama[i-1])
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align KAMA to daily timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1w, kama)
+    # Ichimoku parameters
+    tenkan_period = 9
+    kijun_period = 26
+    senkou_span_b_period = 52
     
-    # Daily RSI (14-period)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    # Average gain and loss
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
-    for i in range(len(close)):
-        if i < 14:
-            if i == 0:
-                avg_gain[i] = gain[i] if i == 0 else np.mean(gain[1:i+1])
-                avg_loss[i] = loss[i] if i == 0 else np.mean(loss[1:i+1])
-            else:
-                avg_gain[i] = np.mean(gain[1:i+1]) if i > 0 else gain[i]
-                avg_loss[i] = np.mean(loss[1:i+1]) if i > 0 else loss[i]
-        else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    tenkan_sen = (pd.Series(high_1d).rolling(window=tenkan_period, min_periods=tenkan_period).max() + 
+                  pd.Series(low_1d).rolling(window=tenkan_period, min_periods=tenkan_period).min()) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    kijun_sen = (pd.Series(high_1d).rolling(window=kijun_period, min_periods=kijun_period).max() + 
+                 pd.Series(low_1d).rolling(window=kijun_period, min_periods=kijun_period).min()) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2
+    senkou_span_b = (pd.Series(high_1d).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).max() + 
+                     pd.Series(low_1d).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).min()) / 2
+    
+    # Align Ichimoku components to 6h timeframe
+    tenkan_sen_6h = align_htf_to_ltf(prices, df_1d, tenkan_sen.values)
+    kijun_sen_6h = align_htf_to_ltf(prices, df_1d, kijun_sen.values)
+    senkou_span_a_6h = align_htf_to_ltf(prices, df_1d, senkou_span_a.values)
+    senkou_span_b_6h = align_htf_to_ltf(prices, df_1d, senkou_span_b.values)
+    
+    # Cloud top and bottom
+    cloud_top = np.maximum(senkou_span_a_6h, senkou_span_b_6h)
+    cloud_bottom = np.minimum(senkou_span_a_6h, senkou_span_b_6h)
+    
+    # TK Cross: Tenkan-sen > Kijun-sen (bullish) or < (bearish)
+    tk_cross_bullish = tenkan_sen_6h > kijun_sen_6h
+    tk_cross_bearish = tenkan_sen_6h < kijun_sen_6h
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):  # warmup for weekly KAMA and daily RSI
+    for i in range(100, n):
         # Skip if any critical value is NaN
-        if np.isnan(kama_aligned[i]) or np.isnan(rsi[i]):
+        if (np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or 
+            np.isnan(tk_cross_bullish[i]) or np.isnan(tk_cross_bearish[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: weekly uptrend (price above KAMA) and daily RSI oversold (<30)
-            if close[i] > kama_aligned[i] and rsi[i] < 30:
+            # Long: price above cloud and TK cross bullish
+            if close[i] > cloud_top[i] and tk_cross_bullish[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: weekly downtrend (price below KAMA) and daily RSI overbought (>70)
-            elif close[i] < kama_aligned[i] and rsi[i] > 70:
+            # Short: price below cloud and TK cross bearish
+            elif close[i] < cloud_bottom[i] and tk_cross_bearish[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: weekly trend turns down OR RSI overbought (>70)
-            if close[i] < kama_aligned[i] or rsi[i] > 70:
+            # Exit long: price drops below cloud bottom or TK cross turns bearish
+            if close[i] < cloud_bottom[i] or not tk_cross_bullish[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: weekly trend turns up OR RSI oversold (<30)
-            if close[i] > kama_aligned[i] or rsi[i] < 30:
+            # Exit short: price rises above cloud top or TK cross turns bullish
+            if close[i] > cloud_top[i] or not tk_cross_bearish[i]:
                 signals[i] = 0.0
                 position = 0
             else:
