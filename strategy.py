@@ -3,22 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using weekly pivot points with volume confirmation and trend filter
-# Weekly pivots (R1/S1 for breakouts, R2/S2 for reversals) provide key levels for swing trading
-# Breakout above R1 or below S1 with volume > 1.5x 50-period average indicates momentum
-# Rejection at R2 or S2 with volume indicates mean reversion
-# Trend filter: 100-period EMA on 6h timeframe to avoid counter-trend trades
-# Weekly timeframe provides stability for pivots, reducing whipsaw in choppy markets
+# Hypothesis: 12h strategy using daily pivot points with volume confirmation and trend filter
+# Pivot points (R1/S1 for breakouts, R2/S2 for reversals) provide key intraday levels
+# Breakout above R1 or below S1 with volume > 1.5x 20-period average indicates momentum
+# Rejection at R2 or S2 with volume confirmation indicates mean reversion
+# Trend filter: 50-period EMA on 12h timeframe to avoid counter-trend trades
 # Works in bull/bear markets: breakouts capture trends, reversals capture pullbacks within trend
 # Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
 
-name = "6h_WeeklyPivot_R1S2_VolumeTrendFilter_v1"
-timeframe = "6h"
+name = "12h_Pivot_R1S2_VolumeTrendFilter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,16 +25,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate weekly pivot points ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Calculate daily pivot points ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 2:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Previous week's OHLC for pivot calculation
-    prev_close = df_1w['close'].shift(1).values
-    prev_high = df_1w['high'].shift(1).values
-    prev_low = df_1w['low'].shift(1).values
+    # Previous day's OHLC for pivot calculation
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
     # Pivot point calculation
     # Pivot = (previous high + previous low + previous close) / 3
@@ -48,21 +47,21 @@ def generate_signals(prices):
     s1 = pivot - (range_ * 1.0)
     s2 = pivot - (range_ * 2.0)
     
-    # Align weekly levels to 6h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    # Align daily levels to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
-    # Volume confirmation: >1.5x 50-period average
-    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
-    volume_filter = volume > (1.5 * vol_ma_50)
+    # Volume confirmation: >1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma_20)
     
-    # Trend filter: 100-period EMA on 6h timeframe
+    # Trend filter: 50-period EMA on 12h timeframe
     close_series = pd.Series(close)
-    ema_100 = close_series.ewm(span=100, adjust=False, min_periods=100).mean().values
-    uptrend = close > ema_100
-    downtrend = close < ema_100
+    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend = close > ema_50
+    downtrend = close < ema_50
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -71,10 +70,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any critical value is NaN or outside session
         if (np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(s2_aligned[i]) or np.isnan(volume_filter[i]) or np.isnan(ema_100[i]) or
+            np.isnan(s2_aligned[i]) or np.isnan(volume_filter[i]) or np.isnan(ema_50[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
