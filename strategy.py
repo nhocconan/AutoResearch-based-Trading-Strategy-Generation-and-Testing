@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1-day KAMA trend with RSI mean reversion and volume confirmation
-# Long when 1-day KAMA is rising (bullish trend) AND RSI < 30 (oversold) AND volume > 1.5x average
-# Short when 1-day KAMA is falling (bearish trend) AND RSI > 70 (overbought) AND volume > 1.5x average
-# Uses daily KAMA for trend direction, RSI for mean-reversion entry, volume for confirmation
-# Designed to work in bull markets via pullbacks in uptrends and in bear markets via bounces in downtrends
-# Target: 20-30 trades per year (80-120 over 4 years) with 0.25 position sizing
+# Hypothesis: 6h strategy using 1-weekly pivot points with volume expansion and EMA trend filter
+# Long when price breaks above weekly R3 with volume > 2x 20-period average and EMA50 > EMA200 (bullish trend)
+# Short when price breaks below weekly S3 with volume > 2x 20-period average and EMA50 < EMA200 (bearish trend)
+# Uses weekly pivot points for key support/resistance, volume for confirmation, and EMA for trend filter
+# Designed to capture strong breakouts in trending markets while avoiding false signals in ranging markets
+# Target: 15-25 trades per year (60-100 over 4 years) with 0.25 position sizing
 
-name = "4h_1dKAMA_RSI_MeanReversion_Volume"
-timeframe = "4h"
+name = "6h_WeeklyPivot_R3S3_Breakout_VolumeTrend"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,60 +24,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1-day KAMA ( Kaufman Adaptive Moving Average )
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Calculate weekly pivot points
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    # Efficiency Ratio and Smoothing Constants for KAMA
-    close_1d = df_1d['close'].values
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0)  # Will compute properly below
+    # Weekly high, low, close for pivot calculation
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Proper ER calculation
-    er = np.zeros_like(close_1d)
-    for i in range(1, len(close_1d)):
-        if i >= 10:  # ER period
-            direction = np.abs(close_1d[i] - close_1d[i-10])
-            volatility = np.sum(np.abs(np.diff(close_1d[i-9:i+1])))
-            er[i] = direction / volatility if volatility != 0 else 0
-        else:
-            er[i] = 0
+    # Calculate pivot point and support/resistance levels
+    pivot = (weekly_high + weekly_low + weekly_close) / 3
+    r1 = 2 * pivot - weekly_low
+    s1 = 2 * pivot - weekly_high
+    r2 = pivot + (weekly_high - weekly_low)
+    s2 = pivot - (weekly_high - weekly_low)
+    r3 = weekly_high + 2 * (pivot - weekly_low)
+    s3 = weekly_low - 2 * (weekly_high - pivot)
     
-    # Smoothing constants
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # fast=2, slow=30
-    sc = np.where(er > 0, sc, 0)
+    # Align weekly pivot levels to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
     
-    # KAMA calculation
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # EMA trend filter (50 and 200)
+    close_series = pd.Series(close)
+    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).values
+    ema_200 = close_series.ewm(span=200, adjust=False, min_periods=200).values
     
-    # KAMA trend: rising if current > previous, falling if current < previous
-    kama_rising = kama > np.roll(kama, 1)
-    kama_falling = kama < np.roll(kama, 1)
-    kama_rising[0] = False
-    kama_falling[0] = False
-    
-    # Align KAMA trend to 4h timeframe
-    kama_rising_aligned = align_htf_to_ltf(prices, df_1d, kama_rising)
-    kama_falling_aligned = align_htf_to_ltf(prices, df_1d, kama_falling)
-    
-    # RSI (14-period) on 4h close
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi[:13] = np.nan  # Not enough data for first 13 periods
-    
-    # Volume confirmation: >1.5x 20-period average
+    # Volume confirmation: >2x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_20)
+    volume_filter = volume > (2.0 * vol_ma_20)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -86,10 +63,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):  # Start after RSI/KAMA warmup
+    for i in range(50, n):  # Start after EMA50 warmup
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(kama_rising_aligned[i]) or np.isnan(kama_falling_aligned[i]) or 
-            np.isnan(rsi[i]) or np.isnan(volume_filter[i]) or
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_50[i]) or np.isnan(ema_200[i]) or 
+            np.isnan(volume_filter[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -97,24 +75,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: KAMA rising (bullish trend) AND RSI oversold (<30) AND volume confirmation
-            if kama_rising_aligned[i] and rsi[i] < 30 and volume_filter[i]:
+            # Long breakout: price breaks above weekly R3 with volume confirmation and bullish trend
+            if close[i] > r3_aligned[i] and volume_filter[i] and ema_50[i] > ema_200[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA falling (bearish trend) AND RSI overbought (>70) AND volume confirmation
-            elif kama_falling_aligned[i] and rsi[i] > 70 and volume_filter[i]:
+            # Short breakout: price breaks below weekly S3 with volume confirmation and bearish trend
+            elif close[i] < s3_aligned[i] and volume_filter[i] and ema_50[i] < ema_200[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: RSI overbought (>70) or KAMA turns bearish
-            if rsi[i] > 70 or not kama_rising_aligned[i]:
+            # Exit long: price breaks below weekly S3 (support break) or trend turns bearish
+            if close[i] < s3_aligned[i] or ema_50[i] < ema_200[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: RSI oversold (<30) or KAMA turns bullish
-            if rsi[i] < 30 or not kama_falling_aligned[i]:
+            # Exit short: price breaks above weekly R3 (resistance break) or trend turns bullish
+            if close[i] > r3_aligned[i] or ema_50[i] > ema_200[i]:
                 signals[i] = 0.0
                 position = 0
             else:
