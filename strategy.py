@@ -3,52 +3,54 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h RSI and 1d EMA50 for trend direction, with 1h price action for entry timing.
-# Long when 4h RSI > 50 (bullish) and 1h close > 1d EMA50 (above long-term trend) with bullish engulfing candle.
-# Short when 4h RSI < 50 (bearish) and 1h close < 1d EMA50 (below long-term trend) with bearish engulfing candle.
-# Uses 4h RSI for medium-term trend filter, 1d EMA50 for long-term trend filter, and 1h price action for precise entry.
-# Designed to reduce false signals in ranging markets and capture momentum in trending markets.
-# Target: 15-30 trades per year (60-120 over 4 years) with 0.20 position sizing.
-# Session filter: 08-20 UTC to avoid low-volume Asian session.
+# Hypothesis: 12h strategy using 1-day Keltner Channel breakout with volume confirmation
+# Long when price closes above upper Keltner band (EMA20 + 2*ATR) with volume > 1.5x average
+# Short when price closes below lower Keltner band (EMA20 - 2*ATR) with volume > 1.5x average
+# Uses daily Keltner channels for dynamic support/resistance, volume for confirmation
+# Designed to capture breakouts in trending markets while avoiding false signals in ranging conditions
+# Target: 15-25 trades per year (60-100 over 4 years) with 0.25 position sizing
 
-name = "1h_4hRSI_1dEMA50_Engulfing_v1"
-timeframe = "1h"
+name = "12h_1dKeltner2x_Volume_Confirmation"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
-    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 4h data for RSI
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 14:
-        return np.zeros(n)
-    
-    # Calculate 4h RSI (14-period)
-    delta = pd.Series(df_4h['close']).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_4h = 100 - (100 / (1 + rs))
-    rsi_4h_values = rsi_4h.values
-    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h_values)
-    
-    # Get 1d data for EMA50
+    # Calculate 1-day Keltner Channel components
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA50
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # EMA20 of close
+    close_series = pd.Series(df_1d['close'])
+    ema20 = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # ATR(10) for Keltner width
+    high_low = df_1d['high'] - df_1d['low']
+    high_close = np.abs(df_1d['high'] - np.concatenate([[df_1d['close'][0]], df_1d['close'][:-1]]))
+    low_close = np.abs(df_1d['low'] - np.concatenate([[df_1d['close'][0]], df_1d['close'][:-1]]))
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    atr10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    
+    # Keltner bands: EMA20 ± 2*ATR10
+    upper_keltner = ema20 + 2 * atr10
+    lower_keltner = ema20 - 2 * atr10
+    
+    # Align Keltner levels to 12h timeframe
+    upper_keltner_aligned = align_htf_to_ltf(prices, df_1d, upper_keltner)
+    lower_keltner_aligned = align_htf_to_ltf(prices, df_1d, lower_keltner)
+    
+    # Volume confirmation: >1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma_20)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -57,42 +59,38 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):  # Start from 1 to access previous candle for engulfing
+    for i in range(20, n):  # Start after EMA/ATR warmup
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(rsi_4h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or
+        if (np.isnan(upper_keltner_aligned[i]) or np.isnan(lower_keltner_aligned[i]) or 
+            np.isnan(volume_filter[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Bullish engulfing: current green candle completely engulfs previous red candle
-        bullish_engulfing = (close[i] > open_price[i]) and (open_price[i] < close[i-1]) and (close[i] > open_price[i-1])
-        # Bearish engulfing: current red candle completely engulfs previous green candle
-        bearish_engulfing = (close[i] < open_price[i]) and (open_price[i] > close[i-1]) and (close[i] < open_price[i-1])
-        
         if position == 0:
-            # Long: bullish 4h RSI, above 1d EMA50, and bullish engulfing
-            if (rsi_4h_aligned[i] > 50) and (close[i] > ema_50_1d_aligned[i]) and bullish_engulfing:
-                signals[i] = 0.20
+            # Long breakout: price closes above upper Keltner with volume confirmation
+            if close[i] > upper_keltner_aligned[i] and volume_filter[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: bearish 4h RSI, below 1d EMA50, and bearish engulfing
-            elif (rsi_4h_aligned[i] < 50) and (close[i] < ema_50_1d_aligned[i]) and bearish_engulfing:
-                signals[i] = -0.20
+            # Short breakout: price closes below lower Keltner with volume confirmation
+            elif close[i] < lower_keltner_aligned[i] and volume_filter[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: bearish engulfing or price crosses below 1d EMA50
-            if bearish_engulfing or (close[i] < ema_50_1d_aligned[i]):
+            # Exit long: price closes below lower Keltner (support break)
+            if close[i] < lower_keltner_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: bullish engulfing or price crosses above 1d EMA50
-            if bullish_engulfing or (close[i] > ema_50_1d_aligned[i]):
+            # Exit short: price closes above upper Keltner (resistance break)
+            if close[i] > upper_keltner_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
