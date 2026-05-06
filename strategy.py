@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
-# Long when price breaks above R3 (strong resistance) AND 1d EMA34 uptrend AND volume > 2.0 * 20-bar avg volume
-# Short when price breaks below S3 (strong support) AND 1d EMA34 downtrend AND volume > 2.0 * 20-bar avg volume
-# Exit with signal=0 when price reverses back inside the Camarilla H-L range (mean reversion)
+# Hypothesis: 6h Camarilla R4/S4 breakout with 1d trend filter and volume spike
+# Long when price breaks above R4 (strong breakout level) AND 1d close > 1d open (bullish daily candle) AND volume > 2.0 * 20-bar avg volume
+# Short when price breaks below S4 (strong breakdown level) AND 1d close < 1d open (bearish daily candle) AND volume > 2.0 * 20-bar avg volume
+# Exit with signal=0 when price reverses back inside the Camarilla H3-L3 range (mean reversion)
 # Uses discrete sizing 0.25 to balance opportunity and drawdown
-# Target: 100-200 total trades over 4 years (25-50/year) for 4h timeframe
-# Camarilla levels provide institutional pivot points; R3/S3 are strong breakout levels
-# 1d EMA34 ensures higher-timeframe trend alignment to avoid counter-trend trades
-# Volume spike confirms institutional participation
+# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
+# Camarilla R4/S4 are extreme breakout levels that require strong momentum, reducing false breakouts
+# 1d candle direction ensures alignment with higher-timeframe sentiment to avoid counter-trend trades
+# Volume spike confirms institutional participation and reduces whipsaws
 # Works in bull via buying strength on upside breakouts, works in bear via selling strength on downside breakdowns
 
-name = "4h_Camarilla_R3S3_1dEMA34_VolumeSpike_v1"
-timeframe = "4h"
+name = "6h_Camarilla_R4S4_1dCandleDir_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,33 +28,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for EMA34 trend filter
+    # Get 1d data ONCE before loop for trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 1:
         return np.zeros(n)
-    close_1d = df_1d['close'].values
-    
-    # Calculate 1d EMA34
-    close_1d_series = pd.Series(close_1d)
-    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align HTF indicators to 4h timeframe (wait for completed HTF bar)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Calculate Camarilla levels from daily data (more stable than intraday)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    open_1d = df_1d['open'].values
     
+    # Calculate 1d candle direction: 1 for bullish (close > open), -1 for bearish (close < open), 0 for doji
+    candle_dir_1d = np.where(close_1d > open_1d, 1, np.where(close_1d < open_1d, -1, 0))
+    
+    # Calculate Camarilla levels from daily data
     # Camarilla formula: H-L range based
+    R4 = close_1d + (high_1d - low_1d) * 1.1 / 2
+    S4 = close_1d - (high_1d - low_1d) * 1.1 / 2
     R3 = close_1d + (high_1d - low_1d) * 1.1 / 4
     S3 = close_1d - (high_1d - low_1d) * 1.1 / 4
     H3 = close_1d + (high_1d - low_1d) * 1.1 / 6
     L3 = close_1d - (high_1d - low_1d) * 1.1 / 6
     
-    # Align Camarilla levels to 4h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    # Align HTF indicators to 6h timeframe (wait for completed HTF bar)
+    candle_dir_1d_aligned = align_htf_to_ltf(prices, df_1d, candle_dir_1d)
+    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
+    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
     H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
     L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
     
@@ -67,7 +65,7 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or
+        if (np.isnan(candle_dir_1d_aligned[i]) or np.isnan(R4_aligned[i]) or np.isnan(S4_aligned[i]) or
             np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -76,12 +74,12 @@ def generate_signals(prices):
         
         if position == 0:
             # Camarilla breakout signals with trend and volume filters
-            # Long: price breaks above R3 (strong resistance) AND uptrend AND volume spike
-            if close[i] > R3_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_spike[i]:
+            # Long: price breaks above R4 (strong resistance) AND bullish daily candle AND volume spike
+            if close[i] > R4_aligned[i] and candle_dir_1d_aligned[i] > 0 and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 (strong support) AND downtrend AND volume spike
-            elif close[i] < S3_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_spike[i]:
+            # Short: price breaks below S4 (strong support) AND bearish daily candle AND volume spike
+            elif close[i] < S4_aligned[i] and candle_dir_1d_aligned[i] < 0 and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
