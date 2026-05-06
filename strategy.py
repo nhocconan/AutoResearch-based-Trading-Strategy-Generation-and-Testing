@@ -4,17 +4,17 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h strategy using 1d Donchian breakout with 1d EMA trend filter and volume confirmation
-# Long when price breaks above 1d Donchian upper (20) AND 1d EMA50 > EMA200 AND volume > 1.5 * avg_volume(20)
-# Short when price breaks below 1d Donchian lower (20) AND 1d EMA50 < EMA200 AND volume > 1.5 * avg_volume(20)
-# Exit when price touches 1d Donchian midpoint or opposite Donchian level
+# Long when price breaks above 1d Donchian upper (20) AND 1d EMA50 > EMA200 AND volume > 2.0 * avg_volume(20)
+# Short when price breaks below 1d Donchian lower (20) AND 1d EMA50 < EMA200 AND volume > 2.0 * avg_volume(20)
+# Exit when price touches 1d Donchian middle
 # Uses discrete sizing 0.25 to balance return and drawdown control
 # Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
-# 1d Donchian provides strong structural breakout levels
+# 1d Donchian provides strong structural breakout levels that work in both bull and bear markets
 # 1d EMA filter ensures alignment with long-term trend, reducing counter-trend trades
-# Volume confirmation filters weak breakouts
+# High volume threshold (2.0x) filters weak breakouts and reduces overtrading
 # Works in bull (trend continuation breakouts) and bear (trend continuation breakdowns)
 
-name = "4h_1dDonchian20_1dEMATrend_Volume"
+name = "4h_1dDonchian20_1dEMATrend_VolumeFilter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -55,9 +55,9 @@ def generate_signals(prices):
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Calculate volume confirmation: volume > 1.5 * 20-period average volume on 4h
+    # Calculate volume confirmation: volume > 2.0 * 20-period average volume on 4h
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * avg_volume_20)
+    volume_confirm = volume > (2.0 * avg_volume_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -84,15 +84,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price touches 1d Donchian middle or lower (reversal or profit take)
-            if close[i] <= donchian_middle_aligned[i] or close[i] <= donchian_lower_aligned[i]:
+            # Exit long: price touches 1d Donchian middle (take profit or reversal)
+            if close[i] <= donchian_middle_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price touches 1d Donchian middle or upper (reversal or profit take)
-            if close[i] >= donchian_middle_aligned[i] or close[i] >= donchian_upper_aligned[i]:
+            # Exit short: price touches 1d Donchian middle (take profit or reversal)
+            if close[i] >= donchian_middle_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
