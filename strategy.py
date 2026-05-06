@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using daily Donchian breakouts with volume confirmation and weekly trend filter
-# Breakout above daily Donchian high(20) or below low(20) with volume > 1.5x 20-period average
-# Trend filter: 50-period EMA on weekly timeframe to avoid counter-trend trades
-# Works in bull/bear markets: breakouts capture trends, mean reversion within trend via stop
+# Hypothesis: 4h strategy using 12h Donchian breakout with volume confirmation and ATR volatility filter
+# Breakout above 12h Donchian high or below low with volume > 2x 20-period average indicates strong momentum
+# ATR filter ensures trades occur during sufficient volatility (ATR > 1.5x 50-period ATR mean)
+# Works in bull/bear markets: breakouts capture trends, volatility filter avoids choppy periods
 # Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
 
-name = "12h_Donchian20_Volume_WeeklyTrend_v1"
-timeframe = "12h"
+name = "4h_DonchianBreakout_12h_VolumeATRFilter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,36 +23,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate daily Donchian channels (20) ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Calculate 12h Donchian channels ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_1d) < 20:
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Daily Donchian high and low (20-period)
-    high_series = pd.Series(df_1d['high'])
-    low_series = pd.Series(df_1d['low'])
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # 20-period Donchian high and low
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Align daily Donchian levels to 12h timeframe
-    dh_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    dl_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # Calculate weekly EMA(50) for trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Align 12h Donchian levels to 4h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
     
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Weekly EMA(50)
-    weekly_close = df_1w['close'].values
-    weekly_ema = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    weekly_ema_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema)
-    
-    # Volume confirmation: >1.5x 20-period average
+    # Volume confirmation: >2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_20)
+    volume_filter = volume > (2.0 * vol_ma_20)
+    
+    # ATR volatility filter: ATR > 1.5x 50-period ATR mean
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_mean_50 = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+    atr_filter = atr > (1.5 * atr_mean_50)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -63,8 +62,8 @@ def generate_signals(prices):
     
     for i in range(60, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(dh_aligned[i]) or np.isnan(dl_aligned[i]) or 
-            np.isnan(weekly_ema_aligned[i]) or np.isnan(volume_filter[i]) or
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(volume_filter[i]) or np.isnan(atr_filter[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -72,24 +71,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long breakout: price breaks above daily Donchian high with volume confirmation and weekly uptrend
-            if close[i] > dh_aligned[i] and volume_filter[i] and close[i] > weekly_ema_aligned[i]:
+            # Long breakout: price breaks above 12h Donchian high with volume and volatility
+            if close[i] > donchian_high_aligned[i] and volume_filter[i] and atr_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short breakout: price breaks below daily Donchian low with volume confirmation and weekly downtrend
-            elif close[i] < dl_aligned[i] and volume_filter[i] and close[i] < weekly_ema_aligned[i]:
+            # Short breakout: price breaks below 12h Donchian low with volume and volatility
+            elif close[i] < donchian_low_aligned[i] and volume_filter[i] and atr_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below daily Donchian low (trailing stop)
-            if close[i] < dl_aligned[i]:
+            # Exit long: price breaks below 12h Donchian low (failed breakout) or ATR drops
+            if close[i] < donchian_low_aligned[i] or not atr_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above daily Donchian high (trailing stop)
-            if close[i] > dh_aligned[i]:
+            # Exit short: price breaks above 12h Donchian high (failed breakdown) or ATR drops
+            if close[i] > donchian_high_aligned[i] or not atr_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
