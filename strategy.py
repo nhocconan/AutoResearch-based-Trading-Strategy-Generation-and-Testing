@@ -3,17 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R mean reversion with 1d EMA34 trend filter and volume spike confirmation
-# Williams %R identifies overbought/oversold conditions for mean reversion entries
-# 1d EMA34 ensures alignment with higher timeframe trend to reduce false signals
-# Volume spike (>2.0x 20-bar average) confirms participation and reduces whipsaw
-# ATR-based trailing stop via signal=0 when price retraces 25% of ATR from extreme
-# Discrete sizing 0.25 to minimize fee drag while maintaining profit potential
-# Target: 50-120 total trades over 4 years (12-30/year) to stay within fee-efficient range
-# Works in both bull/bear: mean reversion captures pullbacks in trends, trend filter avoids counter-trend traps
+# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume confirmation
+# Uses Camarilla pivot levels from daily chart for institutional structure, 12h EMA50 for trend alignment
+# Volume spike (>2.0x 20-bar average) confirms breakout strength
+# ATR-based trailing stop via signal=0 when price retraces 30% of ATR from extreme
+# Discrete sizing 0.30 to balance profit potential and fee drag; target 75-150 total trades over 4 years (19-37/year)
+# Works in both bull/bear: breakouts capture momentum, trend filter avoids counter-trend traps, volume filter ensures participation
 
-name = "12h_WilliamsR_1dEMA34_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_12hEMA50_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,21 +26,30 @@ def generate_signals(prices):
     
     # Calculate HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    df_12h = get_htf_data(prices, '12h')
+    
+    if len(df_1d) < 50 or len(df_12h) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate 1d EMA34 trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 1d Camarilla pivot levels (R3, S3)
+    # Camarilla: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
+    # Using prior day's OHLC
+    prior_high = np.concatenate([[np.nan], high_1d[:-1]])
+    prior_low = np.concatenate([[np.nan], low_1d[:-1]])
+    prior_close = np.concatenate([[np.nan], close_1d[:-1]])
     
-    # Calculate Williams %R(14) on 1d: (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r_1d = -100 * (highest_high_1d - close_1d) / (highest_high_1d - lowest_low_1d + 1e-10)
+    camarilla_range = prior_high - prior_low
+    r3 = prior_close + 1.1 * camarilla_range / 2
+    s3 = prior_close - 1.1 * camarilla_range / 2
+    
+    # Calculate 12h EMA50 trend filter
+    close_12h_series = pd.Series(close_12h)
+    ema50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Calculate ATR(14) for stoploss
     tr1 = np.abs(high[1:] - low[1:])
@@ -55,9 +62,10 @@ def generate_signals(prices):
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (2.0 * vol_ma_20)
     
-    # Align HTF indicators to 12h timeframe (primary)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    williams_r_1d_aligned = align_htf_to_ltf(prices, df_1d, williams_r_1d)
+    # Align HTF indicators to 4h timeframe (primary)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
     # Pre-compute session filter (08-20 UTC)
     hours = prices.index.hour
@@ -70,7 +78,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(williams_r_1d_aligned[i]) or 
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(ema50_12h_aligned[i]) or 
             np.isnan(atr[i]) or np.isnan(volume_filter[i]) or
             not session_filter[i]):
             if position != 0:
@@ -81,35 +89,35 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long entry: Williams %R oversold (< -80) AND uptrend (close > EMA34) AND volume spike
-            if williams_r_1d_aligned[i] < -80 and close[i] > ema34_1d_aligned[i] and volume_filter[i]:
-                signals[i] = 0.25
+            # Long breakout: price > R3 AND uptrend (price > EMA50) AND volume spike
+            if close[i] > r3_aligned[i] and close[i] > ema50_12h_aligned[i] and volume_filter[i]:
+                signals[i] = 0.30
                 position = 1
                 long_extreme = close[i]
-            # Short entry: Williams %R overbought (> -20) AND downtrend (close < EMA34) AND volume spike
-            elif williams_r_1d_aligned[i] > -20 and close[i] < ema34_1d_aligned[i] and volume_filter[i]:
-                signals[i] = -0.25
+            # Short breakdown: price < S3 AND downtrend (price < EMA50) AND volume spike
+            elif close[i] < s3_aligned[i] and close[i] < ema50_12h_aligned[i] and volume_filter[i]:
+                signals[i] = -0.30
                 position = -1
                 short_extreme = close[i]
         elif position == 1:
             # Update long extreme
             long_extreme = max(long_extreme, close[i])
-            # Exit long: price retraces 25% of ATR from extreme (tighter stop for 12h mean reversion)
-            if close[i] <= long_extreme - 0.25 * atr[i]:
+            # Exit long: price retraces 30% of ATR from extreme (tighter stop for 4h)
+            if close[i] <= long_extreme - 0.3 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 long_extreme = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
             # Update short extreme
             short_extreme = min(short_extreme, close[i])
-            # Exit short: price retraces 25% of ATR from extreme
-            if close[i] >= short_extreme + 0.25 * atr[i]:
+            # Exit short: price retraces 30% of ATR from extreme
+            if close[i] >= short_extreme + 0.3 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 short_extreme = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
