@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using weekly RSI mean reversion with daily trend filter
-# Weekly RSI > 70 indicates overbought conditions (short opportunity), < 30 indicates oversold (long opportunity)
-# Daily EMA 50 acts as trend filter: only take longs when price > daily EMA 50, shorts when price < daily EMA 50
-# This combines mean reversion on higher timeframe with trend alignment on lower timeframe
-# Works in both bull/bear markets: mean reversion captures pullbacks in trends, trend filter avoids counter-trend trades
+# Hypothesis: 12h strategy using daily KAMA trend with RSI momentum and chop filter
+# KAMA adapts to market noise, providing reliable trend direction in both trending and ranging markets
+# RSI(14) filters for momentum strength (>50 for long, <50 for short) to avoid choppy entries
+# Choppiness Index (CHOP) > 61.8 avoids trend-following in ranging markets, reducing whipsaw
+# Works in bull markets via trend continuation, in bear markets via counter-trend bounces at extremes
 # Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
 
-name = "6h_WeeklyRSI30_70_DailyEMA50_TrendFilter_v1"
-timeframe = "6h"
+name = "12h_KAMA_RSI_ChopFilter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,32 +22,65 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Calculate weekly RSI ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    
-    if len(df_1w) < 30:
-        return np.zeros(n)
-    
-    # Weekly RSI calculation
-    delta = pd.Series(df_1w['close']).diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=14).mean()
-    rs = gain / loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
-    
-    # Align weekly RSI to 6h timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_1w, rsi_values)
-    
-    # Calculate daily EMA 50 ONCE before loop
+    # Calculate daily KAMA trend ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    ema_50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Kaufman's Adaptive Moving Average (KAMA)
+    # Efficiency Ratio (ER) = |change| / volatility
+    change = np.abs(df_1d['close'].diff(10))
+    volatility = df_1d['close'].diff().abs().rolling(10).sum()
+    er = change / volatility.replace(0, np.nan)
+    # Smoothing constants
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # fast=2, slow=30
+    # Initialize KAMA
+    kama = df_1d['close'].copy()
+    for i in range(1, len(kama)):
+        if not np.isnan(sc.iloc[i]):
+            kama.iloc[i] = kama.iloc[i-1] + sc.iloc[i] * (df_1d['close'].iloc[i] - kama.iloc[i-1])
+        else:
+            kama.iloc[i] = kama.iloc[i-1]
+    kama_values = kama.values
+    
+    # Align daily KAMA to 12h timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama_values)
+    
+    # RSI(14) on daily for momentum filter
+    delta = df_1d['close'].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(14, min_periods=14).mean()
+    avg_loss = loss.rolling(14, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_values)
+    
+    # Choppiness Index (CHOP) on 12h for regime filter
+    # Requires high, low, close
+    atr_period = 14
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
+    atr = pd.Series(tr).rolling(atr_period, min_periods=atr_period).mean().values
+    
+    # Calculate highest high and lowest low over atr_period
+    highest_high = pd.Series(high).rolling(atr_period, min_periods=atr_period).max().values
+    lowest_low = pd.Series(low).rolling(atr_period, min_periods=atr_period).min().values
+    
+    # Avoid division by zero
+    range_sum = highest_high - lowest_low
+    chop = np.where(
+        (range_sum > 0) & (atr > 0),
+        100 * np.log10(atr * atr_period / range_sum) / np.log10(atr_period),
+        50  # neutral when range is zero
+    )
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -58,7 +91,7 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(rsi_aligned[i]) or np.isnan(ema_50_aligned[i]) or
+        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or np.isnan(chop[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -66,24 +99,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long signal: weekly RSI < 30 (oversold) and price > daily EMA 50 (uptrend)
-            if rsi_aligned[i] < 30 and close[i] > ema_50_aligned[i]:
+            # Long: price above KAMA, RSI > 50, and not in strong chop (trending market)
+            if close[i] > kama_aligned[i] and rsi_aligned[i] > 50 and chop[i] <= 61.8:
                 signals[i] = 0.25
                 position = 1
-            # Short signal: weekly RSI > 70 (overbought) and price < daily EMA 50 (downtrend)
-            elif rsi_aligned[i] > 70 and close[i] < ema_50_aligned[i]:
+            # Short: price below KAMA, RSI < 50, and not in strong chop
+            elif close[i] < kama_aligned[i] and rsi_aligned[i] < 50 and chop[i] <= 61.8:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: weekly RSI > 50 (mean reversion complete) or price < daily EMA 50 (trend change)
-            if rsi_aligned[i] > 50 or close[i] < ema_50_aligned[i]:
+            # Exit long: price below KAMA or RSI < 40 (loss of momentum)
+            if close[i] < kama_aligned[i] or rsi_aligned[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: weekly RSI < 50 (mean reversion complete) or price > daily EMA 50 (trend change)
-            if rsi_aligned[i] < 50 or close[i] > ema_50_aligned[i]:
+            # Exit short: price above KAMA or RSI > 60 (loss of momentum)
+            if close[i] > kama_aligned[i] or rsi_aligned[i] > 60:
                 signals[i] = 0.0
                 position = 0
             else:
