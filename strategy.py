@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using daily Keltner channels with ADX trend filter and volume confirmation
-# Keltner channels (EMA-based) adapt to volatility better than fixed % bands
-# ADX > 25 indicates trending market for breakout trades; ADX < 20 indicates ranging for mean reversion
-# Volume > 1.5x average confirms institutional participation
-# Works in bull/bear: trend following in strong moves, mean reversion in low volatility regimes
-# Target: 60-120 total trades over 4 years (15-30/year) with 0.25 position sizing
+# Hypothesis: 12h strategy using daily Donchian breakout with volume confirmation and weekly trend filter
+# Daily Donchian channels (20-period) provide clear breakout levels
+# Volume > 2x 20-period average confirms institutional participation
+# Weekly EMA50 trend filter ensures we only trade in direction of higher timeframe trend
+# Works in both bull/bear markets: breakouts capture trends, trend filter avoids counter-trend trades
+# Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
 
-name = "6h_Keltner_ADX_VolumeFilter_v1"
-timeframe = "6h"
+name = "12h_Donchian20_WeeklyTrend_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,60 +24,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate daily EMA for Keltner center line
+    # Calculate daily Donchian channels (20-period) ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Daily EMA(20) for Keltner center
-    ema_20 = pd.Series(df_1d['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Daily Donchian channels
+    donchian_high = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
     
-    # Daily ATR(10) for Keltner width
-    tr1 = pd.Series(df_1d['high']).diff().abs()
-    tr2 = (pd.Series(df_1d['high']) - pd.Series(df_1d['close'].shift())).abs()
-    tr3 = (pd.Series(df_1d['low']) - pd.Series(df_1d['close'].shift())).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_10 = tr.ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Align daily Donchian levels to 12h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # Keltner channels: EMA(20) ± 2 * ATR(10)
-    upper = ema_20 + (2 * atr_10)
-    lower = ema_20 - (2 * atr_10)
+    # Calculate weekly EMA50 for trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # Align daily Keltner levels to 6h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower)
-    center_aligned = align_htf_to_ltf(prices, df_1d, ema_20)
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # ADX(14) from daily data for trend strength
-    # Calculate +DM, -DM, TR
-    high_diff = pd.Series(df_1d['high']).diff()
-    low_diff = -pd.Series(df_1d['low']).diff()
-    plus_dm = np.where((high_diff > low_diff) & (high_diff > 0), high_diff, 0)
-    minus_dm = np.where((low_diff > high_diff) & (low_diff > 0), low_diff, 0)
-    tr_atr = pd.concat([
-        pd.Series(df_1d['high']).diff().abs(),
-        (pd.Series(df_1d['high']) - pd.Series(df_1d['close'].shift())).abs(),
-        (pd.Series(df_1d['low']) - pd.Series(df_1d['close'].shift())).abs()
-    ], axis=1).max(axis=1)
+    # Weekly EMA50
+    weekly_close = df_1w['close'].values
+    weekly_ema50 = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Smoothed values
-    atr_14 = tr_atr.ewm(span=14, adjust=False, min_periods=14).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Align weekly EMA50 to 12h timeframe
+    weekly_ema50_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema50)
     
-    # DI+ and DI-
-    plus_di = 100 * (plus_dm_smooth / atr_14)
-    minus_di = 100 * (minus_dm_smooth / atr_14)
-    
-    # DX and ADX
-    dx = 100 * np.abs((plus_di - minus_di) / (plus_di + minus_di))
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume confirmation: >1.5x 20-period average
+    # Volume confirmation: >2x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_20)
+    volume_filter = volume > (2.0 * vol_ma_20)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -88,8 +64,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or np.isnan(center_aligned[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(volume_filter[i]) or
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(weekly_ema50_aligned[i]) or np.isnan(volume_filter[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -97,32 +73,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long entry: ADX > 25 (trending) + price breaks above upper Keltner + volume
-            if adx_aligned[i] > 25 and close[i] > upper_aligned[i] and volume_filter[i]:
+            # Long breakout: price breaks above daily Donchian high with volume confirmation and weekly uptrend
+            if close[i] > donchian_high_aligned[i] and volume_filter[i] and close[i] > weekly_ema50_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: ADX > 25 (trending) + price breaks below lower Keltner + volume
-            elif adx_aligned[i] > 25 and close[i] < lower_aligned[i] and volume_filter[i]:
-                signals[i] = -0.25
-                position = -1
-            # Long mean reversion: ADX < 20 (ranging) + price touches lower Keltner + volume
-            elif adx_aligned[i] < 20 and close[i] < lower_aligned[i] * 1.002 and volume_filter[i]:
-                signals[i] = 0.25
-                position = 1
-            # Short mean reversion: ADX < 20 (ranging) + price touches upper Keltner + volume
-            elif adx_aligned[i] < 20 and close[i] > upper_aligned[i] * 0.998 and volume_filter[i]:
+            # Short breakout: price breaks below daily Donchian low with volume confirmation and weekly downtrend
+            elif close[i] < donchian_low_aligned[i] and volume_filter[i] and close[i] < weekly_ema50_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: ADX drops below 20 (trend weakening) or price returns to center
-            if adx_aligned[i] < 20 or close[i] > center_aligned[i]:
+            # Exit long: price breaks below daily Donchian low (failed breakout) or weekly trend turns down
+            if close[i] < donchian_low_aligned[i] or close[i] < weekly_ema50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: ADX drops below 20 (trend weakening) or price returns to center
-            if adx_aligned[i] < 20 or close[i] < center_aligned[i]:
+            # Exit short: price breaks above daily Donchian high (failed breakdown) or weekly trend turns up
+            if close[i] > donchian_high_aligned[i] or close[i] > weekly_ema50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
