@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 12h KAMA trend + 4h Williams %R mean reversion + volume confirmation
-# Long when 12h KAMA is rising (bullish trend) AND 4h Williams %R < -80 (oversold) AND volume > 1.5 * avg_volume(20)
-# Short when 12h KAMA is falling (bearish trend) AND 4h Williams %R > -20 (overbought) AND volume > 1.5 * avg_volume(20)
-# Exit when Williams %R crosses back above -50 (for long) or below -50 (for short)
+# Hypothesis: 1d strategy using 1w Camarilla pivot breakout with 1d EMA34 trend filter and volume confirmation
+# Long when price breaks above 1w Camarilla R3 AND 1d EMA34 > EMA89 AND volume > 2.0 * avg_volume(20)
+# Short when price breaks below 1w Camarilla S3 AND 1d EMA34 < EMA89 AND volume > 2.0 * avg_volume(20)
+# Exit when price crosses 1d EMA34 (trend reversal)
 # Uses discrete sizing 0.25 to balance return and drawdown control
-# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
-# 12h KAMA provides smooth trend filtering with lag compensation
-# 4h Williams %R (14) captures mean reversion in extreme zones
-# Volume confirmation filters weak reversals
-# Works in bull (buy dips in uptrend) and bear (sell rallies in downtrend)
+# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe
+# 1w Camarilla provides strong weekly structure with clear breakout/fade levels
+# 1d EMA34/EMA89 filter ensures alignment with intermediate trend
+# Volume confirmation filters weak breakouts
+# Works in bull (breakouts above R3 in uptrend) and bear (breakdowns below S3 in downtrend)
 
-name = "4h_12hKAMA_4hWilliamsR_Volume_v1"
-timeframe = "4h"
+name = "1d_1wCamarillaR3S3_1dEMA34Trend_Volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,83 +28,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data ONCE before loop for KAMA trend
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get 1w data ONCE before loop for Camarilla pivots
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:  # Need sufficient data for Camarilla calculation
         return np.zeros(n)
-    close_12h = df_12h['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 12h KAMA (ER=10, fast=2, slow=30)
-    close_series_12h = pd.Series(close_12h)
-    change = abs(close_series_12h.diff(10))
-    volatility = close_series_12h.diff(1).abs().rolling(window=10, min_periods=10).sum()
-    er = change / volatility.replace(0, np.nan)
-    er = er.fillna(0)
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2
-    kama_12h = [np.nan] * len(close_12h)
-    kama_12h[0] = close_12h[0]
-    for i in range(1, len(close_12h)):
-        kama_12h[i] = kama_12h[i-1] + sc.iloc[i] * (close_12h[i] - kama_12h[i-1])
-    kama_12h = np.array(kama_12h)
+    # Calculate 1w Camarilla levels (based on previous 1w bar)
+    # Camarilla: R3 = close + 1.1*(high-low)*1.1/4, S3 = close - 1.1*(high-low)*1.1/4
+    # Simplified: R3 = close + 0.275*(high-low), S3 = close - 0.275*(high-low)
+    typical_price_1w = (high_1w + low_1w + close_1w) / 3.0
+    range_1w = high_1w - low_1w
+    camarilla_r3_1w = typical_price_1w + 0.275 * range_1w
+    camarilla_s3_1w = typical_price_1w - 0.275 * range_1w
     
-    # Get 4h data ONCE before loop for Williams %R
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get 1d data ONCE before loop for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 100:  # Need sufficient data for EMA89
         return np.zeros(n)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 4h Williams %R (14): (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_4h).rolling(window=14, min_periods=14).max()
-    lowest_low = pd.Series(low_4h).rolling(window=14, min_periods=14).min()
-    williams_r = -100 * (highest_high - close_4h) / (highest_high - lowest_low)
-    williams_r = williams_r.values
+    # Calculate 1d EMA34 and EMA89 for trend filter
+    close_series_1d = pd.Series(close_1d)
+    ema_34_1d = close_series_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_89_1d = close_series_1d.ewm(span=89, adjust=False, min_periods=89).mean().values
     
-    # Align 12h KAMA to 4h timeframe (wait for completed 12h bar)
-    kama_aligned = align_htf_to_ltf(prices, df_12h, kama_12h)
+    # Align 1w Camarilla levels to 1d timeframe (wait for completed 1w bar)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3_1w)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3_1w)
     
-    # Align 4h Williams %R to 4h timeframe (wait for completed 4h bar)
-    williams_r_aligned = align_htf_to_ltf(prices, df_4h, williams_r)
+    # Align 1d EMA indicators to 1d timeframe (wait for completed 1d bar)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_89_aligned = align_htf_to_ltf(prices, df_1d, ema_89_1d)
     
-    # Calculate volume confirmation: volume > 1.5 * 20-period average volume
+    # Calculate volume confirmation: volume > 2.0 * 20-period average volume
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * avg_volume_20)
+    volume_confirm = volume > (2.0 * avg_volume_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN
-        if (np.isnan(kama_aligned[i]) or np.isnan(williams_r_aligned[i]) or np.isnan(avg_volume_20[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(ema_89_aligned[i]) or np.isnan(avg_volume_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: 12h KAMA rising (bullish trend) AND 4h Williams %R < -80 (oversold) AND volume confirmation
-            if (kama_aligned[i] > kama_aligned[i-1] and 
-                williams_r_aligned[i] < -80 and 
-                volume_confirm[i]):
+            # Long: price breaks above 1w Camarilla R3 with 1d EMA34 > EMA89 and volume confirmation
+            if (close[i] > camarilla_r3_aligned[i] and close[i-1] <= camarilla_r3_aligned[i-1] and 
+                ema_34_aligned[i] > ema_89_aligned[i] and volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: 12h KAMA falling (bearish trend) AND 4h Williams %R > -20 (overbought) AND volume confirmation
-            elif (kama_aligned[i] < kama_aligned[i-1] and 
-                  williams_r_aligned[i] > -20 and 
-                  volume_confirm[i]):
+            # Short: price breaks below 1w Camarilla S3 with 1d EMA34 < EMA89 and volume confirmation
+            elif (close[i] < camarilla_s3_aligned[i] and close[i-1] >= camarilla_s3_aligned[i-1] and 
+                  ema_34_aligned[i] < ema_89_aligned[i] and volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R crosses back above -50 (mean reversion complete)
-            if williams_r_aligned[i] > -50:
+            # Exit long: price crosses below 1d EMA34 (trend reversal)
+            if close[i] < ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R crosses back below -50 (mean reversion complete)
-            if williams_r_aligned[i] < -50:
+            # Exit short: price crosses above 1d EMA34 (trend reversal)
+            if close[i] > ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
