@@ -1,17 +1,18 @@
+# US2314
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using daily Donchian breakout with volume confirmation and weekly trend filter
-# Daily Donchian channels (20-period) provide clear breakout levels
-# Volume > 2x 20-period average confirms institutional participation
-# Weekly EMA50 trend filter ensures we only trade in direction of higher timeframe trend
-# Works in both bull/bear markets: breakouts capture trends, trend filter avoids counter-trend trades
-# Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
+# Hypothesis: 4h strategy combining 12h trend filter (HMA21) with 4h Donchian breakout
+# Uses volume confirmation (>1.5x 20-period average) to filter breakouts
+# Trend filter prevents counter-trend entries: long only when price above 12h HMA21, short only when below
+# Donchian(20) breakouts capture momentum moves; exits on opposite Donchian(10) touch for quick reversion
+# Works in both bull/bear markets: trend filter adapts to market direction, breakouts capture momentum
+# Target: 80-180 total trades over 4 years (20-45/year) with 0.25 position sizing
 
-name = "12h_Donchian20_WeeklyTrend_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Donchian20_HMA21_12hTrend_VolumeFilter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,36 +25,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate daily Donchian channels (20-period) ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Calculate 12h HMA21 trend filter ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_1d) < 20:
+    if len(df_12h) < 21:
         return np.zeros(n)
     
-    # Daily Donchian channels
-    donchian_high = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
+    # Calculate HMA(21) on 12h close
+    close_12h = df_12h['close'].values
+    n_hma = 21
+    wma2 = np.zeros_like(close_12h)
+    wma1 = np.zeros_like(close_12h)
+    sqrt_n = int(np.sqrt(n_hma))
     
-    # Align daily Donchian levels to 12h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # WMA(n/2)
+    half_n = n_hma // 2
+    weights_half = np.arange(1, half_n + 1)
+    sum_weights_half = weights_half.sum()
+    for i in range(half_n, len(close_12h)):
+        wma1[i] = np.dot(close_12h[i-half_n+1:i+1], weights_half) / sum_weights_half
     
-    # Calculate weekly EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # WMA(n)
+    weights_full = np.arange(1, n_hma + 1)
+    sum_weights_full = weights_full.sum()
+    for i in range(n_hma, len(close_12h)):
+        wma2[i] = np.dot(close_12h[i-n_hma+1:i+1], weights_full) / sum_weights_full
     
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # HMA = 2*WMA(n/2) - WMA(n)
+    hma_12h = 2 * wma1 - wma2
+    # Final WMA(sqrt(n)) on the HMA
+    weights_sqrt = np.arange(1, sqrt_n + 1)
+    sum_weights_sqrt = weights_sqrt.sum()
+    hma_final = np.zeros_like(close_12h)
+    for i in range(sqrt_n, len(hma_12h)):
+        hma_final[i] = np.dot(hma_12h[i-sqrt_n+1:i+1], weights_sqrt) / sum_weights_sqrt
     
-    # Weekly EMA50
-    weekly_close = df_1w['close'].values
-    weekly_ema50 = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Align 12h HMA to 4h timeframe
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_final)
     
-    # Align weekly EMA50 to 12h timeframe
-    weekly_ema50_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema50)
+    # Calculate 4h Donchian channels
+    donchian_len = 20
+    upper_donchian = pd.Series(high).rolling(window=donchian_len, min_periods=donchian_len).max().values
+    lower_donchian = pd.Series(low).rolling(window=donchian_len, min_periods=donchian_len).min().values
     
-    # Volume confirmation: >2x 20-period average
+    # Exit channel (shorter for reversion)
+    exit_len = 10
+    upper_exit = pd.Series(high).rolling(window=exit_len, min_periods=exit_len).max().values
+    lower_exit = pd.Series(low).rolling(window=exit_len, min_periods=exit_len).min().values
+    
+    # Volume confirmation: >1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (2.0 * vol_ma_20)
+    volume_filter = volume > (1.5 * vol_ma_20)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -64,8 +86,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(weekly_ema50_aligned[i]) or np.isnan(volume_filter[i]) or
+        if (np.isnan(hma_12h_aligned[i]) or np.isnan(upper_donchian[i]) or np.isnan(lower_donchian[i]) or
+            np.isnan(upper_exit[i]) or np.isnan(lower_exit[i]) or np.isnan(volume_filter[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -73,24 +95,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long breakout: price breaks above daily Donchian high with volume confirmation and weekly uptrend
-            if close[i] > donchian_high_aligned[i] and volume_filter[i] and close[i] > weekly_ema50_aligned[i]:
+            # Long entry: price breaks above upper Donchian + volume + above 12h HMA
+            if close[i] > upper_donchian[i] and volume_filter[i] and close[i] > hma_12h_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short breakout: price breaks below daily Donchian low with volume confirmation and weekly downtrend
-            elif close[i] < donchian_low_aligned[i] and volume_filter[i] and close[i] < weekly_ema50_aligned[i]:
+            # Short entry: price breaks below lower Donchian + volume + below 12h HMA
+            elif close[i] < lower_donchian[i] and volume_filter[i] and close[i] < hma_12h_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below daily Donchian low (failed breakout) or weekly trend turns down
-            if close[i] < donchian_low_aligned[i] or close[i] < weekly_ema50_aligned[i]:
+            # Long exit: price touches lower exit channel (mean reversion) or breaks below Donchian
+            if close[i] < lower_exit[i] or close[i] < lower_donchian[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above daily Donchian high (failed breakdown) or weekly trend turns up
-            if close[i] > donchian_high_aligned[i] or close[i] > weekly_ema50_aligned[i]:
+            # Short exit: price touches upper exit channel or breaks above Donchian
+            if close[i] > upper_exit[i] or close[i] > upper_donchian[i]:
                 signals[i] = 0.0
                 position = 0
             else:
