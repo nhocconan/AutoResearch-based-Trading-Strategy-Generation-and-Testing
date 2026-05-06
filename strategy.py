@@ -1,31 +1,19 @@
-#%%
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1-day Williams Alligator (SMMA) for trend direction and 1-week momentum for entry timing
-# Long when price > Alligator's Jaw (13-period SMMA) and weekly ROC > 0, short when price < Jaw and weekly ROC < 0
-# Williams Alligator uses smoothed moving averages (SMMA) with specific periods: Jaw(13), Teeth(8), Lips(5)
-# Weekly ROC provides higher timeframe momentum confirmation to avoid counter-trend entries
-# Designed to capture trends in both bull and bear markets by following the Alligator's alignment
+# Hypothesis: 12h strategy using 1-week Donchian breakout with volume confirmation and 1-day ADX trend filter
+# Long when price breaks above 1-week Donchian upper channel (20-period high) with volume > 1.5x 20-period average and ADX > 25
+# Short when price breaks below 1-week Donchian lower channel (20-period low) with volume > 1.5x 20-period average and ADX > 25
+# Uses weekly Donchian channels for major support/resistance, volume for breakout confirmation, ADX for trend strength
+# Designed to work in bull markets via breakouts above resistance and in bear markets via breakdowns below support
+# ADX filter ensures we only trade in trending conditions, reducing whipsaw in ranging markets
 # Target: 20-40 trades per year (80-160 over 4 years) with 0.25 position sizing
 
-name = "4h_WilliamsAlligator_1wROC_Trend"
-timeframe = "4h"
+name = "12h_1wDonchian20_Volume_ADX_Trend_v1"
+timeframe = "12h"
 leverage = 1.0
-
-def smma(source, length):
-    """Smoothed Moving Average (SMMA) - also called Wilder's Moving Average"""
-    if len(source) < length:
-        return np.full_like(source, np.nan, dtype=np.float64)
-    result = np.full_like(source, np.nan, dtype=np.float64)
-    # First value is simple average
-    result[length-1] = np.mean(source[:length])
-    # Subsequent values: (prev_smma * (length-1) + current_price) / length
-    for i in range(length, len(source)):
-        result[i] = (result[i-1] * (length-1) + source[i]) / length
-    return result
 
 def generate_signals(prices):
     n = len(prices)
@@ -35,78 +23,104 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1-day data for Williams Alligator
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:  # Need at least 13 for Jaw
-        return np.zeros(n)
-    
-    # Calculate Williams Alligator components (SMMA)
-    close_1d = df_1d['close'].values
-    jaw = smma(close_1d, 13)    # Jaw: 13-period SMMA
-    teeth = smma(close_1d, 8)   # Teeth: 8-period SMMA
-    lips = smma(close_1d, 5)    # Lips: 5-period SMMA
-    
-    # Align Alligator lines to 4h timeframe (wait for daily bar to close)
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
-    
-    # Get 1-week data for momentum confirmation
+    # Calculate 1-week Donchian Channel (20-period high/low)
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:  # Need minimum for ROC
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate weekly Rate of Change (ROC) - 5 period
-    close_1w = df_1w['close'].values
-    roc_1w = np.full_like(close_1w, np.nan, dtype=np.float64)
-    for i in range(5, len(close_1w)):
-        if close_1w[i-5] != 0:
-            roc_1w[i] = ((close_1w[i] - close_1w[i-5]) / close_1w[i-5]) * 100
+    # 20-period high and low for Donchian channels
+    high_20 = df_1w['high'].rolling(window=20, min_periods=20).max().values
+    low_20 = df_1w['low'].rolling(window=20, min_periods=20).min().values
     
-    # Align weekly ROC to 4h timeframe
-    roc_1w_aligned = align_htf_to_ltf(prices, df_1w, roc_1w)
+    # Align Donchian levels to 12h timeframe
+    upper_donchian = align_htf_to_ltf(prices, df_1w, high_20)
+    lower_donchian = align_htf_to_ltf(prices, df_1w, low_20)
+    
+    # Volume confirmation: >1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma_20)
+    
+    # Calculate 1-day ADX for trend strength
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # True Range
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed values
+    tr_14 = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
+    dm_plus_14 = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False).mean().values
+    dm_minus_14 = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False).mean().values
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_14 / tr_14
+    di_minus = 100 * dm_minus_14 / tr_14
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
+    
+    # Align ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Pre-compute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after warmup
-        # Skip if any critical value is NaN
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(roc_1w_aligned[i])):
+    for i in range(20, n):  # Start after Donchian warmup
+        # Skip if any critical value is NaN or outside session
+        if (np.isnan(upper_donchian[i]) or np.isnan(lower_donchian[i]) or 
+            np.isnan(volume_filter[i]) or np.isnan(adx_aligned[i]) or
+            not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Entry conditions
         if position == 0:
-            # Long: price above Jaw AND teeth above lips (bullish alignment) AND weekly ROC positive
-            if (close[i] > jaw_aligned[i] and 
-                teeth_aligned[i] > lips_aligned[i] and 
-                roc_1w_aligned[i] > 0):
+            # Long breakout: price breaks above upper Donchian with volume confirmation and ADX > 25
+            if close[i] > upper_donchian[i] and volume_filter[i] and adx_aligned[i] > 25:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below Jaw AND teeth below lips (bearish alignment) AND weekly ROC negative
-            elif (close[i] < jaw_aligned[i] and 
-                  teeth_aligned[i] < lips_aligned[i] and 
-                  roc_1w_aligned[i] < 0):
+            # Short breakout: price breaks below lower Donchian with volume confirmation and ADX > 25
+            elif close[i] < lower_donchian[i] and volume_filter[i] and adx_aligned[i] > 25:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below Teeth (8-period SMMA) or weekly ROC turns negative
-            if close[i] < teeth_aligned[i] or roc_1w_aligned[i] < 0:
+            # Exit long: price breaks below lower Donchian (support break)
+            if close[i] < lower_donchian[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above Teeth (8-period SMMA) or weekly ROC turns positive
-            if close[i] > teeth_aligned[i] or roc_1w_aligned[i] > 0:
+            # Exit short: price breaks above upper Donchian (resistance break)
+            if close[i] > upper_donchian[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
-#%%
