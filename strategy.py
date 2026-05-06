@@ -3,16 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using daily VWAP as dynamic support/resistance with
-# volume-weighted trend confirmation and volume spike filter. Long when price
-# crosses above VWAP with rising volume and bullish volume trend; short when
-# price crosses below VWAP with rising volume and bearish volume trend.
-# VWAP acts as institutional reference point, volume confirms institutional
-# participation, and volume trend filter ensures momentum alignment.
-# Works in bull/bear markets by capturing institutional flow shifts.
-# Target: 25-50 trades per year (100-200 over 4 years) with 0.25 position sizing.
+# Hypothesis: 4h strategy using daily Camarilla pivot (R3/S3) breakout with 4h EMA50 trend filter and volume confirmation
+# Long when price breaks above daily Camarilla R3 with EMA50 trend alignment and volume > 1.5x average
+# Short when price breaks below daily Camarilla S3 with EMA50 trend alignment and volume > 1.5x average
+# Daily Camarilla provides strong intraday support/resistance, EMA50 filters counter-trend moves,
+# Volume confirms breakout strength. Designed for low trade frequency and high win rate.
+# Target: 20-50 trades per year (80-200 over 4 years) with 0.25 position sizing.
 
-name = "4h_dailyVWAP_VolumeTrend_Filter_v1"
+name = "4h_Camarilla_R3S3_EMA50_Volume_Breakout_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -26,39 +24,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate daily VWAP ONCE before loop
+    # Calculate daily Camarilla pivot levels ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
     if len(df_1d) < 1:
         return np.zeros(n)
     
-    # Typical price for VWAP calculation
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    # VWAP = cumulative(typical_price * volume) / cumulative(volume)
-    vwap = (typical_price * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
-    vwap_values = vwap.values
+    # Daily Camarilla levels (R3, S3)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align daily VWAP to 4h timeframe
-    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap_values)
+    # Pivot point calculation
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
     
-    # Volume trend: 20-period volume moving average slope
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ma_slope = np.diff(vol_ma, prepend=vol_ma[0])
-    vol_trend_bull = vol_ma_slope > 0
-    vol_trend_bear = vol_ma_slope < 0
+    # Camarilla levels
+    r3 = pivot + (range_1d * 1.1 / 2.0)  # R3 = pivot + 1.1*(H-L)/2
+    s3 = pivot - (range_1d * 1.1 / 2.0)  # S3 = pivot - 1.1*(H-L)/2
     
-    # Volume spike: current volume > 1.8x 20-period average
-    volume_spike = volume > (1.8 * vol_ma)
+    # Align Camarilla levels to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Price relative to VWAP for crossover detection
-    price_above_vwap = close > vwap_aligned
-    price_below_vwap = close < vwap_aligned
+    # Calculate 4h EMA50 for trend filter
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Detect VWAP crossovers
-    vwap_cross_up = np.zeros(n, dtype=bool)
-    vwap_cross_down = np.zeros(n, dtype=bool)
-    vwap_cross_up[1:] = price_above_vwap[1:] & ~price_above_vwap[:-1]
-    vwap_cross_down[1:] = price_below_vwap[1:] & ~price_below_vwap[:-1]
+    # Volume confirmation: >1.5x 50-period average
+    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    volume_filter = volume > (1.5 * vol_ma_50)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -69,32 +63,33 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(vwap_aligned[i]) or np.isnan(vol_ma[i]) or
-            np.isnan(volume_spike[i]) or not session_filter[i]):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_50[i]) or np.isnan(volume_filter[i]) or
+            not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: VWAP cross up with volume spike and bullish volume trend
-            if vwap_cross_up[i] and volume_spike[i] and vol_trend_bull[i]:
+            # Long breakout: price breaks above daily Camarilla R3 with EMA50 uptrend and volume confirmation
+            if close[i] > r3_aligned[i] and close[i] > ema_50[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: VWAP cross down with volume spike and bearish volume trend
-            elif vwap_cross_down[i] and volume_spike[i] and vol_trend_bear[i]:
+            # Short breakout: price breaks below daily Camarilla S3 with EMA50 downtrend and volume confirmation
+            elif close[i] < s3_aligned[i] and close[i] < ema_50[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below VWAP (trend reversal)
-            if vwap_cross_down[i]:
+            # Exit long: price breaks below daily Camarilla S3 (mean reversion) or EMA50 turns down
+            if close[i] < s3_aligned[i] or close[i] < ema_50[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above VWAP (trend reversal)
-            if vwap_cross_up[i]:
+            # Exit short: price breaks above daily Camarilla R3 (mean reversion) or EMA50 turns up
+            if close[i] > r3_aligned[i] or close[i] > ema_50[i]:
                 signals[i] = 0.0
                 position = 0
             else:
