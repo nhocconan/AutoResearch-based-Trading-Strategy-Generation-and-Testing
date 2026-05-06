@@ -3,16 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 12h Donchian channel breakout with volume confirmation and 1d trend filter
-# - Uses 12h Donchian(20) breakout for entry signals
-# - Confirms with volume spike (>2x 20-period average) on 6h timeframe
-# - Uses 1d EMA(50) to filter trades in direction of higher timeframe trend
-# - Exits when price returns to the 12h Donchian midpoint or reverses
-# - Designed to capture medium-term breakouts with trend alignment to reduce false signals
-# - Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
+# Hypothesis: 4h strategy combining 1d Keltner Channel breakout with 1w RSI regime filter
+# - Uses 1d Keltner Channel (20, 2.0) for dynamic support/resistance levels
+# - Uses 1w RSI(14) to identify overbought/oversold conditions for mean reversion in ranging markets
+# - Enters long when price breaks below lower KC in oversold weekly RSI (<30) - contrarian bounce
+# - Enters short when price breaks above upper KC in overbought weekly RSI (>70) - contrarian fade
+# - Uses volume spike confirmation on breakouts to avoid false signals
+# - Exits when price returns to KC middle line or RSI returns to neutral zone (40-60)
+# - Designed to capture mean reversion moves after extreme weekly RSI readings with intraday breakouts
+# - Target: 60-120 total trades over 4 years (15-30/year) with 0.25 position sizing
 
-name = "6h_12hDonchian_20_1dEMA50_VolumeBreakout"
-timeframe = "6h"
+name = "4h_1wRSI_1dKeltner_MeanReversion"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,72 +27,110 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Donchian channel calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    # Get 1d data for EMA50 trend filter
+    # Get 1d data for Keltner Channel calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 12h Donchian channel (20-period)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Get 1w data for RSI calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
+        return np.zeros(n)
     
-    # Upper band: highest high of last 20 periods
-    high_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    # Lower band: lowest low of last 20 periods
-    low_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    # Middle band: average of upper and lower
-    mid_20 = (high_20 + low_20) / 2
-    
-    # Calculate 1d EMA(50) for trend filter
+    # Calculate 1d Keltner Channel (20, 2.0)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 12h indicators to 6h timeframe
-    high_20_6h = align_htf_to_ltf(prices, df_12h, high_20)
-    low_20_6h = align_htf_to_ltf(prices, df_12h, low_20)
-    mid_20_6h = align_htf_to_ltf(prices, df_12h, mid_20)
-    ema_50_6h = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Typical Price
+    tp_1d = (high_1d + low_1d + close_1d) / 3
     
-    # Volume filters (6h timeframe)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)  # Volume confirmation
+    # ATR(10) for Keltner Channel width
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    
+    def wilders_smoothing(data, period):
+        result = np.zeros_like(data)
+        if len(data) < period:
+            return result
+        result[period-1] = np.nansum(data[:period])
+        for i in range(period, len(data)):
+            result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
+    
+    atr = wilders_smoothing(tr, 10)
+    
+    # EMA(20) of Typical Price for KC middle line
+    ema_tp = pd.Series(tp_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Keltner Channel bands
+    kc_upper = ema_tp + (2.0 * atr)
+    kc_lower = ema_tp - (2.0 * atr)
+    kc_middle = ema_tp
+    
+    # Calculate 1w RSI(14)
+    close_1w = df_1w['close'].values
+    delta = np.diff(close_1w, prepend=close_1w[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Align 1d indicators to 4h timeframe
+    kc_upper_4h = align_htf_to_ltf(prices, df_1d, kc_upper)
+    kc_lower_4h = align_htf_to_ltf(prices, df_1d, kc_lower)
+    kc_middle_4h = align_htf_to_ltf(prices, df_1d, kc_middle)
+    
+    # Align 1w RSI to 4h timeframe
+    rsi_4h = align_htf_to_ltf(prices, df_1w, rsi)
+    
+    # Volume filters (4h timeframe)
+    vol_ma_10 = pd.Series(volume).ewm(span=10, adjust=False, min_periods=10).mean().values
+    volume_spike = volume > (1.5 * vol_ma_10)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):  # Start after warmup
+    for i in range(100, n):
         # Skip if any critical value is NaN
-        if (np.isnan(high_20_6h[i]) or np.isnan(low_20_6h[i]) or np.isnan(mid_20_6h[i]) or
-            np.isnan(ema_50_6h[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(kc_upper_4h[i]) or np.isnan(kc_lower_4h[i]) or np.isnan(kc_middle_4h[i]) or
+            np.isnan(rsi_4h[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above 12h Donchian upper band with volume spike and above 1d EMA50
-            if close[i] > high_20_6h[i] and volume_spike[i] and close[i] > ema_50_6h[i]:
-                signals[i] = 0.25
-                position = 1
-            # Short: price breaks below 12h Donchian lower band with volume spike and below 1d EMA50
-            elif close[i] < low_20_6h[i] and volume_spike[i] and close[i] < ema_50_6h[i]:
-                signals[i] = -0.25
-                position = -1
+            # Look for extreme weekly RSI and price near Keltner Bands
+            oversold = rsi_4h[i] < 30
+            overbought = rsi_4h[i] > 70
+            
+            if oversold:
+                # Long: price breaks below lower KC in oversold weekly RSI
+                if close[i] < kc_lower_4h[i] and volume_spike[i]:
+                    signals[i] = 0.25
+                    position = 1
+            elif overbought:
+                # Short: price breaks above upper KC in overbought weekly RSI
+                if close[i] > kc_upper_4h[i] and volume_spike[i]:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Exit long: price returns to 12h Donchian midpoint or breaks below lower band
-            if close[i] < mid_20_6h[i] or close[i] < low_20_6h[i]:
+            # Exit long: price returns to KC middle OR RSI returns to neutral (40-60)
+            if close[i] > kc_middle_4h[i] or (rsi_4h[i] >= 40 and rsi_4h[i] <= 60):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to 12h Donchian midpoint or breaks above upper band
-            if close[i] > mid_20_6h[i] or close[i] > high_20_6h[i]:
+            # Exit short: price returns to KC middle OR RSI returns to neutral (40-60)
+            if close[i] < kc_middle_4h[i] or (rsi_4h[i] >= 40 and rsi_4h[i] <= 60):
                 signals[i] = 0.0
                 position = 0
             else:
