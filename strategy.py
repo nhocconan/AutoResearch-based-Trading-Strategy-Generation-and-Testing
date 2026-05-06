@@ -4,14 +4,13 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h strategy using daily pivot points with volume confirmation and trend filter
-# Pivot points (R1/S1 for breakouts, R2/S2 for reversals) provide key intraday levels
+# Pivot points (R1/S1 for breakouts) provide key daily levels
 # Breakout above R1 or below S1 with volume > 1.5x 20-period average indicates momentum
-# Rejection at R2 or S2 with volume confirmation indicates mean reversion
 # Trend filter: 50-period EMA on 4h timeframe to avoid counter-trend trades
 # Works in bull/bear markets: breakouts capture trends, reversals capture pullbacks within trend
-# Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
+# Target: 75-200 total trades over 4 years (19-50/year) with 0.25 position sizing
 
-name = "4h_Pivot_R1S2_VolumeTrendFilter_v1"
+name = "4h_Pivot_R1S1_VolumeTrendFilter_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -43,15 +42,11 @@ def generate_signals(prices):
     
     # Support and Resistance levels
     r1 = pivot + (range_ * 1.0)
-    r2 = pivot + (range_ * 2.0)
     s1 = pivot - (range_ * 1.0)
-    s2 = pivot - (range_ * 2.0)
     
     # Align daily levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
     # Volume confirmation: >1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -72,8 +67,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(s2_aligned[i]) or np.isnan(volume_filter[i]) or np.isnan(ema_50[i]) or
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(volume_filter[i]) or 
+            np.isnan(ema_50[i]) or np.isnan(uptrend[i]) or np.isnan(downtrend[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -89,24 +84,16 @@ def generate_signals(prices):
             elif close[i] < s1_aligned[i] and volume_filter[i] and downtrend[i]:
                 signals[i] = -0.25
                 position = -1
-            # Long reversal: price rejects S2 with volume confirmation (bounce from support)
-            elif close[i] < s2_aligned[i] and close[i] > s2_aligned[i] * 0.995 and volume_filter[i] and uptrend[i]:
-                signals[i] = 0.25
-                position = 1
-            # Short reversal: price rejects R2 with volume confirmation (rejection from resistance)
-            elif close[i] > r2_aligned[i] and close[i] < r2_aligned[i] * 1.005 and volume_filter[i] and downtrend[i]:
-                signals[i] = -0.25
-                position = -1
         elif position == 1:
-            # Exit long: price breaks below S1 (failed support) or reaches R2 (take profit)
-            if close[i] < s1_aligned[i] or close[i] > r2_aligned[i]:
+            # Exit long: price breaks below S1 (failed support)
+            if close[i] < s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above R1 (failed resistance) or reaches S2 (take profit)
-            if close[i] > r1_aligned[i] or close[i] < s2_aligned[i]:
+            # Exit short: price breaks above R1 (failed resistance)
+            if close[i] > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
