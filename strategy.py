@@ -3,18 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy combining 1w Donchian breakout with 1d volume confirmation and 1d ADX trend filter
-# - Uses 1w Donchian channels (20-period) to identify structural breaks
-# - Uses 1d ADX > 25 to confirm trend strength in direction of breakout
-# - Uses 1d volume spike (>2x 20-period MA) for confirmation
-# - Enters long when price breaks above 1w high with volume spike and strong trend
-# - Enters short when price breaks below 1w low with volume spike and strong trend
-# - Exits when price crosses back below/above 1w close or ADX falls below 20
-# - Designed to capture major trend changes with multi-timeframe confirmation
-# - Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
+# Hypothesis: 4h strategy combining 1d RSI extremes with volume confirmation and 1w trend filter
+# - Uses 1d RSI(14) < 30 for oversold/long signals and > 70 for overbought/short signals
+# - Requires volume > 1.5x 20-period average for confirmation
+# - Uses 1w EMA(50) slope to filter trades in direction of higher timeframe trend
+# - Designed to capture mean reversion in strong trends with institutional volume
+# - Target: 60-120 total trades over 4 years (15-30/year) with 0.25 position sizing
 
-name = "12h_1wDonchian_1dADX_Volume"
-timeframe = "12h"
+name = "4h_1dRSI_1wEMA_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,111 +24,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for Donchian channel calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 40:
-        return np.zeros(n)
-    
-    # Get 1d data for ADX and volume confirmation
+    # Get 1d data for RSI calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate 1w Donchian channels (20-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Get 1w data for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # Calculate 1d RSI (14)
+    close_1d = df_1d['close'].values
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Wilder's smoothing for RSI
+    def wilders_rsi(gain, loss, period):
+        avg_gain = np.zeros_like(gain)
+        avg_loss = np.zeros_like(loss)
+        if len(gain) < period:
+            return np.full_like(gain, 50.0)
+        avg_gain[period-1] = np.mean(gain[:period])
+        avg_loss[period-1] = np.mean(loss[:period])
+        for i in range(period, len(gain)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+        rs = avg_gain / (avg_loss + 1e-10)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+    
+    rsi_1d = wilders_rsi(gain, loss, 14)
+    
+    # Calculate 1w EMA(50) slope for trend filter
     close_1w = df_1w['close'].values
+    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_slope = np.diff(ema_50, prepend=ema_50[0])
     
-    # Donchian upper and lower bands
-    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    donchian_close = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
+    # Align 1d indicators to 4h timeframe
+    rsi_1d_4h = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Calculate 1d ADX (14)
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    # Align 1w EMA slope to 4h timeframe
+    ema_slope_4h = align_htf_to_ltf(prices, df_1w, ema_slope)
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Wilder's smoothing function
-    def wilders_smoothing(data, period):
-        result = np.zeros_like(data)
-        if len(data) < period:
-            return result
-        result[period-1] = np.nansum(data[:period])
-        for i in range(period, len(data)):
-            result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
-    
-    tr14 = wilders_smoothing(tr, 14)
-    dm_plus_14 = wilders_smoothing(dm_plus, 14)
-    dm_minus_14 = wilders_smoothing(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_14 / (tr14 + 1e-10)
-    di_minus = 100 * dm_minus_14 / (tr14 + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = wilders_smoothing(dx, 14)
-    
-    # Align 1w indicators to 12h timeframe
-    donchian_high_12h = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_12h = align_htf_to_ltf(prices, df_1w, donchian_low)
-    donchian_close_12h = align_htf_to_ltf(prices, df_1w, donchian_close)
-    
-    # Align 1d indicators to 12h timeframe
-    adx_12h = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume filters (12h timeframe)
+    # Volume filters (4h timeframe)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)  # Strong volume confirmation
+    volume_confirm = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after warmup
         # Skip if any critical value is NaN
-        if (np.isnan(donchian_high_12h[i]) or np.isnan(donchian_low_12h[i]) or np.isnan(donchian_close_12h[i]) or
-            np.isnan(adx_12h[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(rsi_1d_4h[i]) or np.isnan(ema_slope_4h[i]) or np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Look for strong trend (ADX > 25)
-            strong_trend = adx_12h[i] > 25
-            
-            if strong_trend:
-                # Long: price breaks above 1w high with volume spike
-                if close[i] > donchian_high_12h[i] and volume_spike[i]:
-                    signals[i] = 0.25
-                    position = 1
-                # Short: price breaks below 1w low with volume spike
-                elif close[i] < donchian_low_12h[i] and volume_spike[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # Long: RSI oversold (<30) + volume confirmation + uptrend (EMA slope > 0)
+            if rsi_1d_4h[i] < 30 and volume_confirm[i] and ema_slope_4h[i] > 0:
+                signals[i] = 0.25
+                position = 1
+            # Short: RSI overbought (>70) + volume confirmation + downtrend (EMA slope < 0)
+            elif rsi_1d_4h[i] > 70 and volume_confirm[i] and ema_slope_4h[i] < 0:
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Exit long: price crosses below 1w close OR trend weakens (ADX < 20)
-            if close[i] < donchian_close_12h[i] or adx_12h[i] < 20:
+            # Exit long: RSI returns to neutral (>50) or trend changes
+            if rsi_1d_4h[i] > 50 or ema_slope_4h[i] < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above 1w close OR trend weakens (ADX < 20)
-            if close[i] > donchian_close_12h[i] or adx_12h[i] < 20:
+            # Exit short: RSI returns to neutral (<50) or trend changes
+            if rsi_1d_4h[i] < 50 or ema_slope_4h[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
