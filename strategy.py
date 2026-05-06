@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using 1-week Fibonacci pivot levels with trend filter and volume confirmation
-# Long when price breaks above weekly R3 with price > 200-day EMA and volume > 2x average
-# Short when price breaks below weekly S3 with price < 200-day EMA and volume > 2x average
-# Uses weekly Fibonacci pivots for institutional support/resistance, EMA200 for trend filter, volume for confirmation
-# Target: 20-30 trades per year (80-120 over 4 years) with 0.25 position sizing
-# Works in bull markets via breakouts above resistance and in bear markets via breakdowns below support
+# Hypothesis: 6h strategy using 1-day Keltner Channel with trend filter and volume confirmation
+# Long when price breaks above upper Keltner channel with price > 50-period EMA and volume > 1.5x average
+# Short when price breaks below lower Keltner channel with price < 50-period EMA and volume > 1.5x average
+# Uses daily ATR-based channels for dynamic support/resistance, EMA50 for trend filter, volume for confirmation
+# Designed to work in bull markets via breakouts above resistance and in bear markets via breakdowns below support
+# Target: 20-40 trades per year (80-160 over 4 years) with 0.25 position sizing
 
-name = "1d_1wFibPivot_R3S3_EMA200_Volume_v1"
-timeframe = "1d"
+name = "6h_1dKeltner_EMA50_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,34 +24,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate EMA200 on daily close (needs 200 bars)
+    # Calculate EMA50 on 6h close (needs 50 bars)
     close_series = pd.Series(close)
-    ema200 = close_series.ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema50 = close_series.ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # Calculate 1-week Fibonacci pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Calculate 1-day Keltner Channel (20-period EMA, 2x ATR)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Previous week's high, low, close
-    prev_high = df_1w['high'].shift(1)
-    prev_low = df_1w['low'].shift(1)
-    prev_close = df_1w['close'].shift(1)
+    # EMA20 of close
+    ema20_1d = pd.Series(df_1d['close']).ewm(span=20, min_periods=20, adjust=False).mean().values
     
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
+    # ATR calculation (14-period)
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr14 = tr.ewm(span=14, min_periods=14, adjust=False).mean().values
     
-    # Fibonacci-based pivot levels (R3/S3)
-    r3 = pivot + (range_hl * 1.618)
-    s3 = pivot - (range_hl * 1.618)
+    # Keltner Bands
+    upper_keltner = ema20_1d + (2 * atr14)
+    lower_keltner = ema20_1d - (2 * atr14)
     
-    # Align weekly Fibonacci levels to daily timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3.values)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3.values)
+    # Align Keltner levels to 6h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_keltner)
+    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_keltner)
     
-    # Volume confirmation: >2x 50-period average (higher threshold for daily)
+    # Volume confirmation: >1.5x 50-period average
     vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
-    volume_filter = volume > (2.0 * vol_ma_50)
+    volume_filter = volume > (1.5 * vol_ma_50)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -60,10 +62,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(200, n):  # Start after EMA200 warmup
+    for i in range(50, n):  # Start after EMA50 warmup
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema200[i]) or np.isnan(volume_filter[i]) or
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
+            np.isnan(ema50[i]) or np.isnan(volume_filter[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -71,24 +73,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long breakout: price breaks above weekly R3 with uptrend and volume confirmation
-            if close[i] > r3_aligned[i] and close[i] > ema200[i] and volume_filter[i]:
+            # Long breakout: price breaks above upper Keltner with uptrend and volume confirmation
+            if close[i] > upper_aligned[i] and close[i] > ema50[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short breakout: price breaks below weekly S3 with downtrend and volume confirmation
-            elif close[i] < s3_aligned[i] and close[i] < ema200[i] and volume_filter[i]:
+            # Short breakout: price breaks below lower Keltner with downtrend and volume confirmation
+            elif close[i] < lower_aligned[i] and close[i] < ema50[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below weekly S3 (support break)
-            if close[i] < s3_aligned[i]:
+            # Exit long: price breaks below lower Keltner (support break)
+            if close[i] < lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above weekly R3 (resistance break)
-            if close[i] > r3_aligned[i]:
+            # Exit short: price breaks above upper Keltner (resistance break)
+            if close[i] > upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
