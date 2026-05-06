@@ -3,21 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1-day Williams Fractals with volume and ADX filter
-# Long when price breaks above bearish fractal with volume > 1.5x average and ADX > 25
-# Short when price breaks below bullish fractal with volume > 1.5x average and ADX > 25
-# Williams Fractals identify key support/resistance levels. Volume confirms breakout strength.
-# ADX filter ensures trades occur in trending markets, reducing false breakouts in ranging conditions.
-# Works in bull/bear markets: breakouts capture momentum, ADX filter avoids ranging whipsaws.
+# Hypothesis: 1d strategy using weekly Donchian breakout with volume confirmation and weekly ADX trend filter
+# Long when price breaks above 20-week Donchian upper with volume > 1.5x average and weekly ADX > 25
+# Short when price breaks below 20-week Donchian lower with volume > 1.5x average and weekly ADX > 25
+# Weekly Donchian provides major trend structure. Volume confirms breakout strength.
+# Weekly ADX filter ensures trades align with strong weekly trend, reducing false breakouts.
+# Works in bull/bear markets: breakouts capture momentum, trend filter avoids counter-trend trades.
 # Target: 20-50 trades per year (80-200 over 4 years) with 0.25 position sizing.
 
-name = "4h_1dWilliamsFractal_Volume_ADX_Breakout_v1"
-timeframe = "4h"
+name = "1d_20wDonchian_Breakout_Volume_ADX"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,78 +25,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1-day Williams Fractals ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Calculate weekly Donchian channels and ADX ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 5:
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Williams Fractals: bearish (high) and bullish (low)
-    high_vals = df_1d['high'].values
-    low_vals = df_1d['low'].values
+    # Weekly Donchian channels (20-period)
+    high_20w = pd.Series(df_1w['high']).rolling(window=20, min_periods=20).max().values
+    low_20w = pd.Series(df_1w['low']).rolling(window=20, min_periods=20).min().values
     
-    bearish_fractal = np.full(len(high_vals), np.nan)
-    bullish_fractal = np.full(len(low_vals), np.nan)
+    # Align weekly Donchian to daily timeframe
+    upper_20w_aligned = align_htf_to_ltf(prices, df_1w, high_20w)
+    lower_20w_aligned = align_htf_to_ltf(prices, df_1w, low_20w)
     
-    # Bearish fractal: middle bar has highest high, 2 bars on each side lower
-    for i in range(2, len(high_vals) - 2):
-        if (high_vals[i] > high_vals[i-1] and high_vals[i] > high_vals[i-2] and
-            high_vals[i] > high_vals[i+1] and high_vals[i] > high_vals[i+2]):
-            bearish_fractal[i] = high_vals[i]
+    # Weekly ADX for trend strength
+    # Calculate +DM, -DM, TR
+    high_w = df_1w['high'].values
+    low_w = df_1w['low'].values
+    close_w = df_1w['close'].values
     
-    # Bullish fractal: middle bar has lowest low, 2 bars on each side higher
-    for i in range(2, len(low_vals) - 2):
-        if (low_vals[i] < low_vals[i-1] and low_vals[i] < low_vals[i-2] and
-            low_vals[i] < low_vals[i+1] and low_vals[i] < low_vals[i+2]):
-            bullish_fractal[i] = low_vals[i]
+    up_move = high_w[1:] - high_w[:-1]
+    down_move = low_w[:-1] - low_w[1:]
     
-    # Align fractals to 4h timeframe with 2-bar delay for confirmation
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
-    # ADX calculation on 1-day timeframe
-    # Calculate True Range
-    tr1 = high_vals[1:] - low_vals[1:]
-    tr2 = np.abs(high_vals[1:] - np.append([np.nan], high_vals[:-1])[1:])
-    tr3 = np.abs(low_vals[1:] - np.append([np.nan], low_vals[:-1])[1:])
+    tr1 = high_w[1:] - low_w[1:]
+    tr2 = np.abs(high_w[1:] - close_w[:-1])
+    tr3 = np.abs(low_w[1:] - close_w[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.insert(tr, 0, np.nan)  # align with original index
     
-    # Calculate Directional Movement
-    dm_plus = np.where((high_vals[1:] - high_vals[:-1]) > (low_vals[:-1] - low_vals[1:]), 
-                       np.maximum(high_vals[1:] - high_vals[:-1], 0), 0)
-    dm_minus = np.where((low_vals[:-1] - low_vals[1:]) > (high_vals[1:] - high_vals[:-1]), 
-                        np.maximum(low_vals[:-1] - low_vals[1:], 0), 0)
-    dm_plus = np.insert(dm_plus, 0, np.nan)
-    dm_minus = np.insert(dm_minus, 0, np.nan)
-    
-    # Smooth TR, DM+, DM- using Wilder's smoothing (EMA-like)
-    def wilder_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nanmean(data[:period])
-        # Subsequent values: smoothed = prev_smoothed - (prev_smoothed/period) + current
+    # Wilder's smoothing (alpha = 1/period)
+    def wilder_smoothing(data, period):
+        result = np.zeros_like(data)
+        alpha = 1.0 / period
+        result[period-1] = np.mean(data[:period])
         for i in range(period, len(data)):
-            if not np.isnan(result[i-1]) and not np.isnan(data[i]):
-                result[i] = result[i-1] - (result[i-1]/period) + data[i]
+            result[i] = result[i-1] + alpha * (data[i-1] - result[i-1])
         return result
     
-    atr_1d = wilder_smooth(tr, 14)
-    dm_plus_smooth = wilder_smooth(dm_plus, 14)
-    dm_minus_smooth = wilder_smooth(dm_minus, 14)
+    if len(tr) < 20:
+        return np.zeros(n)
     
-    # Calculate DI+ and DI-
-    di_plus = np.where(atr_1d != 0, 100 * dm_plus_smooth / atr_1d, 0)
-    di_minus = np.where(atr_1d != 0, 100 * dm_minus_smooth / atr_1d, 0)
+    atr_w = wilder_smoothing(tr, 20)
+    plus_di_w = 100 * wilder_smoothing(plus_dm, 20) / atr_w
+    minus_di_w = 100 * wilder_smoothing(minus_dm, 20) / atr_w
+    dx_w = 100 * np.abs(plus_di_w - minus_di_w) / (plus_di_w + minus_di_w)
+    adx_w = wilder_smoothing(dx_w, 20)
     
-    # Calculate DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx_1d = wilder_smooth(dx, 14)
-    
-    # Align ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Align weekly ADX to daily timeframe
+    adx_w_aligned = align_htf_to_ltf(prices, df_1w, adx_w)
     
     # Volume confirmation: >1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -109,10 +88,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(volume_filter[i]) or
+        if (np.isnan(upper_20w_aligned[i]) or np.isnan(lower_20w_aligned[i]) or 
+            np.isnan(adx_w_aligned[i]) or np.isnan(volume_filter[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -120,24 +99,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long breakout: price breaks above bearish fractal with volume and ADX confirmation
-            if close[i] > bearish_fractal_aligned[i] and volume_filter[i] and adx_aligned[i] > 25:
+            # Long breakout: price breaks above 20-week high with volume and trend confirmation
+            if close[i] > upper_20w_aligned[i] and volume_filter[i] and adx_w_aligned[i] > 25:
                 signals[i] = 0.25
                 position = 1
-            # Short breakout: price breaks below bullish fractal with volume and ADX confirmation
-            elif close[i] < bullish_fractal_aligned[i] and volume_filter[i] and adx_aligned[i] > 25:
+            # Short breakout: price breaks below 20-week low with volume and trend confirmation
+            elif close[i] < lower_20w_aligned[i] and volume_filter[i] and adx_w_aligned[i] > 25:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below bullish fractal or ADX weakens
-            if close[i] < bullish_fractal_aligned[i] or adx_aligned[i] < 20:
+            # Exit long: price breaks below 20-week low or ADX falls below 20
+            if close[i] < lower_20w_aligned[i] or adx_w_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above bearish fractal or ADX weakens
-            if close[i] > bearish_fractal_aligned[i] or adx_aligned[i] < 20:
+            # Exit short: price breaks above 20-week high or ADX falls below 20
+            if close[i] > upper_20w_aligned[i] or adx_w_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
