@@ -3,15 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R(14) with 1d ADX(25) trend filter and volume spike
-# Williams %R measures momentum extremes: oversold (< -80) for long, overbought (> -20) for short
-# 1d ADX(25) ensures strong trend context to avoid whipsaws in ranging markets
-# Volume spike (>1.8x 20-bar average) confirms participation in the move
-# Williams %R provides natural mean-reversion exit when momentum normalizes (> -50 for longs, < -50 for shorts)
-# Designed for 20-40 trades/year targeting 80-160 total over 4 years
-# Works in bull/bear: captures momentum extremes with trend filter preventing counter-trend trades
+# Hypothesis: 4h Camarilla Pivot Reversal with 1d Volume Spike and ADX Trend Filter
+# Uses 1d Camarilla pivot levels (R3, S3) for reversal zones, 1d ADX(25) for trend strength,
+# and volume spike (>2x 20-bar average) for momentum confirmation.
+# Works in bull/bear: reversals capture mean reversion in ranges, ADX filter avoids chop,
+# volume filter ensures institutional participation. Discrete sizing 0.25 targets ~100 trades/4 years.
 
-name = "4h_WilliamsR14_1dADX25_VolumeSpike_v1"
+name = "4h_Camarilla_R3S3_1dADX25_VolumeSpike_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -34,6 +32,16 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    
+    # Calculate 1d Camarilla pivot levels (R3, S3)
+    # Pivot = (H + L + C) / 3
+    # Range = H - L
+    # R3 = Pivot + Range * 1.1
+    # S3 = Pivot - Range * 1.1
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    camarilla_r3_1d = pivot_1d + (range_1d * 1.1)
+    camarilla_s3_1d = pivot_1d - (range_1d * 1.1)
     
     # Calculate 1d ADX(25) trend filter
     # TR = max(high-low, |high-prev_close|, |low-prev_close|)
@@ -77,20 +85,21 @@ def generate_signals(prices):
     # ADX = smoothed DX
     adx_1d = wilder_smooth(dx, 25)
     
-    # Calculate Williams %R(14) for 4h timeframe
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = np.where((highest_high - lowest_low) != 0, 
-                          (highest_high - close) / (highest_high - lowest_low) * -100, 
-                          -50)
+    # Calculate ATR(14) for 4h timeframe (for stoploss)
+    tr1_4h = np.abs(high[1:] - low[1:])
+    tr2_4h = np.abs(high[1:] - close[:-1])
+    tr3_4h = np.abs(low[1:] - close[:-1])
+    tr_4h = np.concatenate([[np.nan], np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))])
+    atr_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate volume spike filter (>1.8x 20-bar average)
+    # Calculate volume spike filter (>2.0x 20-bar average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.8 * vol_ma_20)
+    volume_filter = volume > (2.0 * vol_ma_20)
     
     # Align HTF indicators to 4h timeframe (primary)
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    camarilla_r3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
+    camarilla_s3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -101,32 +110,33 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(adx_1d_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(volume_filter[i]) or not session_filter[i]):
+        if (np.isnan(adx_1d_aligned[i]) or np.isnan(camarilla_r3_1d_aligned[i]) or 
+            np.isnan(camarilla_s3_1d_aligned[i]) or np.isnan(atr_4h[i]) or np.isnan(volume_filter[i]) or
+            not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: Williams %R oversold (< -80) AND strong trend (ADX > 25) AND volume spike
-            if williams_r[i] < -80 and adx_1d_aligned[i] > 25 and volume_filter[i]:
+            # Long reversal: price < S3 AND strong trend (ADX > 25) AND volume spike
+            if close[i] < camarilla_s3_1d_aligned[i] and adx_1d_aligned[i] > 25 and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Williams %R overbought (> -20) AND strong trend (ADX > 25) AND volume spike
-            elif williams_r[i] > -20 and adx_1d_aligned[i] > 25 and volume_filter[i]:
+            # Short reversal: price > R3 AND strong trend (ADX > 25) AND volume spike
+            elif close[i] > camarilla_r3_1d_aligned[i] and adx_1d_aligned[i] > 25 and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R returns above -50 (momentum normalization)
-            if williams_r[i] > -50:
+            # Exit long: price > S3 (reversal zone exited)
+            if close[i] > camarilla_s3_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R returns below -50 (momentum normalization)
-            if williams_r[i] < -50:
+            # Exit short: price < R3 (reversal zone exited)
+            if close[i] < camarilla_r3_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
