@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
 # Uses 1d Camarilla pivot levels (R3/S3) for structure, 1d EMA34 for trend alignment (reduces whipsaw)
 # Volume spike (>2.0x 20-bar average) confirms breakout strength
 # ATR-based trailing stop via signal=0 when price retraces 30% of ATR from extreme
-# Discrete sizing 0.30 to balance profit potential and fee drag; target 100-180 total trades over 4 years (25-45/year)
+# Discrete sizing 0.25 to balance profit potential and fee drag; target 50-150 total trades over 4 years (12-37/year)
 # Works in both bull/bear: breakouts capture momentum, trend filter avoids counter-trend traps, volume filter ensures participation
 
-name = "4h_Camarilla_R3S3_1dEMA34_VolumeSpike_v1"
-timeframe = "4h"
+name = "6h_Camarilla_R3S3_1dEMA34_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -56,7 +56,7 @@ def generate_signals(prices):
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (2.0 * vol_ma_20)
     
-    # Align HTF indicators to 4h timeframe
+    # Align HTF indicators to 6h timeframe
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
@@ -85,24 +85,24 @@ def generate_signals(prices):
         if position == 0:
             # Long breakout: price > R3 AND uptrend (price > EMA34) AND volume spike
             if close[i] > r3_1d_aligned[i] and close[i] > ema34_1d_aligned[i] and volume_filter[i]:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
                 long_extreme = close[i]
             # Short breakdown: price < S3 AND downtrend (price < EMA34) AND volume spike
             elif close[i] < s3_1d_aligned[i] and close[i] < ema34_1d_aligned[i] and volume_filter[i]:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
                 short_extreme = close[i]
         elif position == 1:
             # Update long extreme
             long_extreme = max(long_extreme, close[i])
-            # Exit long: price retraces 30% of ATR from extreme (tighter stop for 4h)
+            # Exit long: price retraces 30% of ATR from extreme (tighter stop for 6h)
             if close[i] <= long_extreme - 0.3 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 long_extreme = 0.0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
             # Update short extreme
             short_extreme = min(short_extreme, close[i])
@@ -112,6 +112,6 @@ def generate_signals(prices):
                 position = 0
                 short_extreme = 0.0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
