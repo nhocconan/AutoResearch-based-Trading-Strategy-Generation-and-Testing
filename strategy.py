@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation
-# Uses 4h Donchian channels for breakout structure, 12h EMA50 for trend alignment (reduces whipsaw)
-# Volume spike (>2.0x 20-bar average) confirms breakout strength
-# ATR-based trailing stop via signal=0 when price retraces 25% of ATR from extreme
-# Discrete sizing 0.25 to balance profit potential and fee drag; target 75-150 total trades over 4 years (19-37/year)
-# Works in both bull/bear: breakouts capture momentum, trend filter avoids counter-trend traps, volume filter ensures participation
+# Hypothesis: 1h EMA crossover (8/21) with 4h Supertrend filter and volume confirmation
+# Uses 4h Supertrend for trend direction (reduces whipsaw in choppy markets)
+# 1h EMA(8/21) crossover for precise entry timing within the trend
+# Volume spike (>1.5x 20-bar average) confirms momentum strength
+# Discrete sizing 0.20 to minimize fee drag; target 60-150 total trades over 4 years (15-37/year)
+# Works in both bull/bear: Supertrend adapts to regimes, EMA crossover captures swings, volume ensures participation
 
-name = "4h_Donchian20_12hEMA50_VolumeConfirm_v1"
-timeframe = "4h"
+name = "1h_EMA8_21_4hSupertrend_VolumeConfirm_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,39 +25,52 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Calculate HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
     df_4h = get_htf_data(prices, '4h')
     
-    if len(df_12h) < 50 or len(df_4h) < 20:
+    if len(df_4h) < 10:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate 12h EMA50 trend filter
-    close_12h_series = pd.Series(close_12h)
-    ema50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 4h Supertrend (ATR=10, mult=3.0)
+    tr1 = np.abs(high_4h[1:] - low_4h[1:])
+    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
+    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
+    tr_4h = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_4h = pd.Series(tr_4h).rolling(window=10, min_periods=10).mean().values
     
-    # Calculate ATR(14) for stoploss
-    tr1 = np.abs(high[1:] - low[1:])
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    hl2_4h = (high_4h + low_4h) / 2
+    upper_4h = hl2_4h + (3.0 * atr_4h)
+    lower_4h = hl2_4h - (3.0 * atr_4h)
     
-    # Calculate volume spike filter (>2.0x 20-bar average)
+    supertrend_4h = np.full_like(close_4h, np.nan, dtype=float)
+    direction_4h = np.full_like(close_4h, np.nan, dtype=float)  # 1 for uptrend, -1 for downtrend
+    
+    for i in range(1, len(close_4h)):
+        if np.isnan(supertrend_4h[i-1]):
+            supertrend_4h[i] = lower_4h[i]
+            direction_4h[i] = 1
+        else:
+            if close_4h[i] > supertrend_4h[i-1]:
+                supertrend_4h[i] = max(lower_4h[i], supertrend_4h[i-1])
+                direction_4h[i] = 1
+            else:
+                supertrend_4h[i] = min(upper_4h[i], supertrend_4h[i-1])
+                direction_4h[i] = -1
+    
+    # Calculate 1h EMA(8) and EMA(21)
+    close_s = pd.Series(close)
+    ema8 = close_s.ewm(span=8, adjust=False, min_periods=8).mean().values
+    ema21 = close_s.ewm(span=21, adjust=False, min_periods=21).mean().values
+    
+    # Calculate volume spike filter (>1.5x 20-bar average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (2.0 * vol_ma_20)
+    volume_filter = volume > (1.5 * vol_ma_20)
     
-    # Calculate 4h Donchian(20) channels
-    highest_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    
-    # Align HTF indicators to 4h timeframe (primary)
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    highest_high_aligned = align_htf_to_ltf(prices, df_4h, highest_high)
-    lowest_low_aligned = align_htf_to_ltf(prices, df_4h, lowest_low)
+    # Align HTF indicators to 1h timeframe (primary)
+    direction_4h_aligned = align_htf_to_ltf(prices, df_4h, direction_4h)
     
     # Pre-compute session filter (08-20 UTC)
     hours = prices.index.hour
@@ -65,51 +78,38 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    long_extreme = 0.0
-    short_extreme = 0.0
     
-    for i in range(100, n):
+    for i in range(21, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(highest_high_aligned[i]) or 
-            np.isnan(lowest_low_aligned[i]) or np.isnan(atr[i]) or np.isnan(volume_filter[i]) or
-            not session_filter[i]):
+        if (np.isnan(ema8[i]) or np.isnan(ema21[i]) or np.isnan(direction_4h_aligned[i]) or 
+            np.isnan(volume_filter[i]) or not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                long_extreme = 0.0
-                short_extreme = 0.0
             continue
         
         if position == 0:
-            # Long breakout: price > upper channel AND uptrend (price > EMA50) AND volume spike
-            if close[i] > highest_high_aligned[i] and close[i] > ema50_12h_aligned[i] and volume_filter[i]:
-                signals[i] = 0.25
+            # Long: EMA8 > EMA21 AND 4h uptrend (direction=1) AND volume spike
+            if ema8[i] > ema21[i] and direction_4h_aligned[i] == 1 and volume_filter[i]:
+                signals[i] = 0.20
                 position = 1
-                long_extreme = close[i]
-            # Short breakdown: price < lower channel AND downtrend (price < EMA50) AND volume spike
-            elif close[i] < lowest_low_aligned[i] and close[i] < ema50_12h_aligned[i] and volume_filter[i]:
-                signals[i] = -0.25
+            # Short: EMA8 < EMA21 AND 4h downtrend (direction=-1) AND volume spike
+            elif ema8[i] < ema21[i] and direction_4h_aligned[i] == -1 and volume_filter[i]:
+                signals[i] = -0.20
                 position = -1
-                short_extreme = close[i]
         elif position == 1:
-            # Update long extreme
-            long_extreme = max(long_extreme, close[i])
-            # Exit long: price retraces 25% of ATR from extreme (tighter stop for 4h)
-            if close[i] <= long_extreme - 0.25 * atr[i]:
+            # Exit long: EMA8 < EMA21 (trend change)
+            if ema8[i] < ema21[i]:
                 signals[i] = 0.0
                 position = 0
-                long_extreme = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Update short extreme
-            short_extreme = min(short_extreme, close[i])
-            # Exit short: price retraces 25% of ATR from extreme
-            if close[i] >= short_extreme + 0.25 * atr[i]:
+            # Exit short: EMA8 > EMA21 (trend change)
+            if ema8[i] > ema21[i]:
                 signals[i] = 0.0
                 position = 0
-                short_extreme = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
