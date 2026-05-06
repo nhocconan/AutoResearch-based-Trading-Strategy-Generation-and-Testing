@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + 1d Regime Filter
-# Long when Bull Power > 0 AND Bear Power < 0 AND price > 1d EMA34 (bull regime)
-# Short when Bull Power < 0 AND Bear Power > 0 AND price < 1d EMA34 (bear regime)
-# Elder Ray = Bull Power (high - EMA13), Bear Power (low - EMA13) on 6h timeframe
-# Uses discrete sizing 0.25 to manage drawdown in volatile markets
-# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
-# Elder Ray measures bull/bear strength relative to EMA13; 1d EMA34 filters regime to avoid counter-trend trades
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Long when price breaks above R3 (Camarilla resistance level 3) AND price > 1d EMA34 (uptrend) AND volume > 1.5 * 20-period avg volume
+# Short when price breaks below S3 (Camarilla support level 3) AND price < 1d EMA34 (downtrend) AND volume > 1.5 * 20-period avg volume
+# Exit with ATR-based trailing stop: signal→0 when long and price < highest_high - 2.0 * ATR OR short and price > lowest_low + 2.0 * ATR
+# Uses discrete sizing 0.25 to balance risk and return (BTC -77% in 2022 → ~19.25% loss at 0.25 exposure)
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# Camarilla levels identify key intraday support/resistance, 1d EMA34 filters primary trend, volume confirms breakout momentum
 
-name = "6h_ElderRay_1dEMA34_Regime_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,61 +23,102 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 6h EMA13 for Elder Ray calculation
-    close_series = pd.Series(close)
-    ema_13 = close_series.ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Calculate Elder Ray components
-    bull_power = high - ema_13  # Bull Power: high - EMA13
-    bear_power = low - ema_13   # Bear Power: low - EMA13
-    
-    # Get 1d data ONCE before loop for regime filter
+    # Get 1d data ONCE before loop for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA34 for regime filter
+    # Calculate 1d EMA34
     close_1d_series = pd.Series(close_1d)
     ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align HTF indicators to 6h timeframe (wait for completed HTF bar)
+    # Calculate 12h ATR(10) for stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period TR is just high-low
+    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    
+    # Calculate volume confirmation: volume > 1.5 * 20-period average volume
+    avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * avg_volume_20)
+    
+    # Align HTF indicators to 12h timeframe (wait for completed HTF bar)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    highest_high_since_entry = 0.0
+    lowest_low_since_entry = 0.0
     
     for i in range(50, n):  # Start after warmup period
         # Skip if any value is NaN
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(ema_34_1d_aligned[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr_10[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                highest_high_since_entry = 0.0
+                lowest_low_since_entry = 0.0
             continue
         
         if position == 0:
-            # Long: Bull Power > 0 (strong buying) AND Bear Power < 0 (weak selling) AND bull regime (price > 1d EMA34)
-            if bull_power[i] > 0 and bear_power[i] < 0 and close[i] > ema_34_1d_aligned[i]:
+            # Calculate Camarilla levels from previous day's OHLC
+            # Need previous day's high, low, close - get from daily data
+            if len(df_1d) < 2:
+                continue
+            # Get previous day's OHLC (yesterday's data)
+            prev_day_idx = len(df_1d) - 2  # Yesterday (not today which is still forming)
+            if prev_day_idx < 0:
+                continue
+            prev_high = df_1d['high'].iloc[prev_day_idx]
+            prev_low = df_1d['low'].iloc[prev_day_idx]
+            prev_close = df_1d['close'].iloc[prev_day_idx]
+            
+            # Calculate Camarilla levels
+            range_val = prev_high - prev_low
+            if range_val <= 0:
+                continue
+                
+            camarilla_r3 = prev_close + (range_val * 1.1 / 4)
+            camarilla_s3 = prev_close - (range_val * 1.1 / 4)
+            
+            # Camarilla breakout signals with trend and volume filters
+            breakout_long = close[i] > camarilla_r3
+            breakout_short = close[i] < camarilla_s3
+            
+            # Long: breakout above R3 AND uptrend AND volume spike
+            if breakout_long and close[i] > ema_34_1d_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bull Power < 0 (weak buying) AND Bear Power > 0 (strong selling) AND bear regime (price < 1d EMA34)
-            elif bull_power[i] < 0 and bear_power[i] > 0 and close[i] < ema_34_1d_aligned[i]:
+                highest_high_since_entry = close[i]
+            # Short: breakout below S3 AND downtrend AND volume spike
+            elif breakout_short and close[i] < ema_34_1d_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
+                lowest_low_since_entry = close[i]
         elif position == 1:
-            # Exit long: Bull Power <= 0 (buying weakness) OR Bear Power >= 0 (selling strength)
-            if bull_power[i] <= 0 or bear_power[i] >= 0:
+            # Update highest high since entry
+            highest_high_since_entry = max(highest_high_since_entry, close[i])
+            # Exit long: price drops below highest_high - 2.0 * ATR (trailing stop)
+            if close[i] < highest_high_since_entry - 2.0 * atr_10[i]:
                 signals[i] = 0.0
                 position = 0
+                highest_high_since_entry = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Bull Power >= 0 (buying strength) OR Bear Power <= 0 (selling weakness)
-            if bull_power[i] >= 0 or bear_power[i] <= 0:
+            # Update lowest low since entry
+            lowest_low_since_entry = min(lowest_low_since_entry, close[i])
+            # Exit short: price rises above lowest_low + 2.0 * ATR (trailing stop)
+            if close[i] > lowest_low_since_entry + 2.0 * atr_10[i]:
                 signals[i] = 0.0
                 position = 0
+                lowest_low_since_entry = 0.0
             else:
                 signals[i] = -0.25
     
