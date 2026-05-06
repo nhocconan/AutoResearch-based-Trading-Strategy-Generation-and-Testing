@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d trend filter and volume confirmation
-# Uses Donchian channel breakouts on 12h timeframe for entries
-# Uses 1d EMA(50) to filter for trend direction (only long when price > EMA50, short when price < EMA50)
+# Hypothesis: 6h Camarilla pivot + 1d trend filter + volume confirmation
+# Uses daily Camarilla pivot levels (R3/S3 for fade, R4/S4 for breakout)
+# Requires 1d EMA50 trend filter (price > EMA50 for long, < EMA50 for short)
 # Volume confirmation (>1.5x 20-bar average) ensures participation
-# ATR-based stop loss to manage risk
-# Designed for 12h timeframe to target 50-150 total trades over 4 years (12-37/year)
-# Works in both bull/bear: captures breakouts in trending markets, avoids false signals in weak trends
+# Camarilla levels work well in ranging markets (fade at R3/S3) and trending (breakout at R4/S4)
+# Designed for 6h timeframe to target 50-150 total trades over 4 years (12-37/year)
+# Works in both bull/bear: fades extremes in range, breaks with trend
 
-name = "12h_Donchian20_1dEMA50_Trend_VolumeConfirm_v1"
-timeframe = "12h"
+name = "6h_Camarilla_R3S3_R4S4_1dEMA50_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,28 +35,34 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Donchian channel on 12h timeframe (20-period)
-    # Upper channel = highest high of last 20 periods
-    # Lower channel = lowest low of last 20 periods
-    high_roll_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla pivot levels from previous day
+    # Pivot = (H + L + C) / 3
+    # Range = H - L
+    # R3 = Pivot + (H - L) * 1.1 / 2
+    # S3 = Pivot - (H - L) * 1.1 / 2
+    # R4 = Pivot + (H - L) * 1.1
+    # S4 = Pivot - (H - L) * 1.1
+    pivot = (high_1d[:-1] + low_1d[:-1] + close_1d[:-1]) / 3
+    rang = high_1d[:-1] - low_1d[:-1]
     
-    # Calculate EMA(50) on 1d timeframe for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    r3 = pivot + rang * 1.1 / 2
+    s3 = pivot - rang * 1.1 / 2
+    r4 = pivot + rang * 1.1
+    s4 = pivot - rang * 1.1
     
-    # Calculate ATR(14) for 12h timeframe (for stoploss)
-    tr1 = np.abs(high[1:] - low[1:])
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate 1d EMA50 for trend filter
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Calculate volume confirmation filter (>1.5x 20-bar average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma_20)
     
-    # Align HTF indicators to 12h timeframe (primary)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align HTF indicators to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -67,8 +73,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(high_roll_max[i]) or np.isnan(low_roll_min[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(volume_filter[i]) or
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(r4_aligned[i]) or 
+            np.isnan(s4_aligned[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(volume_filter[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -76,24 +82,43 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long entry: price breaks above Donchian upper channel AND above 1d EMA50 AND volume confirmation
-            if (close[i] > high_roll_max[i] and close[i] > ema_50_1d_aligned[i] and volume_filter[i]):
+            # Long entry conditions:
+            # 1. Fade at S3: price crosses above S3 with close > S3
+            # 2. Breakout at R4: price crosses above R4 with close > R4
+            # Both require: price > EMA50 (uptrend) and volume confirmation
+            fade_long = (close[i-1] <= s3_aligned[i] and close[i] > s3_aligned[i])
+            breakout_long = (close[i-1] <= r4_aligned[i] and close[i] > r4_aligned[i])
+            
+            if ((fade_long or breakout_long) and 
+                close[i] > ema_50_aligned[i] and 
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below Donchian lower channel AND below 1d EMA50 AND volume confirmation
-            elif (close[i] < low_roll_min[i] and close[i] < ema_50_1d_aligned[i] and volume_filter[i]):
+            
+            # Short entry conditions:
+            # 1. Fade at R3: price crosses below R3 with close < R3
+            # 2. Breakout at S4: price crosses below S4 with close < S4
+            # Both require: price < EMA50 (downtrend) and volume confirmation
+            fade_short = (close[i-1] >= r3_aligned[i] and close[i] < r3_aligned[i])
+            breakout_short = (close[i-1] >= s4_aligned[i] and close[i] < s4_aligned[i])
+            
+            if ((fade_short or breakout_short) and 
+                close[i] < ema_50_aligned[i] and 
+                volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
+        
         elif position == 1:
-            # Exit long: price closes below Donchian lower channel OR below 1d EMA50
-            if (close[i] < low_roll_min[i] or close[i] < ema_50_1d_aligned[i]):
+            # Exit long: price closes below S3 (fade level) or above R4 (breakout failure)
+            if close[i] < s3_aligned[i] or close[i] > r4_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
+        
         elif position == -1:
-            # Exit short: price closes above Donchian upper channel OR above 1d EMA50
-            if (close[i] > high_roll_max[i] or close[i] > ema_50_1d_aligned[i]):
+            # Exit short: price closes above R3 (fade level) or below S4 (breakout failure)
+            if close[i] > r3_aligned[i] or close[i] < s4_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
