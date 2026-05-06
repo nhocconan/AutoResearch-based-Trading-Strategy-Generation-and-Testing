@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 4h_1dCamarilla_R1S1_Breakout_1dEMA34_Trend_Volume_v4
+# 12h_1dCamarilla_R1S1_Breakout_1dEMA34_Trend_Volume
 # Uses daily Camarilla pivot levels (R1/S1) as breakout levels with daily trend filter (EMA34)
-# and daily volume confirmation. Designed for 4h timeframe to capture major pivot breaks
+# and daily volume confirmation. Designed for 12h timeframe to capture major pivot breaks
 # with trend alignment, working in both bull and bear markets by following the daily trend.
 # Tightened volume threshold and added ADX filter to reduce trade frequency and improve win rate.
-# Target: 75-200 total trades over 4 years (19-50/year) with 0.30 position sizing.
+# Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing.
 
-name = "4h_1dCamarilla_R1S1_Breakout_1dEMA34_Trend_Volume_v4"
-timeframe = "4h"
+name = "12h_1dCamarilla_R1S1_Breakout_1dEMA34_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -42,13 +42,13 @@ def generate_signals(prices):
     r1 = pp + range_1d * 1.1 / 12
     s1 = pp - range_1d * 1.1 / 12
     
-    # Align Camarilla levels to 4h timeframe
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    # Align Camarilla levels to 12h timeframe
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
     
     # Daily EMA34 for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_34_12h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Daily volume filter (20-period MA) with higher threshold
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -92,7 +92,7 @@ def generate_signals(prices):
         return adx
     
     adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    adx_4h = align_htf_to_ltf(prices, df_1d, adx_1d)
+    adx_12h = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -100,8 +100,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical value is NaN
-        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or 
-            np.isnan(ema_34_4h[i]) or np.isnan(volume_spike[i]) or np.isnan(adx_4h[i])):
+        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or 
+            np.isnan(ema_34_12h[i]) or np.isnan(volume_spike[i]) or np.isnan(adx_12h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -112,32 +112,32 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: break above R1 with uptrend (ADX > 20), EMA34 filter, and volume
-            if close[i] > r1_4h[i] and adx_4h[i] > 20 and close[i] > ema_34_4h[i] and volume_spike[i]:
-                signals[i] = 0.30
+            if close[i] > r1_12h[i] and adx_12h[i] > 20 and close[i] > ema_34_12h[i] and volume_spike[i]:
+                signals[i] = 0.25
                 position = 1
                 bars_since_entry = 0
             # Short: break below S1 with downtrend (ADX > 20), EMA34 filter, and volume
-            elif close[i] < s1_4h[i] and adx_4h[i] > 20 and close[i] < ema_34_4h[i] and volume_spike[i]:
-                signals[i] = -0.30
+            elif close[i] < s1_12h[i] and adx_12h[i] > 20 and close[i] < ema_34_12h[i] and volume_spike[i]:
+                signals[i] = -0.25
                 position = -1
                 bars_since_entry = 0
         elif position == 1:
             # Exit conditions: price returns to EMA34 or breaks below S1
             # Minimum holding period of 3 bars to reduce churn
-            if bars_since_entry >= 3 and (close[i] < ema_34_4h[i] or close[i] < s1_4h[i]):
+            if bars_since_entry >= 3 and (close[i] < ema_34_12h[i] or close[i] < s1_12h[i]):
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
             # Exit conditions: price returns to EMA34 or breaks above R1
             # Minimum holding period of 3 bars to reduce churn
-            if bars_since_entry >= 3 and (close[i] > ema_34_4h[i] or close[i] > r1_4h[i]):
+            if bars_since_entry >= 3 and (close[i] > ema_34_12h[i] or close[i] > r1_12h[i]):
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
