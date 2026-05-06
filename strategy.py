@@ -3,15 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using weekly Donchian channel breakout with daily EMA trend and volume confirmation
-# Weekly Donchian channel (20-period high/low) captures major market structure breaks
-# Daily EMA50 filter ensures trades align with intermediate-term trend
-# Volume > 1.5x 20-period average confirms institutional participation
-# Works in bull/bear markets: breakouts capture trends, EMA filter avoids counter-trend trades
+# Hypothesis: 4h strategy using 1-week Donchian channels for trend direction and 1-day ATR for volatility filter
+# Long when price breaks above weekly Donchian high with ATR > 1.2x 20-period average, short when breaks below weekly low
+# Uses volatility filter to avoid whipsaws in low volatility regimes and capture strong trends
 # Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
 
-name = "12h_WeeklyDonchian20_DailyEMA50_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_WeeklyDonchian_ATRFilter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,31 +22,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate weekly Donchian channel (20-period high/low) ONCE before loop
+    # Calculate weekly Donchian channels ONCE before loop
     df_1w = get_htf_data(prices, '1w')
     
     if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Weekly Donchian channel: 20-period high and low
-    high_20 = pd.Series(df_1w['high']).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(df_1w['low']).rolling(window=20, min_periods=20).min().values
+    # Weekly Donchian channels (20-period high/low)
+    donchian_high = pd.Series(df_1w['high']).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(df_1w['low']).rolling(window=20, min_periods=20).min().values
     
-    # Align weekly Donchian levels to 12h timeframe
-    high_20_aligned = align_htf_to_ltf(prices, df_1w, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1w, low_20)
+    # Align weekly Donchian levels to 4h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
     
-    # Calculate daily EMA50 for trend filter ONCE before loop
+    # Calculate ATR(14) for volatility filter on 1d timeframe
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 50:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Daily EMA50
-    ema_50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # True Range calculation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align daily EMA50 to 12h timeframe
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = 0  # First value has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate 20-period average of ATR for volatility filter
+    atr_ma_20 = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
+    atr_ratio = atr_1d / atr_ma_20
+    
+    # Align ATR ratio to 4h timeframe
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
     # Volume confirmation: >1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -63,8 +77,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(volume_filter[i]) or
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(atr_ratio_aligned[i]) or np.isnan(volume_filter[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -72,24 +86,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long entry: price breaks above weekly Donchian high with volume and above daily EMA50
-            if close[i] > high_20_aligned[i] and volume_filter[i] and close[i] > ema_50_aligned[i]:
+            # Long entry: price breaks above weekly Donchian high with sufficient volatility
+            if close[i] > donchian_high_aligned[i] and atr_ratio_aligned[i] > 1.2 and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below weekly Donchian low with volume and below daily EMA50
-            elif close[i] < low_20_aligned[i] and volume_filter[i] and close[i] < ema_50_aligned[i]:
+            # Short entry: price breaks below weekly Donchian low with sufficient volatility
+            elif close[i] < donchian_low_aligned[i] and atr_ratio_aligned[i] > 1.2 and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below weekly Donchian low or drops below daily EMA50
-            if close[i] < low_20_aligned[i] or close[i] < ema_50_aligned[i]:
+            # Exit long: price breaks below weekly Donchian low
+            if close[i] < donchian_low_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above weekly Donchian high or rises above daily EMA50
-            if close[i] > high_20_aligned[i] or close[i] > ema_50_aligned[i]:
+            # Exit short: price breaks above weekly Donchian high
+            if close[i] > donchian_high_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
