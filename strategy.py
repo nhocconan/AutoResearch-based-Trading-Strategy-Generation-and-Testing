@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1-day ATR-based volatility regime filter
-# Long when price > 200-bar EMA and price > previous high + 0.5*ATR(14) (breakout)
-# Short when price < 200-bar EMA and price < previous low - 0.5*ATR(14) (breakdown)
-# Uses 1-day ATR for volatility regime: only trade when ATR(14) > 0.8 * ATR(50) (high vol)
-# Position size: 0.25
-# Target: 15-25 trades per year (60-100 over 4 years) to avoid fee drag
+# Hypothesis: 1d strategy using weekly ATR-based Donchian breakout with volume confirmation and close-based exit
+# Long when price breaks above weekly Donchian high (20-period) with volume > 1.5x 50-day average
+# Short when price breaks below weekly Donchian low (20-period) with volume > 1.5x 50-day average
+# Exit on close crossing below/above weekly Donchian midpoint
+# Weekly Donchian provides structural levels, volume confirms institutional interest
+# Target: 15-25 trades per year (60-100 over 4 years) with 0.25 position sizing
 
-name = "12h_1dATR_VolRegime_EMA200_Breakout_v1"
-timeframe = "12h"
+name = "1d_weeklyDonchian20_Volume_ExitMidpoint"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,87 +24,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate EMA200 on 12h close
-    close_series = pd.Series(close)
-    ema200 = close_series.ewm(span=200, min_periods=200, adjust=False).mean().values
-    
-    # Get 1-day data for ATR calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data (HTF)
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 20:
         return np.zeros(n)
     
-    # Calculate ATR(14) and ATR(50) on 1-day data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly Donchian channels (20-period)
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    # True Range
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0  # First value has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # 20-period rolling max/min on weekly data
+    weekly_donchian_high = pd.Series(weekly_high).rolling(window=20, min_periods=20).max().values
+    weekly_donchian_low = pd.Series(weekly_low).rolling(window=20, min_periods=20).min().values
+    weekly_donchian_mid = (weekly_donchian_high + weekly_donchian_low) / 2
     
-    # ATR(14) and ATR(50)
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    # Align weekly Donchian levels to daily timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_weekly, weekly_donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_weekly, weekly_donchian_low)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_weekly, weekly_donchian_mid)
     
-    # Volatility regime: high volatility when ATR(14) > 0.8 * ATR(50)
-    vol_regime = atr14 > (0.8 * atr50)
-    
-    # Previous day's high and low for breakout levels
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    
-    # Align 1-day data to 12h timeframe
-    vol_regime_aligned = align_htf_to_ltf(prices, df_1d, vol_regime)
-    prev_high_aligned = align_htf_to_ltf(prices, df_1d, prev_high)
-    prev_low_aligned = align_htf_to_ltf(prices, df_1d, prev_low)
-    atr14_aligned = align_htf_to_ltf(prices, df_1d, atr14)
-    
-    # Breakout threshold: 0.5 * ATR(14)
-    breakout_threshold = 0.5 * atr14_aligned
-    
-    # Previous 12h close for momentum filter
-    prev_close = np.roll(close, 1)
-    prev_close[0] = close[0]
+    # Volume confirmation: >1.5x 50-day average
+    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    volume_filter = volume > (1.5 * vol_ma_50)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(200, n):  # Start after EMA200 warmup
+    for i in range(50, n):  # Start after volume MA warmup
         # Skip if any critical value is NaN
-        if (np.isnan(ema200[i]) or np.isnan(vol_regime_aligned[i]) or 
-            np.isnan(prev_high_aligned[i]) or np.isnan(prev_low_aligned[i]) or
-            np.isnan(breakout_threshold[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(donchian_mid_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long breakout: price breaks above previous day's high + threshold with uptrend and high vol
-            if (close[i] > prev_high_aligned[i] + breakout_threshold[i] and 
-                close[i] > ema200[i] and vol_regime_aligned[i]):
+            # Long breakout: price breaks above weekly Donchian high with volume confirmation
+            if close[i] > donchian_high_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: price breaks below previous day's low - threshold with downtrend and high vol
-            elif (close[i] < prev_low_aligned[i] - breakout_threshold[i] and 
-                  close[i] < ema200[i] and vol_regime_aligned[i]):
+            # Short breakout: price breaks below weekly Donchian low with volume confirmation
+            elif close[i] < donchian_low_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below EMA200 or volatility drops
-            if close[i] < ema200[i] or not vol_regime_aligned[i]:
+            # Exit long: close crosses below weekly Donchian midpoint
+            if close[i] < donchian_mid_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above EMA200 or volatility drops
-            if close[i] > ema200[i] or not vol_regime_aligned[i]:
+            # Exit short: close crosses above weekly Donchian midpoint
+            if close[i] > donchian_mid_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
