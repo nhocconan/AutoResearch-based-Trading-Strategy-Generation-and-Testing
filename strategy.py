@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1-week Ichimoku Cloud filter from 1-day timeframe for trend direction,
-# with entry triggered by Tenkan/Kijun cross on 1-day and confirmed by price position relative to cloud.
-# Long when price is above cloud, Tenkan > Kijun, and price closes above Tenkan.
-# Short when price is below cloud, Tenkan < Kijun, and price closes below Tenkan.
-# Uses weekly timeframe for regime filter (price above/below weekly cloud) to avoid counter-trend trades.
-# Designed to work in trending markets (both bull and bear) by following Ichimoku trend signals.
-# Target: 50-150 total trades over 4 years = 12-37/year with 0.25 position sizing.
+# Hypothesis: 12h strategy using 1-day Bollinger Band squeeze breakout with volume confirmation
+# Long when price breaks above upper Bollinger Band (20,2) after low volatility squeeze, with volume > 1.5x average
+# Short when price breaks below lower Bollinger Band after squeeze, with volume confirmation
+# Bollinger Band squeeze identifies low volatility periods that often precede explosive moves
+# Volume confirmation ensures breakouts have institutional participation
+# Designed to work in both bull and bear markets by capturing volatility expansion moves
+# Target: 20-40 trades per year (80-160 over 4 years) with 0.25 position sizing
 
-name = "6h_Ichimoku_Cloud_Filter_TK_Cross_1d"
-timeframe = "6h"
+name = "12h_1dBB_Squeeze_Breakout_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,57 +23,36 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1-day data for Ichimoku calculations
+    # Calculate 1-day Bollinger Bands (20-period, 2 std dev)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:  # Need enough data for Ichimoku (26*2)
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Ichimoku components on 1-day data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # 20-period SMA and standard deviation for Bollinger Bands
+    sma_20 = pd.Series(df_1d['close']).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(df_1d['close']).rolling(window=20, min_periods=20).std().values
     
-    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
-    tenkan_sen = (pd.Series(high_1d).rolling(window=9, min_periods=9).max() + 
-                  pd.Series(low_1d).rolling(window=9, min_periods=9).min()) / 2
+    # Upper and lower Bollinger Bands
+    bb_upper = sma_20 + (2 * std_20)
+    bb_lower = sma_20 - (2 * std_20)
     
-    # Kijun-sen (Base Line): (26-period high + low) / 2
-    kijun_sen = (pd.Series(high_1d).rolling(window=26, min_periods=26).max() + 
-                 pd.Series(low_1d).rolling(window=26, min_periods=26).min()) / 2
+    # Bollinger Band Width for squeeze detection (normalized by SMA)
+    bb_width = (bb_upper - bb_lower) / sma_20
     
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
+    # Squeeze condition: BB width below 20-period average width (low volatility)
+    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
+    squeeze_condition = bb_width < bb_width_ma
     
-    # Senkou Span B (Leading Span B): (52-period high + low) / 2
-    senkou_span_b = (pd.Series(high_1d).rolling(window=52, min_periods=52).max() + 
-                     pd.Series(low_1d).rolling(window=52, min_periods=52).min()) / 2
+    # Align Bollinger Bands and squeeze condition to 12h timeframe
+    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper)
+    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower)
+    squeeze_aligned = align_htf_to_ltf(prices, df_1d, squeeze_condition)
     
-    # Align Ichimoku components to 6h timeframe
-    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen.values)
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen.values)
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a.values)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b.values)
-    
-    # Get 1-week data for regime filter (cloud)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 52:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    
-    # Calculate weekly Ichimoku components
-    tenkan_sen_1w = (pd.Series(high_1w).rolling(window=9, min_periods=9).max() + 
-                     pd.Series(low_1w).rolling(window=9, min_periods=9).min()) / 2
-    kijun_sen_1w = (pd.Series(high_1w).rolling(window=26, min_periods=26).max() + 
-                    pd.Series(low_1w).rolling(window=26, min_periods=26).min()) / 2
-    senkou_span_a_1w = ((tenkan_sen_1w + kijun_sen_1w) / 2)
-    senkou_span_b_1w = (pd.Series(high_1w).rolling(window=52, min_periods=52).max() + 
-                        pd.Series(low_1w).rolling(window=52, min_periods=52).min()) / 2
-    
-    # Align weekly Ichimoku components to 6h timeframe
-    senkou_span_a_1w_aligned = align_htf_to_ltf(prices, df_1w, senkou_span_a_1w.values)
-    senkou_span_b_1w_aligned = align_htf_to_ltf(prices, df_1w, senkou_span_b_1w.values)
+    # Volume confirmation: >1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma_20)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -82,51 +61,35 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(52, n):  # Start after Ichimoku warmup
+    for i in range(20, n):  # Start after Bollinger Band warmup
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
-            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or
-            np.isnan(senkou_span_a_1w_aligned[i]) or np.isnan(senkou_span_b_1w_aligned[i]) or
+        if (np.isnan(bb_upper_aligned[i]) or np.isnan(bb_lower_aligned[i]) or 
+            np.isnan(squeeze_aligned[i]) or np.isnan(volume_filter[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine if price is above or below weekly cloud (regime filter)
-        weekly_cloud_top = np.maximum(senkou_span_a_1w_aligned[i], senkou_span_b_1w_aligned[i])
-        weekly_cloud_bottom = np.minimum(senkou_span_a_1w_aligned[i], senkou_span_b_1w_aligned[i])
-        price_above_weekly_cloud = close[i] > weekly_cloud_top
-        price_below_weekly_cloud = close[i] < weekly_cloud_bottom
-        
         if position == 0:
-            # Long: price above daily cloud, Tenkan > Kijun, price closes above Tenkan
-            daily_cloud_top = np.maximum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
-            daily_cloud_bottom = np.minimum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
-            price_above_daily_cloud = close[i] > daily_cloud_top
-            tenkan_above_kijun = tenkan_sen_aligned[i] > kijun_sen_aligned[i]
-            price_above_tenkan = close[i] > tenkan_sen_aligned[i]
-            
-            if (price_above_weekly_cloud and price_above_daily_cloud and 
-                tenkan_above_kijun and price_above_tenkan):
+            # Long breakout: price breaks above upper BB after squeeze with volume confirmation
+            if close[i] > bb_upper_aligned[i] and squeeze_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below daily cloud, Tenkan < Kijun, price closes below Tenkan
-            elif (price_below_weekly_cloud and close[i] < daily_cloud_bottom and 
-                  tenkan_sen_aligned[i] < kijun_sen_aligned[i] and 
-                  close[i] < tenkan_sen_aligned[i]):
+            # Short breakout: price breaks below lower BB after squeeze with volume confirmation
+            elif close[i] < bb_lower_aligned[i] and squeeze_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price closes below Tenkan or below daily cloud
-            if close[i] < tenkan_sen_aligned[i] or close[i] < daily_cloud_bottom:
+            # Exit long: price breaks below lower Bollinger Band (mean reversion)
+            if close[i] < bb_lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price closes above Tenkan or above daily cloud
-            if close[i] > tenkan_sen_aligned[i] or close[i] > daily_cloud_top:
+            # Exit short: price breaks above upper Bollinger Band (mean reversion)
+            if close[i] > bb_upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
