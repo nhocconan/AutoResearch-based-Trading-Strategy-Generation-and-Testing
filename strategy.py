@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1-day Supertrend (ATR 10, multiplier 3) for trend direction,
-# combined with 1-day RSI(14) mean reversion and volume confirmation. Long when price is above Supertrend,
-# RSI < 40 (oversold), and volume > 1.5x 20-period average. Short when price is below Supertrend,
-# RSI > 60 (overbought), and volume > 1.5x 20-period average. Uses daily timeframe for trend and
-# momentum to avoid whipsaws, targeting 20-40 trades per year with 0.25 position sizing.
+# Hypothesis: 4h strategy using 1-day KAMA trend with RSI mean reversion and volume confirmation
+# Long when 1-day KAMA is rising (bullish trend) AND RSI < 30 (oversold) AND volume > 1.5x average
+# Short when 1-day KAMA is falling (bearish trend) AND RSI > 70 (overbought) AND volume > 1.5x average
+# Uses daily KAMA for trend direction, RSI for mean-reversion entry, volume for confirmation
+# Designed to work in bull markets via pullbacks in uptrends and in bear markets via bounces in downtrends
+# Target: 20-30 trades per year (80-120 over 4 years) with 0.25 position sizing
 
-name = "12h_1dSupertrend_RSI_Volume_v1"
-timeframe = "12h"
+name = "4h_1dKAMA_RSI_MeanReversion_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,52 +24,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-day data for Supertrend and RSI
+    # Calculate 1-day KAMA ( Kaufman Adaptive Moving Average )
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1-day ATR(10) for Supertrend
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Efficiency Ratio and Smoothing Constants for KAMA
     close_1d = df_1d['close'].values
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0)  # Will compute properly below
     
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
-    
-    # Supertrend calculation
-    upper_band = (high_1d + low_1d) / 2 + 3 * atr
-    lower_band = (high_1d + low_1d) / 2 - 3 * atr
-    
-    supertrend = np.zeros_like(close_1d)
-    direction = np.ones_like(close_1d)  # 1 for uptrend, -1 for downtrend
-    
+    # Proper ER calculation
+    er = np.zeros_like(close_1d)
     for i in range(1, len(close_1d)):
-        if close_1d[i] > upper_band[i-1]:
-            direction[i] = 1
-        elif close_1d[i] < lower_band[i-1]:
-            direction[i] = -1
+        if i >= 10:  # ER period
+            direction = np.abs(close_1d[i] - close_1d[i-10])
+            volatility = np.sum(np.abs(np.diff(close_1d[i-9:i+1])))
+            er[i] = direction / volatility if volatility != 0 else 0
         else:
-            direction[i] = direction[i-1]
-            if direction[i] == 1 and lower_band[i] < lower_band[i-1]:
-                lower_band[i] = lower_band[i-1]
-            if direction[i] == -1 and upper_band[i] > upper_band[i-1]:
-                upper_band[i] = upper_band[i-1]
-        
-        if direction[i] == 1:
-            supertrend[i] = lower_band[i]
-        else:
-            supertrend[i] = upper_band[i]
+            er[i] = 0
     
-    # Calculate 1-day RSI(14)
-    delta = np.diff(close_1d)
-    delta = np.insert(delta, 0, 0)
+    # Smoothing constants
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # fast=2, slow=30
+    sc = np.where(er > 0, sc, 0)
+    
+    # KAMA calculation
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    
+    # KAMA trend: rising if current > previous, falling if current < previous
+    kama_rising = kama > np.roll(kama, 1)
+    kama_falling = kama < np.roll(kama, 1)
+    kama_rising[0] = False
+    kama_falling[0] = False
+    
+    # Align KAMA trend to 4h timeframe
+    kama_rising_aligned = align_htf_to_ltf(prices, df_1d, kama_rising)
+    kama_falling_aligned = align_htf_to_ltf(prices, df_1d, kama_falling)
+    
+    # RSI (14-period) on 4h close
+    delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     
@@ -76,12 +73,7 @@ def generate_signals(prices):
     avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
     rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
     rsi = 100 - (100 / (1 + rs))
-    
-    # Align Supertrend, RSI, and bands to 12h timeframe
-    supertrend_aligned = align_htf_to_ltf(prices, df_1d, supertrend)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
-    lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
+    rsi[:13] = np.nan  # Not enough data for first 13 periods
     
     # Volume confirmation: >1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -94,34 +86,35 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after warmup
+    for i in range(30, n):  # Start after RSI/KAMA warmup
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(supertrend_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(volume_filter[i]) or not session_filter[i]):
+        if (np.isnan(kama_rising_aligned[i]) or np.isnan(kama_falling_aligned[i]) or 
+            np.isnan(rsi[i]) or np.isnan(volume_filter[i]) or
+            not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above Supertrend (uptrend), RSI < 40 (oversold), volume confirmation
-            if close[i] > supertrend_aligned[i] and rsi_aligned[i] < 40 and volume_filter[i]:
+            # Long: KAMA rising (bullish trend) AND RSI oversold (<30) AND volume confirmation
+            if kama_rising_aligned[i] and rsi[i] < 30 and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below Supertrend (downtrend), RSI > 60 (overbought), volume confirmation
-            elif close[i] < supertrend_aligned[i] and rsi_aligned[i] > 60 and volume_filter[i]:
+            # Short: KAMA falling (bearish trend) AND RSI overbought (>70) AND volume confirmation
+            elif kama_falling_aligned[i] and rsi[i] > 70 and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below Supertrend (trend change)
-            if close[i] < supertrend_aligned[i]:
+            # Exit long: RSI overbought (>70) or KAMA turns bearish
+            if rsi[i] > 70 or not kama_rising_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above Supertrend (trend change)
-            if close[i] > supertrend_aligned[i]:
+            # Exit short: RSI oversold (<30) or KAMA turns bullish
+            if rsi[i] < 30 or not kama_falling_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
