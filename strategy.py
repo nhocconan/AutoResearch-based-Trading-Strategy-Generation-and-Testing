@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Discrete sizing 0.30 to balance profit potential and fee drag; target 75-150 total trades over 4 years (19-37/year)
 # Works in both bull/bear: breakouts capture momentum, trend filter avoids counter-trend traps, volume filter ensures participation
 
-name = "4h_Donchian20_1dEMA50_VolumeConfirm_v2"
+name = "4h_Donchian20_1dEMA50_VolumeConfirm_v1"
 timeframe = "4h"
 leverage = 1.0
 
