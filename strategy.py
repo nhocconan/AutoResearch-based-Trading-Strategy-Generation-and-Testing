@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d trend filter (EMA34) and volume confirmation
-# Long when price breaks above Donchian upper band AND 1d close > 1d EMA34 (uptrend) AND volume > 1.8 * 20-bar avg volume
-# Short when price breaks below Donchian lower band AND 1d close < 1d EMA34 (downtrend) AND volume > 1.8 * 20-bar avg volume
-# Exit when price retraces to the Donchian midpoint (mean reversion to equilibrium)
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Long when price breaks above R3 AND 1d close > 1d EMA34 (uptrend) AND volume > 1.8 * 20-bar avg volume
+# Short when price breaks below S3 AND 1d close < 1d EMA34 (downtrend) AND volume > 1.8 * 20-bar avg volume
+# Exit when price retraces to the Camarilla pivot point (mean reversion to equilibrium)
 # Uses discrete sizing 0.25 to balance return and fee drag
 # Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
 # 1d EMA34 provides strong trend filter between 4h and 1d for better regime adaptation
 # Volume threshold increased to 1.8x to reduce false breakouts and lower trade frequency
-# Donchian midpoint exit works in ranging markets and captures mean reversion after breakout failure
+# Camarilla pivot exit works in ranging markets and captures mean reversion after breakout failure
+# This strategy focuses on BTC and ETH as primary targets, avoiding SOL-only bias
 
-name = "4h_Donchian20_1dEMA34_VolumeSpike_v1"
+name = "4h_Camarilla_R3S3_1dEMA34_VolumeSpike_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -27,23 +28,26 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian channels for 4h timeframe (based on previous 20 bars)
-    # Upper band = highest high of last 20 bars
-    # Lower band = lowest low of last 20 bars
-    # Middle band = (upper + lower) / 2
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    upper = high_series.rolling(window=20, min_periods=20).max().values
-    lower = low_series.rolling(window=20, min_periods=20).min().values
-    middle = (upper + lower) / 2.0
+    # Calculate Camarilla pivot levels for 4h timeframe (based on previous bar)
+    # Pivot = (high + low + close) / 3
+    # R3 = pivot + (high - low) * 1.1 / 2
+    # S3 = pivot - (high - low) * 1.1 / 2
+    # R4 = pivot + (high - low) * 1.1
+    # S4 = pivot - (high - low) * 1.1
+    # We use R3/S3 for entries and pivot for exits
+    typical_price = (high + low + close) / 3.0
+    range_hl = high - low
+    pivot = typical_price
+    R3 = pivot + range_hl * 1.1 / 2.0
+    S3 = pivot - range_hl * 1.1 / 2.0
     
     # Shift by 1 to use only completed bar data (no look-ahead)
-    upper_prev = np.roll(upper, 1)
-    lower_prev = np.roll(lower, 1)
-    middle_prev = np.roll(middle, 1)
-    upper_prev[0] = np.nan
-    lower_prev[0] = np.nan
-    middle_prev[0] = np.nan
+    R3_prev = np.roll(R3, 1)
+    S3_prev = np.roll(S3, 1)
+    pivot_prev = np.roll(pivot, 1)
+    R3_prev[0] = np.nan
+    S3_prev[0] = np.nan
+    pivot_prev[0] = np.nan
     
     # Get 1d data ONCE before loop for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -67,8 +71,8 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN
-        if (np.isnan(upper_prev[i]) or np.isnan(lower_prev[i]) or 
-            np.isnan(middle_prev[i]) or np.isnan(ema34_1d_aligned[i]) or 
+        if (np.isnan(R3_prev[i]) or np.isnan(S3_prev[i]) or 
+            np.isnan(pivot_prev[i]) or np.isnan(ema34_1d_aligned[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -76,25 +80,25 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Donchian breakout signals with trend and volume filters
-            # Long: Break above upper band AND uptrend AND volume spike
-            if close[i] > upper_prev[i] and close[i] > ema34_1d_aligned[i] and volume_spike[i]:
+            # Camarilla breakout signals with trend and volume filters
+            # Long: Break above R3 AND uptrend AND volume spike
+            if close[i] > R3_prev[i] and close[i] > ema34_1d_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below lower band AND downtrend AND volume spike
-            elif close[i] < lower_prev[i] and close[i] < ema34_1d_aligned[i] and volume_spike[i]:
+            # Short: Break below S3 AND downtrend AND volume spike
+            elif close[i] < S3_prev[i] and close[i] < ema34_1d_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price retraces to middle band (mean reversion)
-            if close[i] <= middle_prev[i]:
+            # Exit long: Price retraces to pivot point (mean reversion)
+            if close[i] <= pivot_prev[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price retraces to middle band (mean reversion)
-            if close[i] >= middle_prev[i]:
+            # Exit short: Price retraces to pivot point (mean reversion)
+            if close[i] >= pivot_prev[i]:
                 signals[i] = 0.0
                 position = 0
             else:
