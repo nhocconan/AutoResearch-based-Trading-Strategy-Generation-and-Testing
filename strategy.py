@@ -3,63 +3,39 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h RSI for momentum and 1d ATR for volatility filtering
-# - Uses 4h RSI(14) to identify momentum extremes (oversold <30, overbought >70)
-# - Uses 1d ATR(14) normalized by price to filter for adequate volatility
-# - Enters long when RSI crosses above 30 from below with adequate volatility
-# - Enters short when RSI crosses below 70 from above with adequate volatility
-# - Exits when RSI returns to neutral zone (40-60)
-# - Designed to capture mean reversion moves during volatile periods with momentum confirmation
-# - Target: 60-150 total trades over 4 years (15-37/year) with 0.20 position sizing
-# - Uses 4h for signal direction (RSI momentum), 1h only for entry timing
-# - Session filter: 08-20 UTC to reduce noise
+# Hypothesis: 6h strategy using 1d Supertrend for trend direction and 1w RSI for momentum confirmation
+# - Uses 1d Supertrend (ATR=10, multiplier=3) to determine trend direction
+# - Uses 1w RSI(14) to confirm momentum: RSI > 50 for longs, RSI < 50 for shorts
+# - Enters long when price crosses above Supertrend with bullish momentum (RSI > 50)
+# - Enters short when price crosses below Supertrend with bearish momentum (RSI < 50)
+# - Exits when price crosses back below/above Supertrend
+# - Designed to capture trend continuation with momentum filter in both bull and bear markets
+# - Target: 60-120 total trades over 4 years (15-30/year) with 0.25 position sizing
 
-name = "1h_4hRSI_1dATR_MeanReversion"
-timeframe = "1h"
+name = "6h_1dSupertrend_1wRSI_Momentum"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 4h data for RSI calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 14:
-        return np.zeros(n)
-    
-    # Get 1d data for ATR calculation
+    # Get 1d data for Supertrend calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 4h RSI (14)
-    close_4h = df_4h['close'].values
-    delta = np.diff(close_4h, prepend=close_4h[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Get 1w data for RSI calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
+        return np.zeros(n)
     
-    # Wilder's smoothing for RSI
-    def wilders_smoothing(data, period):
-        result = np.zeros_like(data)
-        if len(data) < period:
-            return result
-        result[period-1] = np.nansum(data[:period])
-        for i in range(period, len(data)):
-            result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
-    
-    gain_smoothed = wilders_smoothing(gain, 14)
-    loss_smoothed = wilders_smoothing(loss, 14)
-    rs = gain_smoothed / (loss_smoothed + 1e-10)
-    rsi_4h = 100 - (100 / (1 + rs))
-    
-    # Calculate 1d ATR (14)
+    # Calculate 1d Supertrend (ATR=10, multiplier=3)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -71,62 +47,107 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # First period
     
-    atr_14 = wilders_smoothing(tr, 14)
-    # Normalize ATR by price to get volatility percentage
-    atr_percent = atr_14 / close_1d
+    # ATR(10)
+    atr = np.zeros_like(close_1d)
+    atr[9] = np.mean(tr[:10])  # Simple average for first value
+    for i in range(10, len(tr)):
+        atr[i] = (atr[i-1] * 9 + tr[i]) / 10  # Wilder's smoothing
     
-    # Align 4h RSI to 1h timeframe
-    rsi_4h_1h = align_htf_to_ltf(prices, df_4h, rsi_4h)
+    # Basic Upper and Lower Bands
+    basic_ub = (high_1d + low_1d) / 2 + 3 * atr
+    basic_lb = (high_1d + low_1d) / 2 - 3 * atr
     
-    # Align 1d ATR percent to 1h timeframe
-    atr_percent_1h = align_htf_to_ltf(prices, df_1d, atr_percent)
+    # Final Upper and Lower Bands
+    final_ub = np.zeros_like(close_1d)
+    final_lb = np.zeros_like(close_1d)
+    final_ub[0] = basic_ub[0]
+    final_lb[0] = basic_lb[0]
     
-    # Calculate RSI cross signals
-    rsi_above_30 = rsi_4h_1h > 30
-    rsi_below_70 = rsi_4h_1h < 70
-    rsi_cross_above_30 = (rsi_above_30 & ~np.roll(rsi_above_30, 1)) | ((np.arange(len(rsi_above_30)) == 0) & rsi_above_30[0])
-    rsi_cross_below_70 = (~rsi_below_70 & np.roll(rsi_below_70, 1)) | ((np.arange(len(rsi_below_70)) == 0) & ~rsi_below_70[0])
+    for i in range(1, len(close_1d)):
+        if basic_ub[i] < final_ub[i-1] or close_1d[i-1] > final_ub[i-1]:
+            final_ub[i] = basic_ub[i]
+        else:
+            final_ub[i] = final_ub[i-1]
+            
+        if basic_lb[i] > final_lb[i-1] or close_1d[i-1] < final_lb[i-1]:
+            final_lb[i] = basic_lb[i]
+        else:
+            final_lb[i] = final_lb[i-1]
     
-    # Volatility filter: ATR percent > 1% (adjustable threshold)
-    vol_filter = atr_percent_1h > 0.01
+    # Supertrend
+    supertrend = np.zeros_like(close_1d)
+    supertrend[0] = final_ub[0]
+    for i in range(1, len(close_1d)):
+        if supertrend[i-1] == final_ub[i-1]:
+            if close_1d[i] <= final_ub[i]:
+                supertrend[i] = final_ub[i]
+            else:
+                supertrend[i] = final_lb[i]
+        else:
+            if close_1d[i] >= final_lb[i]:
+                supertrend[i] = final_lb[i]
+            else:
+                supertrend[i] = final_ub[i]
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Calculate 1w RSI(14)
+    close_1w = df_1w['close'].values
+    delta = np.diff(close_1w, prepend=close_1w[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Average gain and loss
+    avg_gain = np.zeros_like(close_1w)
+    avg_loss = np.zeros_like(close_1w)
+    avg_gain[13] = np.mean(gain[1:14])  # First average
+    avg_loss[13] = np.mean(loss[1:14])
+    
+    for i in range(14, len(close_1w)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    # RS and RSI
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Align 1d Supertrend to 6h timeframe
+    supertrend_6h = align_htf_to_ltf(prices, df_1d, supertrend)
+    
+    # Align 1w RSI to 6h timeframe
+    rsi_6h = align_htf_to_ltf(prices, df_1w, rsi)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if any critical value is NaN
-        if (np.isnan(rsi_4h_1h[i]) or np.isnan(atr_percent_1h[i]) or 
-            np.isnan(rsi_cross_above_30[i]) or np.isnan(rsi_cross_below_70[i])):
+        if (np.isnan(supertrend_6h[i]) or np.isnan(rsi_6h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Look for RSI cross with volatility and session filters
-            if rsi_cross_above_30[i] and vol_filter[i] and session_filter[i]:
-                signals[i] = 0.20
+            # Long: price crosses above Supertrend with bullish momentum (RSI > 50)
+            if close[i] > supertrend_6h[i] and rsi_6h[i] > 50:
+                signals[i] = 0.25
                 position = 1
-            elif rsi_cross_below_70[i] and vol_filter[i] and session_filter[i]:
-                signals[i] = -0.20
+            # Short: price crosses below Supertrend with bearish momentum (RSI < 50)
+            elif close[i] < supertrend_6h[i] and rsi_6h[i] < 50:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: RSI returns to neutral zone (above 40)
-            if rsi_4h_1h[i] >= 40:
+            # Exit long: price crosses below Supertrend
+            if close[i] < supertrend_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: RSI returns to neutral zone (below 60)
-            if rsi_4h_1h[i] <= 60:
+            # Exit short: price crosses above Supertrend
+            if close[i] > supertrend_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
