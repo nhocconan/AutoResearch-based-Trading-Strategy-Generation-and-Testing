@@ -3,20 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1-day Williams %R with 1-week EMA trend filter and volume confirmation
-# Long when Williams %R < -80 (oversold) + price > 1-week EMA50 + volume > 1.5x 20-period average
-# Short when Williams %R > -20 (overbought) + price < 1-week EMA50 + volume > 1.5x 20-period average
-# Williams %R identifies overextended moves, EMA50 provides trend direction, volume confirms strength
-# Designed to work in both bull (buy dips in uptrend) and bear (sell rallies in downtrend) markets
-# Target: 20-40 trades per year (80-160 over 4 years) with 0.25 position sizing
+# Hypothesis: 1d strategy using weekly Bollinger Bands with RSI mean reversion and volume confirmation.
+# Long when price touches or crosses below weekly Bollinger Lower Band with RSI(14) < 30 and volume > 1.5x 20-period average.
+# Short when price touches or crosses above weekly Bollinger Upper Band with RSI(14) > 70 and volume > 1.5x 20-period average.
+# Exit when price crosses back to weekly Bollinger Middle Band (20-period SMA).
+# Uses weekly timeframe for structure and mean reversion, daily for execution.
+# Designed to work in both bull and bear markets via mean reversion at volatility extremes.
+# Target: 15-25 trades per year (60-100 over 4 years) with 0.25 position sizing.
 
-name = "4h_1dWilliamsR_1wEMA50_Volume_v1"
-timeframe = "4h"
+name = "1d_weeklyBB_RSI_Volume_MR_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,26 +25,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1-day Williams %R (14-period)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
-        return np.zeros(n)
-    
-    highest_high = df_1d['high'].rolling(window=14, min_periods=14).max().values
-    lowest_low = df_1d['low'].rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    williams_r[highest_high == lowest_low] = -50  # avoid division by zero
-    
-    # Calculate 1-week EMA50 for trend filter
+    # Calculate weekly Bollinger Bands (20-period SMA, 2 std dev)
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    ema_50 = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    close_1w = df_1w['close'].values
+    sma_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
+    middle_bb = sma_20
     
-    # Align indicators to 4h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    # Align weekly BB to daily timeframe
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1w, upper_bb)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1w, lower_bb)
+    middle_bb_aligned = align_htf_to_ltf(prices, df_1w, middle_bb)
+    
+    # RSI(14) on daily timeframe
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     # Volume confirmation: >1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -56,35 +62,35 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after EMA warmup
+    for i in range(20, n):  # Start after warmup
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_50_aligned[i]) or 
-            np.isnan(volume_filter[i]) or
-            not session_filter[i]):
+        if (np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or 
+            np.isnan(middle_bb_aligned[i]) or np.isnan(rsi[i]) or 
+            np.isnan(volume_filter[i]) or not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Williams %R oversold (< -80) + price above weekly EMA50 + volume confirmation
-            if williams_r_aligned[i] < -80 and close[i] > ema_50_aligned[i] and volume_filter[i]:
+            # Long entry: price at or below lower BB, RSI oversold, volume confirmation
+            if close[i] <= lower_bb_aligned[i] and rsi[i] < 30 and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R overbought (> -20) + price below weekly EMA50 + volume confirmation
-            elif williams_r_aligned[i] > -20 and close[i] < ema_50_aligned[i] and volume_filter[i]:
+            # Short entry: price at or above upper BB, RSI overbought, volume confirmation
+            elif close[i] >= upper_bb_aligned[i] and rsi[i] > 70 and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R returns to neutral (> -50) or price breaks below weekly EMA50
-            if williams_r_aligned[i] > -50 or close[i] < ema_50_aligned[i]:
+            # Exit long: price crosses back to middle BB
+            if close[i] >= middle_bb_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R returns to neutral (< -50) or price breaks above weekly EMA50
-            if williams_r_aligned[i] < -50 or close[i] > ema_50_aligned[i]:
+            # Exit short: price crosses back to middle BB
+            if close[i] <= middle_bb_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
