@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Index (Bull Power/Bear Power) with 1d EMA50 trend filter and volume confirmation
-# Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-# Long when Bull Power > 0 AND Bear Power rising (less negative) AND price > 1d EMA50 AND volume spike
-# Short when Bear Power < 0 AND Bull Power falling (less positive) AND price < 1d EMA50 AND volume spike
-# Uses 6h timeframe for entries with 1d trend filter to reduce whipsaw in both bull/bear markets
-# Discrete sizing 0.25 to limit fee drag; target 80-180 total trades over 4 years (20-45/year)
-# Elder Ray measures bull/bear power behind price moves, effective in trending and ranging markets
+# Hypothesis: 12h Williams Alligator with 1d EMA50 trend filter and volume confirmation
+# Uses Williams Alligator (Jaw/Teeth/Lips) from 1d timeframe for trend structure,
+# 1d EMA50 for additional trend alignment, and volume spike (>1.8x 20-bar average) for confirmation.
+# Alligator provides dynamic support/resistance: price above Lips = bullish, below Lips = bearish.
+# Designed for 12h timeframe to capture medium-term swings in BTC/ETH during both bull and bear markets.
+# Low trade frequency expected (<40 trades/year) to minimize fee drag, targeting 80-160 total trades over 4 years.
 
-name = "6h_ElderRay_1dEMA50_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_1dEMA50_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,7 +27,7 @@ def generate_signals(prices):
     # Calculate HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 50:
+    if len(df_1d) < 60:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
@@ -40,61 +39,91 @@ def generate_signals(prices):
     close_1d_series = pd.Series(close_1d)
     ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 6h EMA13 for Elder Ray
-    close_s = pd.Series(close)
-    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate Williams Alligator on 1d timeframe
+    # Jaw (Blue): 13-period SMMA, smoothed by 8 periods
+    # Teeth (Red): 8-period SMMA, smoothed by 5 periods  
+    # Lips (Green): 5-period SMMA, smoothed by 3 periods
+    def smma(arr, period):
+        """Smoothed Moving Average"""
+        if len(arr) < period:
+            return np.full_like(arr, np.nan)
+        result = np.full_like(arr, np.nan, dtype=float)
+        # First value is simple SMA
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: SMMA = (prev_SMMA * (period-1) + current_price) / period
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    # Calculate Elder Ray components
-    bull_power = high - ema13  # Bull Power: High - EMA13
-    bear_power = low - ema13   # Bear Power: Low - EMA13
+    # Calculate Alligator components
+    jaw_1d = smma(close_1d, 13)  # 13-period SMMA
+    jaw_1d = smma(jaw_1d[~np.isnan(jaw_1d)], 8) if np.sum(~np.isnan(jaw_1d)) >= 8 else np.full_like(close_1d, np.nan)
+    # Re-align jaw to original array length
+    jaw_full = np.full_like(close_1d, np.nan)
+    valid_jaw = jaw_1d[~np.isnan(jaw_1d)]
+    if len(valid_jaw) >= 8:
+        jaw_smoothed = smma(valid_jaw, 8)
+        jaw_full[8-1:8-1+len(jaw_smoothed)] = jaw_smoothed
     
-    # Calculate Elder Ray slope (1-bar change) for confirmation
-    bull_power_slope = bull_power - np.roll(bull_power, 1)
-    bear_power_slope = bear_power - np.roll(bear_power, 1)
-    bull_power_slope[0] = 0
-    bear_power_slope[0] = 0
+    teeth_1d = smma(close_1d, 8)   # 8-period SMMA
+    teeth_1d = smma(teeth_1d[~np.isnan(teeth_1d)], 5) if np.sum(~np.isnan(teeth_1d)) >= 5 else np.full_like(close_1d, np.nan)
+    teeth_full = np.full_like(close_1d, np.nan)
+    valid_teeth = teeth_1d[~np.isnan(teeth_1d)]
+    if len(valid_teeth) >= 5:
+        teeth_smoothed = smma(valid_teeth, 5)
+        teeth_full[5-1:5-1+len(teeth_smoothed)] = teeth_smoothed
     
-    # Calculate volume spike filter (>1.5x 20-bar average)
+    lips_1d = smma(close_1d, 5)    # 5-period SMMA
+    lips_1d = smma(lips_1d[~np.isnan(lips_1d)], 3) if np.sum(~np.isnan(lips_1d)) >= 3 else np.full_like(close_1d, np.nan)
+    lips_full = np.full_like(close_1d, np.nan)
+    valid_lips = lips_1d[~np.isnan(lips_1d)]
+    if len(valid_lips) >= 3:
+        lips_smoothed = smma(valid_lips, 3)
+        lips_full[3-1:3-1+len(lips_smoothed)] = lips_smoothed
+    
+    # Calculate volume spike filter (>1.8x 20-bar average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_20)
+    volume_filter = volume > (1.8 * vol_ma_20)
     
-    # Align HTF indicators to 6h timeframe
+    # Align HTF indicators to 12h timeframe
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw_full)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth_full)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips_full)
+    volume_filter_aligned = align_htf_to_ltf(prices, df_1d, volume_filter)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any critical value is NaN
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or np.isnan(bull_power_slope[i]) or 
-            np.isnan(bear_power_slope[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(lips_aligned[i]) or 
+            np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(volume_filter_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Bull Power > 0 AND Bear Power rising (less negative) AND uptrend AND volume spike
-            if (bull_power[i] > 0 and bear_power_slope[i] > 0 and 
-                close[i] > ema50_1d_aligned[i] and volume_filter[i]):
+            # Long entry: price above Lips AND price above Jaw (bullish alignment) AND above EMA50 AND volume spike
+            if close[i] > lips_aligned[i] and close[i] > jaw_aligned[i] and close[i] > ema50_1d_aligned[i] and volume_filter_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 AND Bull Power falling (less positive) AND downtrend AND volume spike
-            elif (bear_power[i] < 0 and bull_power_slope[i] < 0 and 
-                  close[i] < ema50_1d_aligned[i] and volume_filter[i]):
+            # Short entry: price below Lips AND price below Jaw (bearish alignment) AND below EMA50 AND volume spike
+            elif close[i] < lips_aligned[i] and close[i] < jaw_aligned[i] and close[i] < ema50_1d_aligned[i] and volume_filter_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Bear Power turns negative OR Bull Power falls sharply
-            if bear_power[i] < 0 or bull_power_slope[i] < -0.5 * np.std(bull_power[max(0, i-20):i+1]):
+            # Exit long: price crosses below Lips (trend weakening)
+            if close[i] <= lips_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Bull Power turns positive OR Bear Power rises sharply
-            if bull_power[i] > 0 or bear_power_slope[i] > 0.5 * np.std(bear_power[max(0, i-20):i+1]):
+            # Exit short: price crosses above Lips (trend weakening)
+            if close[i] >= lips_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
