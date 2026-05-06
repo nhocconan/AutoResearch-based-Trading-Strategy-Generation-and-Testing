@@ -3,16 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using 1w Donchian breakout with 1d EMA trend filter and volume confirmation
-# - Uses 1w Donchian channel (20) for breakout signals
-# - Uses 1d EMA(50) to filter trend direction (only trade in direction of trend)
-# - Requires volume spike (2x 20-period average) for confirmation
-# - Exits when price crosses back below/above 1d EMA(50) or opposite Donchian breakout occurs
-# - Designed to capture strong trends with proper filtering to avoid whipsaws
-# - Target: 30-100 total trades over 4 years (7-25/year) with 0.25 position sizing
+# Hypothesis: 6h strategy using 12h EMA trend filter and 6h RSI mean reversion
+# - Uses 12h EMA50 to establish trend direction (higher timeframe filter)
+# - Uses 6h RSI(14) for mean reversion entries during pullbacks in trend
+# - Enters long when RSI < 30 and price > 12h EMA50 (oversold in uptrend)
+# - Enters short when RSI > 70 and price < 12h EMA50 (overbought in downtrend)
+# - Uses volume confirmation (volume > 1.5x 20-period average) to filter false signals
+# - Exits when RSI returns to neutral zone (40-60) or trend changes
+# - Designed to capture mean reversion within established trends, working in both bull and bear markets
+# - Target: 60-120 total trades over 4 years (15-30/year) with 0.25 position sizing
 
-name = "1d_1wDonchian_1dEMA50_Volume_Breakout"
-timeframe = "1d"
+name = "6h_12hEMA50_RSI_MeanReversion"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,70 +27,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for Donchian channel calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 12h data for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Get 1d data for EMA calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # Calculate 12h EMA50
+    close_12h = df_12h['close'].values
+    ema_50 = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 1w Donchian Channel (20 periods)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Calculate 6h RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Donchian upper and lower bands
-    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate 1d EMA(50)
-    close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Align 12h EMA50 to 6h timeframe
+    ema_50_6h = align_htf_to_ltf(prices, df_12h, ema_50)
     
-    # Align 1w indicators to 1d timeframe
-    donchian_high_1d = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_1d = align_htf_to_ltf(prices, df_1w, donchian_low)
-    
-    # Align 1d EMA to 1d timeframe (no alignment needed as already 1d)
-    ema_50_1d = ema_50
-    
-    # Volume filters (1d timeframe)
+    # Volume filter (6h timeframe)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)
+    volume_ok = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if any critical value is NaN
-        if (np.isnan(donchian_high_1d[i]) or np.isnan(donchian_low_1d[i]) or 
-            np.isnan(ema_50_1d[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(ema_50_6h[i]) or np.isnan(rsi[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above 1w Donchian high with volume spike and price above 1d EMA50
-            if close[i] > donchian_high_1d[i] and volume_spike[i] and close[i] > ema_50_1d[i]:
+            # Long: RSI oversold (<30) + price above 12h EMA50 (uptrend) + volume confirmation
+            if rsi[i] < 30 and close[i] > ema_50_6h[i] and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 1w Donchian low with volume spike and price below 1d EMA50
-            elif close[i] < donchian_low_1d[i] and volume_spike[i] and close[i] < ema_50_1d[i]:
+            # Short: RSI overbought (>70) + price below 12h EMA50 (downtrend) + volume confirmation
+            elif rsi[i] > 70 and close[i] < ema_50_6h[i] and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below 1d EMA50 OR price breaks below 1w Donchian low
-            if close[i] < ema_50_1d[i] or close[i] < donchian_low_1d[i]:
+            # Exit long: RSI returns to neutral (>=40) OR trend turns bearish (price < EMA50)
+            if rsi[i] >= 40 or close[i] < ema_50_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above 1d EMA50 OR price breaks above 1w Donchian high
-            if close[i] > ema_50_1d[i] or close[i] > donchian_high_1d[i]:
+            # Exit short: RSI returns to neutral (<=60) OR trend turns bullish (price > EMA50)
+            if rsi[i] <= 60 or close[i] > ema_50_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
