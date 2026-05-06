@@ -1,23 +1,24 @@
+# 1. Hypothesis: 4h strategy using daily Pivot Points (High, Low, Close of prior day) with breakout and fade logic
+# - Fade (counter-trend) at S1/R1 levels when price reverses from these levels with volume confirmation
+# - Breakout (trend-following) at S2/R2 levels when price breaks through with volume expansion
+# - Uses daily Pivot Points calculated from prior day's OHLC
+# - Adds 4h EMA50 filter to only take trades in direction of 4h trend
+# - Designed to work in ranging markets (fades at S1/R1) and trending markets (breakouts at S2/R2)
+# - Target: 75-200 total trades over 4 years (19-50/year) with 0.25 position sizing
+# - BTC/ETH focus: Pivot points work well in ranging/mean-reverting markets (bear) and breakout markets (bull)
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1-day Donchian breakout with volume confirmation and chop filter
-# - Long when price breaks above 20-period 1d Donchian high with volume > 1.5x 20-period average
-# - Short when price breaks below 20-period 1d Donchian low with volume > 1.5x 20-period average
-# - Only take trades when 1d Choppiness Index > 61.8 (ranging market) for mean-reversion logic
-# - Uses 12h timeframe for execution but 1d for signal generation to reduce trade frequency
-# - Position size: 0.25 (25% of capital) to balance risk and reward
-# - Target: 50-150 total trades over 4 years (12-37/year) with strict entry conditions
-
-name = "12h_Donchian20_1dVol_Chop_Filter"
-timeframe = "12h"
+name = "4h_DailyPivot_S1R1_S2R2_4hEMA50_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,58 +26,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian and Choppiness calculation
+    # Get daily data for Pivot Point calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 20-period 1d Donchian channels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate Pivot Points for each day: based on prior day's OHLC
+    # Pivot = (high + low + close) / 3
+    # R1 = 2*Pivot - low
+    # S1 = 2*Pivot - high
+    # R2 = Pivot + (high - low)
+    # S2 = Pivot - (high - low)
+    prev_high = df_1d['high'].shift(1)
+    prev_low = df_1d['low'].shift(1)
+    prev_close = df_1d['close'].shift(1)
     
-    # Donchian high: highest high over last 20 periods
-    donchian_high = np.full(len(high_1d), np.nan)
-    for i in range(20, len(high_1d)):
-        donchian_high[i] = np.max(high_1d[i-20:i])
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    r1 = 2 * pivot - prev_low
+    s1 = 2 * pivot - prev_high
+    r2 = pivot + (prev_high - prev_low)
+    s2 = pivot - (prev_high - prev_low)
     
-    # Donchian low: lowest low over last 20 periods
-    donchian_low = np.full(len(low_1d), np.nan)
-    for i in range(20, len(low_1d)):
-        donchian_low[i] = np.min(low_1d[i-20:i])
+    # Align Pivot levels to 4h timeframe
+    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot.values)
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1.values)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1.values)
+    r2_4h = align_htf_to_ltf(prices, df_1d, r2.values)
+    s2_4h = align_htf_to_ltf(prices, df_1d, s2.values)
     
-    # Align Donchian levels to 12h timeframe
-    donchian_high_12h = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_12h = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # 4h EMA50 for trend filter
+    ema_50_4h = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 1d Choppiness Index (20-period)
-    # CHOP = 100 * log10(sum(ATR) / (max(high) - min(low))) / log10(n)
-    atr_1d = np.zeros(len(df_1d))
-    for i in range(1, len(df_1d)):
-        tr = max(
-            high_1d[i] - low_1d[i],
-            abs(high_1d[i] - df_1d['close'].values[i-1]),
-            abs(low_1d[i] - df_1d['close'].values[i-1])
-        )
-        atr_1d[i] = tr
-    
-    chop = np.full(len(df_1d), np.nan)
-    for i in range(20, len(df_1d)):
-        sum_atr = np.sum(atr_1d[i-20:i])
-        max_high = np.max(high_1d[i-20:i])
-        min_low = np.min(low_1d[i-20:i])
-        if max_high - min_low > 0:
-            chop[i] = 100 * np.log10(sum_atr) / np.log10(20) / np.log10(max_high - min_low)
-        else:
-            chop[i] = 50  # neutral when no range
-    
-    # Align Choppiness to 12h timeframe
-    chop_12h = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma_20 = np.full(len(volume), np.nan)
-    for i in range(20, len(volume)):
-        vol_ma_20[i] = np.mean(volume[i-20:i])
-    volume_filter = volume > (1.5 * vol_ma_20)
+    # Volume filters
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.3 * vol_ma_20)  # Volume confirmation
+    volume_expansion = volume > np.roll(volume, 1)  # Current volume > previous
+    volume_expansion[0] = False
     
     # Session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -85,42 +70,59 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(50, n):  # Start after warmup for EMA50
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(donchian_high_12h[i]) or np.isnan(donchian_low_12h[i]) or
-            np.isnan(chop_12h[i]) or np.isnan(volume_filter[i]) or
+        if (np.isnan(pivot_4h[i]) or np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or np.isnan(r2_4h[i]) or np.isnan(s2_4h[i]) or
+            np.isnan(ema_50_4h[i]) or np.isnan(volume_filter[i]) or np.isnan(volume_expansion[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Only trade in ranging market (Choppiness > 61.8)
-        if chop_12h[i] <= 61.8:
-            if position != 0:
+        if position == 0:
+            # Fade at S1/R1: counter-trend entry when price reverses from these levels
+            # Long fade at S1: price touches S1 and closes back above it
+            if close[i] <= s1_4h[i] * 1.001 and close[i] > s1_4h[i] and volume_filter[i]:
+                # Only take long fade if below 4h EMA50 (bearish context)
+                if close[i] < ema_50_4h[i]:
+                    signals[i] = 0.25
+                    position = 1
+            # Short fade at R1: price touches R1 and closes back below it
+            elif close[i] >= r1_4h[i] * 0.999 and close[i] < r1_4h[i] and volume_filter[i]:
+                # Only take short fade if above 4h EMA50 (bullish context)
+                if close[i] > ema_50_4h[i]:
+                    signals[i] = -0.25
+                    position = -1
+            # Breakout at S2/R2: trend-following entry when price breaks through
+            # Long breakout at R2: price breaks above R2 with volume expansion
+            elif close[i] > r2_4h[i] and volume_expansion[i]:
+                # Only take long breakout if above 4h EMA50 (bullish context)
+                if close[i] > ema_50_4h[i]:
+                    signals[i] = 0.25
+                    position = 1
+            # Short breakout at S2: price breaks below S2 with volume expansion
+            elif close[i] < s2_4h[i] and volume_expansion[i]:
+                # Only take short breakout if below 4h EMA50 (bearish context)
+                if close[i] < ema_50_4h[i]:
+                    signals[i] = -0.25
+                    position = -1
+        elif position == 1:
+            # Exit long: price reaches R1 (profit target) or breaks below S2 (stop)
+            if close[i] >= r1_4h[i] * 0.999:  # Take profit at R1
                 signals[i] = 0.0
                 position = 0
-            continue
-        
-        if position == 0:
-            # Long when price breaks above Donchian high with volume confirmation
-            if close[i] > donchian_high_12h[i] and volume_filter[i]:
-                signals[i] = 0.25
-                position = 1
-            # Short when price breaks below Donchian low with volume confirmation
-            elif close[i] < donchian_low_12h[i] and volume_filter[i]:
-                signals[i] = -0.25
-                position = -1
-        elif position == 1:
-            # Exit long: price re-enters Donchian channel (mean reversion)
-            if close[i] < donchian_high_12h[i]:
+            elif close[i] < s2_4h[i]:  # Stop loss if breaks below S2
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price re-enters Donchian channel (mean reversion)
-            if close[i] > donchian_low_12h[i]:
+            # Exit short: price reaches S1 (profit target) or breaks above R2 (stop)
+            if close[i] <= s1_4h[i] * 1.001:  # Take profit at S1
+                signals[i] = 0.0
+                position = 0
+            elif close[i] > r2_4h[i]:  # Stop loss if breaks above R2
                 signals[i] = 0.0
                 position = 0
             else:
