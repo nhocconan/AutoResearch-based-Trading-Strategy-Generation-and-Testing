@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
 # Long when price breaks above Camarilla R3 (1.0833*HIGH - 0.0833*LOW) AND price > 1d EMA34 (uptrend) AND volume > 2.0 * 20-period avg volume
 # Short when price breaks below Camarilla S3 (1.0833*LOW - 0.0833*HIGH) AND price < 1d EMA34 (downtrend) AND volume > 2.0 * 20-period avg volume
 # Exit with ATR-based trailing stop: signal→0 when long and price < highest_high - 2.5 * ATR OR short and price > lowest_low + 2.5 * ATR
 # Uses discrete sizing 0.25 to manage drawdown (BTC -77% in 2022 → ~19.25% loss at 0.25 exposure)
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
-# Camarilla provides precise pivot levels, 1d EMA34 filters primary trend, high volume threshold ensures conviction
+# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
+# Camarilla R3/S3 levels are stronger reversal points than R1/S1, 1d EMA34 filters primary trend, high volume threshold ensures conviction
 # Works in bull via breakout continuation, works in bear via mean reversion at extreme levels
 
-name = "12h_Camarilla_R3S3_1dEMA34_Volume_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dEMA34_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,7 +28,7 @@ def generate_signals(prices):
     
     # Get 1d data ONCE before loop for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     close_1d = df_1d['close'].values
     
@@ -36,7 +36,7 @@ def generate_signals(prices):
     close_1d_series = pd.Series(close_1d)
     ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate 12h ATR(14) for stoploss
+    # Calculate 4h ATR(14) for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -56,7 +56,7 @@ def generate_signals(prices):
     camarilla_r3 = 1.0833 * np.roll(high, 1) - 0.0833 * np.roll(low, 1)
     camarilla_s3 = 1.0833 * np.roll(low, 1) - 0.0833 * np.roll(high, 1)
     
-    # Align HTF indicators to 12h timeframe (wait for completed HTF bar)
+    # Align HTF indicators to 4h timeframe (wait for completed HTF bar)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
