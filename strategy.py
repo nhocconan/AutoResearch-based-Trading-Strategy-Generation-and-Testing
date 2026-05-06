@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 12h Supertrend for direction and volume breakout for entry
-# Long when: price breaks above 2-period high with volume > 1.5x 20-period average AND 12h Supertrend is bullish
-# Short when: price breaks below 2-period low with volume > 1.5x 20-period average AND 12h Supertrend is bearish
-# Supertrend provides robust trend filtering to avoid counter-trend trades
-# Volume confirms breakout strength to filter false breakouts
-# Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
+# Hypothesis: 4h strategy using 1-day Williams Alligator with momentum confirmation
+# Long when Alligator mouth opens upward (Jaw < Teeth < Lips) + close > Teeth + volume > 1.5x average
+# Short when Alligator mouth opens downward (Jaw > Teeth > Lips) + close < Teeth + volume > 1.5x average
+# Alligator identifies trend direction and strength. Mouth open indicates strong trend.
+# Volume confirms momentum behind the move. Works in bull/bear markets by following established trends.
+# Target: 20-40 trades per year (80-160 over 4 years) with 0.25 position sizing.
 
-name = "6h_12hSupertrend_VolumeBreakout_v1"
-timeframe = "6h"
+name = "4h_1dWilliamsAlligator_Momentum_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,66 +24,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 12h Supertrend ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Calculate 1-day Williams Alligator (SMMA) ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_12h) < 10:
+    if len(df_1d) < 13:
         return np.zeros(n)
     
-    # Calculate ATR for Supertrend
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Williams Alligator uses Smoothed Moving Average (SMMA)
+    # Jaw: 13-period SMMA, 8 bars ahead
+    # Teeth: 8-period SMMA, 5 bars ahead
+    # Lips: 5-period SMMA, 3 bars ahead
     
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
+    def smma(arr, period):
+        """Smoothed Moving Average"""
+        result = np.full_like(arr, np.nan, dtype=np.float64)
+        if len(arr) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: (prev*(period-1) + current) / period
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    atr_period = 10
-    atr = np.zeros_like(tr)
-    atr[atr_period-1] = np.mean(tr[:atr_period])
-    for i in range(atr_period, len(tr)):
-        atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
+    close_1d = df_1d['close'].values
     
-    # Supertrend parameters
-    multiplier = 3.0
+    jaw = smma(close_1d, 13)
+    teeth = smma(close_1d, 8)
+    lips = smma(close_1d, 5)
     
-    # Basic upper and lower bands
-    hl2 = (high_12h + low_12h) / 2
-    upper_band = hl2 + (multiplier * atr)
-    lower_band = hl2 - (multiplier * atr)
+    # Shift jaws forward as per Alligator definition
+    jaw = np.roll(jaw, 8)
+    teeth = np.roll(teeth, 5)
+    lips = np.roll(lips, 3)
     
-    # Initialize Supertrend
-    supertrend = np.zeros_like(close_12h)
-    uptrend = np.ones_like(close_12h, dtype=bool)
-    
-    for i in range(1, len(close_12h)):
-        if close_12h[i] > upper_band[i-1]:
-            uptrend[i] = True
-        elif close_12h[i] < lower_band[i-1]:
-            uptrend[i] = False
-        else:
-            uptrend[i] = uptrend[i-1]
-            if uptrend[i] and lower_band[i] < lower_band[i-1]:
-                lower_band[i] = lower_band[i-1]
-            if not uptrend[i] and upper_band[i] > upper_band[i-1]:
-                upper_band[i] = upper_band[i-1]
-        
-        supertrend[i] = lower_band[i] if uptrend[i] else upper_band[i]
-    
-    # Align 12h Supertrend to 6h timeframe
-    supertrend_aligned = align_htf_to_ltf(prices, df_12h, supertrend)
-    uptrend_aligned = align_htf_to_ltf(prices, df_12h, uptrend.astype(float))
+    # Align 1-day Alligator lines to 4h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
     
     # Volume confirmation: >1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma_20)
-    
-    # Breakout levels: 2-period high/low
-    high_2 = pd.Series(high).rolling(window=2, min_periods=2).max().values
-    low_2 = pd.Series(low).rolling(window=2, min_periods=2).min().values
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -92,10 +74,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(supertrend_aligned[i]) or np.isnan(uptrend_aligned[i]) or 
-            np.isnan(volume_filter[i]) or np.isnan(high_2[i]) or np.isnan(low_2[i]) or
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(volume_filter[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -103,24 +85,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long breakout: price breaks above 2-period high with volume and uptrend
-            if close[i] > high_2[i] and volume_filter[i] and uptrend_aligned[i] > 0.5:
+            # Long: Alligator mouth opens upward (Jaw < Teeth < Lips) + momentum + volume
+            if (jaw_aligned[i] < teeth_aligned[i] < lips_aligned[i] and 
+                close[i] > teeth_aligned[i] and volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short breakout: price breaks below 2-period low with volume and downtrend
-            elif close[i] < low_2[i] and volume_filter[i] and uptrend_aligned[i] < 0.5:
+            # Short: Alligator mouth opens downward (Jaw > Teeth > Lips) + momentum + volume
+            elif (jaw_aligned[i] > teeth_aligned[i] > lips_aligned[i] and 
+                  close[i] < teeth_aligned[i] and volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below 2-period low or trend turns bearish
-            if close[i] < low_2[i] or uptrend_aligned[i] < 0.5:
+            # Exit long: mouth closes or reverses
+            if not (jaw_aligned[i] < teeth_aligned[i] < lips_aligned[i]) or close[i] < teeth_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above 2-period high or trend turns bullish
-            if close[i] > high_2[i] or uptrend_aligned[i] > 0.5:
+            # Exit short: mouth closes or reverses
+            if not (jaw_aligned[i] > teeth_aligned[i] > lips_aligned[i]) or close[i] > teeth_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
