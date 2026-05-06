@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using weekly pivot points with volume confirmation and trend filter
-# Weekly pivots provide key weekly levels for position trading
-# Breakout above R1 or below S1 with volume > 2x 20-period average indicates strong momentum
-# Trend filter: 50-period EMA on 12h timeframe to avoid counter-trend trades
-# Works in bull/bear markets: breakouts capture trends, reversals capture pullbacks within trend
-# Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
+# Hypothesis: 1h strategy using 4h Donchian channel breakouts with volume confirmation
+# and 1d trend filter (1d EMA 50). Breakouts above upper Donchian(20) or below lower
+# Donchian(20) on the 4h timeframe, confirmed by volume > 1.5x 20-period average
+# and aligned with 1d trend (price above/below 1d EMA 50). Uses 1h only for precise
+# entry timing. Designed to work in both bull and bear markets by capturing
+# directional breaks with volume confirmation. Target: 60-150 total trades over 4 years
+# (15-37/year) with position size 0.20.
 
-name = "12h_WeeklyPivot_R1S2_VolumeTrendFilter_v1"
-timeframe = "12h"
+name = "1h_Donchian20_4hBreakout_Volume_1dTrend"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,43 +25,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate weekly pivot points ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Calculate 4h Donchian channel (20-period) ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
     
-    if len(df_1w) < 2:
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Previous week's OHLC for pivot calculation
-    prev_close = df_1w['close'].shift(1).values
-    prev_high = df_1w['high'].shift(1).values
-    prev_low = df_1w['low'].shift(1).values
+    # 4h Donchian upper and lower bands
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # Pivot point calculation
-    # Pivot = (previous high + previous low + previous close) / 3
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_ = prev_high - prev_low
+    # Rolling max/min for Donchian channels
+    upper_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lower_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Support and Resistance levels
-    r1 = pivot + (range_ * 1.0)
-    r2 = pivot + (range_ * 2.0)
-    s1 = pivot - (range_ * 1.0)
-    s2 = pivot - (range_ * 2.0)
+    # Align 4h Donchian levels to 1h timeframe
+    upper_20_aligned = align_htf_to_ltf(prices, df_4h, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_4h, lower_20)
     
-    # Align weekly levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    # Calculate 1d EMA 50 for trend filter ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Volume confirmation: >2x 20-period average (higher threshold to reduce trades)
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume confirmation: >1.5x 20-period average (moderate threshold to control trades)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (2.0 * vol_ma_20)
-    
-    # Trend filter: 50-period EMA on 12h timeframe
-    close_series = pd.Series(close)
-    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend = close > ema_50
-    downtrend = close < ema_50
+    volume_filter = volume > (1.5 * vol_ma_20)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -71,8 +66,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(s2_aligned[i]) or np.isnan(volume_filter[i]) or np.isnan(ema_50[i]) or
+        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_filter[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -80,35 +75,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long breakout: price breaks above R1 with volume confirmation and uptrend
-            if close[i] > r1_aligned[i] and volume_filter[i] and uptrend[i]:
-                signals[i] = 0.25
+            # Long breakout: price breaks above 4h upper Donchian with volume and 1d uptrend
+            if close[i] > upper_20_aligned[i] and volume_filter[i] and close[i] > ema_50_1d_aligned[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short breakout: price breaks below S1 with volume confirmation and downtrend
-            elif close[i] < s1_aligned[i] and volume_filter[i] and downtrend[i]:
-                signals[i] = -0.25
-                position = -1
-            # Long reversal: price rejects S2 with volume confirmation (bounce from support)
-            elif close[i] < s2_aligned[i] and close[i] > s2_aligned[i] * 0.995 and volume_filter[i] and uptrend[i]:
-                signals[i] = 0.25
-                position = 1
-            # Short reversal: price rejects R2 with volume confirmation (rejection from resistance)
-            elif close[i] > r2_aligned[i] and close[i] < r2_aligned[i] * 1.005 and volume_filter[i] and downtrend[i]:
-                signals[i] = -0.25
+            # Short breakout: price breaks below 4h lower Donchian with volume and 1d downtrend
+            elif close[i] < lower_20_aligned[i] and volume_filter[i] and close[i] < ema_50_1d_aligned[i]:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below S1 (failed support) or reaches R2 (take profit)
-            if close[i] < s1_aligned[i] or close[i] > r2_aligned[i]:
+            # Exit long: price breaks below 4h lower Donchian (failed breakout) or reaches opposite band
+            if close[i] < lower_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: price breaks above R1 (failed resistance) or reaches S2 (take profit)
-            if close[i] > r1_aligned[i] or close[i] < s2_aligned[i]:
+            # Exit short: price breaks above 4h upper Donchian (failed breakdown) or reaches opposite band
+            if close[i] > upper_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
