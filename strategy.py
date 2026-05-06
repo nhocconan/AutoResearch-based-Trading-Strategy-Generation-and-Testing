@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1d volume-weighted average price (VWAP) and volume imbalance
-# - Long when price closes above 1d VWAP with increasing volume and bullish volume imbalance
-# - Short when price closes below 1d VWAP with increasing volume and bearish volume imbalance
-# - Exit when price crosses back below/above 1d VWAP
-# - Uses volume-weighted price to capture institutional activity and volume imbalance to detect smart money
-# - Designed to work in both bull and bear markets by following volume-confirmed trends
+# Hypothesis: 12h strategy using 1d RSI mean reversion with volume spike and price position relative to 1d EMA50
+# - Long when price is below EMA50, RSI < 30 (oversold), and volume spike occurs
+# - Short when price is above EMA50, RSI > 70 (overbought), and volume spike occurs
+# - Exit when price crosses back above/below EMA50
+# - Designed to capture mean-reversion bounces from the daily trend in both bull and bear markets
 # - Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
 
-name = "6h_VWAP_VolumeImbalance_1d"
-timeframe = "6h"
+name = "12h_RSI_MeanReversion_1dEMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,66 +24,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for VWAP calculation
+    # Get 1d data for RSI and EMA calculations
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d typical price and cumulative values for VWAP
-    typical_price_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    tpv_1d = typical_price_1d * df_1d['volume']
+    close_1d = df_1d['close'].values
     
-    # Cumulative sums for VWAP calculation
-    cum_tpv_1d = np.cumsum(tpv_1d.values)
-    cum_volume_1d = np.cumsum(df_1d['volume'].values)
+    # Calculate 1d RSI (14-period)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Avoid division by zero
-    vwap_1d = np.where(cum_volume_1d != 0, cum_tpv_1d / cum_volume_1d, np.nan)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_14 = 100 - (100 / (1 + rs))
     
-    # Align 1d VWAP to 6h timeframe
-    vwap_1d_6h = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Volume imbalance: (buy volume - sell volume) / total volume
-    # Approximate using price close relative to VWAP and volume
-    vw_diff = close - vwap_1d_6h
-    volume_imbalance = np.where(vw_diff > 0, volume, -volume)
-    volume_imbalance_ma = pd.Series(volume_imbalance).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Align 1d indicators to 12h timeframe
+    rsi_12h = align_htf_to_ltf(prices, df_1d, rsi_14)
+    ema_50_12h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume confirmation: increasing volume trend
-    vol_ma_10 = pd.Series(volume).ewm(span=10, adjust=False, min_periods=10).mean().values
-    vol_increasing = volume > vol_ma_10
+    # Volume filters (12h timeframe)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma_20)  # Volume confirmation
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):  # Start after warmup
         # Skip if any critical value is NaN
-        if (np.isnan(vwap_1d_6h[i]) or np.isnan(volume_imbalance_ma[i]) or 
-            np.isnan(vol_increasing[i])):
+        if (np.isnan(rsi_12h[i]) or np.isnan(ema_50_12h[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above VWAP with bullish volume imbalance and increasing volume
-            if close[i] > vwap_1d_6h[i] and volume_imbalance_ma[i] > 0 and vol_increasing[i]:
+            # Long: price below EMA50, RSI oversold, volume spike
+            if close[i] < ema_50_12h[i] and rsi_12h[i] < 30 and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below VWAP with bearish volume imbalance and increasing volume
-            elif close[i] < vwap_1d_6h[i] and volume_imbalance_ma[i] < 0 and vol_increasing[i]:
+            # Short: price above EMA50, RSI overbought, volume spike
+            elif close[i] > ema_50_12h[i] and rsi_12h[i] > 70 and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below VWAP
-            if close[i] < vwap_1d_6h[i]:
+            # Exit long: price crosses above EMA50
+            if close[i] > ema_50_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above VWAP
-            if close[i] > vwap_1d_6h[i]:
+            # Exit short: price crosses below EMA50
+            if close[i] < ema_50_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
