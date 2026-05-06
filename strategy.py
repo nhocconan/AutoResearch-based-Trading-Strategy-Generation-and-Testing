@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d RSI extremes with 1w Supertrend trend filter and volume confirmation
-# Long when 1d RSI < 30 (oversold) AND 1w Supertrend = bullish (price > Supertrend) AND volume > 1.8 * avg_volume(20) on 12h
-# Short when 1d RSI > 70 (overbought) AND 1w Supertrend = bearish (price < Supertrend) AND volume > 1.8 * avg_volume(20) on 12h
-# Exit when 1d RSI crosses back through 50 (mean reversion to midpoint)
+# Hypothesis: 4h strategy using 1d Camarilla pivot (S3/R3) breakout with 1w EMA34 trend filter and volume spike confirmation
+# Long when price breaks above 1d Camarilla R3 AND 1w EMA34 > EMA34 previous (uptrend) AND volume > 2.0 * avg_volume(20) on 4h
+# Short when price breaks below 1d Camarilla S3 AND 1w EMA34 < EMA34 previous (downtrend) AND volume > 2.0 * avg_volume(20) on 4h
+# Exit when price crosses back through 1d Camarilla pivot point (mean reversion to center)
 # Uses discrete sizing 0.25 to balance return and risk
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
-# RSI extremes provide high-probability reversal points in ranging markets
-# 1w Supertrend filter ensures we trade with the dominant weekly trend
-# Volume spike confirmation (1.8x) validates reversal strength while limiting overtrading
-# Works in both bull (buy oversold dips) and bear (sell overbought rallies) markets
+# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
+# Camarilla S3/R3 provides high-probability reversal points in ranging markets
+# 1w EMA34 trend filter ensures we trade with the dominant weekly trend
+# Volume spike confirmation (2.0x) validates breakout strength while limiting overtrading
+# Works in both bull (buy breakouts above R3 in uptrend) and bear (sell breakdowns below S3 in downtrend)
 
-name = "12h_1dRSI_Extreme_1wSupertrend_VolumeConfirm"
-timeframe = "12h"
+name = "4h_Camarilla_S3R3_Breakout_1wEMA34_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,85 +28,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for RSI calculation
+    # Get 1d data ONCE before loop for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:  # Need at least 14 completed 1d bars for RSI
+    if len(df_1d) < 2:  # Need at least 2 completed 1d bars for pivot calculation
         return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d RSI(14)
-    delta = pd.Series(close_1d).diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d = rsi_1d.values
-    # Handle division by zero (when avg_loss == 0)
-    rsi_1d = np.where(avg_loss.values == 0, 100, rsi_1d)
-    rsi_1d = np.where(np.isnan(rsi_1d), 50, rsi_1d)
+    # Calculate 1d Camarilla pivot levels
+    # Pivot point = (High + Low + Close) / 3
+    pp_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Range = High - Low
+    range_1d = high_1d - low_1d
+    # Camarilla levels: S3 = PP - 1.1 * Range / 2, R3 = PP + 1.1 * Range / 2
+    s3_1d = pp_1d - 1.1 * range_1d / 2.0
+    r3_1d = pp_1d + 1.1 * range_1d / 2.0
+    # Pivot point for exit (mean reversion target)
+    pivot_1d = pp_1d
     
-    # Align 1d RSI to 12h timeframe (wait for completed 1d bar)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Align 1d Camarilla levels to 4h timeframe (wait for completed 1d bar)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     
-    # Get 1w data ONCE before loop for Supertrend trend filter
+    # Get 1w data ONCE before loop for EMA34 trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:  # Need at least 10 completed weekly bars for Supertrend
+    if len(df_1w) < 34:  # Need at least 34 completed weekly bars for EMA34
         return np.zeros(n)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Calculate 1w Supertrend(10, 3.0)
-    atr_period = 10
-    atr_mult = 3.0
+    # Calculate 1w EMA34
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # True Range
-    tr1 = pd.Series(high_1w) - pd.Series(low_1w)
-    tr2 = abs(pd.Series(high_1w) - pd.Series(close_1w).shift(1))
-    tr3 = abs(pd.Series(low_1w) - pd.Series(close_1w).shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.ewm(alpha=1/atr_period, adjust=False, min_periods=atr_period).mean()
-    
-    # Basic Upper and Lower Bands
-    basic_ub = (pd.Series(high_1w) + pd.Series(low_1w)) / 2 + atr_mult * atr
-    basic_lb = (pd.Series(high_1w) + pd.Series(low_1w)) / 2 - atr_mult * atr
-    
-    # Final Upper and Lower Bands
-    final_ub = basic_ub.copy()
-    final_lb = basic_lb.copy()
-    for i in range(1, len(basic_ub)):
-        if basic_ub.iloc[i] < final_ub.iloc[i-1] or close_1w.iloc[i-1] > final_ub.iloc[i-1]:
-            final_ub.iloc[i] = basic_ub.iloc[i]
-        else:
-            final_ub.iloc[i] = final_ub.iloc[i-1]
-            
-        if basic_lb.iloc[i] > final_lb.iloc[i-1] or close_1w.iloc[i-1] < final_lb.iloc[i-1]:
-            final_lb.iloc[i] = basic_lb.iloc[i]
-        else:
-            final_lb.iloc[i] = final_lb.iloc[i-1]
-    
-    # Supertrend
-    supertrend = pd.Series(index=close_1w.index, dtype=float)
-    for i in range(len(supertrend)):
-        if i == 0:
-            supertrend.iloc[i] = 0.0  # undefined
-        elif supertrend.iloc[i-1] == final_ub.iloc[i-1]:
-            supertrend.iloc[i] = final_ub.iloc[i] if close_1w.iloc[i] <= final_ub.iloc[i] else final_lb.iloc[i]
-        else:
-            supertrend.iloc[i] = final_lb.iloc[i] if close_1w.iloc[i] >= final_lb.iloc[i-1] else final_ub.iloc[i]
-    
-    # Supertrend trend: 1 = bullish (price > Supertrend), -1 = bearish (price < Supertrend)
-    supertrend_trend = np.where(close_1w > supertrend.values, 1, -1)
-    supertrend_trend = np.where(np.isnan(supertrend_trend), 0, supertrend_trend)
-    
-    # Align 1w Supertrend trend to 12h timeframe (wait for completed 1w bar)
-    supertrend_trend_aligned = align_htf_to_ltf(prices, df_1w, supertrend_trend)
-    
-    # Calculate volume confirmation: volume > 1.8 * 20-period average volume on 12h
+    # Calculate volume confirmation: volume > 2.0 * 20-period average volume on 4h
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.8 * avg_volume_20)
+    volume_confirm = volume > (2.0 * avg_volume_20)
     
     # Session filter: 08-20 UTC (pre-compute for efficiency)
     hours = prices.index.hour
@@ -117,36 +75,36 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN or outside session
-        if (np.isnan(rsi_aligned[i]) or np.isnan(supertrend_trend_aligned[i]) or 
-            np.isnan(avg_volume_20[i]) or not in_session[i]):
+        if (np.isnan(s3_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(pivot_aligned[i]) or 
+            np.isnan(ema_34_1w_aligned[i]) or np.isnan(avg_volume_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: RSI < 30 (oversold), Supertrend bullish, volume spike, in session
-            if (rsi_aligned[i] < 30 and 
-                supertrend_trend_aligned[i] == 1 and 
+            # Long: price breaks above R3, 1w EMA34 > EMA34 previous (uptrend), volume spike, in session
+            if (close[i] > r3_aligned[i] and 
+                ema_34_1w_aligned[i] > ema_34_1w_aligned[i-1] and 
                 volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI > 70 (overbought), Supertrend bearish, volume spike, in session
-            elif (rsi_aligned[i] > 70 and 
-                  supertrend_trend_aligned[i] == -1 and 
+            # Short: price breaks below S3, 1w EMA34 < EMA34 previous (downtrend), volume spike, in session
+            elif (close[i] < s3_aligned[i] and 
+                  ema_34_1w_aligned[i] < ema_34_1w_aligned[i-1] and 
                   volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: RSI crosses back above 50 (mean reversion)
-            if rsi_aligned[i] > 50:
+            # Exit long: price crosses back below pivot point (mean reversion)
+            if close[i] < pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: RSI crosses back below 50 (mean reversion)
-            if rsi_aligned[i] < 50:
+            # Exit short: price crosses back above pivot point (mean reversion)
+            if close[i] > pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
