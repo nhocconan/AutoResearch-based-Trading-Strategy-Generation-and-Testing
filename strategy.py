@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h EMA(50) trend filter and volume confirmation
-# Breakout above 4h Donchian upper channel or below lower channel with volume > 1.5x 20-period average
-# Trend filter: 12h EMA(50) to ensure trades align with higher timeframe trend
-# Volume confirmation reduces false breakouts
-# Works in bull/bear markets: breakouts capture trends, trend filter avoids counter-trend trades
-# Target: 75-200 total trades over 4 years (19-50/year) with 0.25 position sizing
+# Hypothesis: 4h strategy combining daily RSI mean reversion with weekly trend filter
+# Uses weekly EMA to determine market direction and daily RSI for entry timing
+# In uptrend (price above weekly EMA), look for RSI oversold (<30) for long entries
+# In downtrend (price below weekly EMA), look for RSI overbought (>70) for short entries
+# Volume confirmation (>1.5x 20-period average) filters false signals
+# Weekly trend filter reduces whipsaw in ranging markets
+# Target: 20-50 trades/year with 0.25 position sizing to manage drawdown
 
-name = "4h_Donchian20_12hEMA50_Volume_v1"
+name = "4h_WeeklyTrend_DailyRSI_Volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,22 +25,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 4h Donchian channels (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate weekly EMA for trend filter ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 12h EMA(50) trend filter ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    uptrend_12h = close > ema_50_12h_aligned
-    downtrend_12h = close < ema_50_12h_aligned
+    # Weekly EMA(20) for trend direction
+    weekly_close = df_1w['close'].values
+    weekly_ema = pd.Series(weekly_close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    weekly_ema_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema)
+    
+    # Calculate daily RSI for mean reversion signals ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    
+    if len(df_1d) < 14:
+        return np.zeros(n)
+    
+    # Daily RSI(14)
+    daily_close = df_1d['close'].values
+    delta = np.diff(daily_close, prepend=daily_close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
     # Volume confirmation: >1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -54,33 +67,36 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_filter[i]) or
-            not session_filter[i]):
+        if (np.isnan(weekly_ema_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+            np.isnan(volume_filter[i]) or not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long breakout: price breaks above Donchian high with volume and uptrend
-            if close[i] > donchian_high[i] and volume_filter[i] and uptrend_12h[i]:
+            # Long entry: weekly uptrend + daily RSI oversold + volume confirmation
+            if (close[i] > weekly_ema_aligned[i] and 
+                rsi_aligned[i] < 30 and 
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short breakout: price breaks below Donchian low with volume and downtrend
-            elif close[i] < donchian_low[i] and volume_filter[i] and downtrend_12h[i]:
+            # Short entry: weekly downtrend + daily RSI overbought + volume confirmation
+            elif (close[i] < weekly_ema_aligned[i] and 
+                  rsi_aligned[i] > 70 and 
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below Donchian low (failed breakout) or reaches opposite channel (take profit)
-            if close[i] < donchian_low[i] or close[i] > donchian_high[i]:
+            # Exit long: RSI overbought or price breaks below weekly EMA
+            if rsi_aligned[i] > 70 or close[i] < weekly_ema_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above Donchian high (failed breakdown) or reaches opposite channel (take profit)
-            if close[i] > donchian_high[i] or close[i] < donchian_low[i]:
+            # Exit short: RSI oversold or price breaks above weekly EMA
+            if rsi_aligned[i] < 30 or close[i] > weekly_ema_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
