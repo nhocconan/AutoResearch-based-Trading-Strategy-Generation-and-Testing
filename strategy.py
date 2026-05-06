@@ -3,16 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using daily Volume Weighted Average Price (VWAP) for trend bias,
-# combined with 4h Donchian breakout and volume confirmation.
-# Daily VWAP provides institutional trend bias: price above VWAP = bullish bias, below = bearish.
-# Donchian(20) breakout captures momentum in direction of VWAP trend.
-# Volume confirmation (>1.5x 20-period average) filters false breakouts.
-# Works in bull/bear markets: VWAP adapts to trend, breakouts capture momentum.
-# Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing.
+# Hypothesis: 6h strategy combining 12h Donchian breakout with 1d trend filter
+# Uses 12h Donchian(20) breakout for entry timing, confirmed by 1d EMA(50) trend
+# Volume confirmation >1.5x 20-period average to filter weak breakouts
+# Works in bull/bear: breaks capture trends, trend filter avoids counter-trend trades
+# Target: 80-150 total trades over 4 years (20-37/year) with 0.28 position sizing
 
-name = "4h_DailyVWAP_DonchianBreakout_Volume_v1"
-timeframe = "4h"
+name = "6h_Donchian20_12h_1dTrend_VolumeFilter_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,30 +23,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate daily VWAP ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Calculate 12h Donchian channels ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_1d) < 1:
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Typical price for VWAP calculation
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    # VWAP = cumulative(typical_price * volume) / cumulative(volume)
-    vwap = (typical_price * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
-    vwap_values = vwap.values
+    # 12h Donchian(20) - upper and lower bands
+    donch_high = pd.Series(df_12h['high']).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(df_12h['low']).rolling(window=20, min_periods=20).min().values
     
-    # Align daily VWAP to 4h timeframe
-    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap_values)
+    # Align 12h Donchian levels to 6h timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_12h, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_12h, donch_low)
     
-    # Donchian channels (20-period) on 4h
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate 1d EMA(50) trend filter ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    uptrend = close > ema_50_1d_aligned
+    downtrend = close < ema_50_1d_aligned
     
     # Volume confirmation: >1.5x 20-period average
-    volume_series = pd.Series(volume)
-    vol_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma_20)
     
     # Pre-compute session filter (08-20 UTC)
@@ -58,10 +59,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(vwap_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(volume_filter[i]) or np.isnan(vol_ma_20[i]) or
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_filter[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -69,27 +70,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian high AND above daily VWAP (bullish bias) with volume
-            if close[i] > donchian_high[i] and close[i] > vwap_aligned[i] and volume_filter[i]:
-                signals[i] = 0.25
+            # Long entry: price breaks above 12h Donchian high with volume and uptrend
+            if close[i] > donch_high_aligned[i] and volume_filter[i] and uptrend[i]:
+                signals[i] = 0.28
                 position = 1
-            # Short: price breaks below Donchian low AND below daily VWAP (bearish bias) with volume
-            elif close[i] < donchian_low[i] and close[i] < vwap_aligned[i] and volume_filter[i]:
-                signals[i] = -0.25
+            # Short entry: price breaks below 12h Donchian low with volume and downtrend
+            elif close[i] < donch_low_aligned[i] and volume_filter[i] and downtrend[i]:
+                signals[i] = -0.28
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below Donchian low (trend reversal) or below VWAP (bias change)
-            if close[i] < donchian_low[i] or close[i] < vwap_aligned[i]:
+            # Exit long: price breaks below 12h Donchian low (failed breakout)
+            if close[i] < donch_low_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.28
         elif position == -1:
-            # Exit short: price breaks above Donchian high (trend reversal) or above VWAP (bias change)
-            if close[i] > donchian_high[i] or close[i] > vwap_aligned[i]:
+            # Exit short: price breaks above 12h Donchian high (failed breakdown)
+            if close[i] > donch_high_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.28
     
     return signals
