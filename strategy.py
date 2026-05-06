@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Choppiness Index regime filter with 1d Williams %R for mean reversion entries
-# Uses 12h Choppiness Index to identify ranging markets (CHOP > 61.8) where price reverts to mean
-# 1d Williams %R identifies overbought/oversold conditions for entry in ranging markets
-# Volume confirmation (>1.5x 20-bar average) ensures participation
-# Fixed position size 0.25 to limit risk and reduce fee churn
-# Works in both bull/bear: ranging markets occur in all regimes, mean reversion captures reversals
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
+# Uses 12h Donchian channels for breakout structure, 1d EMA50 for trend alignment (reduces whipsaw)
+# Volume spike (>2.0x 20-bar average) confirms breakout strength
+# ATR-based trailing stop via signal=0 when price retraces 30% of ATR from extreme
+# Discrete sizing 0.30 to balance profit potential and fee drag; target 75-150 total trades over 4 years (19-37/year)
+# Works in both bull/bear: breakouts capture momentum, trend filter avoids counter-trend traps, volume filter ensures participation
 
-name = "12h_Chop61_8_WilliamsR_1d_VolumeConfirm_v1"
+name = "12h_Donchian20_1dEMA50_VolumeConfirm_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -27,95 +27,93 @@ def generate_signals(prices):
     # Calculate HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 14:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Williams %R (14-period)
-    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14)
-    # Handle division by zero when high == low
-    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)
+    # Calculate 1d EMA50 trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 12h Choppiness Index (14-period)
+    # Calculate ATR(14) for stoploss
+    tr1 = np.abs(high[1:] - low[1:])
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate volume filter (>2.0x 20-bar average)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (2.0 * vol_ma_20)
+    
+    # Calculate 12h Donchian(20) channels
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 14:
+    if len(df_12h) < 20:
         return np.zeros(n)
     high_12h = df_12h['high'].values
     low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
     
-    # True Range
-    tr1 = np.abs(high_12h[1:] - low_12h[1:])
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
-    tr_12h = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
-    
-    # Sum of TRUE ranges over 14 periods
-    sum_tr_14 = pd.Series(atr_12h).rolling(window=14, min_periods=14).sum().values
-    
-    # Highest high and lowest low over 14 periods
-    hh_14 = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
-    ll_14 = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
-    
-    # Choppiness Index: 100 * log10(sum_tr_14 / (hh_14 - ll_14)) / log10(14)
-    # Avoid division by zero and log of zero/negative
-    range_14 = hh_14 - ll_14
-    chop_raw = np.where(range_14 > 0, sum_tr_14 / range_14, 1.0)
-    chop_raw = np.where(chop_raw > 0, chop_raw, 1.0)
-    chop = 100 * np.log10(chop_raw) / np.log10(14)
+    # Donchian upper/lower: highest high/lowest low of last 20 periods
+    highest_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
     # Align HTF indicators to 12h timeframe (primary)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    chop_aligned = align_htf_to_ltf(prices, df_12h, chop)
-    
-    # Calculate volume confirmation (>1.5x 20-bar average)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_20)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    highest_high_aligned = align_htf_to_ltf(prices, df_12h, highest_high)
+    lowest_low_aligned = align_htf_to_ltf(prices, df_12h, lowest_low)
     
     # Pre-compute session filter (08-20 UTC)
-    hours = prices.index.hour
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    long_extreme = 0.0
+    short_extreme = 0.0
     
     for i in range(100, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(chop_aligned[i]) or 
-            np.isnan(volume_filter[i]) or not session_filter[i]):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(highest_high_aligned[i]) or 
+            np.isnan(lowest_low_aligned[i]) or np.isnan(atr[i]) or np.isnan(volume_filter[i]) or
+            not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                long_extreme = 0.0
+                short_extreme = 0.0
             continue
         
         if position == 0:
-            # Long entry: Williams %R oversold (< -80) AND ranging market (CHOP > 61.8) AND volume confirmation
-            if williams_r_aligned[i] < -80 and chop_aligned[i] > 61.8 and volume_filter[i]:
-                signals[i] = 0.25
+            # Long breakout: price > upper channel AND uptrend (price > EMA50) AND volume spike
+            if close[i] > highest_high_aligned[i] and close[i] > ema50_1d_aligned[i] and volume_filter[i]:
+                signals[i] = 0.30
                 position = 1
-            # Short entry: Williams %R overbought (> -20) AND ranging market (CHOP > 61.8) AND volume confirmation
-            elif williams_r_aligned[i] > -20 and chop_aligned[i] > 61.8 and volume_filter[i]:
-                signals[i] = -0.25
+                long_extreme = close[i]
+            # Short breakdown: price < lower channel AND downtrend (price < EMA50) AND volume spike
+            elif close[i] < lowest_low_aligned[i] and close[i] < ema50_1d_aligned[i] and volume_filter[i]:
+                signals[i] = -0.30
                 position = -1
+                short_extreme = close[i]
         elif position == 1:
-            # Exit long: Williams %R returns to neutral (> -50) OR CHOP < 50 (trending)
-            if williams_r_aligned[i] > -50 or chop_aligned[i] < 50:
+            # Update long extreme
+            long_extreme = max(long_extreme, close[i])
+            # Exit long: price retraces 30% of ATR from extreme (tighter stop for 12h)
+            if close[i] <= long_extreme - 0.3 * atr[i]:
                 signals[i] = 0.0
                 position = 0
+                long_extreme = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit short: Williams %R returns to neutral (< -50) OR CHOP < 50 (trending)
-            if williams_r_aligned[i] < -50 or chop_aligned[i] < 50:
+            # Update short extreme
+            short_extreme = min(short_extreme, close[i])
+            # Exit short: price retraces 30% of ATR from extreme
+            if close[i] >= short_extreme + 0.3 * atr[i]:
                 signals[i] = 0.0
                 position = 0
+                short_extreme = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
