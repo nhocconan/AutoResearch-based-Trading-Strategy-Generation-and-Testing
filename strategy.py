@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1-day Donchian breakout with volume confirmation and session filter
-# Long when price breaks above 1-day Donchian upper channel (20-period high) with volume > 1.5x 20-period average and session active
-# Short when price breaks below 1-day Donchian lower channel (20-period low) with volume > 1.5x 20-period average and session active
-# Uses daily Donchian channels for key support/resistance levels, volume for confirmation
-# Session filter (8-20 UTC) reduces whipsaw and improves win rate
-# Target: 15-25 trades per year (60-100 over 4 years) with 0.25 position sizing
+# Hypothesis: 12h strategy using 1-day KAMA trend with volume confirmation and session filter
+# Long when 1-day KAMA is rising and price > KAMA with volume > 1.5x 20-period average during active session (08-20 UTC)
+# Short when 1-day KAMA is falling and price < KAMA with volume > 1.5x 20-period average during active session
+# Uses daily KAMA for trend direction, volume for confirmation, session filter to avoid low liquidity periods
+# Designed to capture trending moves in both bull and bear markets while avoiding choppy periods
+# Target: 20-30 trades per year (80-120 over 4 years) with 0.25 position sizing
 
-name = "12h_1dDonchian20_Volume_Session_v1"
+name = "12h_1dKAMA_Trend_Volume_Session_v1"
 timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,18 +24,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1-day Donchian Channel (20-period high/low)
+    # Calculate 1-day KAMA ( Kaufman Adaptive Moving Average )
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 20-period high and low for Donchian channels
-    high_20 = df_1d['high'].rolling(window=20, min_periods=20).max().values
-    low_20 = df_1d['low'].rolling(window=20, min_periods=20).min().values
+    # Efficiency Ratio (ER) over 10 periods
+    change = abs(df_1d['close'].diff(10))
+    volatility = df_1d['close'].diff().abs().rolling(window=10).sum()
+    er = change / volatility
+    er.replace([np.inf, -np.inf], 0, inplace=True)
+    er.fillna(0, inplace=True)
     
-    # Align Donchian levels to 12h timeframe
-    upper_donchian = align_htf_to_ltf(prices, df_1d, high_20)
-    lower_donchian = align_htf_to_ltf(prices, df_1d, low_20)
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Calculate KAMA
+    kama = np.zeros(len(df_1d))
+    kama[0] = df_1d['close'].iloc[0]
+    for i in range(1, len(df_1d)):
+        kama[i] = kama[i-1] + sc.iloc[i] * (df_1d['close'].iloc[i] - kama[i-1])
+    
+    # KAMA trend direction: rising if current > previous
+    kama_rising = kama > np.roll(kama, 1)
+    kama_rising[0] = False
+    kama_falling = kama < np.roll(kama, 1)
+    kama_falling[0] = False
+    
+    # Align KAMA and trend to 12h timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    kama_rising_aligned = align_htf_to_ltf(prices, df_1d, kama_rising.astype(float))
+    kama_falling_aligned = align_htf_to_ltf(prices, df_1d, kama_falling.astype(float))
     
     # Volume confirmation: >1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -48,10 +69,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after Donchian warmup
+    for i in range(30, n):  # Start after KAMA warmup
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(upper_donchian[i]) or np.isnan(lower_donchian[i]) or 
-            np.isnan(volume_filter[i]) or
+        if (np.isnan(kama_aligned[i]) or np.isnan(kama_rising_aligned[i]) or 
+            np.isnan(kama_falling_aligned[i]) or np.isnan(volume_filter[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -59,24 +80,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long breakout: price breaks above upper Donchian with volume confirmation
-            if close[i] > upper_donchian[i] and volume_filter[i]:
+            # Long: KAMA rising and price > KAMA with volume confirmation
+            if kama_rising_aligned[i] > 0.5 and close[i] > kama_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short breakout: price breaks below lower Donchian with volume confirmation
-            elif close[i] < lower_donchian[i] and volume_filter[i]:
+            # Short: KAMA falling and price < KAMA with volume confirmation
+            elif kama_falling_aligned[i] > 0.5 and close[i] < kama_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below lower Donchian (support break)
-            if close[i] < lower_donchian[i]:
+            # Exit long: KAMA falling or price < KAMA
+            if kama_falling_aligned[i] > 0.5 or close[i] < kama_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above upper Donchian (resistance break)
-            if close[i] > upper_donchian[i]:
+            # Exit short: KAMA rising or price > KAMA
+            if kama_rising_aligned[i] > 0.5 or close[i] > kama_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
