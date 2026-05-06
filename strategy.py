@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using daily Camarilla pivot levels with volume spike and Choppiness regime filter
-# Long when price crosses above Camarilla R3 with volume > 2x average and CHOP > 61.8 (ranging market for mean reversion)
-# Short when price crosses below Camarilla S3 with volume > 2x average and CHOP > 61.8
-# Exit when price crosses opposite Camarilla level (S1 for long, R1 for short) or CHOP < 38.2 (trending market)
-# Daily Camarilla provides intraday support/resistance, volume spike confirms institutional interest,
-# Choppiness filter ensures we only trade in ranging markets where mean reversion works.
+# Hypothesis: 6h strategy combining 1-day Elder Ray (Bull/Bear Power) with 12h trend filter and volume confirmation
+# Long when Bull Power > 0, Bear Power < 0, 12h EMA50 trend up, and volume > 1.5x average
+# Short when Bear Power > 0, Bull Power < 0, 12h EMA50 trend down, and volume > 1.5x average
+# Elder Ray measures bull/bear strength relative to EMA13; EMA50 trend filter ensures directional alignment;
+# Volume confirms conviction. Works in bull/bear by capturing strong directional moves with institutional participation.
 # Target: 15-35 trades per year (60-140 over 4 years) with 0.25 position sizing.
 
-name = "12h_1dCamarilla_R3S3_Volume_Chop_MeanRev_v1"
-timeframe = "12h"
+name = "6h_ElderRay_12hTrend_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,75 +24,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate daily Camarilla pivot levels ONCE before loop
+    # Calculate 1-day EMA13 for Elder Ray
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 2:
+    if len(df_1d) < 13:
         return np.zeros(n)
     
-    # Daily OHLC for Camarilla calculation
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    ema13 = pd.Series(df_1d['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Camarilla levels: H-L range
-    range_hl = daily_high - daily_low
+    # Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    # Camarilla resistance levels
-    r3 = daily_close + (range_hl * 1.1 / 2)
-    r2 = daily_close + (range_hl * 1.1 / 4)
-    r1 = daily_close + (range_hl * 1.1 / 6)
+    # Align Elder Ray components to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
     
-    # Camarilla support levels
-    s1 = daily_close - (range_hl * 1.1 / 6)
-    s2 = daily_close - (range_hl * 1.1 / 4)
-    s3 = daily_close - (range_hl * 1.1 / 2)
+    # Calculate 12h EMA50 for trend filter
+    df_12h = get_htf_data(prices, '12h')
     
-    # Align daily Camarilla levels to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    if len(df_12h) < 50:
+        return np.zeros(n)
     
-    # Calculate Choppiness Index (14-period) on 12h data
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period TR
+    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # ATR (14-period)
-    atr = np.zeros(n)
-    atr[13] = np.mean(tr[0:14])
-    for i in range(14, n):
-        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
-    
-    # Sum of TRUE ranges over 14 periods
-    sum_tr = np.zeros(n)
-    for i in range(13, n):
-        if i == 13:
-            sum_tr[i] = np.sum(tr[0:14])
-        else:
-            sum_tr[i] = sum_tr[i-1] - tr[i-14] + tr[i]
-    
-    # Choppiness Index: 100 * log10(sum_tr / (atr * sqrt(14))) / log10(14)
-    chop = np.zeros(n)
-    for i in range(13, n):
-        if atr[i] > 0 and sum_tr[i] > 0:
-            chop[i] = 100 * np.log10(sum_tr[i] / (atr[i] * np.sqrt(14))) / np.log10(14)
-        else:
-            chop[i] = 50  # Neutral value
-    
-    # Volume confirmation: >2x 50-period average
-    vol_ma_50 = np.zeros(n)
-    for i in range(49, n):
-        if i == 49:
-            vol_ma_50[i] = np.mean(volume[0:50])
-        else:
-            vol_ma_50[i] = vol_ma_50[i-1] + (volume[i] - volume[i-50]) / 50
-    
-    volume_filter = volume > (2.0 * vol_ma_50)
+    # Volume confirmation: >1.5x 50-period average
+    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    volume_filter = volume > (1.5 * vol_ma_50)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -102,11 +60,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(r3_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(chop[i]) or np.isnan(volume_filter[i]) or
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+            np.isnan(ema50_12h_aligned[i]) or np.isnan(volume_filter[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -114,24 +71,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price crosses above Camarilla R3 with volume spike in ranging market
-            if close[i] > r3_aligned[i] and volume_filter[i] and chop[i] > 61.8:
+            # Long: Bull Power positive, Bear Power negative, uptrend, volume confirmation
+            if (bull_power_aligned[i] > 0 and bear_power_aligned[i] < 0 and 
+                close[i] > ema50_12h_aligned[i] and volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price crosses below Camarilla S3 with volume spike in ranging market
-            elif close[i] < s3_aligned[i] and volume_filter[i] and chop[i] > 61.8:
+            # Short: Bear Power positive, Bull Power negative, downtrend, volume confirmation
+            elif (bear_power_aligned[i] > 0 and bull_power_aligned[i] < 0 and 
+                  close[i] < ema50_12h_aligned[i] and volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below Camarilla S1 OR market becomes trending
-            if close[i] < s1_aligned[i] or chop[i] < 38.2:
+            # Exit long: trend breakdown or loss of bull strength
+            if close[i] < ema50_12h_aligned[i] or bull_power_aligned[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above Camarilla R1 OR market becomes trending
-            if close[i] > r1_aligned[i] or chop[i] < 38.2:
+            # Exit short: trend reversal or loss of bear strength
+            if close[i] > ema50_12h_aligned[i] or bear_power_aligned[i] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
