@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA direction filter with 1w EMA34 trend and volume confirmation
-# Long when KAMA(14,2,30) > KAMA_prev AND 1w close > 1w EMA34 AND volume > 1.5 * 20-bar average volume
-# Short when KAMA < KAMA_prev AND 1w close < 1w EMA34 AND volume > 1.5 * 20-bar average volume
-# Exit when KAMA reverses direction (KAMA crosses below/above previous KAMA)
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
+# Long when price breaks above R3 AND 1d close > 1d EMA34 AND volume > 2.0 * 20-bar avg volume
+# Short when price breaks below S3 AND 1d close < 1d EMA34 AND volume > 2.0 * 20-bar avg volume
+# Exit when price retouches the 1d EMA34 level (mean reversion to trend)
 # Uses discrete sizing 0.25 to balance return and fee drag
-# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe
-# KAMA adapts to market noise, reducing whipsaws in ranging markets while capturing trends
-# 1w EMA34 provides strong multi-timeframe trend filter for better regime adaptation
-# Volume confirmation reduces false signals during low participation periods
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# Camarilla levels provide precise intraday support/resistance from prior 1d session
+# 1d EMA34 filters for higher-timeframe trend alignment
+# Volume spike confirms institutional participation in breakout
+# Works in bull markets via breakouts and in bear markets via mean-reversion exits
 
-name = "1d_KAMA_1wEMA34_Volume_v1"
-timeframe = "1d"
+name = "12h_Camarilla_R3S3_1dEMA34_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,82 +23,78 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average) for 1d timeframe
-    # ER = Efficiency Ratio, Smooth = smoothing constant
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0) if False else None  # placeholder for correct calc
+    # Calculate Camarilla levels from prior 12h bar (HLC of previous bar)
+    # Camarilla R3 = C_prev + (H_prev - L_prev) * 1.1/4
+    # Camarilla S3 = C_prev - (H_prev - L_prev) * 1.1/4
+    high_prev = np.roll(high, 1)
+    low_prev = np.roll(low, 1)
+    close_prev = np.roll(close, 1)
+    high_prev[0] = high[0]  # avoid NaN on first bar
+    low_prev[0] = low[0]
+    close_prev[0] = close[0]
     
-    # Proper KAMA calculation
-    close_series = pd.Series(close)
-    change = close_series.diff().abs()
-    volatility = close_series.diff().abs().rolling(window=10, min_periods=10).sum()
-    er = change / volatility.replace(0, np.nan)
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2  # fast=2, slow=30
-    sc = sc.fillna(0)  # handle NaN from division by zero
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
+    camarilla_range = high_prev - low_prev
+    r3 = close_prev + camarilla_range * 1.1 / 4
+    s3 = close_prev - camarilla_range * 1.1 / 4
     
-    # Get 1w data ONCE before loop for EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Get 1d data ONCE before loop for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1w EMA34
-    close_1w_series = pd.Series(close_1w)
-    ema34_1w = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 1d EMA34
+    close_1d_series = pd.Series(close_1d)
+    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align HTF indicators to 1d timeframe (wait for completed HTF bar)
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Align HTF indicators to 12h timeframe (wait for completed HTF bar)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume confirmation: volume > 1.5 * 20-bar average volume
+    # Volume confirmation: volume > 2.0 * 20-bar average volume
     volume_series = pd.Series(volume)
     avg_volume_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirmation = volume > (1.5 * avg_volume_20)
+    volume_confirmation = volume > (2.0 * avg_volume_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    prev_kama = kama[0]  # initialize previous KAMA
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN
-        if (np.isnan(kama[i]) or np.isnan(ema34_1w_aligned[i]) or np.isnan(volume_confirmation[i])):
+        if (np.isnan(r3[i]) or np.isnan(s3[i]) or np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(volume_confirmation[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-            prev_kama = kama[i] if not np.isnan(kama[i]) else prev_kama
             continue
         
         if position == 0:
-            # KAMA direction signals with trend and volume filters
-            # Long: KAMA rising AND uptrend AND volume confirmation
-            if kama[i] > prev_kama and close[i] > ema34_1w_aligned[i] and volume_confirmation[i]:
+            # Breakout signals with trend and volume filters
+            # Long: price breaks above R3 AND uptrend AND volume spike
+            if close[i] > r3[i] and close[i] > ema34_1d_aligned[i] and volume_confirmation[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA falling AND downtrend AND volume confirmation
-            elif kama[i] < prev_kama and close[i] < ema34_1w_aligned[i] and volume_confirmation[i]:
+            # Short: price breaks below S3 AND downtrend AND volume spike
+            elif close[i] < s3[i] and close[i] < ema34_1d_aligned[i] and volume_confirmation[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: KAMA reverses (falls below previous KAMA)
-            if kama[i] < prev_kama:
+            # Exit long: price retouches 1d EMA34 (mean reversion to trend)
+            if close[i] <= ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: KAMA reverses (rises above previous KAMA)
-            if kama[i] > prev_kama:
+            # Exit short: price retouches 1d EMA34 (mean reversion to trend)
+            if close[i] >= ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
-        
-        prev_kama = kama[i]
     
     return signals
