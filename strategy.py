@@ -3,13 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using daily Vortex indicator with volume confirmation and ADX filter
-# Vortex identifies trend direction (VI+ > VI- = uptrend, VI- > VI+ = downtrend)
-# Works in both bull/bear markets: trend following in trending regimes, avoids whipsaws in ranging markets
+# Hypothesis: 4h strategy using daily Camarilla pivot levels with volume confirmation
+# Camarilla levels (R3/S3 for reversals, R4/S4 for breakouts) provide institutional support/resistance
+# Price breaking above R4 or below S4 with volume > 1.5x 20-period average indicates institutional breakout
+# Price rejecting at R3 or S3 with volume confirmation indicates mean reversion opportunity
+# Works in both bull/bear markets: breakouts capture trends, reversals capture pullbacks
 # Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
 
-name = "12h_Vortex_ADX_VolumeFilter_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S4_VolumeBreakout_Reversal_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,60 +24,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate daily Vortex and ADX ONCE before loop
+    # Calculate daily Camarilla pivot levels ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 34:  # Need enough data for ADX(14) and Vortex(14)
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate True Range for Vortex and ADX
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    # Previous day's OHLC for Camarilla calculation
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Vortex Indicator (14-period)
-    vm_plus = abs(df_1d['high'] - df_1d['low'].shift(1))
-    vm_minus = abs(df_1d['low'] - df_1d['high'].shift(1))
+    # Camarilla pivot levels
+    # Pivot = (previous high + previous low + previous close) / 3
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_ = prev_high - prev_low
     
-    # Sum over 14 periods
-    period = 14
-    sum_vm_plus = vm_plus.rolling(window=period, min_periods=period).sum()
-    sum_vm_minus = vm_minus.rolling(window=period, min_periods=period).sum()
-    sum_tr = tr.rolling(window=period, min_periods=period).sum()
+    # Resistance and Support levels
+    r4 = pivot + (range_ * 1.1 / 2)
+    r3 = pivot + (range_ * 1.1 / 4)
+    s3 = pivot - (range_ * 1.1 / 4)
+    s4 = pivot - (range_ * 1.1 / 2)
     
-    vi_plus = sum_vm_plus / sum_tr
-    vi_minus = sum_vm_minus / sum_tr
-    
-    # ADX (14-period)
-    # Calculate directional movement
-    dm_plus = np.where((df_1d['high'] - df_1d['high'].shift(1)) > (df_1d['low'].shift(1) - df_1d['low']), 
-                       np.maximum(df_1d['high'] - df_1d['high'].shift(1), 0), 0)
-    dm_minus = np.where((df_1d['low'].shift(1) - df_1d['low']) > (df_1d['high'] - df_1d['high'].shift(1)), 
-                        np.maximum(df_1d['low'].shift(1) - df_1d['low'], 0), 0)
-    
-    # Smoothed DM and TR
-    dm_plus_smooth = pd.Series(dm_plus).rolling(window=period, min_periods=period).sum()
-    dm_minus_smooth = pd.Series(dm_minus).rolling(window=period, min_periods=period).sum()
-    tr_smooth = tr.rolling(window=period, min_periods=period).sum()
-    
-    # DI+ and DI-
-    di_plus = 100 * (dm_plus_smooth / tr_smooth)
-    di_minus = 100 * (dm_minus_smooth / tr_smooth)
-    
-    # DX and ADX
-    dx = 100 * abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = dx.rolling(window=period, min_periods=period).mean()
-    
-    # Convert to numpy arrays
-    vi_plus_arr = vi_plus.values
-    vi_minus_arr = vi_minus.values
-    adx_arr = adx.values
-    
-    # Align daily indicators to 12h timeframe
-    vi_plus_aligned = align_htf_to_ltf(prices, df_1d, vi_plus_arr)
-    vi_minus_aligned = align_htf_to_ltf(prices, df_1d, vi_minus_arr)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_arr)
+    # Align daily levels to 4h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     # Volume confirmation: >1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -90,36 +65,41 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(vi_plus_aligned[i]) or np.isnan(vi_minus_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(volume_filter[i]) or
+        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(s4_aligned[i]) or np.isnan(volume_filter[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # ADX filter: only trade when ADX > 20 (trending market)
-        adx_filter = adx_aligned[i] > 20
-        
         if position == 0:
-            # Long entry: VI+ > VI- (uptrend) with volume confirmation
-            if vi_plus_aligned[i] > vi_minus_aligned[i] and volume_filter[i] and adx_filter:
+            # Long breakout: price breaks above R4 with volume confirmation
+            if close[i] > r4_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: VI- > VI+ (downtrend) with volume confirmation
-            elif vi_minus_aligned[i] > vi_plus_aligned[i] and volume_filter[i] and adx_filter:
+            # Short breakout: price breaks below S4 with volume confirmation
+            elif close[i] < s4_aligned[i] and volume_filter[i]:
+                signals[i] = -0.25
+                position = -1
+            # Long reversal: price rejects S3 with volume confirmation (bounce from support)
+            elif close[i] < s3_aligned[i] and close[i] > s3_aligned[i] * 0.998 and volume_filter[i]:
+                signals[i] = 0.25
+                position = 1
+            # Short reversal: price rejects R3 with volume correction (rejection from resistance)
+            elif close[i] > r3_aligned[i] and close[i] < r3_aligned[i] * 1.002 and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: VI- crosses above VI+ (trend reversal) or ADX weakens
-            if vi_minus_aligned[i] > vi_plus_aligned[i] or adx_aligned[i] < 18:
+            # Exit long: price breaks below S3 (failed support) or reaches R4 (take profit)
+            if close[i] < s3_aligned[i] or close[i] > r4_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: VI+ crosses above VI- (trend reversal) or ADX weakens
-            if vi_plus_aligned[i] > vi_minus_aligned[i] or adx_aligned[i] < 18:
+            # Exit short: price breaks above R3 (failed resistance) or reaches S4 (take profit)
+            if close[i] > r3_aligned[i] or close[i] < s4_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
