@@ -3,9 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
-# Long when price breaks above R3 (1d) AND price > 1d EMA34 (uptrend) AND volume > 2.5 * 20-period avg volume
-# Short when price breaks below S3 (1d) AND price < 1d EMA34 (downtrend) AND volume > 2.5 * 20-period avg volume
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Long when price breaks above R3 (1d) AND price > 1d EMA34 (uptrend) AND volume > 1.8 * 20-period avg volume
+# Short when price breaks below S3 (1d) AND price < 1d EMA34 (downtrend) AND volume > 1.8 * 20-period avg volume
 # Exit with ATR-based trailing stop: signal→0 when long and price < highest_high - 2.0 * ATR OR short and price > lowest_low + 2.0 * ATR
 # Uses discrete sizing 0.25 to control risk (BTC -77% in 2022 → ~19.3% loss at 0.25 exposure)
 # Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
@@ -51,9 +51,9 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First period TR is just high-low
     atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Calculate volume confirmation: volume > 2.5 * 20-period average volume (stricter to reduce trades)
+    # Calculate volume confirmation: volume > 1.8 * 20-period average volume (balanced to avoid overtrading)
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.5 * avg_volume_20)
+    volume_spike = volume > (1.8 * avg_volume_20)
     
     # Align HTF indicators to 4h timeframe (wait for completed HTF bar)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
