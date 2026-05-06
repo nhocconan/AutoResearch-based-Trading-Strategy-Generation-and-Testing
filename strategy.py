@@ -3,19 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
-# Long when price breaks above R3 (strong resistance) AND 1d EMA34 uptrend AND volume > 2.0 * 20-bar avg volume
-# Short when price breaks below S3 (strong support) AND 1d EMA34 downtrend AND volume > 2.0 * 20-bar avg volume
-# Exit with signal=0 when price reverses back inside the Camarilla H-L range (mean reversion)
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume spike
+# Long when price breaks above 20-period Donchian high AND 1d EMA34 uptrend AND volume > 2.0 * 20-bar avg volume
+# Short when price breaks below 20-period Donchian low AND 1d EMA34 downtrend AND volume > 2.0 * 20-bar avg volume
+# Exit with signal=0 when price reverses back to the midpoint of the Donchian channel
 # Uses discrete sizing 0.25 to balance opportunity and drawdown
-# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
-# Camarilla levels provide institutional pivot points; R3/S3 are strong breakout levels
-# 1d EMA34 ensures higher-timeframe trend alignment to avoid counter-trend trades
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# Donchian provides clear structure; 1d EMA34 ensures higher-timeframe trend alignment
 # Volume spike confirms institutional participation
 # Works in bull via buying strength on upside breakouts, works in bear via selling strength on downside breakdowns
 
-name = "6h_Camarilla_R3S3_1dEMA34_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Donchian20_1dEMA34_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,25 +37,27 @@ def generate_signals(prices):
     close_1d_series = pd.Series(close_1d)
     ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align HTF indicators to 6h timeframe (wait for completed HTF bar)
+    # Align HTF indicators to 12h timeframe (wait for completed HTF bar)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla levels from daily data (more stable than intraday)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Donchian channels from 12h data (more stable than lower timeframes)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Camarilla formula: H-L range based
-    R3 = close_1d + (high_1d - low_1d) * 1.1 / 4
-    S3 = close_1d - (high_1d - low_1d) * 1.1 / 4
-    H3 = close_1d + (high_1d - low_1d) * 1.1 / 6
-    L3 = close_1d - (high_1d - low_1d) * 1.1 / 6
+    # Donchian formula: 20-period high/low
+    high_12h_series = pd.Series(high_12h)
+    low_12h_series = pd.Series(low_12h)
+    donchian_high = high_12h_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_12h_series.rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2.0
     
-    # Align Camarilla levels to 6h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    # Align Donchian channels to 12h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_12h, donchian_mid)
     
     # Calculate volume confirmation: volume > 2.0 * 20-bar average volume (stricter for fewer trades)
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -67,33 +68,33 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or
-            np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(donchian_mid_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Camarilla breakout signals with trend and volume filters
-            # Long: price breaks above R3 (strong resistance) AND uptrend AND volume spike
-            if close[i] > R3_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_spike[i]:
+            # Donchian breakout signals with trend and volume filters
+            # Long: price breaks above Donchian high AND uptrend AND volume spike
+            if close[i] > donchian_high_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 (strong support) AND downtrend AND volume spike
-            elif close[i] < S3_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_spike[i]:
+            # Short: price breaks below Donchian low AND downtrend AND volume spike
+            elif close[i] < donchian_low_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price reverses back inside H3-L3 range (mean reversion)
-            if close[i] < H3_aligned[i] and close[i] > L3_aligned[i]:
+            # Exit long: price reverses back to Donchian midpoint (mean reversion)
+            if close[i] < donchian_mid_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price reverses back inside H3-L3 range (mean reversion)
-            if close[i] < H3_aligned[i] and close[i] > L3_aligned[i]:
+            # Exit short: price reverses back to Donchian midpoint (mean reversion)
+            if close[i] > donchian_mid_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
