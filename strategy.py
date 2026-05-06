@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Williams %R extreme reversal with 4h EMA34 trend filter and volume confirmation
-# Long when 1d Williams %R crosses above -80 (oversold reversal) AND 4h EMA34 > EMA89 AND volume > 2.0 * avg_volume(20)
-# Short when 1d Williams %R crosses below -20 (overbought reversal) AND 4h EMA34 < EMA89 AND volume > 2.0 * avg_volume(20)
-# Exit when 1d Williams %R crosses opposite extreme (-20 for long exit, -80 for short exit)
-# Uses discrete sizing 0.25 to control drawdown and fees
+# Hypothesis: 4h strategy using 1d Williams %R extreme levels with 4h EMA34 trend filter and volume confirmation
+# Long when price crosses above 1d Williams %R -80 (oversold) AND 4h EMA34 > EMA89 AND volume > 2.0 * avg_volume(20)
+# Short when price crosses below 1d Williams %R -20 (overbought) AND 4h EMA34 < EMA89 AND volume > 2.0 * avg_volume(20)
+# Exit when price crosses 4h EMA34 (trend reversal signal)
+# Uses discrete sizing 0.25 to balance return and drawdown control
 # Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
-# Williams %R provides mean-reversion signals at extremes, effective in both bull (buy dips) and bear (sell rallies)
-# EMA34/EMA89 filter ensures trades align with intermediate trend to avoid counter-trend whipsaws
-# High volume confirmation filters weak reversals and increases signal reliability
+# Williams %R identifies overextended moves likely to reverse, providing edge in both bull and bear markets
+# 4h EMA34/EMA89 filter ensures alignment with intermediate trend
+# Volume confirmation filters weak breakouts
+# Works in bull (buying oversold dips in uptrend) and bear (selling overbought rallies in downtrend)
 
-name = "4h_1dWilliamsR_Extreme_4hEMA34Trend_Volume_v2"
+name = "4h_1dWilliamsR_Extreme_4hEMA34Trend_Volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -29,22 +30,22 @@ def generate_signals(prices):
     
     # Get 1d data ONCE before loop for Williams %R
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:  # Need sufficient data for Williams %R calculation
+    if len(df_1d) < 20:  # Need sufficient data for Williams %R calculation
         return np.zeros(n)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r_1d = -100 * (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14)
+    # Calculate 1d Williams %R: (highest_high - close) / (highest_high - lowest_low) * -100
+    highest_high_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r_1d = (highest_high_1d - close_1d) / (highest_high_1d - lowest_low_1d) * -100
     # Handle division by zero when high == low
-    williams_r_1d[highest_high_14 == lowest_low_14] = -50.0
+    williams_r_1d = np.where((highest_high_1d - lowest_low_1d) == 0, -50, williams_r_1d)
     
     # Get 4h data ONCE before loop for EMA trend filter
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 89:  # Need sufficient data for EMA89
+    if len(df_4h) < 100:  # Need sufficient data for EMA89
         return np.zeros(n)
     close_4h = df_4h['close'].values
     
@@ -77,26 +78,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Williams %R crosses above -80 (oversold reversal) with EMA34 > EMA89 and volume confirmation
+            # Long: price crosses above Williams %R -80 (oversold) with 4h EMA34 > EMA89 and volume confirmation
             if (williams_r_aligned[i] > -80 and williams_r_aligned[i-1] <= -80 and 
                 ema_34_aligned[i] > ema_89_aligned[i] and volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R crosses below -20 (overbought reversal) with EMA34 < EMA89 and volume confirmation
+            # Short: price crosses below Williams %R -20 (overbought) with 4h EMA34 < EMA89 and volume confirmation
             elif (williams_r_aligned[i] < -20 and williams_r_aligned[i-1] >= -20 and 
                   ema_34_aligned[i] < ema_89_aligned[i] and volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R crosses above -20 (overbought territory)
-            if williams_r_aligned[i] > -20:
+            # Exit long: price crosses below 4h EMA34 (trend reversal)
+            if close[i] < ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R crosses below -80 (oversold territory)
-            if williams_r_aligned[i] < -80:
+            # Exit short: price crosses above 4h EMA34 (trend reversal)
+            if close[i] > ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
