@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1-day Chaikin Money Flow (CMF) for institutional flow confirmation
-# Long when price breaks above 1-day Donchian upper channel (20-period high) with CMF > 0.1
-# Short when price breaks below 1-day Donchian lower channel (20-period low) with CMF < -0.1
-# Uses institutional flow (CMF) to confirm breakouts, reducing false signals
-# Target: 12-25 trades per year (48-100 over 4 years) with 0.25 position sizing
+# Hypothesis: 4h strategy using 12h Bollinger Band breakout with volume confirmation and Choppiness Index regime filter
+# Long when price breaks above upper Bollinger Band (20,2) with volume > 1.3x average and chop > 61.8 (range)
+# Short when price breaks below lower Bollinger Band (20,2) with volume > 1.3x average and chop > 61.8 (range)
+# Exits when price returns to middle Bollinger Band (20-period SMA)
+# Designed to capture mean-reversion bounces in ranging markets while avoiding strong trends
+# Target: 20-40 trades per year (80-160 over 4 years) with 0.25 position sizing
 
-name = "12h_1dCMF_Donchian20_v1"
-timeframe = "12h"
+name = "4h_12hBB20_2_Volume_ChopRange_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,66 +24,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1-day Donchian Channel (20-period high/low)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Calculate 12h Bollinger Bands (20-period, 2 std)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # 20-period high and low for Donchian channels
-    high_20 = df_1d['high'].rolling(window=20, min_periods=20).max().values
-    low_20 = df_1d['low'].rolling(window=20, min_periods=20).min().values
+    close_12h = df_12h['close'].values
+    sma_20 = pd.Series(close_12h).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_12h).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + (2 * std_20)
+    lower_bb = sma_20 - (2 * std_20)
+    middle_bb = sma_20
     
-    # Align Donchian levels to 12h timeframe
-    upper_donchian = align_htf_to_ltf(prices, df_1d, high_20)
-    lower_donchian = align_htf_to_ltf(prices, df_1d, low_20)
+    # Align Bollinger Bands to 4h timeframe
+    upper_bb_aligned = align_htf_to_ltf(prices, df_12h, upper_bb)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_12h, lower_bb)
+    middle_bb_aligned = align_htf_to_ltf(prices, df_12h, middle_bb)
     
-    # Calculate 1-day Chaikin Money Flow (20-period)
-    # CMF = sum((Close - Low - (High - Close)) * Volume) / sum(Volume) over period
-    mf_multiplier = ((df_1d['close'] - df_1d['low']) - (df_1d['high'] - df_1d['close'])) / (df_1d['high'] - df_1d['low'])
-    # Handle division by zero when high == low
-    mf_multiplier = mf_multiplier.fillna(0)
-    mf_volume = mf_multiplier * df_1d['volume']
-    cmf_20 = mf_volume.rolling(window=20, min_periods=20).sum() / df_1d['volume'].rolling(window=20, min_periods=20).sum()
-    cmf_values = cmf_20.fillna(0).values
+    # Volume confirmation: >1.3x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.3 * vol_ma_20)
     
-    # Align CMF to 12h timeframe
-    cmf_aligned = align_htf_to_ltf(prices, df_1d, cmf_values)
+    # Calculate Choppiness Index (14-period) on 4h
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_14 * 14 / (highest_high_14 - lowest_low_14)) / np.log10(14)
+    chop[np.isnan(chop) | (highest_high_14 - lowest_low_14 == 0)] = 50  # neutral when range=0
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Range regime: chop > 61.8 (ranging market)
+    range_regime = chop > 61.8
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after Donchian/CMF warmup
-        # Skip if any critical value is NaN or outside session
-        if (np.isnan(upper_donchian[i]) or np.isnan(lower_donchian[i]) or 
-            np.isnan(cmf_aligned[i]) or not session_filter[i]):
+    for i in range(20, n):
+        # Skip if any critical value is NaN
+        if (np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or 
+            np.isnan(middle_bb_aligned[i]) or np.isnan(volume_filter[i]) or
+            np.isnan(range_regime[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long breakout: price breaks above upper Donchian with bullish CMF (> 0.1)
-            if close[i] > upper_donchian[i] and cmf_aligned[i] > 0.1:
+            # Long entry: price breaks above upper BB with volume confirmation in ranging market
+            if close[i] > upper_bb_aligned[i] and volume_filter[i] and range_regime[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short breakout: price breaks below lower Donchian with bearish CMF (< -0.1)
-            elif close[i] < lower_donchian[i] and cmf_aligned[i] < -0.1:
+            # Short entry: price breaks below lower BB with volume confirmation in ranging market
+            elif close[i] < lower_bb_aligned[i] and volume_filter[i] and range_regime[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below lower Donchian (support break)
-            if close[i] < lower_donchian[i]:
+            # Exit long: price returns to middle BB
+            if close[i] >= middle_bb_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above upper Donchian (resistance break)
-            if close[i] > upper_donchian[i]:
+            # Exit short: price returns to middle BB
+            if close[i] <= middle_bb_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
