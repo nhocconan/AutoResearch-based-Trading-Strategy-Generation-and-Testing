@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h price action with 1d volume profile confirmation
-# Uses 1d volume-weighted average price (VWAP) as dynamic support/resistance
-# Entry when price crosses above/below 1d VWAP with volume confirmation (>1.5x 20-period average)
-# Exit when price reverts to VWAP or momentum fades (volume drops below average)
-# Works in bull/bear markets: VWAP acts as dynamic fair value, deviations present mean-reversion opportunities
-# Target: 80-160 total trades over 4 years (20-40/year) with low turnover to minimize fee drag
+# Hypothesis: 1d Donchian(20) breakout with 1w ADX(25) trend filter and volume spike
+# Uses 1d Donchian channels for structure, 1w ADX(25) for trend strength filter
+# Volume spike (>1.8x 20-bar average) confirms breakout momentum
+# ATR-based trailing stop via signal=0 when price retraces 25% of ATR from extreme
+# Discrete sizing 0.25 to balance profit potential and fee drag; target 30-100 total trades over 4 years (7-25/year)
+# Works in both bull/bear: breakouts capture momentum, ADX filter avoids weak trends, volume filter ensures participation
 
-name = "4h_VWAP_Cross_VolumeConfirm_v1"
-timeframe = "4h"
+name = "1d_Donchian20_1wADX25_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,30 +25,79 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Calculate HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 20:
+    if len(df_1w) < 35:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d VWAP (Volume Weighted Average Price)
-    # VWAP = sum(price * volume) / sum(volume) for the day
-    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
-    pv_1d = typical_price_1d * volume_1d
-    cum_pv_1d = np.cumsum(pv_1d)
-    cum_vol_1d = np.cumsum(volume_1d)
-    vwap_1d = np.divide(cum_pv_1d, cum_vol_1d, out=np.full_like(cum_pv_1d, np.nan), where=cum_vol_1d!=0)
+    # Calculate 1w ADX(25) trend filter
+    # TR = max(high-low, |high-prev_close|, |low-prev_close|)
+    tr1 = np.abs(high_1w[1:] - low_1w[1:])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Calculate volume filter: current volume > 1.5x 20-period average
+    # +DM = max(high - prev_high, 0) if high - prev_high > prev_low - low else 0
+    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
+                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    
+    # -DM = max(prev_low - low, 0) if prev_low - low > high - prev_high else 0
+    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
+                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Smooth TR, +DM, -DM with Wilder's smoothing (alpha = 1/period)
+    def wilder_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        alpha = 1.0 / period
+        # First value is simple average
+        if len(data) >= period:
+            result[period-1] = np.nanmean(data[:period])
+            for i in range(period, len(data)):
+                result[i] = result[i-1] + alpha * (data[i] - result[i-1])
+        return result
+    
+    atr_1w = wilder_smooth(tr, 25)
+    dm_plus_smooth = wilder_smooth(dm_plus, 25)
+    dm_minus_smooth = wilder_smooth(dm_minus, 25)
+    
+    # DI+ = 100 * smoothed +DM / ATR, DI- = 100 * smoothed -DM / ATR
+    di_plus = np.where(atr_1w != 0, 100 * dm_plus_smooth / atr_1w, 0)
+    di_minus = np.where(atr_1w != 0, 100 * dm_minus_smooth / atr_1w, 0)
+    
+    # DX = 100 * |DI+ - DI-| / (DI+ + DI-)
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    
+    # ADX = smoothed DX
+    adx_1w = wilder_smooth(dx, 25)
+    
+    # Calculate ATR(14) for 1d timeframe (for stoploss)
+    tr1_1d = np.abs(high[1:] - low[1:])
+    tr2_1d = np.abs(high[1:] - close[:-1])
+    tr3_1d = np.abs(low[1:] - close[:-1])
+    tr_1d = np.concatenate([[np.nan], np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))])
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate volume spike filter (>1.8x 20-bar average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_20)
+    volume_filter = volume > (1.8 * vol_ma_20)
     
-    # Align HTF VWAP to 4h timeframe (primary)
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    # Calculate 1d Donchian channels (20-period)
+    # Upper = max(high, 20), Lower = min(low, 20)
+    def donchian_channels(high_arr, low_arr, period):
+        upper = pd.Series(high_arr).rolling(window=period, min_periods=period).max().values
+        lower = pd.Series(low_arr).rolling(window=period, min_periods=period).min().values
+        return upper, lower
+    
+    donchian_upper_1d, donchian_lower_1d = donchian_channels(high, low, 20)
+    
+    # Align HTF indicators to 1d timeframe (primary)
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -56,37 +105,50 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    long_extreme = 0.0
+    short_extreme = 0.0
     
     for i in range(100, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(vwap_1d_aligned[i]) or np.isnan(volume_filter[i]) or
+        if (np.isnan(adx_1w_aligned[i]) or np.isnan(donchian_upper_1d[i]) or 
+            np.isnan(donchian_lower_1d[i]) or np.isnan(atr_1d[i]) or np.isnan(volume_filter[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                long_extreme = 0.0
+                short_extreme = 0.0
             continue
         
         if position == 0:
-            # Long entry: price crosses above VWAP with volume confirmation
-            if close[i] > vwap_1d_aligned[i] and volume_filter[i]:
+            # Long breakout: price > Upper Donchian AND strong trend (ADX > 25) AND volume spike
+            if close[i] > donchian_upper_1d[i] and adx_1w_aligned[i] > 25 and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price crosses below VWAP with volume confirmation
-            elif close[i] < vwap_1d_aligned[i] and volume_filter[i]:
+                long_extreme = close[i]
+            # Short breakdown: price < Lower Donchian AND strong trend (ADX > 25) AND volume spike
+            elif close[i] < donchian_lower_1d[i] and adx_1w_aligned[i] > 25 and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
+                short_extreme = close[i]
         elif position == 1:
-            # Exit long: price crosses back below VWAP
-            if close[i] < vwap_1d_aligned[i]:
+            # Update long extreme
+            long_extreme = max(long_extreme, close[i])
+            # Exit long: price retraces 25% of ATR from extreme
+            if close[i] <= long_extreme - 0.25 * atr_1d[i]:
                 signals[i] = 0.0
                 position = 0
+                long_extreme = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses back above VWAP
-            if close[i] > vwap_1d_aligned[i]:
+            # Update short extreme
+            short_extreme = min(short_extreme, close[i])
+            # Exit short: price retraces 25% of ATR from extreme
+            if close[i] >= short_extreme + 0.25 * atr_1d[i]:
                 signals[i] = 0.0
                 position = 0
+                short_extreme = 0.0
             else:
                 signals[i] = -0.25
     
