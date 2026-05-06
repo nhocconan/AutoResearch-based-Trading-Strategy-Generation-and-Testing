@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Camarilla pivot levels (R1, S1) with 6h EMA50 trend filter and volume confirmation
-# Long when price breaks above 1d Camarilla R1 AND 6h EMA50 > EMA50 previous (uptrend) AND volume > 1.5 * avg_volume(20) on 4h
-# Short when price breaks below 1d Camarilla S1 AND 6h EMA50 < EMA50 previous (downtrend) AND volume > 1.5 * avg_volume(20) on 4h
-# Exit when price crosses back through 1d Camarilla pivot point (mean reversion to midpoint)
+# Hypothesis: 12h strategy using 1w Donchian(20) breakout with 1d volume spike and 12h ADX trend filter
+# Long when price breaks above 1w Donchian upper channel AND 12h ADX > 25 AND volume > 1.5 * avg_volume(20)
+# Short when price breaks below 1w Donchian lower channel AND 12h ADX > 25 AND volume > 1.5 * avg_volume(20)
+# Exit when price crosses back through 1w Donchian midpoint
 # Uses discrete sizing 0.25 to balance return and risk
-# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
-# Camarilla levels from higher timeframe (1d) provide strong support/resistance
-# 6h EMA50 trend filter ensures we trade with the intermediate trend
-# Volume confirmation (1.5x) validates breakout strength while limiting overtrading
-# Works in both bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend) markets
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# Donchian breakouts capture strong momentum moves
+# Volume confirmation validates breakout strength while limiting false signals
+# ADX > 25 ensures we only trade in trending markets, reducing whipsaw in ranging conditions
+# Works in both bull (buy breakouts) and bear (sell breakdowns) markets
 
-name = "4h_Camarilla_R1S1_Breakout_6hEMA50_Trend_Volume"
-timeframe = "4h"
+name = "12h_1wDonchian20_12hADX25_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,40 +28,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for Camarilla pivot calculation
+    # Get 1w data ONCE before loop for Donchian channels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:  # Need at least 20 completed weekly bars for Donchian(20)
+        return np.zeros(n)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    
+    # Calculate 1w Donchian(20) channels
+    highest_high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    lowest_low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    donchian_upper = highest_high_20
+    donchian_lower = lowest_low_20
+    donchian_mid = (donchian_upper + donchian_lower) / 2.0
+    
+    # Align 1w Donchian levels to 12h timeframe (wait for completed 1w bar)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1w, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1w, donchian_lower)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_1w, donchian_mid)
+    
+    # Get 1d data ONCE before loop for volume confirmation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:  # Need at least 2 completed 1d bars for pivot (HLC of previous day)
+    if len(df_1d) < 20:  # Need at least 20 completed daily bars for volume average
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 1d Camarilla pivot levels (using previous day's HLC)
-    # Pivot = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
-    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
+    # Calculate 1d average volume(20) for confirmation threshold
+    avg_volume_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_threshold_1d = 1.5 * avg_volume_20_1d
     
-    # Align 1d Camarilla levels to 4h timeframe (wait for completed 1d bar)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Align 1d volume threshold to 12h timeframe
+    volume_threshold_aligned = align_htf_to_ltf(prices, df_1d, volume_threshold_1d)
     
-    # Get 6h data ONCE before loop for EMA50 trend filter
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 50:  # Need at least 50 completed 6h bars for EMA50
-        return np.zeros(n)
-    close_6h = df_6h['close'].values
+    # Calculate 12h ADX(14) trend filter
+    # ADX calculation: +DI, -DI, then DX, then smoothed ADX
+    # +DI = 100 * smoothed(+DM) / ATR
+    # -DI = 100 * smoothed(-DM) / ATR
+    # DX = 100 * |+DI - -DI| / (+DI + -DI)
+    # ADX = smoothed(DX)
     
-    # Calculate 6h EMA50
-    ema_50_6h = pd.Series(close_6h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_6h_aligned = align_htf_to_ltf(prices, df_6h, ema_50_6h)
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(np.maximum(tr1, tr2), tr3)])
     
-    # Calculate volume confirmation: volume > 1.5 * 20-period average volume on 4h
-    avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * avg_volume_20)
+    # +DM and -DM
+    up_move = high[1:] - high[:-1]
+    down_move = low[:-1] - low[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Wilder's smoothing (alpha = 1/period)
+    def wilders_smoothing(values, period):
+        result = np.full_like(values, np.nan)
+        if len(values) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nanmean(values[:period])
+        # Subsequent values: Wilder's smoothing
+        for i in range(period, len(values)):
+            result[i] = result[i-1] - (result[i-1] / period) + values[i]
+        return result
+    
+    atr_14 = wilders_smoothing(tr, 14)
+    plus_di_14 = 100 * wilders_smoothing(plus_dm, 14) / atr_14
+    minus_di_14 = 100 * wilders_smoothing(minus_dm, 14) / atr_14
+    dx_14 = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
+    adx_14 = wilders_smoothing(dx_14, 14)
+    
+    # Handle division by zero cases
+    plus_di_14 = np.where(atr_14 == 0, 0, plus_di_14)
+    minus_di_14 = np.where(atr_14 == 0, 0, minus_di_14)
+    dx_14 = np.where((plus_di_14 + minus_di_14) == 0, 0, dx_14)
     
     # Session filter: 08-20 UTC (pre-compute for efficiency)
     hours = prices.index.hour
@@ -72,36 +111,37 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN or outside session
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(pivot_aligned[i]) or 
-            np.isnan(ema_50_6h_aligned[i]) or np.isnan(avg_volume_20[i]) or not in_session[i]):
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(donchian_mid_aligned[i]) or np.isnan(volume_threshold_aligned[i]) or 
+            np.isnan(adx_14[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R1, 6h EMA50 > EMA50 previous (uptrend), volume spike, in session
-            if (close[i] > r1_aligned[i] and 
-                ema_50_6h_aligned[i] > ema_50_6h_aligned[i-1] and 
-                volume_confirm[i]):
+            # Long: price breaks above 1w Donchian upper AND ADX > 25 AND volume spike
+            if (close[i] > donchian_upper_aligned[i] and 
+                adx_14[i] > 25 and 
+                volume[i] > volume_threshold_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1, 6h EMA50 < EMA50 previous (downtrend), volume spike, in session
-            elif (close[i] < s1_aligned[i] and 
-                  ema_50_6h_aligned[i] < ema_50_6h_aligned[i-1] and 
-                  volume_confirm[i]):
+            # Short: price breaks below 1w Donchian lower AND ADX > 25 AND volume spike
+            elif (close[i] < donchian_lower_aligned[i] and 
+                  adx_14[i] > 25 and 
+                  volume[i] > volume_threshold_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses back below pivot point (mean reversion)
-            if close[i] < pivot_aligned[i]:
+            # Exit long: price crosses back below 1w Donchian midpoint
+            if close[i] < donchian_mid_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses back above pivot point (mean reversion)
-            if close[i] > pivot_aligned[i]:
+            # Exit short: price crosses back above 1w Donchian midpoint
+            if close[i] > donchian_mid_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
