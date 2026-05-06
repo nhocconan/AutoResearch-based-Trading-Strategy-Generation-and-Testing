@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 1d ADX(25) trend filter and volume spike
-# Uses 1d ADX for trend strength, 6h Donchian for breakout signals, volume spike (>2.0x 20-bar avg) for confirmation
-# Exit: time-based exit after 3 bars (18 hours) to avoid whipsaw in ranging markets
-# Works in both bull/bear: breakouts capture momentum, ADX filter avoids weak trends, time exit limits drawdown
-# Target: 60-120 total trades over 4 years (15-30/year) to stay within fee limits
+# Hypothesis: 12h Donchian(20) breakout with 1d ADX(25) trend filter and volume spike
+# Uses 1d Donchian channels for structure, 1d ADX(25) for trend strength filter
+# Volume spike (>1.8x 20-bar average) confirms breakout momentum
+# ATR-based trailing stop via signal=0 when price retraces 25% of ATR from extreme
+# Discrete sizing 0.25 to balance profit potential and fee drag; target 50-150 total trades over 4 years (12-37/year)
+# Works in both bull/bear: breakouts capture momentum, ADX filter avoids weak trends, volume filter ensures participation
 
-name = "6h_Donchian20_1dADX25_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Donchian20_1dADX25_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -75,20 +76,30 @@ def generate_signals(prices):
     # ADX = smoothed DX
     adx_1d = wilder_smooth(dx, 25)
     
-    # Calculate 6h Donchian channels (20-period)
+    # Calculate ATR(14) for 12h timeframe (for stoploss)
+    tr1_12h = np.abs(high[1:] - low[1:])
+    tr2_12h = np.abs(high[1:] - close[:-1])
+    tr3_12h = np.abs(low[1:] - close[:-1])
+    tr_12h = np.concatenate([[np.nan], np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))])
+    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate volume spike filter (>1.8x 20-bar average)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.8 * vol_ma_20)
+    
+    # Calculate 1d Donchian channels (20-period)
+    # Upper = max(high, 20), Lower = min(low, 20)
     def donchian_channels(high_arr, low_arr, period):
         upper = pd.Series(high_arr).rolling(window=period, min_periods=period).max().values
         lower = pd.Series(low_arr).rolling(window=period, min_periods=period).min().values
         return upper, lower
     
-    donchian_upper_6h, donchian_lower_6h = donchian_channels(high, low, 20)
+    donchian_upper_1d, donchian_lower_1d = donchian_channels(high_1d, low_1d, 20)
     
-    # Calculate volume spike filter (>2.0x 20-bar average)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (2.0 * vol_ma_20)
-    
-    # Align HTF indicators to 6h timeframe (primary)
+    # Align HTF indicators to 12h timeframe (primary)
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    donchian_upper_1d_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper_1d)
+    donchian_lower_1d_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower_1d)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -96,60 +107,50 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_entry = 0
+    long_extreme = 0.0
+    short_extreme = 0.0
     
     for i in range(100, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(adx_1d_aligned[i]) or np.isnan(donchian_upper_6h[i]) or 
-            np.isnan(donchian_lower_6h[i]) or np.isnan(volume_filter[i]) or
+        if (np.isnan(adx_1d_aligned[i]) or np.isnan(donchian_upper_1d_aligned[i]) or 
+            np.isnan(donchian_lower_1d_aligned[i]) or np.isnan(atr_12h[i]) or np.isnan(volume_filter[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
-            else:
-                signals[i] = 0.0
+                long_extreme = 0.0
+                short_extreme = 0.0
             continue
         
         if position == 0:
             # Long breakout: price > Upper Donchian AND strong trend (ADX > 25) AND volume spike
-            if close[i] > donchian_upper_6h[i] and adx_1d_aligned[i] > 25 and volume_filter[i]:
+            if close[i] > donchian_upper_1d_aligned[i] and adx_1d_aligned[i] > 25 and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-                bars_since_entry = 0
+                long_extreme = close[i]
             # Short breakdown: price < Lower Donchian AND strong trend (ADX > 25) AND volume spike
-            elif close[i] < donchian_lower_6h[i] and adx_1d_aligned[i] > 25 and volume_filter[i]:
+            elif close[i] < donchian_lower_1d_aligned[i] and adx_1d_aligned[i] > 25 and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
-                bars_since_entry = 0
-            else:
-                signals[i] = 0.0
+                short_extreme = close[i]
         elif position == 1:
-            bars_since_entry += 1
-            # Exit: time-based exit after 3 bars (18 hours) or reverse signal
-            if bars_since_entry >= 3:
+            # Update long extreme
+            long_extreme = max(long_extreme, close[i])
+            # Exit long: price retraces 25% of ATR from extreme
+            if close[i] <= long_extreme - 0.25 * atr_12h[i]:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
-            elif close[i] < donchian_lower_6h[i] and adx_1d_aligned[i] > 25 and volume_filter[i]:
-                # Reverse to short
-                signals[i] = -0.25
-                position = -1
-                bars_since_entry = 0
+                long_extreme = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            bars_since_entry += 1
-            # Exit: time-based exit after 3 bars (18 hours) or reverse signal
-            if bars_since_entry >= 3:
+            # Update short extreme
+            short_extreme = min(short_extreme, close[i])
+            # Exit short: price retraces 25% of ATR from extreme
+            if close[i] >= short_extreme + 0.25 * atr_12h[i]:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
-            elif close[i] > donchian_upper_6h[i] and adx_1d_aligned[i] > 25 and volume_filter[i]:
-                # Reverse to long
-                signals[i] = 0.25
-                position = 1
-                bars_since_entry = 0
+                short_extreme = 0.0
             else:
                 signals[i] = -0.25
     
