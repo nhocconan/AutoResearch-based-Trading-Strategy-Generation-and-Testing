@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy combining Bollinger Band squeeze breakout with 12h volume confirmation and ADX trend filter
-# - Uses Bollinger Bands width percentile to identify low volatility squeeze (BBW < 20th percentile)
-# - Entry on breakout above upper band or below lower band with volume confirmation (>1.5x average)
-# - Uses 12h ADX > 25 to filter for trending markets only
-# - Designed to capture explosive moves after consolidation periods in both bull and bear markets
-# - Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
+# Hypothesis: 1h strategy using 4h RSI and 1d Trend Filter
+# - Uses 4h RSI(14) for overbought/oversold conditions
+# - Enters long when 4h RSI < 30 and price pulls back to 1h EMA(21) with volume confirmation
+# - Enters short when 4h RSI > 70 and price pulls back to 1h EMA(21) with volume confirmation
+# - Uses 1d EMA(50) to filter trades in direction of daily trend
+# - Uses volume spike (volume > 1.5x 20-period average) for entry confirmation
+# - Target: 60-150 total trades over 4 years (15-37/year) with 0.20 position sizing
 
-name = "4h_BollingerSqueeze_Breakout_12hVolume_ADX"
-timeframe = "4h"
+name = "1h_RSI40_EMA21_TrendFilter"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,91 +25,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20, 2) for squeeze detection
-    close_series = pd.Series(close)
-    bb_middle = close_series.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_series.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
-    bb_width = bb_upper - bb_lower
-    
-    # Bollinger Band width percentile (lookback 50 periods)
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-    ).values
-    squeeze_condition = bb_width_percentile < 20  # Bollinger Band width in lowest 20%
-    
-    # 12h volume confirmation (average volume)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 4h data for RSI calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 14:
         return np.zeros(n)
-    vol_12h = df_12h['volume'].values
-    vol_ma_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
-    vol_12h_avg_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
-    volume_confirmation = volume > (1.5 * vol_12h_avg_aligned)
     
-    # 12h ADX for trend filter
-    if len(df_12h) < 15:
+    # Calculate RSI(14) on 4h close
+    delta = np.diff(df_4h['close'].values)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Align 4h RSI to 1h timeframe
+    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi)
+    
+    # Get 1d data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
     
-    # True Range calculation
-    tr1 = high_12h[1:] - low_12h[1:]
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate EMA(50) on 1d close
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Directional Movement
-    dm_plus = np.where((high_12h[1:] - high_12h[:-1]) > (low_12h[:-1] - low_12h[1:]), 
-                       np.maximum(high_12h[1:] - high_12h[:-1], 0), 0)
-    dm_minus = np.where((low_12h[:-1] - low_12h[1:]) > (high_12h[1:] - high_12h[:-1]), 
-                        np.maximum(low_12h[:-1] - low_12h[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    # Calculate 1h EMA(21) for pullback entries
+    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Smoothed values
-    tr_14 = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_plus_14 = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_minus_14 = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Volume filter: volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma_20)
     
-    # DI and DX
-    di_plus = 100 * dm_plus_14 / np.where(tr_14 == 0, 0.0001, tr_14)
-    di_minus = 100 * dm_minus_14 / np.where(tr_14 == 0, 0.0001, tr_14)
-    dx = 100 * np.abs(di_plus - di_minus) / np.where((di_plus + di_minus) == 0, 0.0001, (di_plus + di_minus))
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
-    trend_filter = adx_aligned > 25  # Only trade in trending markets
-    
-    # Breakout conditions
-    long_breakout = (close > bb_upper) & squeeze_condition & volume_confirmation & trend_filter
-    short_breakout = (close < bb_lower) & squeeze_condition & volume_confirmation & trend_filter
+    # Session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
-        # Exit conditions: close back inside Bollinger Bands
-        if position == 1 and close[i] >= bb_middle[i]:
-            signals[i] = 0.0
-            position = 0
-        elif position == -1 and close[i] <= bb_middle[i]:
-            signals[i] = 0.0
-            position = 0
-        # Entry conditions
-        elif position == 0:
-            if long_breakout[i]:
-                signals[i] = 0.25
+    for i in range(21, n):  # Start after warmup for EMA21
+        # Skip if any critical value is NaN or outside session
+        if (np.isnan(rsi_4h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(ema_21[i]) or np.isnan(volume_filter[i]) or
+            not session_filter[i]):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        if position == 0:
+            # Long entry: 4h RSI oversold (<30) + price at 1h EMA21 + volume + above daily EMA50
+            if (rsi_4h_aligned[i] < 30 and 
+                close[i] <= ema_21[i] * 1.002 and  # Allow small tolerance above EMA
+                close[i] >= ema_21[i] * 0.998 and   # Allow small tolerance below EMA
+                volume_filter[i] and
+                close[i] > ema_50_1d_aligned[i]):
+                signals[i] = 0.20
                 position = 1
-            elif short_breakout[i]:
-                signals[i] = -0.25
+            # Short entry: 4h RSI overbought (>70) + price at 1h EMA21 + volume + below daily EMA50
+            elif (rsi_4h_aligned[i] > 70 and 
+                  close[i] >= ema_21[i] * 0.998 and  # Allow small tolerance below EMA
+                  close[i] <= ema_21[i] * 1.002 and  # Allow small tolerance above EMA
+                  volume_filter[i] and
+                  close[i] < ema_50_1d_aligned[i]):
+                signals[i] = -0.20
                 position = -1
-        # Hold position
-        if position == 1 and signals[i] == 0:
-            signals[i] = 0.25
-        elif position == -1 and signals[i] == 0:
-            signals[i] = -0.25
+        elif position == 1:
+            # Exit long: price crosses below EMA21 or RSI reaches overbought
+            if close[i] < ema_21[i] * 0.995 or rsi_4h_aligned[i] > 70:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.20
+        elif position == -1:
+            # Exit short: price crosses above EMA21 or RSI reaches oversold
+            if close[i] > ema_21[i] * 1.005 or rsi_4h_aligned[i] < 30:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.20
     
     return signals
