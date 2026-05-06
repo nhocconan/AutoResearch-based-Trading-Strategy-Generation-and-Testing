@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using weekly Donchian breakout with volume confirmation and RSI filter
-# - Uses 1w Donchian channels (20-period) for long-term structure
-# - Uses 1d volume spike for entry confirmation
-# - Uses 1d RSI > 60 for long and < 40 for short to filter momentum
-# - Enters long when price breaks above 1w Donchian upper band with volume and RSI > 60
-# - Enters short when price breaks below 1w Donchian lower band with volume and RSI < 40
-# - Exits when price returns to 1w Donchian middle (median)
+# Hypothesis: 4h strategy using daily Donchian breakout with volume confirmation and ADX trend filter
+# - Uses 1d Donchian channels (20-period) for long-term structure
+# - Uses 4h volume spike for entry confirmation
+# - Uses 4h ADX > 25 to filter for trending markets only
+# - Enters long when price breaks above 1d Donchian upper band with volume and trend
+# - Enters short when price breaks below 1d Donchian lower band with volume and trend
+# - Exits when price returns to 1d Donchian middle (median) or opposite band
 # - Designed to capture major trend moves with institutional level respect
-# - Target: 40-100 total trades over 4 years (10-25/year) with 0.25 position sizing
+# - Target: 80-180 total trades over 4 years (20-45/year) with 0.25 position sizing
 
-name = "1d_1wDonchian_20_Volume_RSI"
-timeframe = "1d"
+name = "4h_1dDonchian_20_Volume_ADX_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,92 +27,110 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for Donchian channels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for Donchian channels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1w Donchian channels (20-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate 1d Donchian channels (20-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # Donchian upper and lower bands
-    upper_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     middle_20 = (upper_20 + lower_20) / 2  # Median line for exit
     
-    # Align 1w Donchian channels to 1d timeframe
-    upper_20_1d = align_htf_to_ltf(prices, df_1w, upper_20)
-    lower_20_1d = align_htf_to_ltf(prices, df_1w, lower_20)
-    middle_20_1d = align_htf_to_ltf(prices, df_1w, middle_20)
+    # Align 1d Donchian channels to 4h timeframe
+    upper_20_4h = align_htf_to_ltf(prices, df_1d, upper_20)
+    lower_20_4h = align_htf_to_ltf(prices, df_1d, lower_20)
+    middle_20_4h = align_htf_to_ltf(prices, df_1d, middle_20)
     
-    # Volume filter (1d timeframe)
+    # Volume filter (4h timeframe)
     vol_ma_10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
     volume_spike = volume > (1.8 * vol_ma_10)  # Strong volume confirmation
     
-    # RSI filter (1d timeframe)
-    def calculate_rsi(close_prices, period=14):
-        delta = np.diff(close_prices, prepend=close_prices[0])
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
+    # ADX filter (4h timeframe) - trend strength
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
         
-        avg_gain = np.zeros_like(close_prices)
-        avg_loss = np.zeros_like(close_prices)
+        for i in range(1, len(high)):
+            plus_dm[i] = max(high[i] - high[i-1], 0)
+            minus_dm[i] = max(low[i-1] - low[i], 0)
+            if plus_dm[i] < minus_dm[i]:
+                plus_dm[i] = 0
+            if minus_dm[i] < plus_dm[i]:
+                minus_dm[i] = 0
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
         
-        avg_gain[period-1] = np.mean(gain[1:period+1])
-        avg_loss[period-1] = np.mean(loss[1:period+1])
+        # Smooth with Wilder's smoothing (alpha = 1/period)
+        atr = np.zeros_like(high)
+        plus_di = np.zeros_like(high)
+        minus_di = np.zeros_like(high)
         
-        for i in range(period, len(close_prices)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+        atr[period-1] = np.mean(tr[1:period+1])
+        plus_dm_sum = np.sum(plus_dm[1:period+1])
+        minus_dm_sum = np.sum(minus_dm[1:period+1])
         
-        rs = np.zeros_like(close_prices)
-        rsi = np.zeros_like(close_prices)
-        for i in range(period, len(close_prices)):
-            if avg_loss[i] != 0:
-                rs[i] = avg_gain[i] / avg_loss[i]
-                rsi[i] = 100 - (100 / (1 + rs[i]))
-            else:
-                rsi[i] = 100
-        return rsi
+        for i in range(period, len(high)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+            plus_dm_sum = plus_dm_sum - (plus_dm[i-period+1] if i-period+1 >= 0 else 0) + plus_dm[i]
+            minus_dm_sum = minus_dm_sum - (minus_dm[i-period+1] if i-period+1 >= 0 else 0) + minus_dm[i]
+            plus_di[i] = 100 * plus_dm_sum / (atr[i] * period) if atr[i] != 0 else 0
+            minus_di[i] = 100 * minus_dm_sum / (atr[i] * period) if atr[i] != 0 else 0
+        
+        dx = np.zeros_like(high)
+        adx = np.zeros_like(high)
+        for i in range(2*period-1, len(high)):
+            di_diff = abs(plus_di[i] - minus_di[i])
+            di_sum = plus_di[i] + minus_di[i]
+            dx[i] = 100 * di_diff / di_sum if di_sum != 0 else 0
+        
+        # Smooth DX to get ADX
+        adx[2*period-1] = np.mean(dx[2*period-1:3*period]) if 3*period <= len(high) else 0
+        for i in range(3*period, len(high)):
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
     
-    rsi_values = calculate_rsi(close, 14)
-    rsi_long_filter = rsi_values > 60  # Strong momentum for long
-    rsi_short_filter = rsi_values < 40  # Weak momentum for short
+    adx_values = calculate_adx(high, low, close, 14)
+    adx_filter = adx_values > 25  # Strong trend filter
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if any critical value is NaN
-        if (np.isnan(upper_20_1d[i]) or np.isnan(lower_20_1d[i]) or 
-            np.isnan(middle_20_1d[i]) or np.isnan(volume_spike[i]) or 
-            np.isnan(rsi_long_filter[i]) or np.isnan(rsi_short_filter[i])):
+        if (np.isnan(upper_20_4h[i]) or np.isnan(lower_20_4h[i]) or 
+            np.isnan(middle_20_4h[i]) or np.isnan(volume_spike[i]) or 
+            np.isnan(adx_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above 1w Donchian upper with volume and RSI > 60
-            if close[i] > upper_20_1d[i] and volume_spike[i] and rsi_long_filter[i]:
+            # Long: break above 1d Donchian upper with volume and trend
+            if close[i] > upper_20_4h[i] and volume_spike[i] and adx_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below 1w Donchian lower with volume and RSI < 40
-            elif close[i] < lower_20_1d[i] and volume_spike[i] and rsi_short_filter[i]:
+            # Short: break below 1d Donchian lower with volume and trend
+            elif close[i] < lower_20_4h[i] and volume_spike[i] and adx_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to middle
-            if close[i] < middle_20_1d[i]:
+            # Exit long: price returns to middle OR breaks below lower band
+            if close[i] < middle_20_4h[i] or close[i] < lower_20_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to middle
-            if close[i] > middle_20_1d[i]:
+            # Exit short: price returns to middle OR breaks above upper band
+            if close[i] > middle_20_4h[i] or close[i] > upper_20_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
