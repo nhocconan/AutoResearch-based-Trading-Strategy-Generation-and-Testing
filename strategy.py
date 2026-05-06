@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1-day KAMA trend + RSI mean reversion + volume confirmation
-# KAMA adapts to market efficiency, providing smooth trend in both bull and bear markets
-# RSI(2) captures short-term mean reversion: buy oversold, sell overbought
-# Volume confirmation filters weak moves
-# Target: 20-50 total trades over 4 years (5-12/year) with 0.25 position sizing
+# Hypothesis: 4h strategy using 1-day pivot points (R1/S1 for breakouts, R2/S2 for reversals) with volume confirmation and volatility filter
+# Breakouts above R1 or below S1 with volume > 2x 20-period average and ATR > 20-period average ATR indicate strong momentum
+# Reversals at R2 or S2 with volume and volatility filters capture mean reversion within daily range
+# Works in bull/bear markets: breakouts capture trends, reversals capture pullbacks within trend
+# Target: 75-200 total trades over 4 years (19-50/year) with 0.25 position sizing
 
-name = "4h_1dKAMA_RSI2_Volume_v1"
+name = "4h_1dPivot_R1S2_VolumeVolFilter_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,38 +23,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d KAMA trend ONCE before loop
+    # Calculate 1d pivot points ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # KAMA calculation on daily close
-    close_1d = df_1d['close'].values
-    direction = np.abs(close_1d[10:] - close_1d[:-10])
-    volatility = np.sum(np.abs(np.diff(close_1d, axis=0)), axis=0)[:len(direction)]
-    er = np.where(volatility != 0, direction / volatility, 0)
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2
-    kama = np.full_like(close_1d, np.nan, dtype=float)
-    kama[9] = close_1d[9]
-    for i in range(10, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # Previous day's OHLC for pivot calculation
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Align 1d KAMA to 4h timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    # Pivot point calculation
+    # Pivot = (previous high + previous low + previous close) / 3
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_ = prev_high - prev_low
     
-    # RSI(2) on 4h close
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    gain_ma = pd.Series(gain).rolling(window=2, min_periods=2).mean().values
-    loss_ma = pd.Series(loss).rolling(window=2, min_periods=2).mean().values
-    rs = np.where(loss_ma != 0, gain_ma / loss_ma, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Support and Resistance levels
+    r1 = pivot + (range_ * 1.0)
+    r2 = pivot + (range_ * 2.0)
+    s1 = pivot - (range_ * 1.0)
+    s2 = pivot - (range_ * 2.0)
     
-    # Volume confirmation: >1.5x 20-period average
+    # Align 1d levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    
+    # Volume confirmation: >2.0x 20-period average (higher threshold to reduce trades)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_20)
+    volume_filter = volume > (2.0 * vol_ma_20)
+    
+    # Volatility filter: ATR(14) > 20-period average ATR
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(np.maximum(tr1, tr2), tr3)])
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_ma_20 = pd.Series(atr_14).rolling(window=20, min_periods=20).mean().values
+    vol_filter = atr_14 > atr_ma_20
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -65,8 +73,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(volume_filter[i]) or
+        if (np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(s2_aligned[i]) or np.isnan(volume_filter[i]) or np.isnan(vol_filter[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -74,24 +82,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price below KAMA (dip in uptrend) and RSI oversold
-            if close[i] < kama_aligned[i] and rsi[i] < 30 and volume_filter[i]:
+            # Long breakout: price breaks above R1 with volume confirmation and volatility
+            if close[i] > r1_aligned[i] and volume_filter[i] and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price above KAMA (rally in downtrend) and RSI overbought
-            elif close[i] > kama_aligned[i] and rsi[i] > 70 and volume_filter[i]:
+            # Short breakout: price breaks below S1 with volume confirmation and volatility
+            elif close[i] < s1_aligned[i] and volume_filter[i] and vol_filter[i]:
+                signals[i] = -0.25
+                position = -1
+            # Long reversal: price rejects S2 with volume confirmation and volatility
+            elif close[i] < s2_aligned[i] and close[i] > s2_aligned[i] * 0.995 and volume_filter[i] and vol_filter[i]:
+                signals[i] = 0.25
+                position = 1
+            # Short reversal: price rejects R2 with volume confirmation and volatility
+            elif close[i] > r2_aligned[i] and close[i] < r2_aligned[i] * 1.005 and volume_filter[i] and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses above KAMA or RSI overbought
-            if close[i] > kama_aligned[i] or rsi[i] > 70:
+            # Exit long: price breaks below S1 (failed support) or reaches R2 (take profit)
+            if close[i] < s1_aligned[i] or close[i] > r2_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses below KAMA or RSI oversold
-            if close[i] < kama_aligned[i] or rsi[i] < 30:
+            # Exit short: price breaks above R1 (failed resistance) or reaches S2 (take profit)
+            if close[i] > r1_aligned[i] or close[i] < s2_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
