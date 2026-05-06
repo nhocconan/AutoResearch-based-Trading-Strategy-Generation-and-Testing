@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1-day Volatility Breakout with Volume Confirmation
-# - Buy when price breaks above 1-day high with volume expansion
-# - Sell when price breaks below 1-day low with volume expansion
-# - Uses 1-day ATR to filter for high volatility breakouts only
-# - Includes session filter (08-20 UTC) to avoid low liquidity periods
-# - Designed to capture momentum bursts in both bull and bear markets
+# Hypothesis: 12h Donchian breakout with volume confirmation and chop regime filter
+# - Long when price breaks above Donchian(20) high with volume > 1.5x average
+# - Short when price breaks below Donchian(20) low with volume > 1.5x average
+# - Uses 1d ADX(14) > 25 to filter for trending markets only
+# - Uses 1d ATR(14) for dynamic stop loss and position sizing
 # - Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
 
-name = "6h_1dVolatilityBreakout_VolumeConfirmation"
-timeframe = "6h"
+name = "12h_Donchian20_Volume_ADX_Trend_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,31 +24,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-day data for volatility breakout levels
+    # Get 1d data for ADX and ATR filters
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1-day high and low from previous day
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Calculate ADX(14) for trend strength
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1-day ATR for volatility filter
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1d = tr.rolling(window=14, min_periods=14).mean().values
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
     
-    # Align 1-day levels to 6h timeframe
-    prev_high_6h = align_htf_to_ltf(prices, df_1d, prev_high)
-    prev_low_6h = align_htf_to_ltf(prices, df_1d, prev_low)
-    atr_1d_6h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed values
+    def smooth_series(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(data[:period])
+        # Subsequent values using Wilder's smoothing
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    atr_1d = smooth_series(tr, 14)
+    dm_plus_smooth = smooth_series(dm_plus, 14)
+    dm_minus_smooth = smooth_series(dm_minus, 14)
+    
+    # DI+ and DI-
+    di_plus = np.where(atr_1d != 0, 100 * dm_plus_smooth / atr_1d, 0)
+    di_minus = np.where(atr_1d != 0, 100 * dm_minus_smooth / atr_1d, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = smooth_series(dx, 14)
+    
+    # Align 1d indicators to 12h timeframe
+    adx_12h = align_htf_to_ltf(prices, df_1d, adx)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # Get 12h data for Donchian channels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
+    
+    # Calculate Donchian(20) channels
+    high_20 = df_12h['high'].rolling(window=20, min_periods=20).max().values
+    low_20 = df_12h['low'].rolling(window=20, min_periods=20).min().values
+    
+    # Align Donchian channels to 12h timeframe
+    donchian_high = align_htf_to_ltf(prices, df_12h, high_20)
+    donchian_low = align_htf_to_ltf(prices, df_12h, low_20)
     
     # Volume filters
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_expansion = volume > (1.5 * vol_ma_20)  # Significant volume expansion
-    volume_filter = volume > vol_ma_20  # Minimum volume threshold
+    volume_filter = volume > (1.5 * vol_ma_20)  # Volume confirmation
     
     # Session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -58,40 +101,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after warmup
+    for i in range(30, n):  # Start after warmup
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(prev_high_6h[i]) or np.isnan(prev_low_6h[i]) or np.isnan(atr_1d_6h[i]) or
-            np.isnan(volume_expansion[i]) or np.isnan(volume_filter[i]) or
-            not session_filter[i]):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(adx_12h[i]) or np.isnan(atr_1d_aligned[i]) or
+            np.isnan(volume_filter[i]) or not session_filter[i]):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Only trade in trending markets (ADX > 25)
+        if adx_12h[i] <= 25:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long breakout: price breaks above previous day high with volume expansion
-            # Only take if volatility is elevated (above average ATR)
-            if (close[i] > prev_high_6h[i] and 
-                volume_expansion[i] and 
-                atr_1d_6h[i] > np.nanmedian(atr_1d_6h[max(0, i-50):i])):
+            # Long entry: price breaks above Donchian high with volume confirmation
+            if close[i] > donchian_high[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short breakout: price breaks below previous day low with volume expansion
-            elif (close[i] < prev_low_6h[i] and 
-                  volume_expansion[i] and 
-                  atr_1d_6h[i] > np.nanmedian(atr_1d_6h[max(0, i-50):i])):
+            # Short entry: price breaks below Donchian low with volume confirmation
+            elif close[i] < donchian_low[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below previous day low (reversal) or time-based exit
-            if close[i] < prev_low_6h[i]:
+            # Exit long: price breaks below Donchian low (trailing stop)
+            if close[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above previous day high (reversal) or time-based exit
-            if close[i] > prev_high_6h[i]:
+            # Exit short: price breaks above Donchian high (trailing stop)
+            if close[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
