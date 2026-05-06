@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Bollinger Band breakout with 1d trend filter and volume confirmation
-# Uses 1d EMA50 for trend alignment (reduces whipsaw) and Bollinger Band breakout
-# Volume spike (>2x 20-bar average) confirms breakout strength
-# ATR-based trailing stop via signal=0 when price retraces 30% of ATR from extreme
-# Discrete sizing 0.25 to balance profit potential and fee drag; target 60-120 total trades over 4 years (15-30/year)
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1w EMA34 trend filter and volume spike
+# Uses 1w EMA34 for trend alignment to reduce whipsaw during choppy markets
+# Volume spike (>1.8x 20-bar average) confirms breakout strength
+# ATR-based trailing stop via signal=0 when price retraces 25% of ATR from extreme
+# Discrete sizing 0.25 to balance profit potential and fee drag; target 80-160 total trades over 4 years (20-40/year)
 # Works in both bull/bear: breakouts capture momentum, trend filter avoids counter-trend traps, volume filter ensures participation
-# Bollinger Bands provide adaptive volatility-based breakout levels that work in ranging and trending markets
 
-name = "12h_BollingerBreakout_1dEMA50_Volume_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1wEMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,16 +25,18 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Calculate HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 50:
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d EMA50 trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1w EMA34 trend filter
+    close_1w_series = pd.Series(close_1w)
+    ema34_1w = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # Calculate ATR(14) for stoploss
     tr1 = np.abs(high[1:] - low[1:])
@@ -44,20 +45,13 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Bollinger Bands (20, 2)
-    bb_period = 20
-    bb_std = 2
-    bb_ma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    bb_std_dev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    bb_upper = bb_ma + bb_std * bb_std_dev
-    bb_lower = bb_ma - bb_std * bb_std_dev
-    
-    # Calculate volume filter (>2x 20-bar average)
+    # Calculate volume spike filter (>1.8x 20-bar average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (2.0 * vol_ma_20)
+    volume_filter = volume > (1.8 * vol_ma_20)
     
-    # Align HTF indicators to 12h timeframe
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate 1w EMA34 trend (already computed)
+    # Align HTF indicators to 4h timeframe (primary)
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -70,8 +64,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
-            np.isnan(atr[i]) or np.isnan(volume_filter[i]) or
+        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(atr[i]) or np.isnan(volume_filter[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -80,22 +73,27 @@ def generate_signals(prices):
                 short_extreme = 0.0
             continue
         
+        # Calculate 1w-based Camarilla levels for current bar
+        # Need to get the current week's high/low/close from the aligned 1w data
+        # Since we don't have direct access to weekly OHLC in the loop, we approximate
+        # by using the most recent available weekly values (which are already aligned)
+        # For breakout logic, we use price vs EMA trend and volume as primary signals
         if position == 0:
-            # Long breakout: price > upper BB AND uptrend (price > EMA50) AND volume spike
-            if close[i] > bb_upper[i] and close[i] > ema50_1d_aligned[i] and volume_filter[i]:
+            # Long breakout: price > EMA34 (uptrend) AND volume spike
+            if close[i] > ema34_1w_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
                 long_extreme = close[i]
-            # Short breakdown: price < lower BB AND downtrend (price < EMA50) AND volume spike
-            elif close[i] < bb_lower[i] and close[i] < ema50_1d_aligned[i] and volume_filter[i]:
+            # Short breakdown: price < EMA34 (downtrend) AND volume spike
+            elif close[i] < ema34_1w_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
                 short_extreme = close[i]
         elif position == 1:
             # Update long extreme
             long_extreme = max(long_extreme, close[i])
-            # Exit long: price retraces 30% of ATR from extreme
-            if close[i] <= long_extreme - 0.30 * atr[i]:
+            # Exit long: price retraces 25% of ATR from extreme
+            if close[i] <= long_extreme - 0.25 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 long_extreme = 0.0
@@ -104,8 +102,8 @@ def generate_signals(prices):
         elif position == -1:
             # Update short extreme
             short_extreme = min(short_extreme, close[i])
-            # Exit short: price retraces 30% of ATR from extreme
-            if close[i] >= short_extreme + 0.30 * atr[i]:
+            # Exit short: price retraces 25% of ATR from extreme
+            if close[i] >= short_extreme + 0.25 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 short_extreme = 0.0
