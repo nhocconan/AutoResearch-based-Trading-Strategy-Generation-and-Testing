@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Donchian(20) breakout with volume confirmation and ATR-based volatility filter
+# Hypothesis: 4h strategy using 1d Donchian(20) breakout with volume confirmation and ATR volatility filter
 # Long when price breaks above 1d Donchian upper band AND volume > 1.5 * 20-period avg volume AND ATR(14) < ATR(50) (low vol regime)
 # Short when price breaks below 1d Donchian lower band with same conditions
 # Exit when price crosses 1d Donchian middle band (mean reversion to equilibrium)
 # Uses discrete sizing 0.25 to limit drawdown and reduce fee churn
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
 # Donchian provides daily structure, volume confirms participation, ATR filter avoids choppy markets
+# Works in both bull and bear markets by capturing breakouts with institutional participation
 
-name = "12h_1dDonchian20_VolumeSpike_ATRRegime_v2"
-timeframe = "12h"
+name = "4h_1dDonchian20_VolumeSpike_ATRRegime_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -78,13 +79,13 @@ def generate_signals(prices):
     avg_volume_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
     volume_spike_4h = volume_4h > (1.5 * avg_volume_20_4h)
     
-    # Align 1d indicators to 12h timeframe (wait for completed 1d bar)
+    # Align 1d indicators to 4h timeframe (wait for completed 1d bar)
     donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper_1d)
     donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower_1d)
     donchian_middle_aligned = align_htf_to_ltf(prices, df_1d, donchian_middle_1d)
     atr_regime_aligned = align_htf_to_ltf(prices, df_1d, atr_regime_1d)
     
-    # Align 4h indicators to 12h timeframe (wait for completed 4h bar)
+    # Align 4h indicators to 4h timeframe (wait for completed 4h bar)
     volume_spike_aligned = align_htf_to_ltf(prices, df_4h, volume_spike_4h)
     
     signals = np.zeros(n)
