@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1d Bollinger Band squeeze + 1d Williams %R mean reversion + volume confirmation
-# Long when Bollinger Band Width (20,2) < 20th percentile (squeeze) AND Williams %R < -80 (oversold) AND volume > 1.5 * avg_volume(20) on 6h
-# Short when Bollinger Band Width (20,2) < 20th percentile (squeeze) AND Williams %R > -20 (overbought) AND volume > 1.5 * avg_volume(20) on 6h
-# Exit when Williams %R crosses back through -50 (mean reversion to midpoint)
+# Hypothesis: 12h strategy using 1d ATR-based volatility regime filter + 1w EMA200 trend filter + price action breakout
+# Long when price breaks above 12h Donchian(20) high AND 1d ATR(14)/ATR(50) > 1.2 (expanding volatility) AND 1w EMA200 > EMA200 previous (uptrend)
+# Short when price breaks below 12h Donchian(20) low AND 1d ATR(14)/ATR(50) > 1.2 (expanding volatility) AND 1w EMA200 < EMA200 previous (downtrend)
+# Exit when price crosses 12h EMA20 (mean reversion to short-term trend)
 # Uses discrete sizing 0.25 to balance return and risk
-# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
-# Bollinger Band squeeze identifies low volatility periods primed for breakout
-# Williams %R extremes provide high-probability reversal points in ranging markets
-# Volume confirmation validates breakout strength while limiting overtrading
-# Works in both bull (buy oversold dips) and bear (sell overbought rallies) markets
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# ATR regime filter identifies true breakouts vs false signals in ranging markets
+# 1w EMA200 trend filter ensures we trade with the dominant weekly trend
+# Donchian breakout provides clear entry/exit levels with built-in structure
+# Works in both bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend) markets
 
-name = "6h_1dBB_Squeeze_1dWilliamsR_MeanRev_VolumeConfirm"
-timeframe = "6h"
+name = "12h_ATRRegime_DonchianBreakout_1wEMA200_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,39 +28,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for Bollinger Bands and Williams %R
+    # Get 1d data ONCE before loop for ATR regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:  # Need at least 20 completed 1d bars for Bollinger Bands
+    if len(df_1d) < 50:  # Need at least 50 completed 1d bars for ATR(50)
         return np.zeros(n)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Bollinger Bands (20,2)
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
-    bb_width = (upper_bb - lower_bb) / sma_20  # Normalized width
+    # Calculate 1d ATR(14) and ATR(50) for volatility regime
+    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
+    tr2 = np.maximum(tr1, np.abs(low_1d[1:] - close_1d[:-1]))
+    tr = np.concatenate([[np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])], tr2])
     
-    # Calculate 1d Bollinger Band Width percentile (20-period lookback)
-    bb_width_percentile = pd.Series(bb_width).rolling(window=20, min_periods=20).rank(pct=True).values * 100
-    bb_squeeze = bb_width_percentile < 20  # Squeeze when width < 20th percentile
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    atr_ratio = np.where(atr_50 != 0, atr_14 / atr_50, 1.0)
     
-    # Calculate 1d Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r_1d = -100 * (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14)
-    # Handle division by zero (when high == low)
-    williams_r_1d = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r_1d)
+    # Align 1d ATR ratio to 12h timeframe (wait for completed 1d bar)
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
-    # Align 1d indicators to 6h timeframe (wait for completed 1d bar)
-    bb_squeeze_aligned = align_htf_to_ltf(prices, df_1d, bb_squeeze)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r_1d)
+    # Get 1w data ONCE before loop for EMA200 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:  # Need at least 200 completed weekly bars for EMA200
+        return np.zeros(n)
+    close_1w = df_1w['close'].values
     
-    # Calculate volume confirmation: volume > 1.5 * 20-period average volume on 6h
-    avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * avg_volume_20)
+    # Calculate 1w EMA200
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    
+    # Calculate 12h Donchian channels (20-period)
+    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 12h EMA20 for exit signal
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     # Session filter: 08-20 UTC (pre-compute for efficiency)
     hours = prices.index.hour
@@ -71,36 +74,37 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN or outside session
-        if (np.isnan(bb_squeeze_aligned[i]) or np.isnan(williams_r_aligned[i]) or 
-            np.isnan(avg_volume_20[i]) or not in_session[i]):
+        if (np.isnan(atr_ratio_aligned[i]) or np.isnan(ema_200_1w_aligned[i]) or 
+            np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i]) or 
+            np.isnan(ema_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: BB squeeze, Williams %R < -80 (oversold), volume spike, in session
-            if (bb_squeeze_aligned[i] and 
-                williams_r_aligned[i] < -80 and 
-                volume_confirm[i]):
+            # Long: Donchian breakout above, ATR regime > 1.2 (expanding vol), 1w EMA200 rising, in session
+            if (close[i] > highest_high_20[i] and 
+                atr_ratio_aligned[i] > 1.2 and 
+                ema_200_1w_aligned[i] > ema_200_1w_aligned[i-1]):
                 signals[i] = 0.25
                 position = 1
-            # Short: BB squeeze, Williams %R > -20 (overbought), volume spike, in session
-            elif (bb_squeeze_aligned[i] and 
-                  williams_r_aligned[i] > -20 and 
-                  volume_confirm[i]):
+            # Short: Donchian breakdown below, ATR regime > 1.2 (expanding vol), 1w EMA200 falling, in session
+            elif (close[i] < lowest_low_20[i] and 
+                  atr_ratio_aligned[i] > 1.2 and 
+                  ema_200_1w_aligned[i] < ema_200_1w_aligned[i-1]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R crosses back above -50 (mean reversion)
-            if williams_r_aligned[i] > -50:
+            # Exit long: price crosses below 12h EMA20 (mean reversion)
+            if close[i] < ema_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R crosses back below -50 (mean reversion)
-            if williams_r_aligned[i] < -50:
+            # Exit short: price crosses above 12h EMA20 (mean reversion)
+            if close[i] > ema_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
