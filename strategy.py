@@ -3,21 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h KAMA trend filter with 1d RSI mean reversion and volume confirmation
-# Uses 1d RSI(14) for mean reversion signals (RSI < 30 long, RSI > 70 short)
-# 4h KAMA(14) filters trend direction to avoid counter-trend trades
-# Volume spike (>1.5x 20-bar average) confirms momentum
-# Fixed profit targets at 1.5% and 3% with trailing stop via signal=0 when adverse move exceeds 0.5%
-# Designed for low trade frequency (target: 20-40 trades/year) to minimize fee drag
-# Works in bull/bear: mean reversion captures reversals, trend filter avoids false signals, volume ensures participation
+# Hypothesis: 4h Donchian breakout with 1d ADX trend filter and volume spike
+# Uses 1d Donchian channels (20) for breakout signals, 1d ADX (14) for trend strength (avoids chop)
+# Volume spike (>1.5x 20-bar average) confirms breakout momentum
+# ATR-based trailing stop via signal=0 when price retraces 20% of ATR from extreme
+# Discrete sizing 0.25 to balance profit and fee; target 80-160 total trades (20-40/year)
+# Works in bull/bear: breakouts capture momentum, ADX filter avoids false signals in range, volume ensures participation
 
-name = "4h_KAMA_1dRSI_MeanRev_Volume_v1"
+name = "4h_Donchian20_1dADX14_VolumeSpike_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -28,36 +27,54 @@ def generate_signals(prices):
     # Calculate HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 14:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d RSI(14) for mean reversion
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
+    # Calculate 1d ADX(14) for trend filter
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 4h KAMA(14) trend filter
-    change = np.abs(np.diff(close, k=1))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (0.0645 - 0.0625) + 0.0625) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Directional Movement
+    up_move = np.concatenate([[np.nan], high_1d[1:] - high_1d[:-1]])
+    down_move = np.concatenate([[np.nan], low_1d[:-1] - low_1d[1:]])
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
-    # Calculate volume confirmation (>1.5x 20-bar average)
+    # Smoothed DM and TR
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_1d
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_1d
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Calculate ATR(14) for stoploss (on 4h)
+    tr1_4h = np.abs(high[1:] - low[1:])
+    tr2_4h = np.abs(high[1:] - close[:-1])
+    tr3_4h = np.abs(low[1:] - close[:-1])
+    tr_4h = np.concatenate([[np.nan], np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))])
+    atr_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate volume spike filter (>1.5x 20-bar average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma_20)
     
-    # Align HTF RSI to 4h timeframe
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Calculate 1d Donchian channels (20-period)
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
+    # Align HTF indicators to 4h timeframe (primary)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -65,37 +82,50 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    long_extreme = 0.0
+    short_extreme = 0.0
     
-    for i in range(20, n):
+    for i in range(100, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(kama[i]) or 
-            np.isnan(volume_filter[i]) or not session_filter[i]):
+        if (np.isnan(adx_aligned[i]) or np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or np.isnan(atr_4h[i]) or np.isnan(volume_filter[i]) or
+            not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                long_extreme = 0.0
+                short_extreme = 0.0
             continue
         
         if position == 0:
-            # Long signal: RSI < 30 (oversold) AND price > KAMA (uptrend) AND volume spike
-            if rsi_1d_aligned[i] < 30 and close[i] > kama[i] and volume_filter[i]:
+            # Long breakout: price > Donchian high AND strong trend (ADX > 25) AND volume spike
+            if close[i] > donchian_high_aligned[i] and adx_aligned[i] > 25 and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short signal: RSI > 70 (overbought) AND price < KAMA (downtrend) AND volume spike
-            elif rsi_1d_aligned[i] > 70 and close[i] < kama[i] and volume_filter[i]:
+                long_extreme = close[i]
+            # Short breakdown: price < Donchian low AND strong trend (ADX > 25) AND volume spike
+            elif close[i] < donchian_low_aligned[i] and adx_aligned[i] > 25 and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
+                short_extreme = close[i]
         elif position == 1:
-            # Exit long: RSI > 50 (mean reversion complete) or adverse move > 0.5%
-            if rsi_1d_aligned[i] > 50 or close[i] < signals[i-1] * 0.995 * (1 if signals[i-1] > 0 else 1):
+            # Update long extreme
+            long_extreme = max(long_extreme, close[i])
+            # Exit long: price retraces 20% of ATR from extreme
+            if close[i] <= long_extreme - 0.20 * atr_4h[i]:
                 signals[i] = 0.0
                 position = 0
+                long_extreme = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: RSI < 50 (mean reversion complete) or adverse move > 0.5%
-            if rsi_1d_aligned[i] < 50 or close[i] > signals[i-1] * 1.005 * (1 if signals[i-1] < 0 else 1):
+            # Update short extreme
+            short_extreme = min(short_extreme, close[i])
+            # Exit short: price retraces 20% of ATR from extreme
+            if close[i] >= short_extreme + 0.20 * atr_4h[i]:
                 signals[i] = 0.0
                 position = 0
+                short_extreme = 0.0
             else:
                 signals[i] = -0.25
     
