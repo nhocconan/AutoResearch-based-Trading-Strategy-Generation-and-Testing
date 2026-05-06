@@ -1,11 +1,12 @@
-# 6h_1dCamarilla_R3S3_Breakout_1dTrend_Volume
+#!/usr/bin/env python3
+# 12h_1dCamarilla_R3S3_Breakout_1dTrend_Volume
 # Uses 1d Camarilla pivot levels (R3/S3) as breakout levels with 1d trend filter (EMA34)
-# and 6h volume confirmation. Designed for 6h timeframe to capture major pivot breaks
+# and 12h volume confirmation. Designed for 12h timeframe to capture major pivot breaks
 # with trend alignment, working in both bull and bear markets by following the 1d trend.
 # Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing.
 
-name = "6h_1dCamarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_1dCamarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,15 +37,15 @@ def generate_signals(prices):
     r3 = pp + range_1d * 1.1 / 2
     s3 = pp - range_1d * 1.1 / 2
     
-    # Align Camarilla levels to 6h timeframe
-    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
+    # Align Camarilla levels to 12h timeframe
+    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
     
     # 1d EMA34 for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_6h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_34_12h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 6h volume filter
+    # 12h volume filter
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma_20)  # Strong volume confirmation
     
@@ -53,8 +54,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical value is NaN
-        if (np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or 
-            np.isnan(ema_34_6h[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or 
+            np.isnan(ema_34_12h[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,31 +63,26 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: break above R3 with uptrend and volume
-            if close[i] > r3_6h[i] and close[i] > ema_34_6h[i] and volume_spike[i]:
+            if close[i] > r3_12h[i] and close[i] > ema_34_12h[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
             # Short: break below S3 with downtrend and volume
-            elif close[i] < s3_6h[i] and close[i] < ema_34_6h[i] and volume_spike[i]:
+            elif close[i] < s3_12h[i] and close[i] < ema_34_12h[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Exit long: price returns to EMA34 or breaks below S3
-            if close[i] < ema_34_6h[i] or close[i] < s3_6h[i]:
+            if close[i] < ema_34_12h[i] or close[i] < s3_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Exit short: price returns to EMA34 or breaks above R3
-            if close[i] > ema_34_6h[i] or close[i] > r3_6h[i]:
+            if close[i] > ema_34_12h[i] or close[i] > r3_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
-
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
