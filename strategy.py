@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d pivot points with volume confirmation and 4h trend filter
-# Pivot points from daily timeframe provide key support/resistance levels
-# Breakout above R1 or below S1 with volume > 1.5x 20-period average indicates strong momentum
-# Trend filter: 4h EMA(50) to avoid counter-trend trades
-# Works in bull/bear markets: breakouts capture trends, reversals capture pullbacks within trend
+# Hypothesis: 12h strategy using daily Donchian breakouts with volume confirmation and trend filter
+# Daily Donchian(20) provides key structural levels for breakouts
+# Breakout above upper band or below lower band with volume > 2.0x 20-period average indicates strong momentum
+# Trend filter: 20-period EMA on 12h timeframe to avoid counter-trend trades
+# Works in bull/bear markets: breakouts capture trends, volatility filter avoids whipsaws
 # Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
 
-name = "4h_DailyPivot_R1S1_VolumeTrendFilter_v1"
-timeframe = "4h"
+name = "12h_Donchian20_1d_VolumeTrendFilter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,39 +24,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate daily pivot points ONCE before loop
+    # Calculate daily Donchian channels ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Previous day's OHLC for pivot calculation
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Daily Donchian(20) - using previous day's data to avoid look-ahead
+    high_20 = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().shift(1).values
+    low_20 = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Pivot point calculation
-    # Pivot = (previous high + previous low + previous close) / 3
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_ = prev_high - prev_low
+    # Align daily Donchian levels to 12h timeframe
+    upper_band_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    lower_band_aligned = align_htf_to_ltf(prices, df_1d, low_20)
     
-    # Support and Resistance levels
-    r1 = pivot + (range_ * 1.0)
-    s1 = pivot - (range_ * 1.0)
-    
-    # Align daily levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Volume confirmation: >1.5x 20-period average
+    # Volume confirmation: >2.0x 20-period average (higher threshold to reduce trades)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_20)
+    volume_filter = volume > (2.0 * vol_ma_20)
     
-    # Trend filter: 50-period EMA on 4h timeframe
+    # Trend filter: 20-period EMA on 12h timeframe
     close_series = pd.Series(close)
-    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend = close > ema_50
-    downtrend = close < ema_50
+    ema_20 = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    uptrend = close > ema_20
+    downtrend = close < ema_20
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -65,34 +55,35 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(volume_filter[i]) or 
-            np.isnan(ema_50[i]) or not session_filter[i]):
+        if (np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]) or 
+            np.isnan(volume_filter[i]) or np.isnan(ema_20[i]) or
+            not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long breakout: price breaks above R1 with volume confirmation and uptrend
-            if close[i] > r1_aligned[i] and volume_filter[i] and uptrend[i]:
+            # Long breakout: price breaks above upper band with volume confirmation and uptrend
+            if close[i] > upper_band_aligned[i] and volume_filter[i] and uptrend[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short breakout: price breaks below S1 with volume confirmation and downtrend
-            elif close[i] < s1_aligned[i] and volume_filter[i] and downtrend[i]:
+            # Short breakout: price breaks below lower band with volume confirmation and downtrend
+            elif close[i] < lower_band_aligned[i] and volume_filter[i] and downtrend[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below S1 (failed support) or reaches R1*1.02 (take profit)
-            if close[i] < s1_aligned[i] or close[i] > r1_aligned[i] * 1.02:
+            # Exit long: price breaks below lower band (failed support) or reaches upper band (take profit)
+            if close[i] < lower_band_aligned[i] or close[i] > upper_band_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above R1 (failed resistance) or reaches S1*0.98 (take profit)
-            if close[i] > r1_aligned[i] or close[i] < s1_aligned[i] * 0.98:
+            # Exit short: price breaks above upper band (failed resistance) or reaches lower band (take profit)
+            if close[i] > upper_band_aligned[i] or close[i] < lower_band_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
