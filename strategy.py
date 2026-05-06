@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1-day Keltner Channel breakout with volume confirmation
-# Long when price closes above upper Keltner band (EMA20 + 2*ATR) with volume > 1.5x average
-# Short when price closes below lower Keltner band (EMA20 - 2*ATR) with volume > 1.5x average
-# Uses daily Keltner channels for dynamic support/resistance, volume for confirmation
-# Designed to capture breakouts in trending markets while avoiding false signals in ranging conditions
-# Target: 15-25 trades per year (60-100 over 4 years) with 0.25 position sizing
+# Hypothesis: 4h strategy using 1-day KAMA trend with RSI momentum filter and volume confirmation
+# Long when 1-day KAMA is rising, RSI(14) > 50, and volume > 1.5x 20-period average
+# Short when 1-day KAMA is falling, RSI(14) < 50, and volume > 1.5x 20-period average
+# KAMA adapts to market noise, making it effective in both trending and ranging markets
+# RSI filter ensures momentum alignment, volume confirmation reduces false signals
+# Target: 20-40 trades per year (80-160 over 4 years) with 0.25 position sizing
 
-name = "12h_1dKeltner2x_Volume_Confirmation"
-timeframe = "12h"
+name = "4h_1dKAMA_RSI_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,29 +24,50 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1-day Keltner Channel components
+    # Calculate 1-day KAMA (adaptive moving average)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # EMA20 of close
-    close_series = pd.Series(df_1d['close'])
-    ema20 = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    close_1d = df_1d['close'].values
+    # Efficiency ratio
+    change = np.abs(np.diff(close_1d))
+    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0)  # placeholder, will compute properly below
+    # Proper ER calculation
+    er = np.zeros_like(close_1d)
+    for i in range(len(close_1d)):
+        if i < 10:
+            er[i] = np.nan
+        else:
+            direction = np.abs(close_1d[i] - close_1d[i-9])
+            volatility = np.sum(np.abs(np.diff(close_1d[i-9:i+1])))
+            er[i] = direction / volatility if volatility != 0 else 0
+    # Smoothing constants
+    sc = (er * 0.29 + 0.06) ** 2
+    # KAMA calculation
+    kama = np.full_like(close_1d, np.nan)
+    kama[9] = close_1d[9]  # seed
+    for i in range(10, len(close_1d)):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
     
-    # ATR(10) for Keltner width
-    high_low = df_1d['high'] - df_1d['low']
-    high_close = np.abs(df_1d['high'] - np.concatenate([[df_1d['close'][0]], df_1d['close'][:-1]]))
-    low_close = np.abs(df_1d['low'] - np.concatenate([[df_1d['close'][0]], df_1d['close'][:-1]]))
-    tr = np.maximum(high_low, np.maximum(high_close, low_close))
-    atr10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Align KAMA to 4h timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
     
-    # Keltner bands: EMA20 ± 2*ATR10
-    upper_keltner = ema20 + 2 * atr10
-    lower_keltner = ema20 - 2 * atr10
+    # KAMA trend: slope over 3 periods
+    kama_slope = np.diff(kama_aligned, n=1)
+    kama_slope = np.insert(kama_slope, 0, np.nan)
+    kama_rising = kama_slope > 0
+    kama_falling = kama_slope < 0
     
-    # Align Keltner levels to 12h timeframe
-    upper_keltner_aligned = align_htf_to_ltf(prices, df_1d, upper_keltner)
-    lower_keltner_aligned = align_htf_to_ltf(prices, df_1d, lower_keltner)
+    # RSI(14) on 4h close
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
     
     # Volume confirmation: >1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -59,9 +80,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after EMA/ATR warmup
+    for i in range(30, n):  # Start after warmup
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(upper_keltner_aligned[i]) or np.isnan(lower_keltner_aligned[i]) or 
+        if (np.isnan(kama_aligned[i]) or np.isnan(rsi[i]) or 
             np.isnan(volume_filter[i]) or
             not session_filter[i]):
             if position != 0:
@@ -70,24 +91,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long breakout: price closes above upper Keltner with volume confirmation
-            if close[i] > upper_keltner_aligned[i] and volume_filter[i]:
+            # Long: KAMA rising, RSI > 50, volume confirmation
+            if kama_rising[i] and rsi[i] > 50 and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short breakout: price closes below lower Keltner with volume confirmation
-            elif close[i] < lower_keltner_aligned[i] and volume_filter[i]:
+            # Short: KAMA falling, RSI < 50, volume confirmation
+            elif kama_falling[i] and rsi[i] < 50 and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price closes below lower Keltner (support break)
-            if close[i] < lower_keltner_aligned[i]:
+            # Exit long: KAMA falling or RSI < 40
+            if kama_falling[i] or rsi[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price closes above upper Keltner (resistance break)
-            if close[i] > upper_keltner_aligned[i]:
+            # Exit short: KAMA rising or RSI > 60
+            if kama_rising[i] or rsi[i] > 60:
                 signals[i] = 0.0
                 position = 0
             else:
