@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R mean reversal with 1d EMA34 trend filter and volume confirmation
-# Long when Williams %R < -80 (oversold) AND price > 1d EMA34 (uptrend) AND volume > 1.5 * 20-bar avg volume
-# Short when Williams %R > -20 (overbought) AND price < 1d EMA34 (downtrend) AND volume > 1.5 * 20-bar avg volume
-# Exit when Williams %R crosses back above -50 (for longs) or below -50 (for shorts)
-# Uses discrete sizing 0.25 to balance opportunity and drawdown
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
-# Williams %R identifies exhaustion points; EMA34 ensures higher-timeframe trend alignment
-# Volume spike confirms participation; mean reversal works in both bull (buy dips) and bear (sell rallies)
+# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume confirmation
+# Long when price breaks above R3 AND close > 12h EMA50 (uptrend) AND volume > 2.0 * 20-bar avg volume
+# Short when price breaks below S3 AND close < 12h EMA50 (downtrend) AND volume > 2.0 * 20-bar avg volume
+# Exit when price reverts to the 12h EMA50 level (mean reversion to trend)
+# Uses discrete sizing 0.25 to control fee drag and drawdown
+# Target: 80-150 total trades over 4 years (20-38/year) for 4h timeframe
+# Camarilla levels provide institutional support/resistance; EMA50 ensures higher-timeframe trend alignment
+# Volume spike confirms institutional participation; mean reversion to trend works in ranging markets
 
-name = "12h_WilliamsR_1dEMA34_VolumeMeanRev_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_12hEMA50_VolumeBreakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,59 +26,67 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Williams %R (14-period)
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14)
+    # Calculate Camarilla levels (based on previous bar's range)
+    # Camarilla: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = high[0]  # avoid NaN on first bar
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
     
-    # Get 1d data ONCE before loop for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    camarilla_range = prev_high - prev_low
+    r3 = prev_close + 1.1 * camarilla_range / 2.0
+    s3 = prev_close - 1.1 * camarilla_range / 2.0
+    
+    # Get 12h data ONCE before loop for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
-    close_1d = df_1d['close'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate 1d EMA34
-    close_1d_series = pd.Series(close_1d)
-    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 12h EMA50
+    close_12h_series = pd.Series(close_12h)
+    ema_50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align HTF indicators to 12h timeframe (wait for completed HTF bar)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align HTF indicators to 4h timeframe (wait for completed HTF bar)
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate volume confirmation: volume > 1.5 * 20-bar average volume
+    # Calculate volume confirmation: volume > 2.0 * 20-bar average volume
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * avg_volume_20)
+    volume_spike = volume > (2.0 * avg_volume_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN
-        if (np.isnan(williams_r[i]) or np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(r3[i]) or np.isnan(s3[i]) or np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Williams %R mean reversal signals with trend and volume filters
-            # Long: oversold (%R < -80) AND uptrend AND volume spike
-            if williams_r[i] < -80.0 and close[i] > ema_34_1d_aligned[i] and volume_spike[i]:
+            # Camarilla breakout signals with trend and volume filters
+            # Long: break above R3 AND uptrend AND volume spike
+            if close[i] > r3[i] and close[i] > ema_50_12h_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: overbought (%R > -20) AND downtrend AND volume spike
-            elif williams_r[i] > -20.0 and close[i] < ema_34_1d_aligned[i] and volume_spike[i]:
+            # Short: break below S3 AND downtrend AND volume spike
+            elif close[i] < s3[i] and close[i] < ema_50_12h_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R crosses back above -50 (recovering from oversold)
-            if williams_r[i] > -50.0:
+            # Exit long: price reverts to 12h EMA50 (mean reversion to trend)
+            if close[i] <= ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R crosses back below -50 (rejecting from overbought)
-            if williams_r[i] < -50.0:
+            # Exit short: price reverts to 12h EMA50 (mean reversion to trend)
+            if close[i] >= ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
