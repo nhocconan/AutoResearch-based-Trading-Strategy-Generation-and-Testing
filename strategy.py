@@ -4,10 +4,10 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and ATR volatility filter
-# Uses Donchian channels for price structure, 1d EMA50 for strong trend alignment (reduces whipsaw)
+# Uses Donchian channels for structure, 1d EMA50 for strong trend alignment (reduces bear market whipsaw)
 # ATR(14) > 20-bar average ATR filters for sufficient volatility to avoid choppy markets
-# Discrete sizing 0.25 to limit fee drag; target 75-200 total trades over 4 years
-# Proven pattern: price channel breakouts with volatility confirmation work on BTC/ETH in both bull/bear
+# Discrete sizing 0.25 to limit fee drag; target 75-200 trades over 4 years
+# Proven pattern: price channel breakouts with volume/volatility confirmation work on BTC/ETH in both bull/bear
 
 name = "4h_Donchian20_1dEMA50_ATRFilter_v1"
 timeframe = "4h"
@@ -25,7 +25,7 @@ def generate_signals(prices):
     # Calculate HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
