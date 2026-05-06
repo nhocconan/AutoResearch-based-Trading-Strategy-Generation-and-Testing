@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1d Donchian breakout with 1w EMA trend filter and volume confirmation
-# Long when price breaks above 1d Donchian upper (20) AND 1w EMA34 > EMA89 AND volume > 1.5 * avg_volume(20)
-# Short when price breaks below 1d Donchian lower (20) AND 1w EMA34 < EMA89 AND volume > 1.5 * avg_volume(20)
-# Exit when price touches 1d Donchian midpoint or opposite Donchian level
+# Hypothesis: 12h strategy using weekly Donchian breakout with 1d EMA trend filter and volume confirmation
+# Long when price breaks above weekly Donchian upper (20) AND 1d EMA34 > EMA89 AND volume > 1.3 * avg_volume(20)
+# Short when price breaks below weekly Donchian lower (20) AND 1d EMA34 < EMA89 AND volume > 1.3 * avg_volume(20)
+# Exit when price touches weekly Donchian midpoint
 # Uses discrete sizing 0.25 to balance return and drawdown control
-# Target: 75-200 total trades over 4 years (19-50/year) for 6h timeframe
-# 1d Donchian provides strong structural breakout levels aligned with daily candles
-# 1w EMA filter ensures alignment with weekly trend, reducing counter-trend trades
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# Weekly Donchian provides strong structural breakout levels
+# 1d EMA filter ensures alignment with medium-term trend, reducing counter-trend trades
 # Volume confirmation filters weak breakouts
 # Works in bull (trend continuation breakouts) and bear (trend continuation breakdowns)
 
-name = "6h_1dDonchian20_1wEMATrend_Volume"
-timeframe = "6h"
+name = "12h_weeklyDonchian20_1dEMATrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,47 +28,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for Donchian channels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:  # Need sufficient data for Donchian(20)
+    # Get weekly data ONCE before loop for Donchian channels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:  # Need sufficient data for Donchian(20)
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d Donchian channels (20-period)
+    # Calculate weekly Donchian channels (20-period)
     # Upper = highest high over last 20 periods
     # Lower = lowest low over last 20 periods
     # Middle = (Upper + Lower) / 2
-    high_series_1d = pd.Series(high_1d)
-    low_series_1d = pd.Series(low_1d)
-    donchian_upper_1d = high_series_1d.rolling(window=20, min_periods=20).max().values
-    donchian_lower_1d = low_series_1d.rolling(window=20, min_periods=20).min().values
-    donchian_middle_1d = (donchian_upper_1d + donchian_lower_1d) / 2.0
+    high_series_1w = pd.Series(high_1w)
+    low_series_1w = pd.Series(low_1w)
+    donchian_upper_1w = high_series_1w.rolling(window=20, min_periods=20).max().values
+    donchian_lower_1w = low_series_1w.rolling(window=20, min_periods=20).min().values
+    donchian_middle_1w = (donchian_upper_1w + donchian_lower_1w) / 2.0
     
-    # Align 1d Donchian levels to 6h timeframe (wait for completed 1d bar)
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper_1d)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower_1d)
-    donchian_middle_aligned = align_htf_to_ltf(prices, df_1d, donchian_middle_1d)
+    # Align weekly Donchian levels to 12h timeframe (wait for completed weekly bar)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1w, donchian_upper_1w)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1w, donchian_lower_1w)
+    donchian_middle_aligned = align_htf_to_ltf(prices, df_1w, donchian_middle_1w)
     
-    # Get 1w data ONCE before loop for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 89:  # Need sufficient data for EMA89
+    # Get 1d data ONCE before loop for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 89:  # Need sufficient data for EMA89
         return np.zeros(n)
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1w EMA34 and EMA89
-    close_series_1w = pd.Series(close_1w)
-    ema_34_1w = close_series_1w.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_89_1w = close_series_1w.ewm(span=89, adjust=False, min_periods=89).mean().values
+    # Calculate 1d EMA34 and EMA89
+    close_series_1d = pd.Series(close_1d)
+    ema_34_1d = close_series_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_89_1d = close_series_1d.ewm(span=89, adjust=False, min_periods=89).mean().values
     
-    # Align 1w EMA values to 6h timeframe (wait for completed 1w bar)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    ema_89_aligned = align_htf_to_ltf(prices, df_1w, ema_89_1w)
+    # Align 1d EMA values to 12h timeframe (wait for completed 1d bar)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_89_aligned = align_htf_to_ltf(prices, df_1d, ema_89_1d)
     
-    # Calculate volume confirmation: volume > 1.5 * 20-period average volume on 6h
+    # Calculate volume confirmation: volume > 1.3 * 20-period average volume on 12h
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * avg_volume_20)
+    volume_confirm = volume > (1.3 * avg_volume_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -84,26 +84,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above 1d Donchian upper with 1w EMA34 > EMA89 and volume confirmation
+            # Long: price breaks above weekly Donchian upper with 1d EMA34 > EMA89 and volume confirmation
             if (close[i] > donchian_upper_aligned[i] and close[i-1] <= donchian_upper_aligned[i-1] and 
                 ema_34_aligned[i] > ema_89_aligned[i] and volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 1d Donchian lower with 1w EMA34 < EMA89 and volume confirmation
+            # Short: price breaks below weekly Donchian lower with 1d EMA34 < EMA89 and volume confirmation
             elif (close[i] < donchian_lower_aligned[i] and close[i-1] >= donchian_lower_aligned[i-1] and 
                   ema_34_aligned[i] < ema_89_aligned[i] and volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price touches 1d Donchian middle or lower (reversal or profit take)
-            if close[i] <= donchian_middle_aligned[i] or close[i] <= donchian_lower_aligned[i]:
+            # Exit long: price touches weekly Donchian middle (profit take or reversal)
+            if close[i] <= donchian_middle_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price touches 1d Donchian middle or upper (reversal or profit take)
-            if close[i] >= donchian_middle_aligned[i] or close[i] >= donchian_upper_aligned[i]:
+            # Exit short: price touches weekly Donchian middle (profit take or reversal)
+            if close[i] >= donchian_middle_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
