@@ -1,22 +1,21 @@
+# 1h strategy: 4h Donchian breakout with volume confirmation and session filter
+# Uses 4h Donchian channels for directional bias and 1h for entry timing
+# Designed for 15-35 trades/year with 0.20 position sizing to manage drawdown
+# Session filter (08-20 UTC) reduces noise trades
+# Works in bull via breakouts above resistance, bear via breakdowns below support
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1-day Bollinger Band squeeze breakout with volume confirmation and ADX trend filter
-# Long when price closes above upper Bollinger Band (20,2) with volume > 1.3x average and ADX > 25
-# Short when price closes below lower Bollinger Band with volume > 1.3x average and ADX > 25
-# Bollinger squeeze identifies low volatility breakouts; volume confirms breakout strength; ADX ensures trending environment
-# Designed to capture explosive moves in both bull and bear markets with controlled frequency
-# Target: 20-40 trades per year (80-160 over 4 years) with 0.25 position sizing
-
-name = "4h_1dBB_Squeeze_Breakout_Volume_ADX_v1"
-timeframe = "4h"
+name = "1h_4hDonchian20_Volume_Session_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,55 +23,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1-day Bollinger Bands (20,2)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Calculate 4h Donchian Channel (20-period high/low)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # 20-period SMA and standard deviation for Bollinger Bands
-    sma_20 = pd.Series(df_1d['close']).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(df_1d['close']).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + (2 * std_20)
-    lower_bb = sma_20 - (2 * std_20)
+    # 20-period high and low for Donchian channels
+    high_20 = df_4h['high'].rolling(window=20, min_periods=20).max().values
+    low_20 = df_4h['low'].rolling(window=20, min_periods=20).min().values
     
-    # Align Bollinger Bands to 4h timeframe
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
+    # Align Donchian levels to 1h timeframe
+    upper_donchian = align_htf_to_ltf(prices, df_4h, high_20)
+    lower_donchian = align_htf_to_ltf(prices, df_4h, low_20)
     
-    # Volume confirmation: >1.3x 20-period average
+    # Volume confirmation: >1.5x 20-period average (1h volume)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.3 * vol_ma_20)
-    
-    # ADX trend filter (14-period) on 1h timeframe for better trend detection
-    df_1h = get_htf_data(prices, '1h')
-    if len(df_1h) < 14:
-        return np.zeros(n)
-    
-    # Calculate True Range
-    tr1 = pd.Series(df_1h['high']).shift(1) - pd.Series(df_1h['low'])
-    tr2 = abs(pd.Series(df_1h['high']) - pd.Series(df_1h['close']).shift(1))
-    tr3 = abs(pd.Series(df_1h['low']) - pd.Series(df_1h['close']).shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    
-    # Directional Movement
-    dm_plus = pd.Series(df_1h['high']) - pd.Series(df_1h['high']).shift(1)
-    dm_minus = pd.Series(df_1h['low']).shift(1) - pd.Series(df_1h['low'])
-    dm_plus = dm_plus.where((dm_plus > dm_minus) & (dm_plus > 0), 0)
-    dm_minus = dm_minus.where((dm_minus > dm_plus) & (dm_minus > 0), 0)
-    
-    # Smoothed values
-    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
-    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
-    
-    # DI and DX
-    di_plus = 100 * dm_plus_14 / tr_14
-    di_minus = 100 * dm_minus_14 / tr_14
-    dx = 100 * abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Align ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1h, adx)
+    volume_filter = volume > (1.5 * vol_ma_20)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -81,10 +47,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after Bollinger warmup
+    for i in range(20, n):  # Start after Donchian warmup
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or 
-            np.isnan(volume_filter[i]) or np.isnan(adx_aligned[i]) or
+        if (np.isnan(upper_donchian[i]) or np.isnan(lower_donchian[i]) or 
+            np.isnan(volume_filter[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -92,27 +58,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long breakout: price closes above upper BB with volume and trend confirmation
-            if close[i] > upper_bb_aligned[i] and volume_filter[i] and adx_aligned[i] > 25:
-                signals[i] = 0.25
+            # Long breakout: price breaks above upper Donchian with volume confirmation
+            if close[i] > upper_donchian[i] and volume_filter[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short breakout: price closes below lower BB with volume and trend confirmation
-            elif close[i] < lower_bb_aligned[i] and volume_filter[i] and adx_aligned[i] > 25:
-                signals[i] = -0.25
+            # Short breakout: price breaks below lower Donchian with volume confirmation
+            elif close[i] < lower_donchian[i] and volume_filter[i]:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: price closes below middle Bollinger Band (SMA)
-            if close[i] < sma_20[i]:  # Using aligned SMA would be better but using raw for simplicity
+            # Exit long: price breaks below lower Donchian (support break)
+            if close[i] < lower_donchian[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: price closes above middle Bollinger Band (SMA)
-            if close[i] > sma_20[i]:
+            # Exit short: price breaks above upper Donchian (resistance break)
+            if close[i] > upper_donchian[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
