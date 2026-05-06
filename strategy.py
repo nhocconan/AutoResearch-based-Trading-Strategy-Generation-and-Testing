@@ -4,13 +4,11 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
-# Uses 1d EMA34 for primary trend alignment (reduces whipsaw in both bull/bear markets)
-# Camarilla R3/S3 from previous 1d bar provides intraday structure for 4h entries
-# Volume spike (>1.8x 20-bar average) confirms breakout strength to avoid false signals
-# ATR-based trailing stop via signal=0 when price retests opposite Camarilla level
-# Discrete sizing 0.25 to balance profit potential and drawdown control
-# Target: 25-40 trades/year (100-160 total over 4 years) to minimize fee drag
-# Proven pattern: Camarilla breaks with HTF trend + volume work on BTC/ETH in all regimes
+# Uses Camarilla pivot levels from daily structure for key support/resistance, 1d EMA34 for trend alignment
+# Volume spike (>2.0x 50-bar average) confirms breakout strength and reduces false signals
+# ATR-based stoploss via signal=0 when price retests opposite Camarilla level
+# Discrete sizing 0.25 to balance return and risk; target 80-180 total trades over 4 years
+# Proven pattern: Camarilla breaks with volume work on ETH/SOL in both bull/bear markets
 
 name = "4h_Camarilla_R3S3_1dEMA34_VolumeConfirm_v1"
 timeframe = "4h"
@@ -41,9 +39,9 @@ def generate_signals(prices):
     close_1d_series = pd.Series(close_1d)
     ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate volume spike filter (>1.8x 20-bar average)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.8 * vol_ma_20)
+    # Calculate volume spike filter (>2.0x 50-bar average on 1d)
+    vol_ma_50 = pd.Series(volume_1d).rolling(window=50, min_periods=50).mean().values
+    volume_filter = volume_1d > (2.0 * vol_ma_50)
     
     # Calculate 4h Camarilla pivot levels (using previous 1d bar)
     # Camarilla: R3 = C + ((H-L)*1.1/4), S3 = C - ((H-L)*1.1/4)
