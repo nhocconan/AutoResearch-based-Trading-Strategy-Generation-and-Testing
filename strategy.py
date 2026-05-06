@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
-# Uses Camarilla pivot levels from 1d structure for key swing levels, 1d EMA34 for trend alignment (reduces whipsaw)
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Uses Camarilla pivot levels from 1d structure for key levels, 1d EMA34 for trend alignment
 # Volume spike (>1.5x 20-bar average) confirms breakout strength
 # ATR-based stoploss via signal=0 when price retests opposite Camarilla level
-# Discrete sizing 0.25 to limit fee drag; target 80-150 total trades over 4 years (20-37/year)
+# Discrete sizing 0.25 to balance return and fee drag; target 12-37 trades/year (50-150 total over 4 years)
+# Session filter: only trade 08-20 UTC to avoid low-liquidity hours
 # Proven pattern: price channel breakouts with volume confirmation work on BTC/ETH in both bull/bear markets
 
-name = "4h_Camarilla_R3S3_1dEMA34_VolumeConfirm_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_1dEMA34_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -63,19 +64,24 @@ def generate_signals(prices):
     camarilla_high = np.array(camarilla_high)
     camarilla_low = np.array(camarilla_low)
     
-    # Align HTF indicators to 4h timeframe
+    # Align HTF indicators to 12h timeframe
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     camarilla_high_aligned = align_htf_to_ltf(prices, df_1d, camarilla_high)
     camarilla_low_aligned = align_htf_to_ltf(prices, df_1d, camarilla_low)
     volume_filter_aligned = align_htf_to_ltf(prices, df_1d, volume_filter)
     
+    # Pre-compute session filter (08-20 UTC)
+    hours = prices.index.hour
+    session_filter = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
-        # Skip if any critical value is NaN
+        # Skip if any critical value is NaN or outside session
         if (np.isnan(ema34_1d_aligned[i]) or np.isnan(camarilla_high_aligned[i]) or 
-            np.isnan(camarilla_low_aligned[i]) or np.isnan(volume_filter_aligned[i])):
+            np.isnan(camarilla_low_aligned[i]) or np.isnan(volume_filter_aligned[i]) or
+            not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
