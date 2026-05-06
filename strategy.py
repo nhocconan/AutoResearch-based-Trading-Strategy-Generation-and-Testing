@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 4h_1dCamarilla_R1S1_Breakout_1dEMA34_Trend_Volume_v5
-# Uses daily Camarilla pivot levels (R1/S1) as breakout levels with daily trend filter (EMA34)
-# and daily volume confirmation. Designed for 4h timeframe to capture major pivot breaks
-# with trend alignment, working in both bull and bear markets by following the daily trend.
-# Tightened volume threshold and added ADX filter to reduce trade frequency and improve win rate.
-# Target: 75-200 total trades over 4 years (19-50/year) with 0.30 position sizing.
+# 1d_1wDonchian_20_1wEMA34_Trend_Volume
+# Uses weekly Donchian channel (20-period) breakout with weekly EMA34 trend filter and weekly volume confirmation.
+# Designed for 1d timeframe to capture major trend continuations with proper risk management.
+# Target: 30-100 total trades over 4 years (7-25/year) with 0.25 position sizing.
+# Works in bull markets by following upward breaks and in bear markets by following downward breaks.
 
-name = "4h_1dCamarilla_R1S1_Breakout_1dEMA34_Trend_Volume_v5"
-timeframe = "4h"
+name = "1d_1wDonchian_20_1wEMA34_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -24,75 +23,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for Donchian, EMA, and volume
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly Donchian channel (20-period)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # Pivot point (PP) = (H + L + C) / 3
-    pp = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
+    # Upper band: highest high of last 20 weeks
+    upper = np.full_like(high_1w, np.nan)
+    for i in range(20, len(high_1w)):
+        upper[i] = np.max(high_1w[i-20:i])
     
-    # Camarilla levels (R1/S1 - tighter range for fewer trades)
-    r1 = pp + range_1d * 1.1 / 12
-    s1 = pp - range_1d * 1.1 / 12
+    # Lower band: lowest low of last 20 weeks
+    lower = np.full_like(low_1w, np.nan)
+    for i in range(20, len(low_1w)):
+        lower[i] = np.min(low_1w[i-20:i])
     
-    # Align Camarilla levels to 4h timeframe
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    # Weekly EMA34 for trend filter
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Daily EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Weekly volume filter (20-period MA)
+    vol_ma_20 = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume_1w > (1.5 * vol_ma_20)  # Moderate volume confirmation
     
-    # Daily volume filter (20-period MA) with higher threshold
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (3.0 * vol_ma_20)  # Increased threshold for stronger confirmation
-    
-    # ADX filter for trend strength (using 1d data)
-    def calculate_adx(high, low, close, period=14):
-        plus_dm = np.zeros(len(high))
-        minus_dm = np.zeros(len(high))
-        tr = np.zeros(len(high))
-        
-        for i in range(1, len(high)):
-            plus_dm[i] = max(0, high[i] - high[i-1])
-            minus_dm[i] = max(0, low[i-1] - low[i])
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        # Smooth using Wilder's smoothing (alpha = 1/period)
-        atr = np.zeros(len(high))
-        atr[period] = np.mean(tr[1:period+1])
-        for i in range(period+1, len(high)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        
-        plus_di = np.zeros(len(high))
-        minus_di = np.zeros(len(high))
-        dx = np.zeros(len(high))
-        
-        for i in range(period, len(high)):
-            plus_dm_sum = np.sum(plus_dm[i-period+1:i+1])
-            minus_dm_sum = np.sum(minus_dm[i-period+1:i+1])
-            if atr[i] != 0:
-                plus_di[i] = 100 * plus_dm_sum / (atr[i] * period)
-                minus_di[i] = 100 * minus_dm_sum / (atr[i] * period)
-                if plus_di[i] + minus_di[i] != 0:
-                    dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
-        
-        adx = np.zeros(len(high))
-        adx[2*period-1] = np.mean(dx[period:2*period])
-        for i in range(2*period, len(high)):
-            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx
-    
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    adx_4h = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Align weekly indicators to daily timeframe
+    upper_daily = align_htf_to_ltf(prices, df_1w, upper)
+    lower_daily = align_htf_to_ltf(prices, df_1w, lower)
+    ema_34_daily = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    volume_spike_daily = align_htf_to_ltf(prices, df_1w, volume_spike)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -100,8 +63,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical value is NaN
-        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or 
-            np.isnan(ema_34_4h[i]) or np.isnan(volume_spike[i]) or np.isnan(adx_4h[i])):
+        if (np.isnan(upper_daily[i]) or np.isnan(lower_daily[i]) or 
+            np.isnan(ema_34_daily[i]) or np.isnan(volume_spike_daily[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -111,33 +74,33 @@ def generate_signals(prices):
         bars_since_entry += 1
         
         if position == 0:
-            # Long: break above R1 with uptrend (ADX > 20), EMA34 filter, and volume
-            if close[i] > r1_4h[i] and adx_4h[i] > 20 and close[i] > ema_34_4h[i] and volume_spike[i]:
-                signals[i] = 0.30
+            # Long: break above upper Donchian with uptrend and volume
+            if close[i] > upper_daily[i] and close[i] > ema_34_daily[i] and volume_spike_daily[i]:
+                signals[i] = 0.25
                 position = 1
                 bars_since_entry = 0
-            # Short: break below S1 with downtrend (ADX > 20), EMA34 filter, and volume
-            elif close[i] < s1_4h[i] and adx_4h[i] > 20 and close[i] < ema_34_4h[i] and volume_spike[i]:
-                signals[i] = -0.30
+            # Short: break below lower Donchian with downtrend and volume
+            elif close[i] < lower_daily[i] and close[i] < ema_34_daily[i] and volume_spike_daily[i]:
+                signals[i] = -0.25
                 position = -1
                 bars_since_entry = 0
         elif position == 1:
-            # Exit conditions: price returns to EMA34 or breaks below S1
-            # Minimum holding period of 3 bars to reduce churn
-            if bars_since_entry >= 3 and (close[i] < ema_34_4h[i] or close[i] < s1_4h[i]):
+            # Exit: price returns below EMA34 or breaks below lower Donchian
+            # Minimum holding period of 5 days to reduce churn
+            if bars_since_entry >= 5 and (close[i] < ema_34_daily[i] or close[i] < lower_daily[i]):
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Exit conditions: price returns to EMA34 or breaks above R1
-            # Minimum holding period of 3 bars to reduce churn
-            if bars_since_entry >= 3 and (close[i] > ema_34_4h[i] or close[i] > r1_4h[i]):
+            # Exit: price returns above EMA34 or breaks above upper Donchian
+            # Minimum holding period of 5 days to reduce churn
+            if bars_since_entry >= 5 and (close[i] > ema_34_daily[i] or close[i] > upper_daily[i]):
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
