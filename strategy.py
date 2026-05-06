@@ -3,23 +3,25 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using weekly Donchian breakout with volume confirmation and ADX trend filter
-# - Uses 1w Donchian channels (20-period) for long-term structure
-# - Uses 1d volume spike for entry confirmation
-# - Uses 1d ADX > 25 to filter for trending markets only
-# - Enters long when price breaks above 1w Donchian upper band with volume and trend
-# - Enters short when price breaks below 1w Donchian lower band with volume and trend
-# - Exits when price returns to 1w Donchian middle (median) or opposite band
-# - Designed to capture major trend moves with institutional level respect
-# - Target: 30-100 total trades over 4 years (7-25/year) with 0.25 position sizing
+# Hypothesis: 6h strategy using daily Camarilla pivot levels with volume spike and trend filter
+# - Uses 1d Camarilla pivot levels (R3, R4, S3, S4) for mean reversion and breakout signals
+# - Uses 6h volume spike for entry confirmation
+# - Uses 6h ADX > 20 to filter for trending markets only
+# - Enters long when price breaks above R4 with volume and trend (breakout continuation)
+# - Enters short when price breaks below S4 with volume and trend (breakout continuation)
+# - Enters long when price bounces off S3 with volume and trend (mean reversion in uptrend)
+# - Enters short when price bounces off R3 with volume and trend (mean reversion in downtrend)
+# - Exits when price reaches opposite Camarilla level (R3/S3 for mean reversion, R4/S4 for breakout)
+# - Designed to capture both breakout and mean reversion opportunities in trending markets
+# - Target: 60-120 total trades over 4 years (15-30/year) with 0.25 position sizing
 
-name = "1d_1wDonchian_20_Volume_ADX_Trend"
-timeframe = "1d"
+name = "6h_1dCamarilla_R3R4_S3S4_Volume_ADX"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,31 +29,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for Donchian channels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1w Donchian channels (20-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate 1d Camarilla pivot levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Donchian upper and lower bands
-    upper_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    middle_20 = (upper_20 + lower_20) / 2  # Median line for exit
+    # Previous day's values for pivot calculation
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = high_1d[0]  # First day uses current day's high
+    prev_low[0] = low_1d[0]    # First day uses current day's low
+    prev_close[0] = close_1d[0] # First day uses current day's close
     
-    # Align 1w Donchian channels to 1d timeframe
-    upper_20_1d = align_htf_to_ltf(prices, df_1w, upper_20)
-    lower_20_1d = align_htf_to_ltf(prices, df_1w, lower_20)
-    middle_20_1d = align_htf_to_ltf(prices, df_1w, middle_20)
+    # Camarilla pivot calculation
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_ = prev_high - prev_low
     
-    # Volume filter (1d timeframe)
-    vol_ma_10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
-    volume_spike = volume > (1.8 * vol_ma_10)  # Strong volume confirmation
+    # Resistance levels
+    R3 = pivot + (range_ * 1.1 / 2)
+    R4 = pivot + (range_ * 1.1)
     
-    # ADX filter (1d timeframe) - trend strength
+    # Support levels
+    S3 = pivot - (range_ * 1.1 / 2)
+    S4 = pivot - (range_ * 1.1)
+    
+    # Align 1d Camarilla levels to 6h timeframe
+    R3_6h = align_htf_to_ltf(prices, df_1d, R3)
+    R4_6h = align_htf_to_ltf(prices, df_1d, R4)
+    S3_6h = align_htf_to_ltf(prices, df_1d, S3)
+    S4_6h = align_htf_to_ltf(prices, df_1d, S4)
+    
+    # Volume filter (6h timeframe)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma_20)  # Strong volume confirmation
+    
+    # ADX filter (6h timeframe) - trend strength
     def calculate_adx(high, low, close, period=14):
         plus_dm = np.zeros_like(high)
         minus_dm = np.zeros_like(high)
@@ -97,40 +115,56 @@ def generate_signals(prices):
         return adx
     
     adx_values = calculate_adx(high, low, close, 14)
-    adx_filter = adx_values > 25  # Strong trend filter
+    adx_filter = adx_values > 20  # Trend filter (lower threshold for more signals)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any critical value is NaN
-        if (np.isnan(upper_20_1d[i]) or np.isnan(lower_20_1d[i]) or 
-            np.isnan(middle_20_1d[i]) or np.isnan(volume_spike[i]) or 
-            np.isnan(adx_filter[i])):
+        if (np.isnan(R3_6h[i]) or np.isnan(R4_6h[i]) or 
+            np.isnan(S3_6h[i]) or np.isnan(S4_6h[i]) or 
+            np.isnan(volume_spike[i]) or np.isnan(adx_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above 1w Donchian upper with volume and trend
-            if close[i] > upper_20_1d[i] and volume_spike[i] and adx_filter[i]:
+            # Long breakout: price breaks above R4 with volume and trend
+            if close[i] > R4_6h[i] and volume_spike[i] and adx_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below 1w Donchian lower with volume and trend
-            elif close[i] < lower_20_1d[i] and volume_spike[i] and adx_filter[i]:
+            # Short breakout: price breaks below S4 with volume and trend
+            elif close[i] < S4_6h[i] and volume_spike[i] and adx_filter[i]:
                 signals[i] = -0.25
                 position = -1
+            # Long mean reversion: price bounces off S3 with volume and trend (in uptrend)
+            elif close[i] > S3_6h[i] and close[i-1] <= S3_6h[i-1] and volume_spike[i] and adx_filter[i]:
+                # Additional check for uptrend: price above pivot
+                if close[i] > pivot[i] if not np.isnan(pivot[i]) else False:
+                    signals[i] = 0.25
+                    position = 1
+            # Short mean reversion: price bounces off R3 with volume and trend (in downtrend)
+            elif close[i] < R3_6h[i] and close[i-1] >= R3_6h[i-1] and volume_spike[i] and adx_filter[i]:
+                # Additional check for downtrend: price below pivot
+                if close[i] < pivot[i] if not np.isnan(pivot[i]) else False:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Exit long: price returns to middle OR breaks below lower band
-            if close[i] < middle_20_1d[i] or close[i] < lower_20_1d[i]:
+            # Exit long: 
+            # For breakout: price returns to R3
+            # For mean reversion: price reaches R4
+            if close[i] < R3_6h[i] or close[i] > R4_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to middle OR breaks above upper band
-            if close[i] > middle_20_1d[i] or close[i] > upper_20_1d[i]:
+            # Exit short: 
+            # For breakout: price returns to S3
+            # For mean reversion: price reaches S4
+            if close[i] > S3_6h[i] or close[i] < S4_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
