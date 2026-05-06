@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1-day Camarilla pivot levels with trend filter and volume confirmation
-# Long when price breaks above R3 with price > 200-bar EMA and volume > 1.5x average
-# Short when price breaks below S3 with price < 200-bar EMA and volume > 1.5x average
-# Uses 1d pivot levels for institutional support/resistance, EMA200 for trend filter, volume for confirmation
-# Target: 25-40 trades per year (100-160 over 4 years) with 0.25 position sizing
+# Hypothesis: 4h strategy using 1-week Donchian channel breakout with volume confirmation and ATR filter
+# Long when price breaks above weekly Donchian high with volume > 1.5x average and ATR > 0
+# Short when price breaks below weekly Donchian low with volume > 1.5x average and ATR > 0
+# Weekly Donchian provides strong structural levels, volume confirms breakout strength, ATR ensures volatility
+# Target: 20-30 trades per year (80-120 over 4 years) with 0.25 position sizing
 
-name = "4h_1dCamarilla_R3S3_EMA200_Volume_v1"
+name = "4h_1wDonchian_Breakout_Volume_ATR_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,34 +23,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate EMA200 on 4h close (needs 200 bars)
-    close_series = pd.Series(close)
-    ema200 = close_series.ewm(span=200, min_periods=200, adjust=False).mean().values
+    # Calculate ATR for volatility filter
+    high_low = high - low
+    high_close = np.abs(high - np.roll(close, 1))
+    low_close = np.abs(low - np.roll(close, 1))
+    true_range = np.maximum(high_low, np.maximum(high_close, low_close))
+    true_range[0] = high_low[0]  # First value
+    atr = pd.Series(true_range).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 1-day Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Calculate 1-week Donchian channel
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Previous day's high, low, close
-    prev_high = df_1d['high'].shift(1)
-    prev_low = df_1d['low'].shift(1)
-    prev_close = df_1d['close'].shift(1)
+    # Weekly Donchian high/low (20 periods)
+    donch_high = pd.Series(df_1w['high']).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(df_1w['low']).rolling(window=20, min_periods=20).min().values
     
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
+    # Align Donchian levels to 4h timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_1w, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1w, donch_low)
     
-    # Camarilla levels
-    r3 = pivot + (range_hl * 1.1 / 2)
-    s3 = pivot - (range_hl * 1.1 / 2)
-    
-    # Align Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3.values)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3.values)
-    
-    # Volume confirmation: >1.5x 50-period average
-    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
-    volume_filter = volume > (1.5 * vol_ma_50)
+    # Volume confirmation: >1.5x 30-period average
+    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_filter = volume > (1.5 * vol_ma_30)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -59,10 +55,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(200, n):  # Start after EMA200 warmup
+    for i in range(30, n):  # Start after warmup
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema200[i]) or np.isnan(volume_filter[i]) or
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
+            np.isnan(atr[i]) or atr[i] <= 0 or np.isnan(volume_filter[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -70,24 +66,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long breakout: price breaks above R3 with uptrend and volume confirmation
-            if close[i] > r3_aligned[i] and close[i] > ema200[i] and volume_filter[i]:
+            # Long breakout: price breaks above weekly Donchian high with volume confirmation
+            if close[i] > donch_high_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short breakout: price breaks below S3 with downtrend and volume confirmation
-            elif close[i] < s3_aligned[i] and close[i] < ema200[i] and volume_filter[i]:
+            # Short breakout: price breaks below weekly Donchian low with volume confirmation
+            elif close[i] < donch_low_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below S3 (support break)
-            if close[i] < s3_aligned[i]:
+            # Exit long: price breaks below weekly Donchian low
+            if close[i] < donch_low_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above R3 (resistance break)
-            if close[i] > r3_aligned[i]:
+            # Exit short: price breaks above weekly Donchian high
+            if close[i] > donch_high_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
