@@ -3,31 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using daily KAMA trend direction with 12h EMA filter and volume spike
-# - Uses 1d KAMA (adaptive moving average) to identify trend direction
-# - Uses 12h EMA50 as higher timeframe trend confirmation
-# - Uses 4h volume spike for entry confirmation
-# - Enters long when price > 1d KAMA AND price > 12h EMA50 with volume spike
-# - Enters short when price < 1d KAMA AND price < 12h EMA50 with volume spike
-# - Exits when price crosses back below/above 1d KAMA
-# - Designed to capture trends with adaptive trend filter and avoid whipsaws
-# - Target: 80-180 total trades over 4 years (20-45/year) with 0.25 position sizing
+# Hypothesis: 1h strategy using 4h Donchian breakout with volume confirmation and 1d trend filter
+# - Uses 4h Donchian channels (20-period) for medium-term structure
+# - Uses 1h volume spike for entry confirmation
+# - Uses 1d EMA50 for trend filter (only long when price > EMA50, short when price < EMA50)
+# - Designed to capture trend moves with institutional level respect
+# - Target: 60-150 total trades over 4 years (15-37/year) with 0.20 position sizing
 
-name = "4h_1dKAMA_12hEMA50_Volume"
-timeframe = "4h"
+name = "1h_4hDonchian_20_1dEMA50_Volume"
+timeframe = "1h"
 leverage = 1.0
-
-def calculate_kama(close, er_fast=2, er_slow=30):
-    """Calculate Kaufman Adaptive Moving Average"""
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (2/(er_fast+1) - 2/(er_slow+1)) + 2/(er_slow+1)) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    return kama
 
 def generate_signals(prices):
     n = len(prices)
@@ -39,64 +24,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for KAMA
+    # Get 4h data for Donchian channels
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    
+    # Calculate 4h Donchian channels (20-period)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    
+    upper_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lower_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    
+    # Align 4h Donchian channels to 1h timeframe
+    upper_20_1h = align_htf_to_ltf(prices, df_4h, upper_20)
+    lower_20_1h = align_htf_to_ltf(prices, df_4h, lower_20)
+    
+    # Volume filter (1h timeframe)
+    vol_ma_10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    volume_spike = volume > (1.8 * vol_ma_10)  # Strong volume confirmation
+    
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d KAMA
     close_1d = df_1d['close'].values
-    kama_1d = calculate_kama(close_1d, er_fast=2, er_slow=30)
-    kama_1d_4h = align_htf_to_ltf(prices, df_1d, kama_1d)
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1h = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Get 12h data for EMA50
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    # Calculate 12h EMA50
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_4h = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # Volume filter (4h timeframe)
-    vol_ma_15 = pd.Series(volume).rolling(window=15, min_periods=15).mean().values
-    volume_spike = volume > (2.0 * vol_ma_15)  # Strong volume confirmation
+    # Session filter: 08:00-20:00 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if any critical value is NaN
-        if (np.isnan(kama_1d_4h[i]) or np.isnan(ema_50_12h_4h[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(upper_20_1h[i]) or np.isnan(lower_20_1h[i]) or 
+            np.isnan(volume_spike[i]) or np.isnan(ema_50_1h[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Check session filter
+        if not session_filter[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above both KAMA and EMA50 with volume spike
-            if close[i] > kama_1d_4h[i] and close[i] > ema_50_12h_4h[i] and volume_spike[i]:
-                signals[i] = 0.25
+            # Long: break above 4h Donchian upper with volume and uptrend (price > 1d EMA50)
+            if close[i] > upper_20_1h[i] and volume_spike[i] and close[i] > ema_50_1h[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short: price below both KAMA and EMA50 with volume spike
-            elif close[i] < kama_1d_4h[i] and close[i] < ema_50_12h_4h[i] and volume_spike[i]:
-                signals[i] = -0.25
+            # Short: break below 4h Donchian lower with volume and downtrend (price < 1d EMA50)
+            elif close[i] < lower_20_1h[i] and volume_spike[i] and close[i] < ema_50_1h[i]:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below KAMA
-            if close[i] < kama_1d_4h[i]:
+            # Exit long: price returns below 4h Donchian lower
+            if close[i] < lower_20_1h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: price crosses above KAMA
-            if close[i] > kama_1d_4h[i]:
+            # Exit short: price returns above 4h Donchian upper
+            if close[i] > upper_20_1h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
