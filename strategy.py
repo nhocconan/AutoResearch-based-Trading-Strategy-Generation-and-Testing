@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Williams Alligator (Jaw/Teeth/Lips) with volume confirmation
-# Long when price > Alligator Lips AND Lips > Teeth AND Teeth > Jaw (bullish alignment) AND volume > 1.5 * avg_volume(34)
-# Short when price < Alligator Lips AND Lips < Teeth AND Teeth < Jaw (bearish alignment) AND volume > 1.5 * avg_volume(34)
-# Exit when Alligator alignment breaks (Lips crosses Teeth or Teeth crosses Jaw)
+# Hypothesis: 1d strategy using 1w Camarilla pivot levels with volume spike confirmation
+# Long when price breaks above 1w Camarilla R4 level AND 1d volume > 2.0 * avg_volume(20)
+# Short when price breaks below 1w Camarilla S4 level AND 1d volume > 2.0 * avg_volume(20)
+# Exit when price returns to 1w Camarilla midpoint (PP)
 # Uses discrete sizing 0.25 to balance return and drawdown control
-# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
-# Williams Alligator identifies trend direction via smoothed medians; filters choppy markets
-# Volume confirmation ensures institutional participation in trending moves
-# Works in bull (continuation uptrends) and bear (continuation downtrends) by following Alligator alignment
+# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe
+# Camarilla R4/S4 represent strong breakout levels from 1w structure
+# Volume spike filters for institutional participation in breakouts
+# Works in both bull (continuation breakouts) and bear (continuation breakdowns) markets
 
-name = "4h_1dWilliamsAlligator_Alignment_Volume"
-timeframe = "4h"
+name = "1d_1wCamarilla_R4_S4_Breakout_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,73 +27,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for Williams Alligator calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:  # Need sufficient data for SMMA(13,8,5)
+    # Get 1w data ONCE before loop for Camarilla pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:  # Need at least 2 completed weekly bars for Camarilla
         return np.zeros(n)
-    median_1d = (df_1d['high'].values + df_1d['low'].values) / 2.0
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Williams Alligator: three smoothed medians (SMMA)
-    # Jaw: SMMA(median, 13, 8) - blue line
-    # Teeth: SMMA(median, 8, 5) - red line
-    # Lips: SMMA(median, 5, 3) - green line
-    def smma(values, period, prev=None):
-        if len(values) < period:
-            return np.full_like(values, np.nan)
-        result = np.full_like(values, np.nan)
-        sma = np.mean(values[:period])
-        result[period-1] = sma
-        for i in range(period, len(values)):
-            result[i] = (result[i-1] * (period-1) + values[i]) / period
-        return result
+    # Calculate 1w Camarilla pivot levels (based on previous week)
+    # Pivot Point (PP) = (High + Low + Close) / 3
+    # R4 = PP + (High - Low) * 1.1/2
+    # S4 = PP - (High - Low) * 1.1/2
+    pp = (high_1w + low_1w + close_1w) / 3.0
+    r4 = pp + (high_1w - low_1w) * 1.1 / 2.0
+    s4 = pp - (high_1w - low_1w) * 1.1 / 2.0
     
-    jaw = smma(median_1d, 13, 8)
-    teeth = smma(median_1d, 8, 5)
-    lips = smma(median_1d, 5, 3)
+    # Align 1w Camarilla levels to 1d timeframe (wait for completed 1w bar)
+    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
+    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
     
-    # Align 1d Alligator lines to 4h timeframe (wait for completed 1d bar)
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
-    
-    # Calculate volume confirmation: volume > 1.5 * 34-period average volume on 4h
-    avg_volume_34 = pd.Series(volume).rolling(window=34, min_periods=34).mean().values
-    volume_confirm = volume > (1.5 * avg_volume_34)
+    # Calculate volume confirmation: volume > 2.0 * 20-period average volume on 1d
+    avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (2.0 * avg_volume_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(avg_volume_34[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(pp_aligned[i]) or np.isnan(avg_volume_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        bullish_alignment = (lips_aligned[i] > teeth_aligned[i]) and (teeth_aligned[i] > jaw_aligned[i])
-        bearish_alignment = (lips_aligned[i] < teeth_aligned[i]) and (teeth_aligned[i] < jaw_aligned[i])
-        
         if position == 0:
-            # Long: bullish Alligator alignment with volume confirmation
-            if bullish_alignment and volume_confirm[i]:
+            # Long: price breaks above 1w Camarilla R4 level with volume spike
+            if (close[i] > r4_aligned[i] and close[i-1] <= r4_aligned[i-1] and volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish Alligator alignment with volume confirmation
-            elif bearish_alignment and volume_confirm[i]:
+            # Short: price breaks below 1w Camarilla S4 level with volume spike
+            elif (close[i] < s4_aligned[i] and close[i-1] >= s4_aligned[i-1] and volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: bullish alignment breaks
-            if not bullish_alignment:
+            # Exit long: price returns to 1w Camarilla pivot point (PP)
+            if close[i] <= pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: bearish alignment breaks
-            if not bearish_alignment:
+            # Exit short: price returns to 1w Camarilla pivot point (PP)
+            if close[i] >= pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
