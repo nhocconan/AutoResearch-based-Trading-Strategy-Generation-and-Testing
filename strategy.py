@@ -3,16 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using weekly pivot points with volume confirmation and trend filter
-# Weekly pivots (R1/S1 for breakouts, R2/S2 for reversals) provide key levels for swing trading
-# Breakout above R1 or below S1 with volume > 2x 20-period average indicates strong momentum
-# Rejection at R2 or S2 with volume confirmation indicates mean reversion within weekly range
-# Trend filter: 50-period EMA on 12h timeframe to avoid counter-trend trades
-# Works in bull/bear markets: breakouts capture trends, reversals capture pullbacks within trend
-# Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
+# Hypothesis: 4h strategy using weekly pivot points with volume confirmation and trend filter
+# Weekly pivots provide key weekly levels. Breakout above R1 or below S1 with volume > 2.0x 
+# 20-period average indicates strong momentum. Trend filter: 50-period EMA on 4h timeframe.
+# Works in bull/bear markets: breakouts capture trends, reversals capture pullbacks within trend.
+# Target: 75-200 total trades over 4 years (19-50/year) with 0.25 position sizing.
 
-name = "12h_WeeklyPivot_R1S2_VolumeTrendFilter_v1"
-timeframe = "12h"
+name = "4h_WeeklyPivot_R1S1_VolumeTrendFilter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -47,17 +45,17 @@ def generate_signals(prices):
     s1 = pivot - (range_ * 1.0)
     s2 = pivot - (range_ * 2.0)
     
-    # Align weekly levels to 12h timeframe
+    # Align weekly levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
     r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
     s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
     s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
     
-    # Volume confirmation: >2x 20-period average (higher threshold to reduce trades)
+    # Volume confirmation: >2.0x 20-period average (higher threshold to reduce trades)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (2.0 * vol_ma_20)
     
-    # Trend filter: 50-period EMA on 12h timeframe
+    # Trend filter: 50-period EMA on 4h timeframe
     close_series = pd.Series(close)
     ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     uptrend = close > ema_50
