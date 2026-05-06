@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using daily Camarilla pivot levels with volume confirmation
-# - Uses 1d Camarilla pivot levels (R1-R4, S1-S4) for support/resistance
-# - Uses 12h volume spike for entry confirmation
-# - Enters long when price breaks above R1 with volume spike
-# - Enters short when price breaks below S1 with volume spike
-# - Exits when price returns to pivot point (PP) or opposite side
-# - Designed to capture intraday momentum with institutional level respect
-# - Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
+# Hypothesis: 1d strategy using weekly Bollinger Bands with volume confirmation
+# - Uses 1w Bollinger Bands (20, 2.0) for dynamic support/resistance
+# - Uses 1d volume spike for entry confirmation
+# - Enters long when price breaks above upper band with volume spike
+# - Enters short when price breaks below lower band with volume spike
+# - Exits when price returns to middle band
+# - Designed to capture weekly trends with statistical significance
+# - Target: 30-100 total trades over 4 years (7-25/year) with 0.25 position sizing
 
-name = "12h_1dCamarilla_R1_S1_Breakout_Volume"
-timeframe = "12h"
+name = "1d_1wBBands_1dVolume_Breakout"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,70 +26,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 1w data for Bollinger Bands
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1w Bollinger Bands (20, 2.0)
+    close_1w = df_1w['close'].values
+    sma_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).std().values
     
-    # Pivot point and ranges
-    pp = (high_1d + low_1d + close_1d) / 3
-    range_hl = high_1d - low_1d
+    upper_band = sma_20 + (2.0 * std_20)
+    middle_band = sma_20
+    lower_band = sma_20 - (2.0 * std_20)
     
-    # Camarilla levels
-    r1 = pp + (range_hl * 1.1 / 12)
-    r2 = pp + (range_hl * 1.1 / 6)
-    r3 = pp + (range_hl * 1.1 / 4)
-    r4 = pp + (range_hl * 1.1 / 2)
-    s1 = pp - (range_hl * 1.1 / 12)
-    s2 = pp - (range_hl * 1.1 / 6)
-    s3 = pp - (range_hl * 1.1 / 4)
-    s4 = pp - (range_hl * 1.1 / 2)
+    # Align 1w Bollinger Bands to 1d timeframe
+    upper_1d = align_htf_to_ltf(prices, df_1w, upper_band)
+    middle_1d = align_htf_to_ltf(prices, df_1w, middle_band)
+    lower_1d = align_htf_to_ltf(prices, df_1w, lower_band)
     
-    # Align 1d Camarilla levels to 12h timeframe
-    pp_12h = align_htf_to_ltf(prices, df_1d, pp)
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Volume filter (12h timeframe)
+    # Volume filter (1d timeframe)
     vol_ma_10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
-    volume_spike = volume > (1.5 * vol_ma_10)  # Moderate volume confirmation
+    volume_spike = volume > (2.0 * vol_ma_10)  # Strong volume confirmation
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if any critical value is NaN
-        if (np.isnan(pp_12h[i]) or np.isnan(r1_12h[i]) or 
-            np.isnan(s1_12h[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(upper_1d[i]) or np.isnan(middle_1d[i]) or 
+            np.isnan(lower_1d[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above R1 with volume spike
-            if close[i] > r1_12h[i] and volume_spike[i]:
+            # Long: break above upper band with volume spike
+            if close[i] > upper_1d[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 with volume spike
-            elif close[i] < s1_12h[i] and volume_spike[i]:
+            # Short: break below lower band with volume spike
+            elif close[i] < lower_1d[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to pivot point OR breaks below S1
-            if close[i] < pp_12h[i] or close[i] < s1_12h[i]:
+            # Exit long: price returns to middle band
+            if close[i] < middle_1d[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to pivot point OR breaks above R1
-            if close[i] > pp_12h[i] or close[i] > r1_12h[i]:
+            # Exit short: price returns to middle band
+            if close[i] > middle_1d[i]:
                 signals[i] = 0.0
                 position = 0
             else:
