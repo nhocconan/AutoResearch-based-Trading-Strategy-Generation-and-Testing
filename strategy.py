@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
-# Uses Donchian channel from 4h structure for breakout levels, 1d EMA34 for trend alignment (reduces whipsaw)
-# Volume spike (>1.5x 20-bar average) confirms breakout strength
-# ATR-based trailing stop: exit when price retraces 2*ATR from extreme
-# Discrete sizing 0.25 to limit fee drag; target 80-150 total trades over 4 years (20-37/year)
-# Session filter: only trade 08-20 UTC to avoid low-liquidity hours
-# Proven pattern: price channel breakouts with volume confirmation work on BTC/ETH in both bull/bear markets
+# Hypothesis: 6h strategy using 1d Ichimoku cloud (Senkou Span A/B) + TK Cross for trend direction
+# Entry when price breaks above/below cloud with TK cross confirmation and volume spike (>1.8x 20-bar avg)
+# Exit when price re-enters cloud or TK cross reverses
+# Uses discrete sizing 0.25 to balance return and drawdown; target 80-120 total trades over 4 years (20-30/year)
+# Ichimoku works in both bull/bear markets by adapting to trend via cloud color and TK cross
+# Weekly timeframe used only for regime filter: only trade when weekly close > weekly EMA20 (bull) or < weekly EMA20 (bear)
+# This avoids counter-trend trades in strong weekly regimes while allowing mean-reversion in ranging weeks
 
-name = "4h_Donchian20_1dEMA34_VolumeConfirm_v1"
-timeframe = "4h"
+name = "6h_Ichimoku_Cloud_TKCross_WeeklyRegime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,82 +27,104 @@ def generate_signals(prices):
     
     # Calculate HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 34:
+    if len(df_1d) < 50 or len(df_1w) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d EMA34 trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 1d Ichimoku components (standard periods: 9, 26, 52)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    high_9 = pd.Series(high_1d).rolling(window=9, min_periods=9).max()
+    low_9 = pd.Series(low_1d).rolling(window=9, min_periods=9).min()
+    tenkan = (high_9 + low_9) / 2
     
-    # Calculate ATR(14) for stoploss
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    high_26 = pd.Series(high_1d).rolling(window=26, min_periods=26).max()
+    low_26 = pd.Series(low_1d).rolling(window=26, min_periods=26).min()
+    kijun = (high_26 + low_26) / 2
     
-    # Calculate Donchian(20) channels
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan + kijun) / 2).shift(26)
     
-    # Calculate volume spike filter (>1.5x 20-bar average)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    high_52 = pd.Series(high_1d).rolling(window=52, min_periods=52).max()
+    low_52 = pd.Series(low_1d).rolling(window=52, min_periods=52).min()
+    senkou_b = ((high_52 + low_52) / 2).shift(26)
+    
+    # Chikou Span (Lagging Span): close shifted -26 periods (not used for signals)
+    
+    # Calculate weekly EMA20 for regime filter
+    close_1w_series = pd.Series(close_1w)
+    ema20_1w = close_1w_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Align HTF indicators to 6h timeframe
+    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan.values)
+    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun.values)
+    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a.values)
+    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b.values)
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w, additional_delay_bars=0)
+    
+    # Pre-compute volume spike filter (>1.8x 20-bar average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_20)
+    volume_filter = volume > (1.8 * vol_ma_20)
+    volume_filter_aligned = align_htf_to_ltf(prices, df_1d, volume_filter, additional_delay_bars=0)
     
-    # Align HTF indicators to 4h timeframe
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Pre-compute session filter (08-20 UTC)
+    # Pre-compute session filter (08-20 UTC) - optional but helps reduce noise
     hours = prices.index.hour
     session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    long_extreme = 0.0
-    short_extreme = 0.0
     
     for i in range(100, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(volume_filter[i]) or not session_filter[i]):
+        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
+            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or
+            np.isnan(ema20_1w_aligned[i]) or np.isnan(volume_filter_aligned[i]) or
+            not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Determine cloud color and boundaries
+        upper_cloud = np.maximum(senkou_a_aligned[i], senkou_b_aligned[i])
+        lower_cloud = np.minimum(senkou_a_aligned[i], senkou_b_aligned[i])
+        
+        # TK Cross: Tenkan > Kijun = bullish, Tenkan < Kijun = bearish
+        tk_bullish = tenkan_aligned[i] > kijun_aligned[i]
+        tk_bearish = tenkan_aligned[i] < kijun_aligned[i]
+        
+        # Weekly regime: only trade in direction of weekly trend
+        weekly_bull = close_1w.iloc[-1] > ema20_1w_aligned[i] if len(close_1w) > 0 else False
+        weekly_bear = close_1w.iloc[-1] < ema20_1w_aligned[i] if len(close_1w) > 0 else False
+        
         if position == 0:
-            # Long breakout: price > Donchian high AND uptrend (price > EMA34) AND volume spike
-            if close[i] > highest_high[i] and close[i] > ema34_1d_aligned[i] and volume_filter[i]:
+            # Long: price above cloud, TK bullish, volume spike, weekly bullish regime
+            if (close[i] > upper_cloud and tk_bullish and volume_filter_aligned[i] and weekly_bull):
                 signals[i] = 0.25
                 position = 1
-                long_extreme = high[i]
-            # Short breakdown: price < Donchian low AND downtrend (price < EMA34) AND volume spike
-            elif close[i] < lowest_low[i] and close[i] < ema34_1d_aligned[i] and volume_filter[i]:
+            # Short: price below cloud, TK bearish, volume spike, weekly bearish regime
+            elif (close[i] < lower_cloud and tk_bearish and volume_filter_aligned[i] and weekly_bear):
                 signals[i] = -0.25
                 position = -1
-                short_extreme = low[i]
         elif position == 1:
-            # Update long extreme
-            long_extreme = max(long_extreme, high[i])
-            # Exit long: price retraces 2*ATR from extreme
-            if close[i] < long_extreme - 2.0 * atr[i]:
+            # Exit long: price re-enters cloud OR TK cross turns bearish
+            if close[i] <= upper_cloud or not tk_bullish:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Update short extreme
-            short_extreme = min(short_extreme, low[i])
-            # Exit short: price retraces 2*ATR from extreme
-            if close[i] > short_extreme + 2.0 * atr[i]:
+            # Exit short: price re-enters cloud OR TK cross turns bullish
+            if close[i] >= lower_cloud or tk_bullish:
                 signals[i] = 0.0
                 position = 0
             else:
