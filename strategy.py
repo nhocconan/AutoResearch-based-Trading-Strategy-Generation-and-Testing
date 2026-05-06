@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1-day Keltner Channels with volume squeeze and ADX trend filter
-# Long when price breaks above upper KC with volume > 1.5x average and ADX > 25 (strong trend)
-# Short when price breaks below lower KC with volume > 1.5x average and ADX > 25 (strong trend)
-# Keltner Channels adapt to volatility, reducing false breakouts in low-volatility periods.
-# Volume confirmation ensures breakout strength, ADX ensures we only trade in trending markets.
-# Works in bull/bear markets: captures strong trends while avoiding choppy, sideways action.
-# Target: 20-40 trades per year (80-160 over 4 years) with 0.25 position sizing.
+# Hypothesis: 1h strategy using 4h Donchian channel breakout with volume confirmation and 1d EMA200 trend filter
+# Long when price breaks above 4h Donchian upper (20-period) with volume > 1.5x average and price above 1-day EMA200
+# Short when price breaks below 4h Donchian lower (20-period) with volume > 1.5x average and price below 1-day EMA200
+# Uses 4h for signal direction (structure), 1h only for entry timing precision
+# Session filter (08-20 UTC) reduces noise trades
+# Position size: 0.20 (20% of capital) to manage drawdown
+# Target: 15-30 trades per year (60-120 over 4 years) to avoid fee drag
 
-name = "4h_1dKeltner_AdxVol_TrendBreakout_v1"
-timeframe = "4h"
+name = "1h_4hDonchian_20_1dEMA200_Volume_Breakout_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,52 +25,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1-day Keltner Channels and ADX ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Calculate 4h Donchian channel (20-period) ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
     
-    if len(df_1d) < 30:
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # 1-day ATR for Keltner Channels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Donchian channels: 20-period high and low
+    high_20 = pd.Series(df_4h['high']).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(df_4h['low']).rolling(window=20, min_periods=20).min().values
     
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period has no previous close
-    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    # Upper and lower bands
+    donchian_upper = high_20
+    donchian_lower = low_20
     
-    # Keltner Channel parameters
-    kc_mult = 2.0
-    ema_20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    kc_upper = ema_20 + (kc_mult * atr)
-    kc_lower = ema_20 - (kc_mult * atr)
+    # Align 4h Donchian levels to 1h timeframe
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower)
     
-    # 1-day ADX for trend strength
-    plus_dm = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    minus_dm = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    plus_dm[0] = 0
-    minus_dm[0] = 0
+    # 1-day EMA200 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 200:
+        return np.zeros(n)
+    ema_200_1d = pd.Series(df_1d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_di_14 = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / tr_14
-    minus_di_14 = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / tr_14
-    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Align 1-day indicators to 4h timeframe
-    kc_upper_aligned = align_htf_to_ltf(prices, df_1d, kc_upper)
-    kc_lower_aligned = align_htf_to_ltf(prices, df_1d, kc_lower)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume confirmation: >1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_20)
+    # Volume confirmation: >1.5x 24-period average (6h equivalent)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_filter = volume > (1.5 * vol_ma_24)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -81,8 +63,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(kc_upper_aligned[i]) or np.isnan(kc_lower_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(volume_filter[i]) or
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(ema_200_aligned[i]) or np.isnan(volume_filter[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -90,27 +72,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long breakout: price breaks above upper KC with volume and trend confirmation
-            if close[i] > kc_upper_aligned[i] and volume_filter[i] and adx_aligned[i] > 25:
-                signals[i] = 0.25
+            # Long breakout: price breaks above Donchian upper with volume and trend confirmation
+            if close[i] > donchian_upper_aligned[i] and volume_filter[i] and close[i] > ema_200_aligned[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short breakout: price breaks below lower KC with volume and trend confirmation
-            elif close[i] < kc_lower_aligned[i] and volume_filter[i] and adx_aligned[i] > 25:
-                signals[i] = -0.25
+            # Short breakout: price breaks below Donchian lower with volume and trend confirmation
+            elif close[i] < donchian_lower_aligned[i] and volume_filter[i] and close[i] < ema_200_aligned[i]:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below lower KC or trend weakens (ADX < 20)
-            if close[i] < kc_lower_aligned[i] or adx_aligned[i] < 20:
+            # Exit long: price breaks below Donchian lower (failed breakout) or trend turns bearish
+            if close[i] < donchian_lower_aligned[i] or close[i] < ema_200_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: price breaks above upper KC or trend weakens (ADX < 20)
-            if close[i] > kc_upper_aligned[i] or adx_aligned[i] < 20:
+            # Exit short: price breaks above Donchian upper (failed breakdown) or trend turns bullish
+            if close[i] > donchian_upper_aligned[i] or close[i] > ema_200_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
