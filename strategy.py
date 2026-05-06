@@ -1,18 +1,18 @@
+# Python implementation of the strategy described
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Ichimoku Cloud with 1d trend filter and volume confirmation
-# Uses 1d Ichimoku (Tenkan-sen, Kijun-sen, Senkou Span A/B, Chikou) for trend and cloud
-# Price above/below cloud determines long/short bias
-# Tenkan/Kijun cross provides entry signals in direction of cloud
-# Volume > 1.5x 20-bar average confirms breakout strength
-# Works in both bull/bear: cloud acts as dynamic support/resistance, trend filter avoids whipsaw
-# Target: 60-120 total trades over 4 years (15-30/year)
+# Hypothesis: 4h Donchian breakout with 12h EMA50 trend filter and volume spike
+# Uses 12h Donchian(20) breakout for structure, 12h EMA50 for trend alignment (reduces whipsaw)
+# Volume spike (>1.8x 20-bar average) confirms breakout strength
+# ATR-based trailing stop via signal=0 when price retraces 25% of ATR from extreme
+# Discrete sizing 0.25 to balance profit potential and fee drag; target 80-160 total trades over 4 years (20-40/year)
+# Works in both bull/bear: breakouts capture momentum, trend filter avoids counter-trend traps, volume filter ensures participation
 
-name = "6h_Ichimoku_1dTrend_Filter_Volume"
-timeframe = "6h"
+name = "4h_Donchian20_12hEMA50_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,38 +26,18 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Calculate HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_1d) < 52:
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate 1d Ichimoku components
-    # Tenkan-sen (Conversion Line): (9-period high + low)/2
-    period_tenkan = 9
-    max_high_tenkan = pd.Series(high_1d).rolling(window=period_tenkan, min_periods=period_tenkan).max()
-    min_low_tenkan = pd.Series(low_1d).rolling(window=period_tenkan, min_periods=period_tenkan).min()
-    tenkan = (max_high_tenkan + min_low_tenkan) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + low)/2
-    period_kijun = 26
-    max_high_kijun = pd.Series(high_1d).rolling(window=period_kijun, min_periods=period_kijun).max()
-    min_low_kijun = pd.Series(low_1d).rolling(window=period_kijun, min_periods=period_kijun).min()
-    kijun = (max_high_kijun + min_low_kijun) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2)
-    
-    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
-    period_senkou_b = 52
-    max_high_senkou_b = pd.Series(high_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).max()
-    min_low_senkou_b = pd.Series(low_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).min()
-    senkou_b = ((max_high_senkou_b + min_low_senkou_b) / 2)
-    
-    # Chikou Span (Lagging Span): close shifted -22 periods (but we don't use it for signals)
+    # Calculate 12h EMA50 trend filter
+    close_12h_series = pd.Series(close_12h)
+    ema50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Calculate ATR(14) for stoploss
     tr1 = np.abs(high[1:] - low[1:])
@@ -66,15 +46,22 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate volume filter (>1.5x 20-bar average)
+    # Calculate volume spike filter (>1.8x 20-bar average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_20)
+    volume_filter = volume > (1.8 * vol_ma_20)
     
-    # Align HTF Ichimoku components to 6h timeframe
-    tenkan_6h = align_htf_to_ltf(prices, df_1d, tenkan.values)
-    kijun_6h = align_htf_to_ltf(prices, df_1d, kijun.values)
-    senkou_a_6h = align_htf_to_ltf(prices, df_1d, senkou_a.values, additional_delay_bars=26)
-    senkou_b_6h = align_htf_to_ltf(prices, df_1d, senkou_b.values, additional_delay_bars=26)
+    # Calculate 12h Donchian(20) channels
+    # Upper = max(high_12h, window=20)
+    # Lower = min(low_12h, window=20)
+    high_series = pd.Series(high_12h)
+    low_series = pd.Series(low_12h)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    
+    # Align HTF indicators to 4h timeframe (primary)
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -82,55 +69,50 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    long_stop = 0.0
-    short_stop = 0.0
+    long_extreme = 0.0
+    short_extreme = 0.0
     
     for i in range(100, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or 
-            np.isnan(senkou_a_6h[i]) or np.isnan(senkou_b_6h[i]) or 
-            np.isnan(atr[i]) or np.isnan(volume_filter[i]) or
+        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(donchian_upper_aligned[i]) or 
+            np.isnan(donchian_lower_aligned[i]) or np.isnan(atr[i]) or np.isnan(volume_filter[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                long_stop = 0.0
-                short_stop = 0.0
+                long_extreme = 0.0
+                short_extreme = 0.0
             continue
         
-        # Determine cloud top and bottom
-        cloud_top = max(senkou_a_6h[i], senkou_b_6h[i])
-        cloud_bottom = min(senkou_a_6h[i], senkou_b_6h[i])
-        
         if position == 0:
-            # Long signal: price above cloud AND Tenkan > Kijun AND volume filter
-            if close[i] > cloud_top and tenkan_6h[i] > kijun_6h[i] and volume_filter[i]:
+            # Long breakout: price > Donchian upper AND uptrend (price > EMA50) AND volume spike
+            if close[i] > donchian_upper_aligned[i] and close[i] > ema50_12h_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-                long_stop = close[i] - 1.5 * atr[i]
-            # Short signal: price below cloud AND Tenkan < Kijun AND volume filter
-            elif close[i] < cloud_bottom and tenkan_6h[i] < kijun_6h[i] and volume_filter[i]:
+                long_extreme = close[i]
+            # Short breakdown: price < Donchian lower AND downtrend (price < EMA50) AND volume spike
+            elif close[i] < donchian_lower_aligned[i] and close[i] < ema50_12h_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
-                short_stop = close[i] + 1.5 * atr[i]
+                short_extreme = close[i]
         elif position == 1:
-            # Update trailing stop for long
-            long_stop = max(long_stop, close[i] - 1.5 * atr[i])
-            # Exit long if price hits stop
-            if close[i] <= long_stop:
+            # Update long extreme
+            long_extreme = max(long_extreme, close[i])
+            # Exit long: price retraces 25% of ATR from extreme
+            if close[i] <= long_extreme - 0.25 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-                long_stop = 0.0
+                long_extreme = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Update trailing stop for short
-            short_stop = min(short_stop, close[i] + 1.5 * atr[i])
-            # Exit short if price hits stop
-            if close[i] >= short_stop:
+            # Update short extreme
+            short_extreme = min(short_extreme, close[i])
+            # Exit short: price retraces 25% of ATR from extreme
+            if close[i] >= short_extreme + 0.25 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-                short_stop = 0.0
+                short_extreme = 0.0
             else:
                 signals[i] = -0.25
     
