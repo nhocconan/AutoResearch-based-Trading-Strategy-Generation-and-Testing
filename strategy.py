@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h Bollinger Band mean reversion with volume filter
-# - Uses 4h Bollinger Bands (20, 2) for mean reversion signals
-# - Uses 1h volume spike for entry confirmation
-# - Uses session filter (08-20 UTC) to reduce noise
-# - Enters long when price touches lower BB with volume confirmation
-# - Enters short when price touches upper BB with volume confirmation
-# - Exits when price returns to BB middle
-# - Designed to capture mean reversion in ranging markets with institutional level respect
-# - Target: 60-150 total trades over 4 years (15-37/year) with 0.20 position sizing
+# Hypothesis: 6h strategy using weekly Camarilla pivot levels with 1d trend filter and volume confirmation
+# - Uses weekly Camarilla pivot levels (R3/S3, R4/S4) for institutional support/resistance
+# - Uses 1d EMA50 for trend direction filter (long above EMA50, short below)
+# - Uses 6h volume spike for entry confirmation
+# - Enters long when price breaks above weekly R3 with 1d uptrend and volume
+# - Enters short when price breaks below weekly S3 with 1d downtrend and volume
+# - Exits when price returns to weekly pivot point (PP) or opposite S3/R3 level
+# - Designed to capture institutional level breaks with trend alignment
+# - Target: 60-120 total trades over 4 years (15-30/year) with 0.25 position sizing
 
-name = "1h_4hBB_20_2_Volume_Session"
-timeframe = "1h"
+name = "6h_WeeklyCamarilla_R3S3_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,69 +26,83 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Get 4h data for Bollinger Bands
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get weekly data for Camarilla pivots
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
         return np.zeros(n)
     
-    # Calculate 4h Bollinger Bands (20, 2)
-    close_4h = df_4h['close'].values
-    sma_20 = pd.Series(close_4h).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_4h).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + (2 * std_20)
-    lower_bb = sma_20 - (2 * std_20)
-    middle_bb = sma_20
+    # Calculate weekly Camarilla pivot levels
+    high_w = df_1w['high'].values
+    low_w = df_1w['low'].values
+    close_w = df_1w['close'].values
     
-    # Align 4h Bollinger Bands to 1h timeframe
-    upper_bb_1h = align_htf_to_ltf(prices, df_4h, upper_bb)
-    lower_bb_1h = align_htf_to_ltf(prices, df_4h, lower_bb)
-    middle_bb_1h = align_htf_to_ltf(prices, df_4h, middle_bb)
+    # Weekly pivot point (PP)
+    PP = (high_w + low_w + close_w) / 3
+    R1 = PP + (high_w - low_w) * 1.1 / 12
+    S1 = PP - (high_w - low_w) * 1.1 / 12
+    R2 = PP + (high_w - low_w) * 1.1 / 6
+    S2 = PP - (high_w - low_w) * 1.1 / 6
+    R3 = PP + (high_w - low_w) * 1.1 / 4
+    S3 = PP - (high_w - low_w) * 1.1 / 4
+    R4 = PP + (high_w - low_w) * 1.1 / 2
+    S4 = PP - (high_w - low_w) * 1.1 / 2
     
-    # Volume filter (1h timeframe)
-    vol_ma_10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
-    volume_spike = volume > (1.5 * vol_ma_10)  # Volume confirmation
+    # Align weekly Camarilla levels to 6h timeframe
+    PP_6h = align_htf_to_ltf(prices, df_1w, PP)
+    R3_6h = align_htf_to_ltf(prices, df_1w, R3)
+    S3_6h = align_htf_to_ltf(prices, df_1w, S3)
+    R4_6h = align_htf_to_ltf(prices, df_1w, R4)
+    S4_6h = align_htf_to_ltf(prices, df_1w, S4)
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(open_time).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    # Calculate 1d EMA50 for trend
+    close_1d = df_1d['close'].values
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_6h = align_htf_to_ltf(prices, df_1d, ema_50)
+    
+    # Volume filter (6h timeframe)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma_20)  # Strong volume confirmation
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
-        # Skip if any critical value is NaN or outside session
-        if (np.isnan(upper_bb_1h[i]) or np.isnan(lower_bb_1h[i]) or 
-            np.isnan(middle_bb_1h[i]) or np.isnan(volume_spike[i]) or
-            not session_filter[i]):
+        # Skip if any critical value is NaN
+        if (np.isnan(PP_6h[i]) or np.isnan(R3_6h[i]) or np.isnan(S3_6h[i]) or 
+            np.isnan(ema_50_6h[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price touches lower BB with volume confirmation
-            if low[i] <= lower_bb_1h[i] and volume_spike[i]:
-                signals[i] = 0.20
+            # Long: break above weekly R3 with 1d uptrend and volume
+            if close[i] > R3_6h[i] and close[i] > ema_50_6h[i] and volume_spike[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: price touches upper BB with volume confirmation
-            elif high[i] >= upper_bb_1h[i] and volume_spike[i]:
-                signals[i] = -0.20
+            # Short: break below weekly S3 with 1d downtrend and volume
+            elif close[i] < S3_6h[i] and close[i] < ema_50_6h[i] and volume_spike[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to middle BB
-            if close[i] >= middle_bb_1h[i]:
+            # Exit long: price returns to weekly PP or breaks below S3
+            if close[i] < PP_6h[i] or close[i] < S3_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to middle BB
-            if close[i] <= middle_bb_1h[i]:
+            # Exit short: price returns to weekly PP or breaks above R3
+            if close[i] > PP_6h[i] or close[i] > R3_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
