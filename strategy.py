@@ -3,14 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using weekly Bollinger Bands squeeze + mean reversion
-# - Enter long when price touches lower BB after squeeze (BBW < 20th percentile) and RSI < 30
-# - Enter short when price touches upper BB after squeeze and RSI > 70
-# - Uses weekly Bollinger Bands calculated from prior week's close
-# - Designed to work in ranging markets (mean reversion at BB extremes) and low volatility periods
+# Hypothesis: 1d strategy using weekly Donchian(20) breakouts with volume confirmation and ADX trend filter
+# - Long when price breaks above weekly Donchian upper with volume > 1.3x 20-day MA and ADX > 25
+# - Short when price breaks below weekly Donchian lower with volume > 1.3x 20-day MA and ADX > 25
+# - Exit when price crosses weekly Donchian midpoint or reverses with volume confirmation
+# - Weekly Donchian provides clean breakout signals with proper trend alignment
+# - Volume confirmation ensures breakouts have institutional participation
+# - ADX filter ensures we only trade in trending conditions, avoiding chop
 # - Target: 30-100 total trades over 4 years (7-25/year) with 0.25 position sizing
 
-name = "1d_BollingerSqueeze_MeanReversion_WeeklyBB"
+name = "1d_WeeklyDonchian20_Volume_ADX_Trend"
 timeframe = "1d"
 leverage = 1.0
 
@@ -24,81 +26,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Bollinger Bands calculation
+    # Get weekly data for Donchian calculation
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate weekly Bollinger Bands (20, 2)
-    weekly_close = df_1w['close'].values
-    bb_middle = pd.Series(weekly_close).rolling(window=20, min_periods=20).mean().values
-    bb_std = pd.Series(weekly_close).rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
-    bb_width = bb_upper - bb_lower
+    # Calculate weekly Donchian channels (20-period)
+    high_20 = pd.Series(df_1w['high']).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(df_1w['low']).rolling(window=20, min_periods=20).min().values
     
-    # Calculate Bollinger Band width percentile (20-period lookback)
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=20, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-    ).values
+    # Align weekly Donchian to daily timeframe
+    donchian_high = align_htf_to_ltf(prices, df_1w, high_20)
+    donchian_low = align_htf_to_ltf(prices, df_1w, low_20)
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Align weekly Bollinger Bands to daily timeframe
-    bb_upper_daily = align_htf_to_ltf(prices, df_1w, bb_upper)
-    bb_lower_daily = align_htf_to_ltf(prices, df_1w, bb_lower)
-    bb_width_percentile_daily = align_htf_to_ltf(prices, df_1w, bb_width_percentile)
+    # Daily ADX for trend filter (14-period)
+    # Calculate True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Daily RSI for entry confirmation
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values  # Fill NaN with neutral 50
+    # Directional Movement
+    dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Smoothed values
+    tr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_plus_14 = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_minus_14 = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    plus_di = 100 * dm_plus_14 / tr_14
+    minus_di = 100 * dm_minus_14 / tr_14
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     # Volume filter
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.2 * vol_ma_20)  # Volume confirmation
+    volume_filter = volume > (1.3 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after warmup
+    for i in range(20, n):
         # Skip if any critical value is NaN
-        if (np.isnan(bb_upper_daily[i]) or np.isnan(bb_lower_daily[i]) or 
-            np.isnan(bb_width_percentile_daily[i]) or np.isnan(rsi[i]) or 
-            np.isnan(volume_filter[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(adx[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Bollinger squeeze condition: BB width below 20th percentile
-        squeeze_condition = bb_width_percentile_daily[i] < 20
-        
-        if position == 0 and squeeze_condition:
-            # Long entry: price touches lower BB and RSI oversold
-            if close[i] <= bb_lower_daily[i] * 1.001 and close[i] >= bb_lower_daily[i] and rsi[i] < 30:
-                if volume_filter[i]:
-                    signals[i] = 0.25
-                    position = 1
-            # Short entry: price touches upper BB and RSI overbought
-            elif close[i] >= bb_upper_daily[i] * 0.999 and close[i] <= bb_upper_daily[i] and rsi[i] > 70:
-                if volume_filter[i]:
-                    signals[i] = -0.25
-                    position = -1
+        if position == 0:
+            # Long entry: break above weekly Donchian high with volume and trend
+            if close[i] > donchian_high[i] and volume_filter[i] and adx[i] > 25:
+                signals[i] = 0.25
+                position = 1
+            # Short entry: break below weekly Donchian low with volume and trend
+            elif close[i] < donchian_low[i] and volume_filter[i] and adx[i] > 25:
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Exit long: price reaches middle BB or RSI overbought
-            if close[i] >= bb_middle[i] * 0.999 or rsi[i] > 70:
+            # Exit long: cross below midpoint or reverse with volume
+            if close[i] < donchian_mid[i]:
+                signals[i] = 0.0
+                position = 0
+            elif close[i] < donchian_low[i] and volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price reaches middle BB or RSI oversold
-            if close[i] <= bb_middle[i] * 1.001 or rsi[i] < 30:
+            # Exit short: cross above midpoint or reverse with volume
+            if close[i] > donchian_mid[i]:
+                signals[i] = 0.0
+                position = 0
+            elif close[i] > donchian_high[i] and volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
