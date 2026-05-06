@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
-# Uses 1d Camarilla pivot levels (R3/S3) for structure, 1d EMA34 for trend alignment (reduces whipsaw)
+# Hypothesis: 12h Williams Alligator with 1d EMA34 trend filter and volume confirmation
+# Uses Williams Alligator (Jaw=13, Teeth=8, Lips=5 SMAs) to identify trend direction and avoid choppy markets
+# 1d EMA34 provides higher-timeframe trend alignment to reduce whipsaw
 # Volume spike (>2.0x 20-bar average) confirms breakout strength
 # ATR-based trailing stop via signal=0 when price retraces 30% of ATR from extreme
-# Discrete sizing 0.30 to balance profit potential and fee drag; target 100-180 total trades over 4 years (25-45/year)
-# Works in both bull/bear: breakouts capture momentum, trend filter avoids counter-trend traps, volume filter ensures participation
+# Discrete sizing 0.25 to balance profit potential and fee drag; target 60-120 total trades over 4 years (15-30/year)
+# Works in both bull/bear: Alligator catches trends, EMA filter avoids counter-trend traps, volume filter ensures participation
 
-name = "4h_Camarilla_R3S3_1dEMA34_VolumeSpike_v1"
-timeframe = "4h"
+name = "12h_WilliamsAlligator_1dEMA34_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,20 +31,22 @@ def generate_signals(prices):
     if len(df_1d) < 34:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
     # Calculate 1d EMA34 trend filter
     close_1d_series = pd.Series(close_1d)
     ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate 1d Camarilla pivot levels (R3, S3)
-    # Camarilla: R4 = close + 1.5*(high-low), R3 = close + 1.125*(high-low), etc.
-    # We use R3 and S3 as key breakout levels
-    camarilla_range = high_1d - low_1d
-    r3_1d = close_1d + 1.125 * camarilla_range
-    s3_1d = close_1d - 1.125 * camarilla_range
+    # Calculate Williams Alligator on 12h timeframe
+    # Jaw: 13-period SMMA, Teeth: 8-period SMMA, Lips: 5-period SMMA
+    # SMMA (Smoothed Moving Average) = EMA with alpha = 1/period
+    jaw = pd.Series(close).ewm(alpha=1/13, adjust=False, min_periods=13).mean().values
+    teeth = pd.Series(close).ewm(alpha=1/8, adjust=False, min_periods=8).mean().values
+    lips = pd.Series(close).ewm(alpha=1/5, adjust=False, min_periods=5).mean().values
+    
+    # Alligator signals: Lips > Teeth > Jaw = uptrend, Lips < Teeth < Jaw = downtrend
+    alligator_long = (lips > teeth) & (teeth > jaw)
+    alligator_short = (lips < teeth) & (teeth < jaw)
     
     # Calculate ATR(14) for stoploss
     tr1 = np.abs(high[1:] - low[1:])
@@ -56,10 +59,10 @@ def generate_signals(prices):
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (2.0 * vol_ma_20)
     
-    # Align HTF indicators to 4h timeframe
+    # Align HTF indicators to 12h timeframe
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    alligator_long_aligned = align_htf_to_ltf(prices, df_1d, alligator_long.astype(float))
+    alligator_short_aligned = align_htf_to_ltf(prices, df_1d, alligator_short.astype(float))
     
     # Pre-compute session filter (08-20 UTC)
     hours = prices.index.hour
@@ -72,8 +75,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or 
-            np.isnan(s3_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(volume_filter[i]) or
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(alligator_long_aligned[i]) or 
+            np.isnan(alligator_short_aligned[i]) or np.isnan(atr[i]) or np.isnan(volume_filter[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -83,26 +86,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long breakout: price > R3 AND uptrend (price > EMA34) AND volume spike
-            if close[i] > r3_1d_aligned[i] and close[i] > ema34_1d_aligned[i] and volume_filter[i]:
-                signals[i] = 0.30
+            # Long entry: Alligator uptrend AND price > EMA34 AND volume spike
+            if alligator_long_aligned[i] and close[i] > ema34_1d_aligned[i] and volume_filter[i]:
+                signals[i] = 0.25
                 position = 1
                 long_extreme = close[i]
-            # Short breakdown: price < S3 AND downtrend (price < EMA34) AND volume spike
-            elif close[i] < s3_1d_aligned[i] and close[i] < ema34_1d_aligned[i] and volume_filter[i]:
-                signals[i] = -0.30
+            # Short entry: Alligator downtrend AND price < EMA34 AND volume spike
+            elif alligator_short_aligned[i] and close[i] < ema34_1d_aligned[i] and volume_filter[i]:
+                signals[i] = -0.25
                 position = -1
                 short_extreme = close[i]
         elif position == 1:
             # Update long extreme
             long_extreme = max(long_extreme, close[i])
-            # Exit long: price retraces 30% of ATR from extreme (tighter stop for 4h)
+            # Exit long: price retraces 30% of ATR from extreme
             if close[i] <= long_extreme - 0.3 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 long_extreme = 0.0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
             # Update short extreme
             short_extreme = min(short_extreme, close[i])
@@ -112,6 +115,6 @@ def generate_signals(prices):
                 position = 0
                 short_extreme = 0.0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
