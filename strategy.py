@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1-day ATR-based volatility breakout with volume confirmation
-# Long when price breaks above 1-day close + ATR(14) with volume > 1.3x 20-period average
-# Short when price breaks below 1-day close - ATR(14) with volume > 1.3x 20-period average
-# Uses daily volatility for dynamic support/resistance, volume for breakout confirmation
-# Designed to capture momentum in both bull and bear markets with controlled trade frequency
-# Target: 20-40 trades per year (80-160 over 4 years) with 0.25 position sizing
+# Hypothesis: 12h strategy using 1-week RSI divergence with volume confirmation and Bollinger Bands
+# Long when weekly RSI < 30 and price > 12h Bollinger middle band with volume > 1.5x 20-period average
+# Short when weekly RSI > 70 and price < 12h Bollinger middle band with volume > 1.5x 20-period average
+# Uses weekly RSI for overbought/oversold conditions, Bollinger Bands for mean reversion entry
+# Designed to work in bull markets via mean reversion from oversold and in bear markets via mean reversion from overbought
+# Target: 20-30 trades per year (80-120 over 4 years) with 0.25 position sizing
 
-name = "12h_1dATR_Volume_Breakout_v1"
+name = "12h_1wRSI_Bollinger_Volume_v1"
 timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,38 +24,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-day data
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Calculate 1-week RSI (14-period)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
         return np.zeros(n)
     
-    # Calculate 1-day ATR(14)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 14-period RSI calculation
+    delta = pd.Series(df_1w['close']).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
+    # Align weekly RSI to 12h timeframe
+    rsi_12h = align_htf_to_ltf(prices, df_1w, rsi_values)
     
-    atr_14 = np.zeros_like(tr)
-    atr_14[13] = np.mean(tr[:14])  # Seed with first 14 values
-    for i in range(14, len(tr)):
-        atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
+    # Calculate 12h Bollinger Bands (20-period, 2 std dev)
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + (2 * std_20)
+    lower_bb = sma_20 - (2 * std_20)
+    middle_bb = sma_20  # 20-period SMA
     
-    # Dynamic bands: close ± ATR
-    upper_band = close_1d + atr_14
-    lower_band = close_1d - atr_14
-    
-    # Align bands to 12h timeframe
-    upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
-    lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
-    
-    # Volume confirmation: >1.3x 20-period average
+    # Volume confirmation: >1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.3 * vol_ma_20)
+    volume_filter = volume > (1.5 * vol_ma_20)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -64,9 +60,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(14, n):  # Start after ATR warmup
+    for i in range(20, n):  # Start after Bollinger warmup
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]) or 
+        if (np.isnan(rsi_12h[i]) or np.isnan(middle_bb[i]) or 
             np.isnan(volume_filter[i]) or
             not session_filter[i]):
             if position != 0:
@@ -75,32 +71,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long breakout: price breaks above upper band with volume confirmation
-            if close[i] > upper_band_aligned[i] and volume_filter[i]:
+            # Long entry: RSI oversold (<30) and price above middle Bollinger Band with volume confirmation
+            if rsi_12h[i] < 30 and close[i] > middle_bb[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short breakout: price breaks below lower band with volume confirmation
-            elif close[i] < lower_band_aligned[i] and volume_filter[i]:
+            # Short entry: RSI overbought (>70) and price below middle Bollinger Band with volume confirmation
+            elif rsi_12h[i] > 70 and close[i] < middle_bb[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price closes below 1-day close (mean reversion)
-            if close[i] < close_1d[-1] if len(close_1d) > 0 else 0:  # Simplified exit condition
+            # Exit long: RSI crosses above 50 (momentum shift) or price touches upper Bollinger Band
+            if rsi_12h[i] > 50 or close[i] >= upper_bb[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price closes above 1-day close (mean reversion)
-            if close[i] > close_1d[-1] if len(close_1d) > 0 else 0:  # Simplified exit condition
+            # Exit short: RSI crosses below 50 (momentum shift) or price touches lower Bollinger Band
+            if rsi_12h[i] < 50 or close[i] <= lower_bb[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
-
-# Note: The exit condition uses the most recent daily close as a mean reversion target.
-# In practice, this would be the aligned daily close series. For simplicity in this
-# implementation, we use the last available daily close value as the target.
-# A more precise implementation would align the daily close series and use that.
