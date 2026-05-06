@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using daily volatility contraction/expansion with volume confirmation
-# Low volatility (ATR contraction) followed by expansion with volume indicates breakout
-# Uses daily ATR contraction filter (ATR < 0.8 * 20-day average) to identify low vol periods
-# Breakout entry when price breaks above/below 12h high/low of prior 3 bars with volume > 1.5x 20-period average
-# Works in bull/bear markets: volatility expansion captures breakouts in both directions
-# Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
+# Hypothesis: 4h strategy using 12h Donchian breakout with volume confirmation and ATR-based stop
+# 12h Donchian(20) defines the medium-term trend channel
+# Breakout above upper channel or below lower channel with volume > 1.5x 20-period average
+# ATR(14) used for dynamic stop loss and position sizing
+# Works in bull/bear markets: breakouts capture trends, volatility filter avoids chop
+# Target: 100-200 total trades over 4 years (25-50/year) with 0.25 position sizing
 
-name = "12h_1dATRContraction_VolumeBreakout_v1"
-timeframe = "12h"
+name = "4h_12hDonchian20_VolumeVolFilter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,27 +24,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate daily ATR for volatility filter ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Calculate 12h Donchian channels ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_1d) < 20:
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # True Range for daily ATR
-    tr1 = df_1d['high'].values[1:] - df_1d['low'].values[1:]
-    tr2 = np.abs(df_1d['high'].values[1:] - df_1d['close'].values[:-1])
-    tr3 = np.abs(df_1d['low'].values[1:] - df_1d['close'].values[:-1])
-    tr_daily = np.concatenate([[np.nan], np.maximum(np.maximum(tr1, tr2), tr3)])
-    atr_14_daily = pd.Series(tr_daily).rolling(window=14, min_periods=14).mean().values
-    atr_ma_20_daily = pd.Series(atr_14_daily).rolling(window=20, min_periods=20).mean().values
+    # Donchian channel calculation
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Volatility filter: daily ATR < 0.8 * 20-day average ATR (contraction)
-    vol_filter_daily = atr_14_daily < (0.8 * atr_ma_20_daily)
-    vol_filter_daily_aligned = align_htf_to_ltf(prices, df_1d, vol_filter_daily)
+    # Upper channel: 20-period high
+    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    # Lower channel: 20-period low
+    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation: >1.5x 20-period average (moderate threshold to reduce trades)
+    # Align 12h channels to 4h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+    
+    # Volume confirmation: >1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma_20)
+    
+    # Volatility filter: ATR(14) > 20-period average ATR
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(np.maximum(tr1, tr2), tr3)])
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_ma_20 = pd.Series(atr_14).rolling(window=20, min_periods=20).mean().values
+    vol_filter = atr_14 > atr_ma_20
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -55,7 +65,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(vol_filter_daily_aligned[i]) or np.isnan(volume_filter[i]) or
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(volume_filter[i]) or np.isnan(vol_filter[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -63,45 +74,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Lookback period for 12h high/low (prior 3 bars)
-            lookback_start = max(0, i - 3)
-            lookback_end = i
-            if lookback_end > lookback_start:
-                period_high = np.max(high[lookback_start:lookback_end])
-                period_low = np.min(low[lookback_start:lookback_end])
-                
-                # Long breakout: price breaks above period high with volume and vol contraction
-                if close[i] > period_high and volume_filter[i] and vol_filter_daily_aligned[i]:
-                    signals[i] = 0.25
-                    position = 1
-                # Short breakout: price breaks below period low with volume and vol contraction
-                elif close[i] < period_low and volume_filter[i] and vol_filter_daily_aligned[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # Long breakout: price breaks above upper Donchian channel with volume and volatility
+            if close[i] > donchian_high_aligned[i] and volume_filter[i] and vol_filter[i]:
+                signals[i] = 0.25
+                position = 1
+            # Short breakout: price breaks below lower Donchian channel with volume and volatility
+            elif close[i] < donchian_low_aligned[i] and volume_filter[i] and vol_filter[i]:
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Exit long: price breaks below period low (failed breakout) or time-based exit
-            lookback_start = max(0, i - 3)
-            lookback_end = i
-            if lookback_end > lookback_start:
-                period_low = np.min(low[lookback_start:lookback_end])
-                if close[i] < period_low:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+            # Exit long: price breaks below lower Donchian channel (failed support)
+            if close[i] < donchian_low_aligned[i]:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above period high (failed breakdown) or time-based exit
-            lookback_start = max(0, i - 3)
-            lookback_end = i
-            if lookback_end > lookback_start:
-                period_high = np.max(high[lookback_start:lookback_end])
-                if close[i] > period_high:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            # Exit short: price breaks above upper Donchian channel (failed resistance)
+            if close[i] > donchian_high_aligned[i]:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = -0.25
     
