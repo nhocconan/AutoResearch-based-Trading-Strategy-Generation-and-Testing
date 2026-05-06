@@ -3,51 +3,60 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 12h Elder Ray (Bull/Bear Power) with 1d EMA trend filter and volume confirmation
-# Long when Bull Power > 0, price > 1d EMA200, and volume > 1.2x 20-period average
-# Short when Bear Power < 0, price < 1d EMA200, and volume > 1.2x 20-period average
-# Elder Ray identifies bull/bear power via EMA13, trend filter avoids counter-trend trades, volume confirms conviction
-# Designed to work in bull markets via sustained Bull Power and in bear markets via sustained Bear Power
-# Target: 50-150 total trades over 4 years = 12-37/year with 0.25 position sizing
+# Hypothesis: 12h strategy using 1-day Williams %R with Bollinger Band squeeze filter
+# Long when %R crosses above -80 (oversold exit) with Bollinger Band width < 20th percentile (low volatility)
+# Short when %R crosses below -20 (overbought entry) with Bollinger Band width < 20th percentile
+# Uses daily Williams %R for mean reversion signals and Bollinger Band width for volatility regime filter
+# Designed to work in both bull and bear markets by capturing mean reversion in low volatility regimes
+# Target: 20-30 trades per year (80-120 over 4 years) with 0.25 position sizing
 
-name = "6h_ElderRay_EMA200_Volume_Trend_v1"
-timeframe = "6h"
+name = "12h_1dWilliamsR_BollingerSqueeze_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Calculate 12h EMA13 for Elder Ray
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    close_12h = df_12h['close'].values
-    ema13_12h = pd.Series(close_12h).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high - ema13_12h[-len(high):]  # Align to same length as prices
-    bear_power = low - ema13_12h[-len(low):]
-    
-    # Calculate 1d EMA200 for trend filter
+    # Calculate 1-day Williams %R (14-period)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = df_1d['high'].rolling(window=14, min_periods=14).max()
+    lowest_low = df_1d['low'].rolling(window=14, min_periods=14).min()
+    williams_r = -100 * (highest_high - df_1d['close']) / (highest_high - lowest_low)
+    williams_r = williams_r.replace([np.inf, -np.inf], np.nan).fillna(50).values  # Handle division by zero
     
-    # Volume confirmation: >1.2x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.2 * vol_ma_20)
+    # Calculate 1-day Bollinger Band Width (20-period, 2 std dev)
+    sma_20 = df_1d['close'].rolling(window=20, min_periods=20).mean()
+    std_20 = df_1d['close'].rolling(window=20, min_periods=20).std()
+    upper_bb = sma_20 + (2 * std_20)
+    lower_bb = sma_20 - (2 * std_20)
+    bb_width = ((upper_bb - lower_bb) / sma_20) * 100  # Percentage width
+    bb_width = bb_width.replace([np.inf, -np.inf], np.nan).fillna(0).values
+    
+    # Bollinger Band squeeze: width < 20th percentile (low volatility regime)
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile_20 = bb_width_series.rolling(window=50, min_periods=20).quantile(0.20)
+    bb_squeeze = bb_width < bb_width_percentile_20.values
+    
+    # Align indicators to 12h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    bb_squeeze_aligned = align_htf_to_ltf(prices, df_1d, bb_squeeze.astype(float))
+    
+    # Williams %R signal generation: cross above -80 for long, cross below -20 for short
+    williams_r_series = pd.Series(williams_r_aligned)
+    williams_r_prev = williams_r_series.shift(1).fillna(50).values
+    
+    long_signal = (williams_r_aligned > -80) & (williams_r_prev <= -80)  # Cross above -80
+    short_signal = (williams_r_aligned < -20) & (williams_r_prev >= -20)  # Cross below -20
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -56,10 +65,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(200, n):  # Start after EMA200 warmup
+    for i in range(1, n):  # Start from 1 to have previous value
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(ema200_1d_aligned[i]) or np.isnan(volume_filter[i]) or
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(bb_squeeze_aligned[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -67,24 +75,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Bull Power positive, price above EMA200, volume confirmation
-            if bull_power[i] > 0 and close[i] > ema200_1d_aligned[i] and volume_filter[i]:
+            # Long entry: Williams %R crosses above -80 (exiting oversold) with Bollinger squeeze
+            if long_signal[i] and bb_squeeze_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power negative, price below EMA200, volume confirmation
-            elif bear_power[i] < 0 and close[i] < ema200_1d_aligned[i] and volume_filter[i]:
+            # Short entry: Williams %R crosses below -20 (entering overbought) with Bollinger squeeze
+            elif short_signal[i] and bb_squeeze_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Bear Power turns negative (trend change)
-            if bear_power[i] < 0:
+            # Exit long: Williams %R crosses below -50 (momentum weakening)
+            if williams_r_aligned[i] < -50 and williams_r_prev > -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Bull Power turns positive (trend change)
-            if bull_power[i] > 0:
+            # Exit short: Williams %R crosses above -50 (momentum weakening)
+            if williams_r_aligned[i] > -50 and williams_r_prev < -50:
                 signals[i] = 0.0
                 position = 0
             else:
