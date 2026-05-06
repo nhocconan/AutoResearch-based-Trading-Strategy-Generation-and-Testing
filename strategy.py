@@ -3,23 +3,23 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using weekly Donchian breakout with volume confirmation and ADX trend filter
-# - Uses 1w Donchian channels (20-period) for long-term structure to avoid noise
-# - Uses 4h volume spike for entry confirmation (volume > 2x 20-period average)
-# - Uses 4h ADX > 25 to filter for trending markets only
+# Hypothesis: 12h strategy using weekly Donchian breakout with volume confirmation and ADX trend filter
+# - Uses 1w Donchian channels (20-period) for long-term structure
+# - Uses 12h volume spike for entry confirmation
+# - Uses 12h ADX > 25 to filter for trending markets only
 # - Enters long when price breaks above 1w Donchian upper band with volume and trend
 # - Enters short when price breaks below 1w Donchian lower band with volume and trend
-# - Exits when price returns to 1w Donchian middle (median) or opposite band
-# - Weekly timeframe reduces noise and false breakouts, suitable for both bull and bear markets
-# - Target: 60-150 total trades over 4 years (15-38/year) with 0.25 position sizing
+# - Exits when price returns to 1w Donchian middle (median)
+# - Designed to capture major trend moves with institutional level respect
+# - Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
 
-name = "4h_1wDonchian_20_Volume_ADX_Trend"
-timeframe = "4h"
+name = "12h_1wDonchian_20_Volume_ADX_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -42,16 +42,16 @@ def generate_signals(prices):
     lower_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     middle_20 = (upper_20 + lower_20) / 2  # Median line for exit
     
-    # Align 1w Donchian channels to 4h timeframe
-    upper_20_4h = align_htf_to_ltf(prices, df_1w, upper_20)
-    lower_20_4h = align_htf_to_ltf(prices, df_1w, lower_20)
-    middle_20_4h = align_htf_to_ltf(prices, df_1w, middle_20)
+    # Align 1w Donchian channels to 12h timeframe
+    upper_20_12h = align_htf_to_ltf(prices, df_1w, upper_20)
+    lower_20_12h = align_htf_to_ltf(prices, df_1w, lower_20)
+    middle_20_12h = align_htf_to_ltf(prices, df_1w, middle_20)
     
-    # Volume filter (4h timeframe)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)  # Strong volume confirmation
+    # Volume filter (12h timeframe)
+    vol_ma_10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    volume_spike = volume > (1.8 * vol_ma_10)  # Strong volume confirmation
     
-    # ADX filter (4h timeframe) - trend strength
+    # ADX filter (12h timeframe) - trend strength
     def calculate_adx(high, low, close, period=14):
         plus_dm = np.zeros_like(high)
         minus_dm = np.zeros_like(high)
@@ -102,10 +102,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any critical value is NaN
-        if (np.isnan(upper_20_4h[i]) or np.isnan(lower_20_4h[i]) or 
-            np.isnan(middle_20_4h[i]) or np.isnan(volume_spike[i]) or 
+        if (np.isnan(upper_20_12h[i]) or np.isnan(lower_20_12h[i]) or 
+            np.isnan(middle_20_12h[i]) or np.isnan(volume_spike[i]) or 
             np.isnan(adx_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -114,23 +114,23 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: break above 1w Donchian upper with volume and trend
-            if close[i] > upper_20_4h[i] and volume_spike[i] and adx_filter[i]:
+            if close[i] > upper_20_12h[i] and volume_spike[i] and adx_filter[i]:
                 signals[i] = 0.25
                 position = 1
             # Short: break below 1w Donchian lower with volume and trend
-            elif close[i] < lower_20_4h[i] and volume_spike[i] and adx_filter[i]:
+            elif close[i] < lower_20_12h[i] and volume_spike[i] and adx_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to middle OR breaks below lower band
-            if close[i] < middle_20_4h[i] or close[i] < lower_20_4h[i]:
+            # Exit long: price returns to middle
+            if close[i] < middle_20_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to middle OR breaks above upper band
-            if close[i] > middle_20_4h[i] or close[i] > upper_20_4h[i]:
+            # Exit short: price returns to middle
+            if close[i] > middle_20_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
