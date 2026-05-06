@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1-day KAMA trend with 1-week RSI filter and volume confirmation
-# Long when KAMA(1d) is rising, RSI(1w) < 40 (oversold), and volume > 1.5x average
-# Short when KAMA(1d) is falling, RSI(1w) > 60 (overbought), and volume > 1.5x average
-# KAMA adapts to market noise, providing smooth trend signals. Weekly RSI identifies extremes.
-# Volume confirms momentum. Works in both bull and bear markets by fading extremes in trends.
-# Target: 25-40 trades per year (100-160 over 4 years) with 0.25 position sizing.
+# Hypothesis: 1d strategy using 1-week Keltner Channel breakout with volume confirmation and ADX trend filter
+# Long when price closes above weekly Keltner upper band with volume > 1.5x average and ADX > 25
+# Short when price closes below weekly Keltner lower band with volume > 1.5x average and ADX > 25
+# Weekly Keltner Channel adapts to volatility, providing dynamic support/resistance.
+# Volume confirms breakout strength, ADX filters for trending conditions to avoid whipsaws.
+# Designed to work in both bull and bear markets by capturing strong momentum moves.
+# Target: 15-25 trades per year (60-100 over 4 years) with 0.25 position sizing.
 
-name = "4h_1dKAMA_1wRSI_Volume_Trend_v1"
-timeframe = "4h"
+name = "1d_1wKeltner_20_2.0_ADXVol_Breakout_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,92 +25,102 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1-day KAMA trend ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_1d) < 30:
-        return np.zeros(n)
-    
-    # Efficiency Ratio for KAMA
-    change = abs(df_1d['close'] - df_1d['close'].shift(10))
-    volatility = abs(df_1d['close'] - df_1d['close'].shift(1)).rolling(window=10).sum()
-    er = change / volatility
-    er = er.fillna(0)
-    
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    
-    # KAMA calculation
-    kama = np.zeros(len(df_1d))
-    kama[0] = df_1d['close'].iloc[0]
-    for i in range(1, len(df_1d)):
-        kama[i] = kama[i-1] + sc.iloc[i] * (df_1d['close'].iloc[i] - kama[i-1])
-    
-    # KAMA trend: 1 if rising, -1 if falling
-    kama_trend = np.where(kama > np.roll(kama, 1), 1, -1)
-    kama_trend[0] = 0
-    
-    # Align KAMA trend to 4h timeframe
-    kama_trend_aligned = align_htf_to_ltf(prices, df_1d, kama_trend)
-    
-    # Calculate 1-week RSI for overbought/oversold filter
+    # Calculate 1-week Keltner Channel (20, 2.0) ONCE before loop
     df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1w) < 14:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # RSI calculation
-    delta = df_1w['close'].diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50)  # neutral when no data
+    # Typical Price for Keltner Channel
+    tp = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
     
-    # Align RSI to 4h timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_1w, rsi.values)
+    # EMA of Typical Price (20-period)
+    ema_tp = tp.ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Volume confirmation: >1.5x 50-period average
-    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
-    volume_filter = volume > (1.5 * vol_ma_50)
+    # Average True Range (20-period)
+    tr_w = pd.DataFrame({
+        'hl': df_1w['high'] - df_1w['low'],
+        'hc': abs(df_1w['high'] - df_1w['close'].shift(1)),
+        'lc': abs(df_1w['low'] - df_1w['close'].shift(1))
+    }).max(axis=1)
+    atr_w = tr_w.ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Keltner Channel bands
+    keltner_upper = ema_tp + (2.0 * atr_w)
+    keltner_lower = ema_tp - (2.0 * atr_w)
     
+    # Align weekly Keltner levels to daily timeframe
+    keltner_upper_aligned = align_htf_to_ltf(prices, df_1w, keltner_upper)
+    keltner_lower_aligned = align_htf_to_ltf(prices, df_1w, keltner_lower)
+    
+    # Calculate daily ADX (14-period) for trend strength
+    # True Range
+    tr_d = pd.DataFrame({
+        'hl': high - low,
+        'hc': np.abs(high - np.append([np.nan], close[:-1])),
+        'lc': np.abs(low - np.append([np.nan], close[:-1]))
+    }).max(axis=1)
+    
+    # Directional Movement
+    up_move = np.append([np.nan], high[1:] - high[:-1])
+    down_move = np.append([np.nan], low[:-1] - low[1:])
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values
+    tr_period = 14
+    atr_d = pd.Series(tr_d).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / atr_d
+    minus_di = 100 * minus_dm_smooth / atr_d
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
+    
+    # Align ADX to daily timeframe (already daily, but using align for consistency)
+    adx_aligned = align_htf_to_ltf(prices, prices, adx)
+    
+    # Volume confirmation: >1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma_20)
+    
+    # Signals array
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
-        # Skip if any critical value is NaN or outside session
-        if (np.isnan(kama_trend_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(volume_filter[i]) or not session_filter[i]):
+    for i in range(20, n):
+        # Skip if any critical value is NaN
+        if (np.isnan(keltner_upper_aligned[i]) or np.isnan(keltner_lower_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: KAMA rising, RSI oversold (<40), volume confirmation
-            if kama_trend_aligned[i] == 1 and rsi_aligned[i] < 40 and volume_filter[i]:
+            # Long breakout: price closes above weekly Keltner upper with volume and trend
+            if close[i] > keltner_upper_aligned[i] and volume_filter[i] and adx_aligned[i] > 25:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA falling, RSI overbought (>60), volume confirmation
-            elif kama_trend_aligned[i] == -1 and rsi_aligned[i] > 60 and volume_filter[i]:
+            # Short breakout: price closes below weekly Keltner lower with volume and trend
+            elif close[i] < keltner_lower_aligned[i] and volume_filter[i] and adx_aligned[i] > 25:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: KAMA turns falling or RSI overbought (>70)
-            if kama_trend_aligned[i] == -1 or rsi_aligned[i] > 70:
+            # Exit long: price closes below weekly Keltner lower (trend reversal)
+            if close[i] < keltner_lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: KAMA turns rising or RSI oversold (<30)
-            if kama_trend_aligned[i] == 1 or rsi_aligned[i] < 30:
+            # Exit short: price closes above weekly Keltner upper (trend reversal)
+            if close[i] > keltner_upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
