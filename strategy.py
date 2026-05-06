@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Donchian channel breakout with 1w EMA34 trend filter and volume confirmation
-# Long when price breaks above 1d Donchian(20) upper band AND 1w EMA34 is rising AND 12h volume > 1.5 * avg_volume(20)
-# Short when price breaks below 1d Donchian(20) lower band AND 1w EMA34 is falling AND 12h volume > 1.5 * avg_volume(20)
-# Exit when price returns to 1d Donchian(20) midpoint
+# Hypothesis: 4h strategy using Camarilla R3/S3 pivot levels from 1d with volume confirmation and choppiness regime filter
+# Long when price crosses above Camarilla R3 level AND volume > 1.3 * avg_volume(20) AND choppiness index < 50 (trending market)
+# Short when price crosses below Camarilla S3 level AND volume > 1.3 * avg_volume(20) AND choppiness index < 50 (trending market)
+# Exit when price returns to Camarilla Pivot level (PP) or opposite extreme (S3/R3)
 # Uses discrete sizing 0.25 to balance profit potential and drawdown control
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
-# 1d Donchian provides strong support/resistance levels from higher timeframe structure
-# 1w EMA34 ensures we trade with the weekly trend while reducing noise
+# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
+# Camarilla levels from 1d provide strong intraday support/resistance that works in both bull and bear markets
 # Volume confirmation filters out low-conviction breakouts
-# Works in both bull (breakout continuations) and bear (breakdown continuations) markets
+# Choppiness regime filter ensures we only trade in trending conditions (avoids choppy whipsaws)
+# Works in bull markets (breakout continuations) and bear markets (breakdown continuations)
 
-name = "12h_1dDonchian20_Breakout_1wEMA34_Trend_Volume"
-timeframe = "12h"
+name = "4h_1dCamarilla_R3S3_Breakout_Volume_ChopFilter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,71 +28,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for Donchian channel calculation
+    # Get 1d data ONCE before loop for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:  # Need at least 20 completed daily bars for Donchian(20)
+    if len(df_1d) < 1:  # Need at least 1 completed daily bar
         return np.zeros(n)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1d Donchian channel (20-period)
-    upper_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    mid_1d = (upper_1d + lower_1d) / 2.0
+    # Calculate Camarilla pivot levels for 1d
+    # Camarilla formulas: PP = (H+L+C)/3, R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    pp_1d = typical_price_1d  # Simplified: using typical price as pivot
+    r3_1d = close_1d + (range_1d * 1.1 / 2.0)
+    s3_1d = close_1d - (range_1d * 1.1 / 2.0)
     
-    # Align 1d Donchian levels to 12h timeframe (wait for completed 1d bar)
-    upper_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_1d)
-    lower_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_1d)
-    mid_1d_aligned = align_htf_to_ltf(prices, df_1d, mid_1d)
+    # Align 1d Camarilla levels to 4h timeframe (wait for completed 1d bar)
+    pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
-    # Get 1w data ONCE before loop for EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:  # Need at least 34 completed weekly bars for EMA34
-        return np.zeros(n)
-    close_1w = df_1w['close'].values
-    
-    # Calculate 1w EMA34 trend filter
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Calculate volume confirmation: volume > 1.5 * 20-period average volume on 12h
+    # Calculate volume confirmation: volume > 1.3 * 20-period average volume on 4h
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * avg_volume_20)
+    volume_confirm = volume > (1.3 * avg_volume_20)
+    
+    # Calculate choppiness index regime filter on 4h (trending when CHOP < 50)
+    # CHOP = 100 * log10(sum(ATR(14)) / log10(highest_high - lowest_low)) / log10(14)
+    tr14 = np.maximum(np.abs(high[1:] - low[:-1]), np.absolute(np.abs(close[1:] - close[:-1])))
+    tr14 = np.concatenate([[np.nan], tr14])  # align with original length
+    atr14 = pd.Series(tr14).rolling(window=14, min_periods=14).mean().values
+    
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    
+    # Avoid division by zero
+    range_14 = highest_high_14 - lowest_low_14
+    range_14 = np.where(range_14 == 0, 1e-10, range_14)
+    
+    chop = 100 * np.log10(atr14 * 14 / np.log10(range_14)) / np.log10(14)
+    chop[np.isnan(chop)] = 50  # default to neutral when not enough data
+    chop_filter = chop < 50  # trending market
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN
-        if (np.isnan(upper_1d_aligned[i]) or np.isnan(lower_1d_aligned[i]) or 
-            np.isnan(mid_1d_aligned[i]) or np.isnan(ema_34_1w_aligned[i]) or
-            np.isnan(avg_volume_20[i])):
+        if (np.isnan(pp_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or 
+            np.isnan(s3_1d_aligned[i]) or np.isnan(avg_volume_20[i]) or
+            np.isnan(chop[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above 1d Donchian upper band, EMA34 rising, volume spike
-            if (close[i] > upper_1d_aligned[i] and close[i-1] <= upper_1d_aligned[i-1] and 
-                ema_34_1w_aligned[i] > ema_34_1w_aligned[i-1] and volume_confirm[i]):
+            # Long: price crosses above R3 level, volume spike, trending market
+            if (close[i] > r3_1d_aligned[i] and close[i-1] <= r3_1d_aligned[i-1] and 
+                volume_confirm[i] and chop_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 1d Donchian lower band, EMA34 falling, volume spike
-            elif (close[i] < lower_1d_aligned[i] and close[i-1] >= lower_1d_aligned[i-1] and 
-                  ema_34_1w_aligned[i] < ema_34_1w_aligned[i-1] and volume_confirm[i]):
+            # Short: price crosses below S3 level, volume spike, trending market
+            elif (close[i] < s3_1d_aligned[i] and close[i-1] >= s3_1d_aligned[i-1] and 
+                  volume_confirm[i] and chop_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to 1d Donchian midpoint
-            if close[i] <= mid_1d_aligned[i]:
+            # Exit long: price returns to PP level or below S3 (opposite extreme)
+            if close[i] <= pp_1d_aligned[i] or close[i] <= s3_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to 1d Donchian midpoint
-            if close[i] >= mid_1d_aligned[i]:
+            # Exit short: price returns to PP level or above R3 (opposite extreme)
+            if close[i] >= pp_1d_aligned[i] or close[i] >= r3_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
