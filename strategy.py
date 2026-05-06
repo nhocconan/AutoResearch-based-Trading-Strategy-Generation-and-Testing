@@ -1,109 +1,125 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using weekly RSI mean reversion with daily trend filter
-# - Uses weekly RSI(14) for mean reversion signals (oversold/overbought)
-# - Uses daily EMA(50) for trend direction filter
-# - Uses 4h volume spike for entry confirmation
-# - Enters long when weekly RSI < 30 and price > daily EMA50 with volume
-# - Enters short when weekly RSI > 70 and price < daily EMA50 with volume
-# - Exits when RSI returns to neutral zone (40-60)
-# - Designed to work in both bull and bear markets by trading mean reversion within the trend
-# - Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
+# Hypothesis: 1h strategy using 4h Supertrend for direction and 1h Donchian breakout for entry
+# - Uses 4h Supertrend (ATR multiplier 3.0) for trend direction
+# - Uses 1h Donchian channels (20-period) for precise entry timing
+# - Enters long when price breaks above 1h Donchian upper band AND 4h Supertrend is bullish
+# - Enters short when price breaks below 1h Donchian lower band AND 4h Supertrend is bearish
+# - Exits when price returns to 1h Donchian middle or opposite band
+# - Session filter: only trade 08-20 UTC to avoid low-liquidity hours
+# - Position size: 0.20 (20% of capital)
+# - Target: 60-150 total trades over 4 years (15-37/year) with controlled frequency
 
-name = "4h_weeklyRSI_50EMA_Volume_MeanReversion"
-timeframe = "4h"
+name = "1h_4hSupertrend_1hDonchian_Breakout"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get weekly data for RSI
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 14:
+    # Get 4h data for Supertrend
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 10:
         return np.zeros(n)
     
-    # Calculate weekly RSI(14)
-    close_weekly = df_weekly['close'].values
-    delta = np.diff(close_weekly, prepend=close_weekly[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(close_weekly)
-    avg_loss = np.zeros_like(close_weekly)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
+    # Calculate ATR for Supertrend
+    tr = np.maximum(high_4h - low_4h, 
+                    np.maximum(np.abs(high_4h - np.roll(close_4h, 1)), 
+                               np.absolute(np.roll(low_4h, 1) - low_4h)))
+    tr[0] = high_4h[0] - low_4h[0]
     
-    for i in range(14, len(close_weekly)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    atr_period = 10
+    atr = np.zeros_like(high_4h)
+    atr[atr_period-1] = np.mean(tr[1:atr_period+1])
+    for i in range(atr_period, len(high_4h)):
+        atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi_weekly = 100 - (100 / (1 + rs))
-    rsi_weekly = np.where(avg_loss == 0, 100, rsi_weekly)
-    rsi_weekly = np.where(avg_gain == 0, 0, rsi_weekly)
+    # Calculate Supertrend
+    factor = 3.0
+    hl2 = (high_4h + low_4h) / 2
+    upper_band = hl2 + factor * atr
+    lower_band = hl2 - factor * atr
     
-    # Get daily data for EMA50
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 50:
-        return np.zeros(n)
+    supertrend = np.ones_like(high_4h)
+    for i in range(1, len(high_4h)):
+        if close_4h[i] > upper_band[i-1]:
+            supertrend[i] = 1
+        elif close_4h[i] < lower_band[i-1]:
+            supertrend[i] = -1
+        else:
+            supertrend[i] = supertrend[i-1]
+            if supertrend[i] == 1 and lower_band[i] < lower_band[i-1]:
+                lower_band[i] = lower_band[i-1]
+            if supertrend[i] == -1 and upper_band[i] > upper_band[i-1]:
+                upper_band[i] = upper_band[i-1]
     
-    # Calculate daily EMA(50)
-    close_daily = df_daily['close'].values
-    ema50_daily = pd.Series(close_daily).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Align 4h Supertrend to 1h timeframe
+    supertrend_1h = align_htf_to_ltf(prices, df_4h, supertrend)
     
-    # Align weekly RSI and daily EMA50 to 4h timeframe
-    rsi_weekly_4h = align_htf_to_ltf(prices, df_weekly, rsi_weekly)
-    ema50_daily_4h = align_htf_to_ltf(prices, df_daily, ema50_daily)
+    # Calculate 1h Donchian channels
+    donchian_period = 20
+    upper_donchian = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    lower_donchian = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    middle_donchian = (upper_donchian + lower_donchian) / 2
     
-    # Volume filter (4h timeframe)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)  # Strong volume confirmation
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any critical value is NaN
-        if (np.isnan(rsi_weekly_4h[i]) or np.isnan(ema50_daily_4h[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(supertrend_1h[i]) or np.isnan(upper_donchian[i]) or 
+            np.isnan(lower_donchian[i]) or np.isnan(middle_donchian[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Apply session filter
+        if not session_filter[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: weekly RSI oversold (<30) and price above daily EMA50 with volume
-            if rsi_weekly_4h[i] < 30 and close[i] > ema50_daily_4h[i] and volume_spike[i]:
-                signals[i] = 0.25
+            # Long: break above 1h Donchian upper AND 4h Supertrend bullish
+            if close[i] > upper_donchian[i] and supertrend_1h[i] == 1:
+                signals[i] = 0.20
                 position = 1
-            # Short: weekly RSI overbought (>70) and price below daily EMA50 with volume
-            elif rsi_weekly_4h[i] > 70 and close[i] < ema50_daily_4h[i] and volume_spike[i]:
-                signals[i] = -0.25
+            # Short: break below 1h Donchian lower AND 4h Supertrend bearish
+            elif close[i] < lower_donchian[i] and supertrend_1h[i] == -1:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: RSI returns to neutral (>=40)
-            if rsi_weekly_4h[i] >= 40:
+            # Exit long: price returns to middle OR breaks below lower band
+            if close[i] < middle_donchian[i] or close[i] < lower_donchian[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: RSI returns to neutral (<=60)
-            if rsi_weekly_4h[i] <= 60:
+            # Exit short: price returns to middle OR breaks above upper band
+            if close[i] > middle_donchian[i] or close[i] > upper_donchian[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
