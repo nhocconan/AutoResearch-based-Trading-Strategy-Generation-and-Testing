@@ -1,22 +1,24 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1-day KAMA trend with volume confirmation and session filter
-# Long when 1-day KAMA is rising and price > KAMA with volume > 1.5x 20-period average during active session (08-20 UTC)
-# Short when 1-day KAMA is falling and price < KAMA with volume > 1.5x 20-period average during active session
-# Uses daily KAMA for trend direction, volume for confirmation, session filter to avoid low liquidity periods
-# Designed to capture trending moves in both bull and bear markets while avoiding choppy periods
-# Target: 20-30 trades per year (80-120 over 4 years) with 0.25 position sizing
+# Hypothesis: 6h Elder Ray with 1d Trend Filter and Volume Confirmation
+# Elder Ray: Bull Power = High - EMA(13), Bear Power = EMA(13) - Low
+# Long: Bull Power > 0, Bear Power < 0, price > 1d EMA50, volume > 1.5x 20-period average
+# Short: Bear Power > 0, Bull Power < 0, price < 1d EMA50, volume > 1.5x 20-period average
+# Exit: Opposite power turns positive or volume drops below average
+# Uses 1d EMA50 for trend filter to avoid counter-trend trades
+# Target: 60-120 total trades over 4 years (15-30/year) with 0.25 position sizing
 
-name = "12h_1dKAMA_Trend_Volume_Session_v1"
-timeframe = "12h"
+name = "6h_ElderRay_1dEMA50_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,39 +26,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1-day KAMA ( Kaufman Adaptive Moving Average )
+    # Calculate 13-period EMA for Elder Ray (using close)
+    close_s = pd.Series(close)
+    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Elder Ray components
+    bull_power = high - ema13  # High - EMA13
+    bear_power = ema13 - low   # EMA13 - Low
+    
+    # Get 1d EMA50 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Efficiency Ratio (ER) over 10 periods
-    change = abs(df_1d['close'].diff(10))
-    volatility = df_1d['close'].diff().abs().rolling(window=10).sum()
-    er = change / volatility
-    er.replace([np.inf, -np.inf], 0, inplace=True)
-    er.fillna(0, inplace=True)
-    
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Calculate KAMA
-    kama = np.zeros(len(df_1d))
-    kama[0] = df_1d['close'].iloc[0]
-    for i in range(1, len(df_1d)):
-        kama[i] = kama[i-1] + sc.iloc[i] * (df_1d['close'].iloc[i] - kama[i-1])
-    
-    # KAMA trend direction: rising if current > previous
-    kama_rising = kama > np.roll(kama, 1)
-    kama_rising[0] = False
-    kama_falling = kama < np.roll(kama, 1)
-    kama_falling[0] = False
-    
-    # Align KAMA and trend to 12h timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    kama_rising_aligned = align_htf_to_ltf(prices, df_1d, kama_rising.astype(float))
-    kama_falling_aligned = align_htf_to_ltf(prices, df_1d, kama_falling.astype(float))
+    # 1d EMA50
+    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # Volume confirmation: >1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -69,10 +54,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):  # Start after KAMA warmup
+    for i in range(20, n):  # Start after warmup
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(kama_aligned[i]) or np.isnan(kama_rising_aligned[i]) or 
-            np.isnan(kama_falling_aligned[i]) or np.isnan(volume_filter[i]) or
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_filter[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -80,24 +65,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: KAMA rising and price > KAMA with volume confirmation
-            if kama_rising_aligned[i] > 0.5 and close[i] > kama_aligned[i] and volume_filter[i]:
+            # Long conditions: Bull Power positive, Bear Power negative, price above 1d EMA50, volume confirmation
+            if (bull_power[i] > 0 and bear_power[i] < 0 and 
+                close[i] > ema50_1d_aligned[i] and volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA falling and price < KAMA with volume confirmation
-            elif kama_falling_aligned[i] > 0.5 and close[i] < kama_aligned[i] and volume_filter[i]:
+            # Short conditions: Bear Power positive, Bull Power negative, price below 1d EMA50, volume confirmation
+            elif (bear_power[i] > 0 and bull_power[i] < 0 and 
+                  close[i] < ema50_1d_aligned[i] and volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: KAMA falling or price < KAMA
-            if kama_falling_aligned[i] > 0.5 or close[i] < kama_aligned[i]:
+            # Exit long: Bear Power turns positive (bullish momentum fading) OR volume drops
+            if bear_power[i] > 0 or not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: KAMA rising or price > KAMA
-            if kama_rising_aligned[i] > 0.5 or close[i] > kama_aligned[i]:
+            # Exit short: Bull Power turns positive (bearish momentum fading) OR volume drops
+            if bull_power[i] > 0 or not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
