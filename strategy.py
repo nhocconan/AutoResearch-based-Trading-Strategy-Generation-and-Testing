@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian channel breakout with 1d EMA200 trend filter and volume confirmation
-# Uses Donchian(20) breakouts for structure, 1d EMA200 for major trend alignment (avoids counter-trend trades)
-# Volume confirmation (>1.8x 20-bar average) filters weak breakouts
-# ATR-based trailing stop via signal=0 when price retraces 50% of breakout range
-# Discrete sizing 0.25 to balance return and fee drag; target 80-180 total trades over 4 years
-# Proven pattern: Donchian breakouts with volume/regime filters work on BTC/ETH in both bull/bear markets
+# Hypothesis: 6h Williams Alligator + 12h Camarilla R3/S3 breakout with volume confirmation
+# Williams Alligator (jaw/teeth/lips) identifies trendless markets - only trade when aligned (trending)
+# 12h Camarilla R3/S3 provides institutional support/resistance levels for breakouts
+# Volume spike (>2.0x 50-bar average) confirms institutional participation
+# Discrete sizing 0.25 to balance return and drawdown; target 80-120 total trades over 4 years
+# Works in bull/bear: Alligator filters sideways markets, Camarilla breakouts capture institutional moves
 
-name = "4h_Donchian20_1dEMA200_VolumeConfirm_v1"
-timeframe = "4h"
+name = "6h_WilliamsAlligator_12hCamarilla_R3S3_Breakout_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,91 +25,107 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Calculate HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_1d) < 50:
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Calculate 1d EMA200 trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema200_1d = close_1d_series.ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Williams Alligator on 12h: Jaw(13,8), Teeth(8,5), Lips(5,3) - SMMA
+    def smma(arr, period):
+        """Smoothed Moving Average"""
+        result = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return result
+        # First value is SMA
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: SMMA = (PREV_SMMA*(period-1) + CURRENT_PRICE) / period
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    # Calculate ATR(14) for stoploss and breakout validation
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first bar
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    jaw = smma(close_12h, 13)
+    teeth = smma(close_12h, 8)
+    lips = smma(close_12h, 5)
     
-    # Calculate Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
+    # Alligator alignment: all three lines in order (trending market)
+    # Bullish: Lips > Teeth > Jaw
+    # Bearish: Lips < Teeth < Jaw
+    alligator_bullish = (lips > teeth) & (teeth > jaw)
+    alligator_bearish = (lips < teeth) & (teeth < jaw)
     
-    # Calculate volume filter (>1.8x 20-bar average)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.8 * vol_ma_20)
+    # Calculate 12h Camarilla pivot levels (using previous 12h bar)
+    camarilla_high = []
+    camarilla_low = []
+    for i in range(len(close_12h)):
+        if i == 0:
+            camarilla_high.append(np.nan)
+            camarilla_low.append(np.nan)
+        else:
+            h = high_12h[i-1]
+            l = low_12h[i-1]
+            c = close_12h[i-1]
+            r3 = c + ((h - l) * 1.1 / 4)
+            s3 = c - ((h - l) * 1.1 / 4)
+            camarilla_high.append(r3)
+            camarilla_low.append(s3)
     
-    # Align HTF indicators to 4h timeframe
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
-    volume_filter_aligned = align_htf_to_ltf(prices, df_1d, volume_filter)
+    camarilla_high = np.array(camarilla_high)
+    camarilla_low = np.array(camarilla_low)
+    
+    # Volume spike filter (>2.0x 50-bar average on 12h)
+    vol_ma_50 = pd.Series(volume_12h).rolling(window=50, min_periods=50).mean().values
+    volume_filter = volume_12h > (2.0 * vol_ma_50)
+    
+    # Align HTF indicators to 6h timeframe
+    alligator_bullish_aligned = align_htf_to_ltf(prices, df_12h, alligator_bullish.astype(float))
+    alligator_bearish_aligned = align_htf_to_ltf(prices, df_12h, alligator_bearish.astype(float))
+    camarilla_high_aligned = align_htf_to_ltf(prices, df_12h, camarilla_high)
+    camarilla_low_aligned = align_htf_to_ltf(prices, df_12h, camarilla_low)
+    volume_filter_aligned = align_htf_to_ltf(prices, df_12h, volume_filter.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    breakout_level = 0.0  # tracks breakout level for trailing stop
     
     for i in range(100, n):
         # Skip if any critical value is NaN
-        if (np.isnan(ema200_1d_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(atr[i]) or np.isnan(volume_filter_aligned[i])):
+        if (np.isnan(alligator_bullish_aligned[i]) or np.isnan(alligator_bearish_aligned[i]) or 
+            np.isnan(camarilla_high_aligned[i]) or np.isnan(camarilla_low_aligned[i]) or 
+            np.isnan(volume_filter_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                breakout_level = 0.0
             continue
         
+        bullish_alligator = bool(alligator_bullish_aligned[i])
+        bearish_alligator = bool(alligator_bearish_aligned[i])
+        volume_spike = bool(volume_filter_aligned[i])
+        
         if position == 0:
-            # Long breakout: price > upper Donchian AND uptrend (price > EMA200) AND volume spike
-            if close[i] > donchian_high[i] and close[i] > ema200_1d_aligned[i] and volume_filter_aligned[i]:
+            # Long breakout: price > R3 AND bullish alligator AND volume spike
+            if close[i] > camarilla_high_aligned[i] and bullish_alligator and volume_spike:
                 signals[i] = 0.25
                 position = 1
-                breakout_level = donchian_high[i]
-            # Short breakdown: price < lower Donchian AND downtrend (price < EMA200) AND volume spike
-            elif close[i] < donchian_low[i] and close[i] < ema200_1d_aligned[i] and volume_filter_aligned[i]:
+            # Short breakdown: price < S3 AND bearish alligator AND volume spike
+            elif close[i] < camarilla_low_aligned[i] and bearish_alligator and volume_spike:
                 signals[i] = -0.25
                 position = -1
-                breakout_level = donchian_low[i]
         elif position == 1:
-            # Long position management
-            # Trailing stop: exit if price retraces 50% from breakout level to midpoint
-            retracement_level = breakout_level - 0.5 * (breakout_level - donchian_low[i])
-            if close[i] <= retracement_level:
+            # Exit long: price retests S3 from above OR alligator turns bearish
+            if close[i] <= camarilla_low_aligned[i] or not bullish_alligator:
                 signals[i] = 0.0
                 position = 0
-                breakout_level = 0.0
-            # Optional: re-entry on new breakout in same direction
-            elif close[i] > donchian_high[i]:
-                signals[i] = 0.25
-                breakout_level = donchian_high[i]
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short position management
-            # Trailing stop: exit if price retraces 50% from breakout level to midpoint
-            retracement_level = breakout_level + 0.5 * (donchian_high[i] - breakout_level)
-            if close[i] >= retracement_level:
+            # Exit short: price retests R3 from below OR alligator turns bullish
+            if close[i] >= camarilla_high_aligned[i] or not bearish_alligator:
                 signals[i] = 0.0
                 position = 0
-                breakout_level = 0.0
-            # Optional: re-entry on new breakdown in same direction
-            elif close[i] < donchian_low[i]:
-                signals[i] = -0.25
-                breakout_level = donchian_low[i]
             else:
                 signals[i] = -0.25
     
