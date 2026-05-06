@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using weekly pivot points with volume confirmation and trend filter
-# Weekly pivots provide key levels for medium-term swings. Breakout above weekly R1 or below S1 
-# with volume > 1.5x 24-period average and trend alignment (12h EMA25) captures strong moves. 
-# Reversal at weekly S2/R2 with volume confirmation captures mean reversion within weekly range. 
-# Works in bull/bear markets: breakouts capture trends, reversals capture pullbacks within trend.
-# Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing.
+# Hypothesis: 4h strategy using weekly pivot points with volume confirmation and trend filter
+# Weekly pivots provide key support/resistance levels that hold for weeks
+# Breakout above weekly R1 or below weekly S1 with volume > 1.5x 20-period average indicates strong momentum
+# Trend filter: 50-period EMA on 4h timeframe to avoid counter-trend trades
+# Works in bull/bear markets: breakouts capture trends, reversals capture pullbacks within trend
+# Target: 75-200 total trades over 4 years (19-50/year) with 0.25 position sizing
 
-name = "12h_WeeklyPivot_R1S2_VolumeTrendFilter_v1"
-timeframe = "12h"
+name = "4h_WeeklyPivot_R1S1_VolumeTrendFilter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,6 +36,7 @@ def generate_signals(prices):
     prev_low = df_1w['low'].shift(1).values
     
     # Pivot point calculation
+    # Pivot = (previous high + previous low + previous close) / 3
     pivot = (prev_high + prev_low + prev_close) / 3
     range_ = prev_high - prev_low
     
@@ -45,21 +46,21 @@ def generate_signals(prices):
     s1 = pivot - (range_ * 1.0)
     s2 = pivot - (range_ * 2.0)
     
-    # Align weekly levels to 12h timeframe
+    # Align weekly levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
     r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
     s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
     s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
     
-    # Volume confirmation: >1.5x 24-period average (balanced to reduce trades)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_filter = volume > (1.5 * vol_ma_24)
+    # Volume confirmation: >1.5x 20-period average (balanced threshold)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma_20)
     
-    # Trend filter: 25-period EMA on 12h timeframe
+    # Trend filter: 50-period EMA on 4h timeframe
     close_series = pd.Series(close)
-    ema_25 = close_series.ewm(span=25, adjust=False, min_periods=25).mean().values
-    uptrend = close > ema_25
-    downtrend = close < ema_25
+    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend = close > ema_50
+    downtrend = close < ema_50
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -71,7 +72,7 @@ def generate_signals(prices):
     for i in range(50, n):
         # Skip if any critical value is NaN or outside session
         if (np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(s2_aligned[i]) or np.isnan(volume_filter[i]) or np.isnan(ema_25[i]) or
+            np.isnan(s2_aligned[i]) or np.isnan(volume_filter[i]) or np.isnan(ema_50[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
