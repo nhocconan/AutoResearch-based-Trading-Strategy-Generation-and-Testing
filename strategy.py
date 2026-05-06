@@ -3,29 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Williams Alligator + 12h momentum + volume confirmation
-# - Uses 1d Williams Alligator (SMMA of median price) to determine trend direction
-# - Uses 12h ROC(10) for momentum confirmation
-# - Uses 12h volume spike for entry confirmation
-# - Enters long when price > Alligator jaws and ROC > 0 with volume
-# - Enters short when price < Alligator teeth and ROC < 0 with volume
-# - Exits when price crosses Alligator lines in opposite direction
-# - Designed to capture trends while avoiding whipsaws in ranging markets
-# - Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
+# Hypothesis: 4h strategy using 1d Donchian breakout with volume confirmation and ADX trend filter
+# Uses 1d Donchian channels (20-period) for long-term structure and 4h volume/ADX for entry confirmation
+# Designed to capture major trend moves in both bull and bear markets with low trade frequency
+# Target: 20-45 trades/year per symbol with 0.25 position sizing to manage drawdown
 
-name = "12h_1dWilliamsAlligator_ROC_Volume"
-timeframe = "12h"
+name = "4h_1dDonchian_20_Volume_ADX_Trend"
+timeframe = "4h"
 leverage = 1.0
-
-def smma(data, period):
-    """Smoothed Moving Average (SMMA)"""
-    if len(data) < period:
-        return np.full_like(data, np.nan, dtype=float)
-    result = np.full_like(data, np.nan, dtype=float)
-    result[period-1] = np.mean(data[:period])
-    for i in range(period, len(data)):
-        result[i] = (result[i-1] * (period-1) + data[i]) / period
-    return result
 
 def generate_signals(prices):
     n = len(prices)
@@ -37,74 +22,108 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams Alligator
+    # Get 1d data for Donchian channels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate median price for Alligator
-    median_price = (df_1d['high'].values + df_1d['low'].values) / 2
+    # Calculate 1d Donchian channels (20-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Williams Alligator lines (13, 8, 5 SMMA with 8, 5, 3 shifts)
-    jaws = smma(median_price, 13)  # Blue line
-    teeth = smma(median_price, 8)  # Red line
-    lips = smma(median_price, 5)   # Green line
+    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    middle_20 = (upper_20 + lower_20) / 2  # Middle line for exit
     
-    # Shift the lines as per Alligator definition
-    jaws = np.roll(jaws, 8)
-    teeth = np.roll(teeth, 5)
-    lips = np.roll(lips, 3)
+    # Align 1d Donchian channels to 4h timeframe
+    upper_20_4h = align_htf_to_ltf(prices, df_1d, upper_20)
+    lower_20_4h = align_htf_to_ltf(prices, df_1d, lower_20)
+    middle_20_4h = align_htf_to_ltf(prices, df_1d, middle_20)
     
-    # Align Alligator lines to 12h timeframe
-    jaws_12h = align_htf_to_ltf(prices, df_1d, jaws)
-    teeth_12h = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_12h = align_htf_to_ltf(prices, df_1d, lips)
+    # Volume filter (4h timeframe)
+    vol_ma_10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    volume_spike = volume > (1.8 * vol_ma_10)  # Strong volume confirmation
     
-    # 12h ROC(10) for momentum
-    roc_period = 10
-    roc = np.zeros_like(close)
-    for i in range(roc_period, n):
-        if close[i-roc_period] != 0:
-            roc[i] = (close[i] - close[i-roc_period]) / close[i-roc_period] * 100
+    # ADX filter (4h timeframe) - trend strength
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
+        
+        for i in range(1, len(high)):
+            plus_dm[i] = max(high[i] - high[i-1], 0)
+            minus_dm[i] = max(low[i-1] - low[i], 0)
+            if plus_dm[i] < minus_dm[i]:
+                plus_dm[i] = 0
+            if minus_dm[i] < plus_dm[i]:
+                minus_dm[i] = 0
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        # Smooth with Wilder's smoothing (alpha = 1/period)
+        atr = np.zeros_like(high)
+        plus_di = np.zeros_like(high)
+        minus_di = np.zeros_like(high)
+        
+        atr[period-1] = np.mean(tr[1:period+1])
+        plus_dm_sum = np.sum(plus_dm[1:period+1])
+        minus_dm_sum = np.sum(minus_dm[1:period+1])
+        
+        for i in range(period, len(high)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+            plus_dm_sum = plus_dm_sum - (plus_dm[i-period+1] if i-period+1 >= 0 else 0) + plus_dm[i]
+            minus_dm_sum = minus_dm_sum - (minus_dm[i-period+1] if i-period+1 >= 0 else 0) + minus_dm[i]
+            plus_di[i] = 100 * plus_dm_sum / (atr[i] * period) if atr[i] != 0 else 0
+            minus_di[i] = 100 * minus_dm_sum / (atr[i] * period) if atr[i] != 0 else 0
+        
+        dx = np.zeros_like(high)
+        adx = np.zeros_like(high)
+        for i in range(2*period-1, len(high)):
+            di_diff = abs(plus_di[i] - minus_di[i])
+            di_sum = plus_di[i] + minus_di[i]
+            dx[i] = 100 * di_diff / di_sum if di_sum != 0 else 0
+        
+        # Smooth DX to get ADX
+        adx[2*period-1] = np.mean(dx[2*period-1:3*period]) if 3*period <= len(high) else 0
+        for i in range(3*period, len(high)):
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
     
-    # 12h volume filter
-    vol_ma_10 = np.zeros_like(volume)
-    for i in range(10, n):
-        vol_ma_10[i] = np.mean(volume[i-10:i])
-    volume_spike = volume > (1.5 * vol_ma_10)
+    adx_values = calculate_adx(high, low, close, 14)
+    adx_filter = adx_values > 25  # Strong trend filter
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if any critical value is NaN
-        if (np.isnan(jaws_12h[i]) or np.isnan(teeth_12h[i]) or 
-            np.isnan(lips_12h[i]) or np.isnan(roc[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(upper_20_4h[i]) or np.isnan(lower_20_4h[i]) or 
+            np.isnan(middle_20_4h[i]) or np.isnan(volume_spike[i]) or 
+            np.isnan(adx_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price > jaws AND ROC > 0 with volume spike
-            if close[i] > jaws_12h[i] and roc[i] > 0 and volume_spike[i]:
+            # Long: break above 1d Donchian upper with volume and trend
+            if close[i] > upper_20_4h[i] and volume_spike[i] and adx_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price < teeth AND ROC < 0 with volume spike
-            elif close[i] < teeth_12h[i] and roc[i] < 0 and volume_spike[i]:
+            # Short: break below 1d Donchian lower with volume and trend
+            elif close[i] < lower_20_4h[i] and volume_spike[i] and adx_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below lips or teeth
-            if close[i] < lips_12h[i] or close[i] < teeth_12h[i]:
+            # Exit long: price returns to middle OR breaks below lower band
+            if close[i] < middle_20_4h[i] or close[i] < lower_20_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above lips or jaws
-            if close[i] > lips_12h[i] or close[i] > jaws_12h[i]:
+            # Exit short: price returns to middle OR breaks above upper band
+            if close[i] > middle_20_4h[i] or close[i] > upper_20_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
