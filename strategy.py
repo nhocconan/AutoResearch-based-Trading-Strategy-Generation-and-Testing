@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 12h Camarilla R3/S3 levels with 1d EMA34 trend filter and volume spike confirmation
-# Long when price breaks above 12h R3 level AND 1d EMA34 > EMA34 previous (uptrend) AND volume > 2.0 * avg_volume(20) on 6h
-# Short when price breaks below 12h S3 level AND 1d EMA34 < EMA34 previous (downtrend) AND volume > 2.0 * avg_volume(20) on 6h
-# Exit when price returns to 12h pivot level (mean reversion to center)
+# Hypothesis: 4h strategy using Bollinger Band squeeze breakout with 1d ADX trend filter and volume confirmation
+# Long when price breaks above upper BB(20,2) AND 1d ADX > 25 (trending) AND volume > 1.5 * avg_volume(20)
+# Short when price breaks below lower BB(20,2) AND 1d ADX > 25 (trending) AND volume > 1.5 * avg_volume(20)
+# Exit when price crosses back through BB middle (20-period SMA) or opposite band touch
 # Uses discrete sizing 0.25 to balance return and risk
-# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
-# Camarilla R3/S3 levels provide high-probability breakout points in trending markets
-# 1d EMA34 trend filter ensures we trade with the dominant daily trend
-# Volume spike confirmation (2.0x) validates breakout strength while limiting overtrading
+# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
+# Bollinger Band squeeze identifies low volatility primed for breakout
+# 1d ADX > 25 ensures we only trade when higher timeframe is trending (avoids chop)
+# Volume confirmation validates breakout strength while limiting false signals
 # Works in both bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend) markets
 
-name = "6h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "6h"
+name = "4h_BBand_Squeeze_1dADX_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,40 +28,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data ONCE before loop for Camarilla calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:  # Need at least 2 completed 12h bars for pivot calculation
-        return np.zeros(n)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # Calculate 12h Camarilla pivot levels
-    # Pivot = (High + Low + Close) / 3
-    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
-    # Range = High - Low
-    range_12h = high_12h - low_12h
-    # Resistance levels: R3 = Pivot + Range * 1.1/2, R4 = Pivot + Range * 1.1
-    # Support levels: S3 = Pivot - Range * 1.1/2, S4 = Pivot - Range * 1.1
-    r3_12h = pivot_12h + range_12h * 1.1 / 2.0
-    s3_12h = pivot_12h - range_12h * 1.1 / 2.0
-    pivot_12h_aligned = align_htf_to_ltf(prices, df_12h, pivot_12h)
-    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
-    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
-    
-    # Get 1d data ONCE before loop for EMA34 calculation
+    # Get 1d data ONCE before loop for ADX calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:  # Need at least 34 completed daily bars for EMA34
+    if len(df_1d) < 30:  # Need sufficient data for ADX calculation
         return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA34
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1d ADX (14-period)
+    # True Range
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = 0  # First period has no previous close
     
-    # Calculate volume confirmation: volume > 2.0 * 20-period average volume on 6h
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed TR, DM+ and DM- (Wilder's smoothing)
+    def wilders_smoothing(data, period):
+        result = np.zeros_like(data)
+        result[period-1] = np.nansum(data[:period])
+        for i in range(period, len(data)):
+            result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
+    
+    tr14 = wilders_smoothing(tr, 14)
+    dm_plus_14 = wilders_smoothing(dm_plus, 14)
+    dm_minus_14 = wilders_smoothing(dm_minus, 14)
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_14 / np.where(tr14 == 0, 1, tr14)
+    di_minus = 100 * dm_minus_14 / np.where(tr14 == 0, 1, tr14)
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / np.where((di_plus + di_minus) == 0, 1, (di_plus + di_minus))
+    adx_14 = np.zeros_like(dx)
+    adx_14[27] = np.nanmean(dx[14:28])  # First ADX value
+    for i in range(28, len(dx)):
+        adx_14[i] = (adx_14[i-1] * 13 + dx[i]) / 14
+    
+    # Align 1d ADX to 4h timeframe (wait for completed 1d bar)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
+    
+    # Bollinger Bands (20, 2) on 4h
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + (2 * std_20)
+    lower_bb = sma_20 - (2 * std_20)
+    middle_bb = sma_20  # 20-period SMA
+    
+    # Volume confirmation: volume > 1.5 * 20-period average volume on 4h
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * avg_volume_20)
+    volume_confirm = volume > (1.5 * avg_volume_20)
     
     # Session filter: 08-20 UTC (pre-compute for efficiency)
     hours = prices.index.hour
@@ -72,8 +98,7 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN or outside session
-        if (np.isnan(pivot_12h_aligned[i]) or np.isnan(r3_12h_aligned[i]) or 
-            np.isnan(s3_12h_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+        if (np.isnan(adx_1d_aligned[i]) or np.isnan(sma_20[i]) or np.isnan(std_20[i]) or 
             np.isnan(avg_volume_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -81,28 +106,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R3, 1d EMA34 > EMA34 previous (uptrend), volume spike, in session
-            if (close[i] > r3_12h_aligned[i] and 
-                ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and 
+            # Long: Price breaks above upper BB AND 1d ADX > 25 (trending) AND volume spike
+            if (close[i] > upper_bb[i] and 
+                adx_1d_aligned[i] > 25 and 
                 volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3, 1d EMA34 < EMA34 previous (downtrend), volume spike, in session
-            elif (close[i] < s3_12h_aligned[i] and 
-                  ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and 
+            # Short: Price breaks below lower BB AND 1d ADX > 25 (trending) AND volume spike
+            elif (close[i] < lower_bb[i] and 
+                  adx_1d_aligned[i] > 25 and 
                   volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to pivot level (mean reversion)
-            if close[i] <= pivot_12h_aligned[i]:
+            # Exit long: Price crosses below middle BB OR touches lower BB (mean reversion)
+            if (close[i] < middle_bb[i] or close[i] < lower_bb[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to pivot level (mean reversion)
-            if close[i] >= pivot_12h_aligned[i]:
+            # Exit short: Price crosses above middle BB OR touches upper BB (mean reversion)
+            if (close[i] > middle_bb[i] or close[i] > upper_bb[i]):
                 signals[i] = 0.0
                 position = 0
             else:
