@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 trend filter and volume spike confirmation
-# Uses 4h Camarilla pivot levels (R3/S3) for structure, 4h EMA50 for trend alignment (reduces whipsaw)
-# Volume spike (>2.0x 20-bar average) confirms breakout strength
-# ATR-based trailing stop via signal=0 when price retraces 30% of ATR from extreme
-# Discrete sizing 0.20 to balance profit potential and fee drag; target 60-150 total trades over 4 years (15-37/year)
-# Uses 1h timeframe for entry timing with 4h/1d for signal direction (HTF)
-# Session filter (08-20 UTC) to reduce noise trades
-# Works in both bull/bear: breakouts capture momentum, trend filter avoids counter-trend traps, volume filter ensures participation
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1w EMA34 trend filter and volume confirmation
+# Elder Ray measures bull/bear power relative to EMA13: Bull Power = High - EMA13, Bear Power = Low - EMA13
+# Long when Bull Power > 0 AND Bear Power rising (less negative) AND price > weekly EMA34 (uptrend) AND volume spike
+# Short when Bear Power < 0 AND Bull Power falling (less positive) AND price < weekly EMA34 (downtrend) AND volume spike
+# Uses 1w timeframe for trend filter to avoid whipsaw in choppy markets
+# Discrete sizing 0.25 to balance profit potential and fee drag; target 50-150 total trades over 4 years (12-37/year)
+# Works in both bull/bear: trend filter aligns with higher timeframe momentum, volume confirms participation
 
-name = "1h_Camarilla_R3S3_4hEMA50_VolumeSpike_v1"
-timeframe = "1h"
+name = "6h_ElderRay_1wEMA34_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,25 +26,26 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Calculate HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_4h) < 50:
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 4h EMA50 trend filter
-    close_4h_series = pd.Series(close_4h)
-    ema50_4h = close_4h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1w EMA34 trend filter
+    close_1w_series = pd.Series(close_1w)
+    ema34_1w = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate 4h Camarilla pivot levels (R3, S3)
-    # Camarilla: R4 = close + 1.5*(high-low), R3 = close + 1.125*(high-low), etc.
-    # We use R3 and S3 as key breakout levels
-    camarilla_range = high_4h - low_4h
-    r3_4h = close_4h + 1.125 * camarilla_range
-    s3_4h = close_4h - 1.125 * camarilla_range
+    # Calculate EMA13 for Elder Ray (using 6h data)
+    close_s = pd.Series(close)
+    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Calculate Elder Ray components
+    bull_power = high - ema13  # Bull Power: High - EMA13
+    bear_power = low - ema13   # Bear Power: Low - EMA13
     
     # Calculate ATR(14) for stoploss
     tr1 = np.abs(high[1:] - low[1:])
@@ -58,10 +58,8 @@ def generate_signals(prices):
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (2.0 * vol_ma_20)
     
-    # Align HTF indicators to 1h timeframe
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
-    r3_4h_aligned = align_htf_to_ltf(prices, df_4h, r3_4h)
-    s3_4h_aligned = align_htf_to_ltf(prices, df_4h, s3_4h)
+    # Align HTF indicators to 6h timeframe
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
     # Pre-compute session filter (08-20 UTC)
     hours = prices.index.hour
@@ -74,8 +72,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(r3_4h_aligned[i]) or 
-            np.isnan(s3_4h_aligned[i]) or np.isnan(atr[i]) or np.isnan(volume_filter[i]) or
+        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(atr[i]) or np.isnan(volume_filter[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -85,26 +83,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long breakout: price > R3 AND uptrend (price > EMA50) AND volume spike
-            if close[i] > r3_4h_aligned[i] and close[i] > ema50_4h_aligned[i] and volume_filter[i]:
-                signals[i] = 0.20
+            # Long entry: Bull Power > 0 AND Bear Power rising (less negative) AND uptrend AND volume spike
+            if bull_power[i] > 0 and bear_power[i] > bear_power[i-1] and close[i] > ema34_1w_aligned[i] and volume_filter[i]:
+                signals[i] = 0.25
                 position = 1
                 long_extreme = close[i]
-            # Short breakdown: price < S3 AND downtrend (price < EMA50) AND volume spike
-            elif close[i] < s3_4h_aligned[i] and close[i] < ema50_4h_aligned[i] and volume_filter[i]:
-                signals[i] = -0.20
+            # Short entry: Bear Power < 0 AND Bull Power falling (less positive) AND downtrend AND volume spike
+            elif bear_power[i] < 0 and bull_power[i] < bull_power[i-1] and close[i] < ema34_1w_aligned[i] and volume_filter[i]:
+                signals[i] = -0.25
                 position = -1
                 short_extreme = close[i]
         elif position == 1:
             # Update long extreme
             long_extreme = max(long_extreme, close[i])
-            # Exit long: price retraces 30% of ATR from extreme (tighter stop for 1h)
+            # Exit long: price retraces 30% of ATR from extreme
             if close[i] <= long_extreme - 0.3 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 long_extreme = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
             # Update short extreme
             short_extreme = min(short_extreme, close[i])
@@ -114,6 +112,6 @@ def generate_signals(prices):
                 position = 0
                 short_extreme = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
