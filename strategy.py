@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy combining 1w Pivot Point support/resistance with volume confirmation
-# - Uses weekly pivot levels (S1, S2, R1, R2) calculated from prior week's OHLC
-# - Long entries when price bounces off S1/S2 with volume confirmation in bullish weekly context
-# - Short entries when price rejects R1/R2 with volume confirmation in bearish weekly context
-# - Weekly trend filter: only take longs above weekly EMA20, shorts below weekly EMA20
-# - Designed to work in ranging markets (bounces at S1/S2) and trending markets (breaks at R2/S2)
-# - Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
+# Hypothesis: 12h strategy using 1-day Donchian channel breakouts with volume confirmation and ADX trend filter
+# - Long when price breaks above 1-day Donchian high (20-period) with volume expansion and ADX > 25
+# - Short when price breaks below 1-day Donchian low (20-period) with volume expansion and ADX > 25
+# - Exit when price returns to the 1-day Donchian midpoint or reverses with volume
+# - Uses 1-day ADX for trend strength filtering to avoid whipsaws in ranging markets
+# - Position sizing: 0.25 for strong signals, 0.125 for weaker signals
+# - Designed to capture major trends while avoiding false breakouts in low volatility environments
+# - Target: 50-150 total trades over 4 years (12-37/year) with controlled frequency
 
-name = "6h_WeeklyPivot_S1S2_R1R2_VolumeTrend"
-timeframe = "6h"
+name = "12h_Donchian20_1dADX_Volume_Breakout"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,38 +26,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1-day data for Donchian channels and ADX
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate weekly pivot points from prior week's OHLC
-    # P = (H + L + C) / 3
-    # S1 = 2*P - H, S2 = P - (H - L)
-    # R1 = 2*P - L, R2 = P + (H - L)
-    prev_weekly_high = df_1w['high'].shift(1)
-    prev_weekly_low = df_1w['low'].shift(1)
-    prev_weekly_close = df_1w['close'].shift(1)
+    # Calculate 1-day Donchian channels (20-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    pivot = (prev_weekly_high + prev_weekly_low + prev_weekly_close) / 3.0
-    S1 = 2 * pivot - prev_weekly_high
-    S2 = pivot - (prev_weekly_high - prev_weekly_low)
-    R1 = 2 * pivot - prev_weekly_low
-    R2 = pivot + (prev_weekly_high - prev_weekly_low)
+    # Donchian high and low
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Align weekly pivot levels to 6h timeframe
-    S1_6h = align_htf_to_ltf(prices, df_1w, S1.values)
-    S2_6h = align_htf_to_ltf(prices, df_1w, S2.values)
-    R1_6h = align_htf_to_ltf(prices, df_1w, R1.values)
-    R2_6h = align_htf_to_ltf(prices, df_1w, R2.values)
+    # Calculate 1-day ADX for trend strength
+    # True Range
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = 0  # First value has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Weekly EMA20 for trend filter
-    weekly_ema_20 = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    weekly_ema_20_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema_20)
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed values
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
+    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
+    
+    # DI+ and DI-
+    plus_di = 100 * dm_plus_14 / tr14
+    minus_di = 100 * dm_minus_14 / tr14
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    dx = np.where((plus_di + minus_di) == 0, 0, dx)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align 1-day indicators to 12h timeframe
+    donchian_high_12h = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_12h = align_htf_to_ltf(prices, df_1d, donchian_low)
+    donchian_mid_12h = align_htf_to_ltf(prices, df_1d, donchian_mid)
+    adx_12h = align_htf_to_ltf(prices, df_1d, adx)
     
     # Volume filters
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_20)  # Volume confirmation threshold
+    volume_filter = volume > (1.5 * vol_ma_20)  # Volume confirmation
+    volume_expansion = volume > np.roll(volume, 1)  # Current volume > previous
+    volume_expansion[0] = False
     
     # Session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -65,10 +92,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after warmup
+    for i in range(30, n):  # Start after warmup
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(S1_6h[i]) or np.isnan(S2_6h[i]) or np.isnan(R1_6h[i]) or np.isnan(R2_6h[i]) or
-            np.isnan(weekly_ema_20_aligned[i]) or np.isnan(volume_filter[i]) or
+        if (np.isnan(donchian_high_12h[i]) or np.isnan(donchian_low_12h[i]) or 
+            np.isnan(donchian_mid_12h[i]) or np.isnan(adx_12h[i]) or 
+            np.isnan(volume_filter[i]) or np.isnan(volume_expansion[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -76,40 +104,36 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long setup: bounce off S1/S2 with volume in bullish weekly context
-            if close[i] >= S1_6h[i] * 0.999 and close[i] <= S1_6h[i] * 1.001 and volume_filter[i]:
-                if close[i] > weekly_ema_20_aligned[i]:  # Above weekly EMA20
-                    signals[i] = 0.25
-                    position = 1
-            elif close[i] >= S2_6h[i] * 0.999 and close[i] <= S2_6h[i] * 1.001 and volume_filter[i]:
-                if close[i] > weekly_ema_20_aligned[i]:  # Above weekly EMA20
-                    signals[i] = 0.25
-                    position = 1
-            # Short setup: rejection at R1/R2 with volume in bearish weekly context
-            elif close[i] <= R1_6h[i] * 1.001 and close[i] >= R1_6h[i] * 0.999 and volume_filter[i]:
-                if close[i] < weekly_ema_20_aligned[i]:  # Below weekly EMA20
-                    signals[i] = -0.25
-                    position = -1
-            elif close[i] <= R2_6h[i] * 1.001 and close[i] >= R2_6h[i] * 0.999 and volume_filter[i]:
-                if close[i] < weekly_ema_20_aligned[i]:  # Below weekly EMA20
-                    signals[i] = -0.25
-                    position = -1
+            # Long breakout: price breaks above Donchian high with volume and trend
+            if (close[i] > donchian_high_12h[i] and 
+                volume_expansion[i] and 
+                adx_12h[i] > 25):
+                signals[i] = 0.25
+                position = 1
+            # Short breakout: price breaks below Donchian low with volume and trend
+            elif (close[i] < donchian_low_12h[i] and 
+                  volume_expansion[i] and 
+                  adx_12h[i] > 25):
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Exit long: price reaches R1 (profit target) or breaks below S2 (stop)
-            if close[i] >= R1_6h[i] * 0.999:  # Take profit at R1
+            # Exit long: price returns to midpoint or reverses with volume
+            if close[i] <= donchian_mid_12h[i]:
                 signals[i] = 0.0
                 position = 0
-            elif close[i] < S2_6h[i]:  # Stop loss if breaks below S2
+            elif (close[i] < donchian_low_12h[i] and 
+                  volume_expansion[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price reaches S1 (profit target) or breaks above R2 (stop)
-            if close[i] <= S1_6h[i] * 1.001:  # Take profit at S1
+            # Exit short: price returns to midpoint or reverses with volume
+            if close[i] >= donchian_mid_12h[i]:
                 signals[i] = 0.0
                 position = 0
-            elif close[i] > R2_6h[i]:  # Stop loss if breaks above R2
+            elif (close[i] > donchian_high_12h[i] and 
+                  volume_expansion[i]):
                 signals[i] = 0.0
                 position = 0
             else:
