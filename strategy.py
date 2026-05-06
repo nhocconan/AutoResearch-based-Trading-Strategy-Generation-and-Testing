@@ -1,17 +1,18 @@
+# 6h_1dCamarilla_R3S3_1wTrend_Filter_v1
+# Hypothesis: 6h strategy using 1-day Camarilla pivot levels R3/S3 for breakout entries
+# with 1-week EMA trend filter to avoid counter-trend trades. Long when price breaks above R3
+# with price above weekly EMA50; short when price breaks below S3 with price below weekly EMA50.
+# Uses volume confirmation to filter weak breakouts. Designed for 50-150 total trades over 4 years.
+# Works in bull markets via breakout continuation and in bear markets via trend-filtered mean reversion
+# at extreme Camarilla levels (R3/S3 often act as support/resistance in ranging markets).
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using 1-week Bollinger Band breakout with 1-day RSI filter and volume confirmation
-# Long when price breaks above weekly upper BB with RSI(1d) > 50 and volume > 1.5x average
-# Short when price breaks below weekly lower BB with RSI(1d) < 50 and volume > 1.5x average
-# Weekly Bollinger Bands provide dynamic support/resistance, RSI filters for momentum direction,
-# Volume confirms breakout strength. Works in bull/bear markets by capturing genuine momentum shifts.
-# Target: 15-25 trades per year (60-100 over 4 years) with 0.25 position sizing.
-
-name = "1d_1wBB_20_2.0_RSI_Volume_Breakout_v1"
-timeframe = "1d"
+name = "6h_1dCamarilla_R3S3_1wTrend_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,69 +25,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1-week Bollinger Bands ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Calculate 1-day Camarilla pivot levels ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Weekly Bollinger Bands (20-period, 2 std dev)
-    weekly_close = df_1w['close']
-    bb_middle = weekly_close.rolling(window=20, min_periods=20).mean().values
-    bb_std = weekly_close.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + (2 * bb_std)
-    bb_lower = bb_middle - (2 * bb_std)
+    # Previous day's OHLC for Camarilla calculation
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Align weekly Bollinger Bands to daily timeframe
-    bb_upper_aligned = align_htf_to_ltf(prices, df_1w, bb_upper)
-    bb_lower_aligned = align_htf_to_ltf(prices, df_1w, bb_lower)
-    bb_middle_aligned = align_htf_to_ltf(prices, df_1w, bb_middle)
+    # Pivot point (PP)
+    pp = (prev_high + prev_low + prev_close) / 3.0
+    # Camarilla levels
+    r3 = pp + (prev_high - prev_low) * 1.1 / 2.0
+    s3 = pp - (prev_high - prev_low) * 1.1 / 2.0
+    r4 = pp + (prev_high - prev_low) * 1.1
+    s4 = pp - (prev_high - prev_low) * 1.1
     
-    # Calculate 1-day RSI for momentum filter
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Align Camarilla levels to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Volume confirmation: >1.5x 50-period average
-    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
-    volume_filter = volume > (1.5 * vol_ma_50)
+    # Calculate 1-week EMA50 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Volume confirmation: >1.3x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.3 * vol_ma_20)
+    
+    # Pre-compute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
-        # Skip if any critical value is NaN
-        if (np.isnan(bb_upper_aligned[i]) or np.isnan(bb_lower_aligned[i]) or 
-            np.isnan(rsi_values[i]) or np.isnan(volume_filter[i])):
+        # Skip if any critical value is NaN or outside session
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or
+            np.isnan(volume_filter[i]) or not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long breakout: price breaks above weekly upper BB with RSI > 50 and volume confirmation
-            if close[i] > bb_upper_aligned[i] and rsi_values[i] > 50 and volume_filter[i]:
+            # Long entry: price breaks above R3 with uptrend filter and volume confirmation
+            if close[i] > r3_aligned[i] and close[i] > ema_50_1w_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short breakout: price breaks below weekly lower BB with RSI < 50 and volume confirmation
-            elif close[i] < bb_lower_aligned[i] and rsi_values[i] < 50 and volume_filter[i]:
+            # Short entry: price breaks below S3 with downtrend filter and volume confirmation
+            elif close[i] < s3_aligned[i] and close[i] < ema_50_1w_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below weekly middle BB (mean reversion)
-            if close[i] < bb_middle_aligned[i]:
+            # Exit long: price breaks below S3 (mean reversion) or above R4 (take profit)
+            if close[i] < s3_aligned[i] or close[i] > r4_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above weekly middle BB (mean reversion)
-            if close[i] > bb_middle_aligned[i]:
+            # Exit short: price breaks above R3 (mean reversion) or below S4 (take profit)
+            if close[i] > r3_aligned[i] or close[i] < s4_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
