@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using weekly Donchian breakout with volume confirmation and volatility filter
-# Long when price breaks above weekly Donchian upper channel (20-period high) with volume > 1.5x 20-period average and ATR ratio < 1.2
-# Short when price breaks below weekly Donchian lower channel (20-period low) with volume > 1.5x 20-period average and ATR ratio < 1.2
-# Uses weekly Donchian channels for key support/resistance levels, volume for confirmation, and ATR ratio to avoid high volatility periods
-# Designed to work in bull markets via breakouts above resistance and in bear markets via breakdowns below support
-# Target: 15-25 trades per year (60-100 over 4 years) with 0.25 position sizing
+# Hypothesis: 12h strategy using 1-day ATR-based volatility breakout with volume confirmation
+# Long when price closes above previous close + ATR(10) with volume > 1.5x average
+# Short when price closes below previous close - ATR(10) with volume > 1.5x average
+# Uses volatility expansion to capture momentum bursts in both bull and bear markets
+# Volume confirmation ensures breakouts have conviction
+# Target: 20-30 trades per year (80-120 over 4 years) with 0.25 position sizing
 
-name = "1d_weeklyDonchian20_Volume_VolatilityFilter_v1"
-timeframe = "1d"
+name = "12h_1dATR10_Volume_Breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,64 +24,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate weekly Donchian Channel (20-period high/low)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Calculate 1-day ATR(10) for volatility breakout
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # 20-period high and low for Donchian channels
-    high_20 = df_1w['high'].rolling(window=20, min_periods=20).max().values
-    low_20 = df_1w['low'].rolling(window=20, min_periods=20).min().values
+    # True Range calculation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align Donchian levels to daily timeframe
-    upper_donchian = align_htf_to_ltf(prices, df_1w, high_20)
-    lower_donchian = align_htf_to_ltf(prices, df_1w, low_20)
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = high_1d[0] - low_1d[0]  # First bar
+    tr2[0] = np.abs(high_1d[0] - close_1d[0])  # First bar
+    tr3[0] = np.abs(low_1d[0] - close_1d[0])  # First bar
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # ATR(10)
+    atr_10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    
+    # Dynamic breakout levels: previous close ± ATR(10)
+    upper_break = np.roll(close_1d, 1) + atr_10
+    lower_break = np.roll(close_1d, 1) - atr_10
+    
+    # Align breakout levels to 12h timeframe
+    upper_break_aligned = align_htf_to_ltf(prices, df_1d, upper_break)
+    lower_break_aligned = align_htf_to_ltf(prices, df_1d, lower_break)
     
     # Volume confirmation: >1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma_20)
     
-    # Volatility filter: ATR ratio (current ATR / 20-period average ATR) < 1.2 to avoid high volatility periods
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
-    atr_ma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
-    atr_ratio = atr / atr_ma
-    volatility_filter = (atr_ratio < 1.2) & ~np.isnan(atr_ratio)
+    # Pre-compute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after Donchian warmup
-        # Skip if any critical value is NaN
-        if (np.isnan(upper_donchian[i]) or np.isnan(lower_donchian[i]) or 
-            np.isnan(volume_filter[i]) or np.isnan(volatility_filter[i])):
+    for i in range(10, n):  # Start after ATR warmup
+        # Skip if any critical value is NaN or outside session
+        if (np.isnan(upper_break_aligned[i]) or np.isnan(lower_break_aligned[i]) or 
+            np.isnan(volume_filter[i]) or
+            not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long breakout: price breaks above weekly Donchian upper with volume and volatility filters
-            if close[i] > upper_donchian[i] and volume_filter[i] and volatility_filter[i]:
+            # Long breakout: price closes above previous close + ATR(10) with volume confirmation
+            if close[i] > upper_break_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short breakout: price breaks below weekly Donchian lower with volume and volatility filters
-            elif close[i] < lower_donchian[i] and volume_filter[i] and volatility_filter[i]:
+            # Short breakout: price closes below previous close - ATR(10) with volume confirmation
+            elif close[i] < lower_break_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below weekly Donchian lower (support break)
-            if close[i] < lower_donchian[i]:
+            # Exit long: price closes below previous close - ATR(10) (mean reversion)
+            if close[i] < lower_break_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above weekly Donchian upper (resistance break)
-            if close[i] > upper_donchian[i]:
+            # Exit short: price closes above previous close + ATR(10) (mean reversion)
+            if close[i] > upper_break_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
