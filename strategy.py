@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
 # Long when price breaks above Camarilla R3 AND price > 1d EMA34 (uptrend) AND volume > 2.0 * 20-period avg volume
 # Short when price breaks below Camarilla S3 AND price < 1d EMA34 (downtrend) AND volume > 2.0 * 20-period avg volume
 # Exit with ATR-based trailing stop: signal→0 when long and price < highest_high - 2.0 * ATR OR short and price > lowest_low + 2.0 * ATR
 # Uses discrete sizing 0.25 to balance risk and return (BTC -77% in 2022 → ~19.25% loss at 0.25 exposure)
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
-# Camarilla levels provide precise support/resistance, 1d EMA34 filters long-term trend, volume ensures conviction
-# Works in bull markets via breakout + trend alignment, in bear via short opportunities on breakdowns
+# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
+# Camarilla levels provide precise intraday support/resistance, 1d EMA34 filters longer-term trend, volume ensures conviction
 
-name = "12h_Camarilla_R3S3_1dEMA34_Volume_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dEMA34_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -45,7 +44,7 @@ def generate_signals(prices):
     camarilla_r3_1d = close_1d + 1.1 * daily_range
     camarilla_s3_1d = close_1d - 1.1 * daily_range
     
-    # Calculate 12h ATR(14) for stoploss
+    # Calculate 4h ATR(14) for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -57,7 +56,7 @@ def generate_signals(prices):
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * avg_volume_20)
     
-    # Align HTF indicators to 12h timeframe (wait for completed HTF bar)
+    # Align HTF indicators to 4h timeframe (wait for completed HTF bar)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     camarilla_r3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
     camarilla_s3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
