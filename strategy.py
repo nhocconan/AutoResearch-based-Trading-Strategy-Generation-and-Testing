@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d RSI extremes with 1w Supertrend trend filter and volume spike confirmation
-# Long when 1d RSI < 30 (oversold) AND 1w Supertrend = uptrend AND volume > 2.0 * avg_volume(20) on 12h
-# Short when 1d RSI > 70 (overbought) AND 1w Supertrend = downtrend AND volume > 2.0 * avg_volume(20) on 12h
-# Exit when 1d RSI crosses back through 50 (mean reversion to midpoint)
+# Hypothesis: 1d strategy using Williams %R extremes with 1w EMA200 trend filter and volume spike confirmation
+# Long when 1d Williams %R < -80 (oversold) AND 1w EMA200 > EMA200 previous (uptrend) AND volume > 2.0 * avg_volume(20)
+# Short when 1d Williams %R > -20 (overbought) AND 1w EMA200 < EMA200 previous (downtrend) AND volume > 2.0 * avg_volume(20)
+# Exit when 1d Williams %R crosses back through -50 (mean reversion to midpoint)
 # Uses discrete sizing 0.25 to balance return and risk
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
-# RSI extremes provide high-probability reversal points in ranging markets
-# 1w Supertrend filter ensures we trade with the dominant weekly trend
+# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe
+# Williams %R extremes provide high-probability reversal points in ranging markets
+# 1w EMA200 trend filter ensures we trade with the dominant weekly trend
 # Volume spike confirmation (2.0x) validates reversal strength while limiting overtrading
 # Works in both bull (buy oversold dips) and bear (sell overbought rallies) markets
 
-name = "12h_1dRSI_Extreme_1wSupertrend_Trend_VolumeSpike"
-timeframe = "12h"
+name = "1d_1dWilliamsR_Extreme_1wEMA200_Trend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,71 +28,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for RSI calculation
+    # Get 1d data ONCE before loop for Williams %R calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:  # Need at least 14 completed 1d bars for RSI
+    if len(df_1d) < 14:  # Need at least 14 completed 1d bars for Williams %R
         return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d RSI(14)
-    delta = pd.Series(close_1d).diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d = rsi_1d.fillna(50).values  # Fill NaN with 50 (neutral)
+    # Calculate 1d Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r_1d = -100 * (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14)
+    # Handle division by zero (when high == low)
+    williams_r_1d = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r_1d)
     
-    # Align 1d RSI to 12h timeframe (wait for completed 1d bar)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Align 1d Williams %R to 1d timeframe (no shift needed as we're on same timeframe)
+    williams_r_aligned = williams_r_1d
     
-    # Get 1w data ONCE before loop for Supertrend trend filter
+    # Get 1w data ONCE before loop for EMA200 trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:  # Need at least 10 completed weekly bars for Supertrend
+    if len(df_1w) < 200:  # Need at least 200 completed weekly bars for EMA200
         return np.zeros(n)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Calculate 1w Supertrend (ATR=10, multiplier=3.0)
-    atr_period = 10
-    multiplier = 3.0
+    # Calculate 1w EMA200
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
-    # True Range
-    tr1 = pd.Series(high_1w) - pd.Series(low_1w)
-    tr2 = abs(pd.Series(high_1w) - pd.Series(close_1w).shift(1))
-    tr3 = abs(pd.Series(low_1w) - pd.Series(close_1w).shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.ewm(alpha=1/atr_period, adjust=False, min_periods=atr_period).mean().values
-    
-    # Basic Upper and Lower Bands
-    hl2 = (pd.Series(high_1w) + pd.Series(low_1w)) / 2
-    upper_band = hl2 + (multiplier * atr)
-    lower_band = hl2 - (multiplier * atr)
-    
-    # Initialize Supertrend
-    supertrend = np.zeros(len(close_1w))
-    direction = np.ones(len(close_1w))  # 1 for uptrend, -1 for downtrend
-    
-    for i in range(1, len(close_1w)):
-        if close_1w[i] > upper_band[i-1]:
-            direction[i] = 1
-        elif close_1w[i] < lower_band[i-1]:
-            direction[i] = -1
-        else:
-            direction[i] = direction[i-1]
-            if direction[i] == 1 and lower_band[i] < lower_band[i-1]:
-                lower_band[i] = lower_band[i-1]
-            if direction[i] == -1 and upper_band[i] > upper_band[i-1]:
-                upper_band[i] = upper_band[i-1]
-    
-        supertrend[i] = (lower_band[i] if direction[i] == 1 else upper_band[i])
-    
-    # Align 1w Supertrend direction to 12h timeframe (wait for completed 1w bar)
-    supertrend_direction_aligned = align_htf_to_ltf(prices, df_1w, direction)
-    
-    # Calculate volume confirmation: volume > 2.0 * 20-period average volume on 12h
+    # Calculate volume confirmation: volume > 2.0 * 20-period average volume
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (2.0 * avg_volume_20)
     
@@ -105,7 +69,7 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN or outside session
-        if (np.isnan(rsi_aligned[i]) or np.isnan(supertrend_direction_aligned[i]) or 
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_200_1w_aligned[i]) or 
             np.isnan(avg_volume_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -113,28 +77,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: RSI < 30 (oversold), Supertrend uptrend (direction=1), volume spike, in session
-            if (rsi_aligned[i] < 30 and 
-                supertrend_direction_aligned[i] == 1 and 
+            # Long: Williams %R < -80 (oversold), 1w EMA200 > EMA200 previous (uptrend), volume spike, in session
+            if (williams_r_aligned[i] < -80 and 
+                ema_200_1w_aligned[i] > ema_200_1w_aligned[i-1] and 
                 volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI > 70 (overbought), Supertrend downtrend (direction=-1), volume spike, in session
-            elif (rsi_aligned[i] > 70 and 
-                  supertrend_direction_aligned[i] == -1 and 
+            # Short: Williams %R > -20 (overbought), 1w EMA200 < EMA200 previous (downtrend), volume spike, in session
+            elif (williams_r_aligned[i] > -20 and 
+                  ema_200_1w_aligned[i] < ema_200_1w_aligned[i-1] and 
                   volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: RSI crosses back above 50 (mean reversion)
-            if rsi_aligned[i] > 50:
+            # Exit long: Williams %R crosses back above -50 (mean reversion)
+            if williams_r_aligned[i] > -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: RSI crosses back below 50 (mean reversion)
-            if rsi_aligned[i] < 50:
+            # Exit short: Williams %R crosses back below -50 (mean reversion)
+            if williams_r_aligned[i] < -50:
                 signals[i] = 0.0
                 position = 0
             else:
