@@ -3,24 +3,23 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using weekly Donchian(20) breakout with 1w EMA200 trend filter and volume confirmation
-# Long when price breaks above weekly Donchian upper (20-period high) AND 1w EMA200 > EMA200 previous 5 bars (strong uptrend) AND volume > 2.0 * avg_volume(50) on 1d
-# Short when price breaks below weekly Donchian lower (20-period low) AND 1w EMA200 < EMA200 previous 5 bars (strong downtrend) AND volume > 2.0 * avg_volume(50) on 1d
-# Exit when price crosses back through the weekly Donchian midpoint (upper+lower)/2
+# Hypothesis: 12h strategy using 1d Donchian(20) breakout with 1w Supertrend filter and volume confirmation
+# Long when price breaks above 1d Donchian upper band AND 1w Supertrend is bullish AND volume > 1.5 * avg_volume(20) on 12h
+# Short when price breaks below 1d Donchian lower band AND 1w Supertrend is bearish AND volume > 1.5 * avg_volume(20) on 12h
+# Exit when price crosses back through the 1d Donchian midpoint (upper+lower)/2
 # Uses discrete sizing 0.25 to balance return and risk
-# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe
-# Weekly Donchian provides strong breakout levels that reduce whipsaw in ranging markets
-# 1w EMA200 trend filter ensures we trade with the dominant weekly trend (avoids counter-trend)
-# Volume confirmation (2.0x) validates breakout strength while limiting overtrading
-# Works in both bull and bear markets by following the weekly trend
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# 1d Donchian(20) provides strong structural breakout levels that reduce whipsaw
+# 1w Supertrend filter ensures we trade with the dominant weekly trend (works in both bull and bear)
+# Volume confirmation (1.5x) validates breakout strength while limiting overtrading
 
-name = "1d_WeeklyDonchian20_1wEMA200_Trend_VolumeConfirm"
-timeframe = "1d"
+name = "12h_1dDonchian20_1wSupertrend_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -28,34 +27,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data ONCE before loop for Donchian and EMA calculation
+    # Get 1d data ONCE before loop for Donchian calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:  # Need at least 20 completed 1d bars for Donchian(20)
+        return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate 1d Donchian channels (20-period)
+    # Upper band = highest high over last 20 periods
+    # Lower band = lowest low over last 20 periods
+    high_series_1d = pd.Series(high_1d)
+    low_series_1d = pd.Series(low_1d)
+    donchian_upper_1d = high_series_1d.rolling(window=20, min_periods=20).max().values
+    donchian_lower_1d = low_series_1d.rolling(window=20, min_periods=20).min().values
+    donchian_mid_1d = (donchian_upper_1d + donchian_lower_1d) / 2.0
+    
+    # Align 1d Donchian to 12h timeframe (wait for completed 1d bar)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper_1d)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower_1d)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_1d, donchian_mid_1d)
+    
+    # Get 1w data ONCE before loop for Supertrend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:  # Need at least 20 completed weekly bars for Donchian
+    if len(df_1w) < 10:  # Need at least 10 completed weekly bars for ATR
         return np.zeros(n)
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Calculate weekly Donchian channels (20-period)
-    # Upper = rolling max of high, Lower = rolling min of low
-    high_roll_max = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    low_roll_min = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    donchian_upper = high_roll_max
-    donchian_lower = low_roll_min
-    donchian_mid = (donchian_upper + donchian_lower) / 2.0
+    # Calculate 1w ATR(10) for Supertrend
+    tr1 = np.abs(high_1w - low_1w)
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr1[0] = 0  # First period has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1w = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
-    # Align weekly Donchian to daily timeframe (wait for completed weekly bar)
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1w, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1w, donchian_lower)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_1w, donchian_mid)
+    # Calculate 1w Supertrend with parameters (10, 3.0)
+    factor = 3.0
+    hl2 = (high_1w + low_1w) / 2
+    upperband = hl2 + (factor * atr_1w)
+    lowerband = hl2 - (factor * atr_1w)
     
-    # Calculate 1w EMA200 for trend filter
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    # Initialize Supertrend arrays
+    supertrend = np.zeros_like(close_1w)
+    direction = np.ones_like(close_1w)  # 1 for uptrend, -1 for downtrend
     
-    # Calculate volume confirmation: volume > 2.0 * 50-period average volume on 1d
-    avg_volume_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
-    volume_confirm = volume > (2.0 * avg_volume_50)
+    # First valid value
+    supertrend[0] = upperband[0]
+    direction[0] = 1
+    
+    # Calculate Supertrend
+    for i in range(1, len(close_1w)):
+        if close_1w[i] > supertrend[i-1]:
+            direction[i] = 1
+        elif close_1w[i] < supertrend[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+        
+        if direction[i] == 1 and direction[i-1] == -1:
+            supertrend[i] = upperband[i]
+        elif direction[i] == -1 and direction[i-1] == 1:
+            supertrend[i] = lowerband[i]
+        elif direction[i] == 1:
+            supertrend[i] = max(upperband[i], supertrend[i-1])
+        else:
+            supertrend[i] = min(lowerband[i], supertrend[i-1])
+    
+    # Align 1w Supertrend direction to 12h timeframe (wait for completed 1w bar)
+    supertrend_direction_aligned = align_htf_to_ltf(prices, df_1w, direction)
+    
+    # Calculate volume confirmation: volume > 1.5 * 20-period average volume on 12h
+    avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * avg_volume_20)
     
     # Session filter: 08-20 UTC (pre-compute for efficiency)
     hours = prices.index.hour
@@ -64,37 +113,37 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(200, n):  # Start after warmup period
+    for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN or outside session
         if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
-            np.isnan(ema_200_1w_aligned[i]) or np.isnan(avg_volume_50[i]) or not in_session[i]):
+            np.isnan(supertrend_direction_aligned[i]) or np.isnan(avg_volume_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above weekly Donchian upper, 1w EMA200 trending up (current > 5 bars ago), volume confirmation, in session
+            # Long: price breaks above 1d Donchian upper band, 1w Supertrend bullish (direction=1), volume confirmation, in session
             if (close[i] > donchian_upper_aligned[i] and 
-                ema_200_1w_aligned[i] > ema_200_1w_aligned[i-5] and 
+                supertrend_direction_aligned[i] == 1 and 
                 volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly Donchian lower, 1w EMA200 trending down (current < 5 bars ago), volume confirmation, in session
+            # Short: price breaks below 1d Donchian lower band, 1w Supertrend bearish (direction=-1), volume confirmation, in session
             elif (close[i] < donchian_lower_aligned[i] and 
-                  ema_200_1w_aligned[i] < ema_200_1w_aligned[i-5] and 
+                  supertrend_direction_aligned[i] == -1 and 
                   volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses back below weekly Donchian midpoint
+            # Exit long: price crosses back below 1d Donchian midpoint
             if close[i] < donchian_mid_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses back above weekly Donchian midpoint
+            # Exit short: price crosses back above 1d Donchian midpoint
             if close[i] > donchian_mid_aligned[i]:
                 signals[i] = 0.0
                 position = 0
