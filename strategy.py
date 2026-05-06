@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 12h Supertrend for trend direction and 6h ATR-based Donchian breakout for entry
-# Long when: 12h Supertrend is bullish AND price breaks above 6h Donchian(20) upper band AND 6h volume > 1.3 * avg_volume(20)
-# Short when: 12h Supertrend is bearish AND price breaks below 6h Donchian(20) lower band AND 6h volume > 1.3 * avg_volume(20)
-# Exit when: price crosses the 6h Donchian(20) midpoint OR opposite Supertrend signal occurs
+# Hypothesis: 4h strategy using 1d Camarilla pivot breakouts with volume confirmation and chop regime filter
+# Long when price breaks above daily R3 AND volume > 1.3 * avg_volume(20) AND chop > 61.8 (range)
+# Short when price breaks below daily S3 AND volume > 1.3 * avg_volume(20) AND chop > 61.8 (range)
+# Exit when price returns to daily midpoint (pivot level) or opposite extreme
 # Uses discrete sizing 0.25 to balance profit potential and drawdown control
-# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
-# Supertrend provides strong trend filter reducing false breakouts
-# Donchian breakout captures momentum in trending markets
-# Volume confirmation ensures breakout conviction
-# Works in bull markets (continuation breakouts) and bear markets (continuation breakdowns)
+# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
+# Daily Camarilla pivots provide strong intraday support/resistance levels
+# Chop regime filter ensures we trade in ranging markets where mean reversion works
+# Volume confirmation filters out low-conviction breakouts
+# Works in both bull (breakout continuations) and bear (mean reversion in ranges) markets
 
-name = "6h_12hSupertrend_Donchian20_Breakout_Volume"
-timeframe = "6h"
+name = "4h_1dCamarilla_R3S3_Breakout_Volume_Chop"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,91 +28,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data ONCE before loop for Supertrend calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 10:  # Need sufficient data for ATR and Supertrend
+    # Get 1d data ONCE before loop for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:  # Need at least 1 completed daily bar
         return np.zeros(n)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 12h ATR(10) for Supertrend
-    atr_period = 10
-    tr1 = pd.Series(high_12h).rolling(2).max() - pd.Series(low_12h).rolling(2).min()
-    tr2 = abs(pd.Series(high_12h).shift(1) - pd.Series(close_12h))
-    tr3 = abs(pd.Series(low_12h).shift(1) - pd.Series(close_12h))
-    tr_12h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_12h = pd.Series(tr_12h).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
+    # Calculate daily Camarilla pivot levels
+    # Pivot = (High + Low + Close) / 3
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
     
-    # Calculate 12h Supertrend
-    factor = 3.0
-    hl2_12h = (high_12h + low_12h) / 2.0
-    upperband_12h = hl2_12h + (factor * atr_12h)
-    lowerband_12h = hl2_12h - (factor * atr_12h)
+    # Camarilla levels
+    r3_1d = pivot_1d + (range_1d * 1.125)  # R3 = Pivot + 1.125 * range
+    r4_1d = pivot_1d + (range_1d * 1.500)  # R4 = Pivot + 1.5 * range
+    s3_1d = pivot_1d - (range_1d * 1.125)  # S3 = Pivot - 1.125 * range
+    s4_1d = pivot_1d - (range_1d * 1.500)  # S4 = Pivot - 1.5 * range
+    midpoint_1d = pivot_1d  # Camarilla midpoint is the pivot point
     
-    supertrend_12h = np.zeros_like(close_12h)
-    direction_12h = np.ones_like(close_12h)  # 1 for uptrend, -1 for downtrend
+    # Align daily Camarilla levels to 4h timeframe (wait for completed 1d bar)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    midpoint_1d_aligned = align_htf_to_ltf(prices, df_1d, midpoint_1d)
     
-    supertrend_12h[0] = upperband_12h[0]
-    direction_12h[0] = 1
-    
-    for i in range(1, len(close_12h)):
-        if close_12h[i] > supertrend_12h[i-1]:
-            supertrend_12h[i] = max(upperband_12h[i], supertrend_12h[i-1])
-            direction_12h[i] = 1
-        else:
-            supertrend_12h[i] = min(lowerband_12h[i], supertrend_12h[i-1])
-            direction_12h[i] = -1
-    
-    # Align 12h Supertrend direction to 6h timeframe (wait for completed 12h bar)
-    direction_12h_aligned = align_htf_to_ltf(prices, df_12h, direction_12h)
-    
-    # Calculate 6h Donchian(20) channels
-    donchian_period = 20
-    upperband_6h = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    lowerband_6h = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
-    midpoint_6h = (upperband_6h + lowerband_6h) / 2.0
-    
-    # Calculate volume confirmation: volume > 1.3 * 20-period average volume on 6h
+    # Calculate volume confirmation: volume > 1.3 * 20-period average volume on 4h
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (1.3 * avg_volume_20)
+    
+    # Calculate Choppiness Index regime filter (14-period)
+    # CHOP = 100 * log10(sum(ATR(1)) / (n * log(n))) / log10(n)
+    # Simplified: CHOP > 61.8 = ranging market (good for mean reversion)
+    tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
+    tr1 = np.maximum(tr1, np.absolute(low - np.roll(close, 1)))
+    tr1[0] = high[0] - low[0]  # First TR
+    atr1 = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
+    sum_tr14 = pd.Series(tr1).rolling(window=14, min_periods=14).sum().values
+    chop = 100 * np.log10(sum_tr14 / (14 * np.log10(14))) / np.log10(14)
+    chop_regime = chop > 61.8  # Ranging market
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN
-        if (np.isnan(direction_12h_aligned[i]) or np.isnan(upperband_6h[i]) or 
-            np.isnan(lowerband_6h[i]) or np.isnan(midpoint_6h[i]) or
-            np.isnan(avg_volume_20[i])):
+        if (np.isnan(r3_1d_aligned[i]) or np.isnan(r4_1d_aligned[i]) or 
+            np.isnan(s3_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
+            np.isnan(midpoint_1d_aligned[i]) or np.isnan(avg_volume_20[i]) or
+            np.isnan(chop[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: 12h Supertrend bullish, price breaks above 6h Donchian upper band, volume spike
-            if (direction_12h_aligned[i] == 1 and 
-                close[i] > upperband_6h[i] and close[i-1] <= upperband_6h[i-1] and 
-                volume_confirm[i]):
+            # Long: price breaks above daily R3, volume spike, ranging market
+            if (close[i] > r3_1d_aligned[i] and close[i-1] <= r3_1d_aligned[i-1] and 
+                volume_confirm[i] and chop_regime[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: 12h Supertrend bearish, price breaks below 6h Donchian lower band, volume spike
-            elif (direction_12h_aligned[i] == -1 and 
-                  close[i] < lowerband_6h[i] and close[i-1] >= lowerband_6h[i-1] and 
-                  volume_confirm[i]):
+            # Short: price breaks below daily S3, volume spike, ranging market
+            elif (close[i] < s3_1d_aligned[i] and close[i-1] >= s3_1d_aligned[i-1] and 
+                  volume_confirm[i] and chop_regime[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below 6h Donchian midpoint OR Supertrend turns bearish
-            if close[i] < midpoint_6h[i] or direction_12h_aligned[i] == -1:
+            # Exit long: price returns to daily midpoint or below
+            if close[i] <= midpoint_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above 6h Donchian midpoint OR Supertrend turns bullish
-            if close[i] > midpoint_6h[i] or direction_12h_aligned[i] == 1:
+            # Exit short: price returns to daily midpoint or above
+            if close[i] >= midpoint_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
