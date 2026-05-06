@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1-day Keltner Channel with trend filter and volume confirmation
-# Long when price breaks above upper Keltner channel with price > 50-period EMA and volume > 1.5x average
-# Short when price breaks below lower Keltner channel with price < 50-period EMA and volume > 1.5x average
-# Uses daily ATR-based channels for dynamic support/resistance, EMA50 for trend filter, volume for confirmation
+# Hypothesis: 4h strategy using Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation
+# Long when price breaks above Donchian upper band with price > 12h EMA50 and volume > 1.5x average
+# Short when price breaks below Donchian lower band with price < 12h EMA50 and volume > 1.5x average
+# Uses 4h Donchian channels for breakout signals, 12h EMA50 for trend filter, volume for confirmation
 # Designed to work in bull markets via breakouts above resistance and in bear markets via breakdowns below support
 # Target: 20-40 trades per year (80-160 over 4 years) with 0.25 position sizing
 
-name = "6h_1dKeltner_EMA50_Volume_v1"
-timeframe = "6h"
+name = "4h_Donchian20_12hEMA50_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,32 +24,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate EMA50 on 6h close (needs 50 bars)
+    # Calculate EMA50 on 4h close (needs 50 bars)
     close_series = pd.Series(close)
     ema50 = close_series.ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # Calculate 1-day Keltner Channel (20-period EMA, 2x ATR)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Calculate 12h Donchian Channel (20-period high/low)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # EMA20 of close
-    ema20_1d = pd.Series(df_1d['close']).ewm(span=20, min_periods=20, adjust=False).mean().values
+    # 20-period high and low
+    high_20 = pd.Series(df_12h['high']).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(df_12h['low']).rolling(window=20, min_periods=20).min().values
     
-    # ATR calculation (14-period)
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr14 = tr.ewm(span=14, min_periods=14, adjust=False).mean().values
-    
-    # Keltner Bands
-    upper_keltner = ema20_1d + (2 * atr14)
-    lower_keltner = ema20_1d - (2 * atr14)
-    
-    # Align Keltner levels to 6h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_keltner)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_keltner)
+    # Align Donchian levels to 4h timeframe
+    upper_donchian = align_htf_to_ltf(prices, df_12h, high_20)
+    lower_donchian = align_htf_to_ltf(prices, df_12h, low_20)
     
     # Volume confirmation: >1.5x 50-period average
     vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
@@ -64,7 +54,7 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after EMA50 warmup
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
+        if (np.isnan(upper_donchian[i]) or np.isnan(lower_donchian[i]) or 
             np.isnan(ema50[i]) or np.isnan(volume_filter[i]) or
             not session_filter[i]):
             if position != 0:
@@ -73,24 +63,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long breakout: price breaks above upper Keltner with uptrend and volume confirmation
-            if close[i] > upper_aligned[i] and close[i] > ema50[i] and volume_filter[i]:
+            # Long breakout: price breaks above upper Donchian with uptrend and volume confirmation
+            if close[i] > upper_donchian[i] and close[i] > ema50[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short breakout: price breaks below lower Keltner with downtrend and volume confirmation
-            elif close[i] < lower_aligned[i] and close[i] < ema50[i] and volume_filter[i]:
+            # Short breakout: price breaks below lower Donchian with downtrend and volume confirmation
+            elif close[i] < lower_donchian[i] and close[i] < ema50[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below lower Keltner (support break)
-            if close[i] < lower_aligned[i]:
+            # Exit long: price breaks below lower Donchian (support break)
+            if close[i] < lower_donchian[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above upper Keltner (resistance break)
-            if close[i] > upper_aligned[i]:
+            # Exit short: price breaks above upper Donchian (resistance break)
+            if close[i] > upper_donchian[i]:
                 signals[i] = 0.0
                 position = 0
             else:
