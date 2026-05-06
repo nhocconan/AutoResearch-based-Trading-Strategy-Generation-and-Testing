@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Donchian(20) breakout with volume confirmation and ATR-based volatility filter
+# Hypothesis: 4h strategy using 1d Donchian(20) breakout with volume confirmation and ATR regime filter
 # Long when price breaks above 1d Donchian upper band AND volume > 1.5 * 20-period avg volume AND ATR(14) < ATR(50) (low vol regime)
 # Short when price breaks below 1d Donchian lower band with same conditions
 # Exit when price crosses 1d Donchian middle band (mean reversion to equilibrium)
 # Uses discrete sizing 0.25 to limit drawdown and reduce fee churn
-# Target: 50-150 total trades over 4 years (12-37/year) for 4h timeframe
+# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
 # Donchian provides daily structure, volume confirms participation, ATR filter avoids choppy markets
+# Works in both bull and bear markets by capturing breakouts with volume confirmation in low volatility regimes
 
-name = "4h_1dDonchian20_VolumeSpike_ATRRegime_v2"
+name = "4h_1dDonchian20_VolumeSpike_ATRRegime_v3"
 timeframe = "4h"
 leverage = 1.0
 
