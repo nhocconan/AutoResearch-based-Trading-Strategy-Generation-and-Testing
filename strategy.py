@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Camarilla pivot levels with volume spike confirmation
-# Long when price breaks above 1d Camarilla R3 level AND 12h volume > 1.5 * avg_volume(30)
-# Short when price breaks below 1d Camarilla S3 level AND 12h volume > 1.5 * avg_volume(30)
-# Exit when price returns to 1d Camarilla midpoint (PP)
+# Hypothesis: 1d strategy using 1w Camarilla pivot levels with volume spike confirmation
+# Long when price breaks above 1w Camarilla R4 level AND 1d volume > 2.0 * avg_volume(20)
+# Short when price breaks below 1w Camarilla S4 level AND 1d volume > 2.0 * avg_volume(20)
+# Exit when price returns to 1w Camarilla midpoint (PP)
 # Uses discrete sizing 0.25 to balance return and drawdown control
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
-# Camarilla R3/S3 represent strong breakout levels from 1d structure
+# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe
+# Camarilla R4/S4 represent strong breakout levels from 1w structure
 # Volume spike filters for institutional participation in breakouts
 # Works in both bull (continuation breakouts) and bear (continuation breakdowns) markets
 
-name = "12h_1dCamarilla_R3_S3_Breakout_Volume"
-timeframe = "12h"
+name = "1d_1wCamarilla_R4_S4_Breakout_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,61 +27,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:  # Need at least 2 completed daily bars for Camarilla
+    # Get 1w data ONCE before loop for Camarilla pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:  # Need at least 2 completed weekly bars for Camarilla
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d Camarilla pivot levels (based on previous day)
+    # Calculate 1w Camarilla pivot levels (based on previous week)
     # Pivot Point (PP) = (High + Low + Close) / 3
-    # R3 = PP + (High - Low) * 1.1/4
-    # S3 = PP - (High - Low) * 1.1/4
-    pp = (high_1d + low_1d + close_1d) / 3.0
-    r3 = pp + (high_1d - low_1d) * 1.1 / 4.0
-    s3 = pp - (high_1d - low_1d) * 1.1 / 4.0
+    # R4 = PP + (High - Low) * 1.1/2
+    # S4 = PP - (High - Low) * 1.1/2
+    pp = (high_1w + low_1w + close_1w) / 3.0
+    r4 = pp + (high_1w - low_1w) * 1.1 / 2.0
+    s4 = pp - (high_1w - low_1w) * 1.1 / 2.0
     
-    # Align 1d Camarilla levels to 12h timeframe (wait for completed 1d bar)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    # Align 1w Camarilla levels to 1d timeframe (wait for completed 1w bar)
+    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
+    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
     
-    # Calculate volume confirmation: volume > 1.5 * 30-period average volume on 12h
-    avg_volume_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_confirm = volume > (1.5 * avg_volume_30)
+    # Calculate volume confirmation: volume > 2.0 * 20-period average volume on 1d
+    avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (2.0 * avg_volume_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(pp_aligned[i]) or np.isnan(avg_volume_30[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(pp_aligned[i]) or np.isnan(avg_volume_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above 1d Camarilla R3 level with volume spike
-            if (close[i] > r3_aligned[i] and close[i-1] <= r3_aligned[i-1] and volume_confirm[i]):
+            # Long: price breaks above 1w Camarilla R4 level with volume spike
+            if (close[i] > r4_aligned[i] and close[i-1] <= r4_aligned[i-1] and volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 1d Camarilla S3 level with volume spike
-            elif (close[i] < s3_aligned[i] and close[i-1] >= s3_aligned[i-1] and volume_confirm[i]):
+            # Short: price breaks below 1w Camarilla S4 level with volume spike
+            elif (close[i] < s4_aligned[i] and close[i-1] >= s4_aligned[i-1] and volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to 1d Camarilla pivot point (PP)
+            # Exit long: price returns to 1w Camarilla pivot point (PP)
             if close[i] <= pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to 1d Camarilla pivot point (PP)
+            # Exit short: price returns to 1w Camarilla pivot point (PP)
             if close[i] >= pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
