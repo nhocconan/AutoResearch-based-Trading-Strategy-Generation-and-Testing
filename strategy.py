@@ -1,22 +1,26 @@
+# Your Name: Test
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using weekly pivot points with volume confirmation and monthly trend filter
-# Weekly pivot points (R1/S1 for breakouts) provide key support/resistance levels
-# Breakout above R1 or below S1 with volume > 1.5x 20-period average indicates momentum
-# Trend filter: 50-period EMA on weekly timeframe to avoid counter-trend trades
-# Works in bull/bear markets: breakouts capture trends, reversals capture pullbacks within trend
-# Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
+# Hypothesis: 4h strategy using daily KAMA for trend direction, RSI for momentum, and 
+# Choppiness Index for regime filtering. Uses volume confirmation to filter weak signals.
+# KAMA adapts to market efficiency, providing smooth trend signals that work in trending
+# and ranging markets. RSI identifies overbought/oversold conditions, while Choppiness
+# Index determines market regime: >61.8 = ranging (mean revert), <38.2 = trending (follow).
+# Volume confirmation ensures only strong momentum signals are traded.
+# Target: 25-50 trades/year with 0.30 position sizing to minimize fee drag.
+# Works in bull/bear markets: KAMA captures trend, RSI catches reversals within trend,
+# Choppiness filter avoids choppy markets where breakouts fail.
 
-name = "12h_WeeklyPivot_R1S1_VolumeTrendFilter_v1"
-timeframe = "12h"
+name = "4h_KAMA_RSI_Choppiness_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,40 +28,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate weekly pivot points ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Calculate daily KAMA for trend direction ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Previous week's OHLC for pivot calculation
-    prev_close = df_1w['close'].shift(1).values
-    prev_high = df_1w['high'].shift(1).values
-    prev_low = df_1w['low'].shift(1).values
+    # KAMA calculation (Kaufman Adaptive Moving Average)
+    close_1d = df_1d['close'].values
+    direction = np.abs(close_1d[10:] - close_1d[:-10])
+    volatility = np.sum(np.abs(np.diff(close_1d, axis=0)), axis=0)
+    er = np.where(volatility != 0, direction / volatility, 0)
+    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
+    kama = np.full_like(close_1d, np.nan)
+    kama[9] = close_1d[9]  # Seed
+    for i in range(10, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
     
-    # Pivot point calculation
-    # Pivot = (previous high + previous low + previous close) / 3
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_ = prev_high - prev_low
+    kama_trend = kama > np.roll(kama, 1)  # Rising KAMA = uptrend
     
-    # Support and Resistance levels
-    r1 = pivot + (range_ * 1.0)
-    s1 = pivot - (range_ * 1.0)
+    # Align daily KAMA trend to 4h timeframe
+    kama_trend_aligned = align_htf_to_ltf(prices, df_1d, kama_trend.astype(float))
     
-    # Align weekly levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    # Calculate daily RSI for momentum
+    delta = np.diff(close_1d)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = np.concatenate([np.full(14, np.nan), rsi])
     
-    # Volume confirmation: >1.5x 20-period average
+    # Align daily RSI to 4h timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    
+    # Calculate daily Choppiness Index for regime filtering
+    atr_1d = pd.Series(np.maximum(
+        high[1:] - low[:-1],
+        np.maximum(
+            np.abs(high[1:] - close[:-1]),
+            np.abs(low[1:] - close[:-1])
+        )
+    )).rolling(window=14).sum().values
+    atr_1d = np.concatenate([np.full(13, np.nan), atr_1d])
+    
+    max_high = pd.Series(high).rolling(window=14).max().values
+    min_low = pd.Series(low).rolling(window=14).min().values
+    range_max_min = max_high - min_low
+    
+    chop = np.where(
+        (range_max_min != 0) & (atr_1d != 0),
+        100 * np.log10(atr_1d.sum() / range_max_min) / np.log10(14),
+        50
+    )
+    chop = np.concatenate([np.full(13, np.nan), chop])
+    
+    # Align daily Choppiness to 4h timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # Volume confirmation: >1.5x 20-period average on 4h
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma_20)
-    
-    # Trend filter: 50-period EMA on weekly timeframe
-    weekly_close_series = pd.Series(df_1w['close'])
-    weekly_ema_50 = weekly_close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    weekly_ema_50_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema_50)
-    uptrend = close > weekly_ema_50_aligned
-    downtrend = close < weekly_ema_50_aligned
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -66,10 +98,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(volume_filter[i]) or np.isnan(weekly_ema_50_aligned[i]) or
+        if (np.isnan(kama_trend_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+            np.isnan(chop_aligned[i]) or np.isnan(volume_filter[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -77,27 +109,33 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long breakout: price breaks above R1 with volume confirmation and uptrend
-            if close[i] > r1_aligned[i] and volume_filter[i] and uptrend[i]:
-                signals[i] = 0.25
+            # Long entry: KAMA uptrend + RSI oversold + chop < 38.2 (trending) + volume
+            if (kama_trend_aligned[i] and 
+                rsi_aligned[i] < 30 and 
+                chop_aligned[i] < 38.2 and 
+                volume_filter[i]):
+                signals[i] = 0.30
                 position = 1
-            # Short breakout: price breaks below S1 with volume confirmation and downtrend
-            elif close[i] < s1_aligned[i] and volume_filter[i] and downtrend[i]:
-                signals[i] = -0.25
+            # Short entry: KAMA downtrend + RSI overbought + chop < 38.2 (trending) + volume
+            elif (not kama_trend_aligned[i] and 
+                  rsi_aligned[i] > 70 and 
+                  chop_aligned[i] < 38.2 and 
+                  volume_filter[i]):
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below S1 (failed support)
-            if close[i] < s1_aligned[i]:
+            # Exit long: RSI overbought or KAMA trend change
+            if rsi_aligned[i] > 70 or not kama_trend_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit short: price breaks above R1 (failed resistance)
-            if close[i] > r1_aligned[i]:
+            # Exit short: RSI oversold or KAMA trend change
+            if rsi_aligned[i] < 30 or kama_trend_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
