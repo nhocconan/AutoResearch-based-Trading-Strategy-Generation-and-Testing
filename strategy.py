@@ -3,16 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using weekly pivot points with volume confirmation and trend filter
-# Weekly pivot points (R1/S1 for breakouts, R2/S2 for reversals) provide key weekly levels
-# Breakout above R1 or below S1 with volume > 1.5x 20-period average indicates momentum
-# Rejection at R2 or S2 with volume confirmation indicates mean reversion
-# Trend filter: 50-period EMA on 1d timeframe to avoid counter-trend trades
-# Works in bull/bear markets: breakouts capture trends, reversals capture pullbacks within trend
-# Target: 30-100 total trades over 4 years (7-25/year) with 0.25 position sizing
+# Hypothesis: 6h strategy using 12h Supertrend for trend direction, 6h ATR-based breakout with volume confirmation
+# Supertrend on 12h filters trend direction to avoid counter-trend trades
+# Breakout above/below ATR(14) multiplier from open with volume > 1.5x 20-period average signals momentum
+# Works in bull/bear: Supertrend adapts to trend, breakouts capture momentum in trend direction
+# Target: 60-120 total trades over 4 years (15-30/year) with 0.25 position sizing
 
-name = "1d_WeeklyPivot_R1S2_VolumeTrendFilter_v1"
-timeframe = "1d"
+name = "6h_Supertrend_ATRBreakout_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,44 +22,95 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_price = prices['open'].values
     
-    # Calculate weekly pivot points ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Calculate 12h Supertrend ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_1w) < 2:
+    if len(df_12h) < 15:
         return np.zeros(n)
     
-    # Previous week's OHLC for pivot calculation
-    prev_close = df_1w['close'].shift(1).values
-    prev_high = df_1w['high'].shift(1).values
-    prev_low = df_1w['low'].shift(1).values
+    # Supertrend parameters
+    atr_period = 10
+    multiplier = 3.0
     
-    # Pivot point calculation
-    # Pivot = (previous high + previous low + previous close) / 3
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_ = prev_high - prev_low
+    # Calculate ATR for 12h
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Support and Resistance levels
-    r1 = pivot + (range_ * 1.0)
-    r2 = pivot + (range_ * 2.0)
-    s1 = pivot - (range_ * 1.0)
-    s2 = pivot - (range_ * 2.0)
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
     
-    # Align weekly levels to 1d timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    atr = np.zeros_like(tr)
+    atr[atr_period-1] = np.mean(tr[:atr_period])
+    for i in range(atr_period, len(tr)):
+        atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
+    
+    # Calculate basic upper and lower bands
+    basic_ub = (high_12h + low_12h) / 2 + multiplier * atr
+    basic_lb = (high_12h + low_12h) / 2 - multiplier * atr
+    
+    # Initialize final bands
+    final_ub = np.zeros_like(basic_ub)
+    final_lb = np.zeros_like(basic_lb)
+    supertrend = np.zeros_like(close_12h)
+    direction = np.ones_like(close_12h)  # 1 for uptrend, -1 for downtrend
+    
+    # Calculate Supertrend
+    for i in range(atr_period, len(close_12h)):
+        if basic_ub[i] < final_ub[i-1] or close_12h[i-1] > final_ub[i-1]:
+            final_ub[i] = basic_ub[i]
+        else:
+            final_ub[i] = final_ub[i-1]
+            
+        if basic_lb[i] > final_lb[i-1] or close_12h[i-1] < final_lb[i-1]:
+            final_lb[i] = basic_lb[i]
+        else:
+            final_lb[i] = final_lb[i-1]
+        
+        if supertrend[i-1] == final_ub[i-1]:
+            if close_12h[i] <= final_ub[i]:
+                supertrend[i] = final_ub[i]
+            else:
+                supertrend[i] = final_lb[i]
+                direction[i] = -1
+        else:
+            if close_12h[i] >= final_lb[i]:
+                supertrend[i] = final_lb[i]
+            else:
+                supertrend[i] = final_ub[i]
+                direction[i] = 1
+    
+    # Align Supertrend to 6h timeframe (direction: 1=uptrend, -1=downtrend)
+    supertrend_direction = direction
+    supertrend_dir_aligned = align_htf_to_ltf(prices, df_12h, supertrend_direction)
+    
+    # ATR-based breakout on 6h
+    atr_period_6h = 14
+    atr_multiplier = 1.5
+    
+    tr1_6h = high - low
+    tr2_6h = np.abs(high - np.roll(close, 1))
+    tr3_6h = np.abs(low - np.roll(close, 1))
+    tr_6h = np.maximum(tr1_6h, np.maximum(tr2_6h, tr3_6h))
+    tr_6h[0] = tr1_6h[0]
+    
+    atr_6h = np.zeros_like(tr_6h)
+    atr_6h[atr_period_6h-1] = np.mean(tr_6h[:atr_period_6h])
+    for i in range(atr_period_6h, len(tr_6h)):
+        atr_6h[i] = (atr_6h[i-1] * (atr_period_6h-1) + tr_6h[i]) / atr_period_6h
+    
+    # Calculate upper and lower breakout levels from open
+    ub_6h = open_price + atr_multiplier * atr_6h
+    lb_6h = open_price - atr_multiplier * atr_6h
     
     # Volume confirmation: >1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma_20)
-    
-    # Trend filter: 50-period EMA on 1d timeframe
-    close_series = pd.Series(close)
-    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend = close > ema_50
-    downtrend = close < ema_50
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -72,8 +121,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(s2_aligned[i]) or np.isnan(volume_filter[i]) or np.isnan(ema_50[i]) or
+        if (np.isnan(supertrend_dir_aligned[i]) or np.isnan(ub_6h[i]) or np.isnan(lb_6h[i]) or
+            np.isnan(volume_filter[i]) or np.isnan(atr_6h[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -81,32 +130,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long breakout: price breaks above R1 with volume confirmation and uptrend
-            if close[i] > r1_aligned[i] and volume_filter[i] and uptrend[i]:
+            # Long breakout: price breaks above upper band with volume confirmation and uptrend
+            if close[i] > ub_6h[i] and volume_filter[i] and supertrend_dir_aligned[i] == 1:
                 signals[i] = 0.25
                 position = 1
-            # Short breakout: price breaks below S1 with volume confirmation and downtrend
-            elif close[i] < s1_aligned[i] and volume_filter[i] and downtrend[i]:
-                signals[i] = -0.25
-                position = -1
-            # Long reversal: price rejects S2 with volume confirmation (bounce from support)
-            elif close[i] < s2_aligned[i] and close[i] > s2_aligned[i] * 0.995 and volume_filter[i] and uptrend[i]:
-                signals[i] = 0.25
-                position = 1
-            # Short reversal: price rejects R2 with volume confirmation (rejection from resistance)
-            elif close[i] > r2_aligned[i] and close[i] < r2_aligned[i] * 1.005 and volume_filter[i] and downtrend[i]:
+            # Short breakout: price breaks below lower band with volume confirmation and downtrend
+            elif close[i] < lb_6h[i] and volume_filter[i] and supertrend_dir_aligned[i] == -1:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below S1 (failed support) or reaches R2 (take profit)
-            if close[i] < s1_aligned[i] or close[i] > r2_aligned[i]:
+            # Exit long: price closes below open (failed breakout) or opposite Supertrend signal
+            if close[i] < open_price[i] or supertrend_dir_aligned[i] == -1:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above R1 (failed resistance) or reaches S2 (take profit)
-            if close[i] > r1_aligned[i] or close[i] < s2_aligned[i]:
+            # Exit short: price closes above open (failed breakdown) or opposite Supertrend signal
+            if close[i] > open_price[i] or supertrend_dir_aligned[i] == 1:
                 signals[i] = 0.0
                 position = 0
             else:
