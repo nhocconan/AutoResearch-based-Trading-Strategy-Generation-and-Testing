@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Camarilla H4/L4 breakout with 1w Supertrend filter and volume confirmation
-# Long when price breaks above 1d Camarilla H4 AND 1w Supertrend is bullish AND volume > 1.5 * avg_volume(20)
-# Short when price breaks below 1d Camarilla L4 AND 1w Supertrend is bearish AND volume > 1.5 * avg_volume(20)
-# Exit when price crosses back through the 1d Camarilla midpoint (H4/L4 average)
+# Hypothesis: 1d strategy using 1w Camarilla H3/L3 breakout with 1w EMA50 trend filter and volume confirmation
+# Long when price breaks above 1w Camarilla H3 AND 1w EMA > EMA50 previous (uptrend) AND volume > 1.5 * avg_volume(20) on 1d
+# Short when price breaks below 1w Camarilla L3 AND 1w EMA < EMA50 previous (downtrend) AND volume > 1.5 * avg_volume(20) on 1d
+# Exit when price crosses back through the 1w Camarilla midpoint (H3/L3 average)
 # Uses discrete sizing 0.25 to balance return and risk
-# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
-# 1d Camarilla H4/L4 provides strong breakout levels that reduce whipsaw
-# 1w Supertrend filter ensures we trade with the dominant weekly trend
+# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe
+# 1w Camarilla H3/L3 provides strong breakout levels that reduce whipsaw
+# 1w EMA50 trend filter ensures we trade with the dominant weekly trend
 # Volume confirmation (1.5x) validates breakout strength while limiting overtrading
+# Works in both bull and bear markets by following the weekly trend
 
-name = "4h_1dCamarillaH4L4_1wSupertrend_VolumeConfirm"
-timeframe = "4h"
+name = "1d_1wCamarillaH3L3_1wEMA50_Trend_VolumeConfirm"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,70 +28,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:  # Need at least one completed 1d bar
-        return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate 1d Camarilla levels (H4, L4, midpoint)
-    # Camarilla: H4 = close + 1.1*(high-low)*1.1/2, L4 = close - 1.1*(high-low)*1.1/2
-    high_low_1d = high_1d - low_1d
-    camarilla_h4_1d = close_1d + 1.1 * high_low_1d * 1.1 / 2.0
-    camarilla_l4_1d = close_1d - 1.1 * high_low_1d * 1.1 / 2.0
-    camarilla_mid_1d = (camarilla_h4_1d + camarilla_l4_1d) / 2.0
-    
-    # Align 1d Camarilla to 4h timeframe (wait for completed 1d bar)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4_1d)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4_1d)
-    camarilla_mid_aligned = align_htf_to_ltf(prices, df_1d, camarilla_mid_1d)
-    
-    # Get 1w data ONCE before loop for Supertrend filter
+    # Get 1w data ONCE before loop for Camarilla calculation and EMA50
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:  # Need at least 10 completed weekly bars for ATR
+    if len(df_1w) < 50:  # Need at least 50 completed weekly bars for EMA50
         return np.zeros(n)
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Calculate 1w Supertrend (ATR=10, multiplier=3.0)
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Calculate 1w Camarilla levels (H3, L3, midpoint)
+    # Camarilla: H3 = close + 1.1*(high-low)*1.1/4, L3 = close - 1.1*(high-low)*1.1/4
+    high_low_1w = high_1w - low_1w
+    camarilla_h3_1w = close_1w + 1.1 * high_low_1w * 1.1 / 4.0
+    camarilla_l3_1w = close_1w - 1.1 * high_low_1w * 1.1 / 4.0
+    camarilla_mid_1w = (camarilla_h3_1w + camarilla_l3_1w) / 2.0
     
-    hl2 = (high_1w + low_1w) / 2.0
-    upper_band = hl2 + 3.0 * atr
-    lower_band = hl2 - 3.0 * atr
+    # Align 1w Camarilla to 1d timeframe (wait for completed 1w bar)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3_1w)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3_1w)
+    camarilla_mid_aligned = align_htf_to_ltf(prices, df_1w, camarilla_mid_1w)
     
-    supertrend = np.zeros_like(close_1w)
-    direction = np.ones_like(close_1w)  # 1 for uptrend, -1 for downtrend
+    # Calculate 1w EMA50
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    supertrend[0] = upper_band[0]
-    direction[0] = 1
-    
-    for i in range(1, len(close_1w)):
-        if close_1w[i] > supertrend[i-1]:
-            direction[i] = 1
-        else:
-            direction[i] = -1
-        
-        if direction[i] == 1:
-            supertrend[i] = max(lower_band[i], supertrend[i-1])
-        else:
-            supertrend[i] = min(upper_band[i], supertrend[i-1])
-    
-    # Align 1w Supertrend to 4h timeframe (wait for completed 1w bar)
-    supertrend_aligned = align_htf_to_ltf(prices, df_1w, supertrend)
-    direction_aligned = align_htf_to_ltf(prices, df_1w, direction)
-    
-    # Calculate volume confirmation: volume > 1.5 * 20-period average volume on 4h
+    # Calculate volume confirmation: volume > 1.5 * 20-period average volume on 1d
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (1.5 * avg_volume_20)
     
@@ -103,36 +65,35 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN or outside session
-        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or 
-            np.isnan(supertrend_aligned[i]) or np.isnan(direction_aligned[i]) or 
-            np.isnan(avg_volume_20[i]) or not in_session[i]):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(avg_volume_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above 1d Camarilla H4, 1w Supertrend bullish (direction=1), volume confirmation, in session
-            if (close[i] > camarilla_h4_aligned[i] and 
-                direction_aligned[i] == 1 and 
+            # Long: price breaks above 1w Camarilla H3, 1w EMA > EMA50 previous (uptrend), volume confirmation, in session
+            if (close[i] > camarilla_h3_aligned[i] and 
+                ema_50_1w_aligned[i] > ema_50_1w_aligned[i-1] and 
                 volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 1d Camarilla L4, 1w Supertrend bearish (direction=-1), volume confirmation, in session
-            elif (close[i] < camarilla_l4_aligned[i] and 
-                  direction_aligned[i] == -1 and 
+            # Short: price breaks below 1w Camarilla L3, 1w EMA < EMA50 previous (downtrend), volume confirmation, in session
+            elif (close[i] < camarilla_l3_aligned[i] and 
+                  ema_50_1w_aligned[i] < ema_50_1w_aligned[i-1] and 
                   volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses back below 1d Camarilla midpoint
+            # Exit long: price crosses back below 1w Camarilla midpoint
             if close[i] < camarilla_mid_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses back above 1d Camarilla midpoint
+            # Exit short: price crosses back above 1w Camarilla midpoint
             if close[i] > camarilla_mid_aligned[i]:
                 signals[i] = 0.0
                 position = 0
