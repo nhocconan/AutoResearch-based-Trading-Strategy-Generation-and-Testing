@@ -3,18 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d VWAP with Bollinger Bands for mean-reversion trades
-# - Long when price touches lower Bollinger Band (20, 2) from 1d VWAP with volume spike and above 1d EMA50
-# - Short when price touches upper Bollinger Band (20, 2) from 1d VWAP with volume spike and below 1d EMA50
-# - Exit when price crosses back above/below 1d VWAP
-# - Uses Bollinger Bands calculated from 1d VWAP to capture institutional support/resistance
-# - Volume filter requires current volume > 1.5x 20-period average to confirm institutional interest
-# - EMA50 trend filter ensures trades align with higher timeframe trend
-# - Designed for institutional mean-reversion at key daily levels with volume confirmation
-# - Target: 75-200 total trades over 4 years (19-50/year) with 0.25 position sizing
+# Hypothesis: 1d strategy using 1w Supertrend for trend direction and price crossing 1d VWAP with volume confirmation
+# - Long when price crosses above VWAP with volume spike and 1w Supertrend is bullish
+# - Short when price crosses below VWAP with volume spike and 1w Supertrend is bearish
+# - Exit when price crosses back below/above VWAP
+# - Uses 1d VWAP for mean reversion entry and 1w Supertrend for trend filter
+# - Target: 30-100 total trades over 4 years (7-25/year) with 0.25 position sizing
 
-name = "4h_VWAP_BBands_1dEMA50_Volume"
-timeframe = "4h"
+name = "1d_VWAP_Supertrend_1w"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,72 +24,102 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for VWAP and EMA calculations
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 1w data for Supertrend calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # Calculate 1d typical price and VWAP
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    pv = (typical_price * df_1d['volume']).values
-    vol = df_1d['volume'].values
+    # Calculate 1w Supertrend (ATR=10, multiplier=3.0)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate cumulative VWAP
-    cum_pv = np.cumsum(pv)
-    cum_vol = np.cumsum(vol)
-    vwap = np.divide(cum_pv, cum_vol, out=np.zeros_like(cum_pv), where=cum_vol!=0)
+    # True Range
+    tr1 = high_1w[1:] - low_1w[1:]
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([ [high_1w[0] - low_1w[0]], tr ])
     
-    # Calculate 1d Bollinger Bands (20, 2) from VWAP
-    vwap_series = pd.Series(vwap)
-    vwap_ma = vwap_series.rolling(window=20, min_periods=20).mean().values
-    vwap_std = vwap_series.rolling(window=20, min_periods=20).std().values
-    bb_lower = vwap_ma - (2 * vwap_std)
-    bb_upper = vwap_ma + (2 * vwap_std)
+    # ATR
+    atr = np.zeros_like(close_1w)
+    atr[9] = np.mean(tr[:10])  # Simple average for first value
+    for i in range(10, len(atr)):
+        atr[i] = (atr[i-1] * 9 + tr[i]) / 10  # Wilder's smoothing
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Supertrend calculation
+    hl2 = (high_1w + low_1w) / 2
+    upper_band = hl2 + 3.0 * atr
+    lower_band = hl2 - 3.0 * atr
     
-    # Align 1d indicators to 4h timeframe
-    bb_lower_4h = align_htf_to_ltf(prices, df_1d, bb_lower)
-    bb_upper_4h = align_htf_to_ltf(prices, df_1d, bb_upper)
-    vwap_4h = align_htf_to_ltf(prices, df_1d, vwap)
-    ema_50_1d_4h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    supertrend = np.zeros_like(close_1w)
+    direction = np.ones_like(close_1w)  # 1 for uptrend, -1 for downtrend
     
-    # Volume filters (4h timeframe)
+    supertrend[0] = upper_band[0]
+    direction[0] = 1
+    
+    for i in range(1, len(close_1w)):
+        if close_1w[i] > supertrend[i-1]:
+            direction[i] = 1
+        elif close_1w[i] < supertrend[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+        
+        if direction[i] == 1:
+            supertrend[i] = max(lower_band[i], supertrend[i-1])
+        else:
+            supertrend[i] = min(upper_band[i], supertrend[i-1])
+    
+    # Align 1w Supertrend direction to 1d timeframe
+    supertrend_dir_1d = align_htf_to_ltf(prices, df_1w, direction)
+    
+    # Calculate 1d VWAP
+    typical_price = (high + low + close) / 3
+    vwap_num = np.cumsum(typical_price * volume)
+    vwap_den = np.cumsum(volume)
+    vwap = np.divide(vwap_num, vwap_den, out=np.full_like(vwap_num, np.nan), where=vwap_den!=0)
+    
+    # Volume filter: current volume > 1.5x 20-period average
+    vol_ma_20 = np.convolve(volume, np.ones(20)/20, mode='same')
+    vol_ma_20[:10] = np.nan
+    vol_ma_20[-10:] = np.nan
+    vol_ma_20 = np.where(np.arange(len(volume)) < 10, np.nan,
+                         np.where(np.arange(len(volume)) >= len(volume)-10, np.nan, vol_ma_20))
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma_20)  # Volume confirmation
+    volume_spike = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):  # Start after warmup
         # Skip if any critical value is NaN
-        if (np.isnan(bb_lower_4h[i]) or np.isnan(bb_upper_4h[i]) or 
-            np.isnan(vwap_4h[i]) or np.isnan(ema_50_1d_4h[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(supertrend_dir_1d[i]) or np.isnan(vwap[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price touches or goes below BB lower with volume spike and above EMA50
-            if low[i] <= bb_lower_4h[i] and volume_spike[i] and close[i] > ema_50_1d_4h[i]:
+            # Long: price crosses above VWAP with volume spike and bullish 1w Supertrend
+            if close[i] > vwap[i] and close[i-1] <= vwap[i-1] and volume_spike[i] and supertrend_dir_1d[i] == 1:
                 signals[i] = 0.25
                 position = 1
-            # Short: price touches or goes above BB upper with volume spike and below EMA50
-            elif high[i] >= bb_upper_4h[i] and volume_spike[i] and close[i] < ema_50_1d_4h[i]:
+            # Short: price crosses below VWAP with volume spike and bearish 1w Supertrend
+            elif close[i] < vwap[i] and close[i-1] >= vwap[i-1] and volume_spike[i] and supertrend_dir_1d[i] == -1:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses above VWAP
-            if close[i] > vwap_4h[i]:
+            # Exit long: price crosses below VWAP
+            if close[i] < vwap[i] and close[i-1] >= vwap[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses below VWAP
-            if close[i] < vwap_4h[i]:
+            # Exit short: price crosses above VWAP
+            if close[i] > vwap[i] and close[i-1] <= vwap[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
