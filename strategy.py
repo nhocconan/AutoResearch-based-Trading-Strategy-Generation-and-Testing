@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Williams %R with 1w EMA200 trend filter and volume confirmation
-# Long when 1d Williams %R < -80 (oversold) AND 1w EMA > EMA200 previous (uptrend) AND volume > 1.3 * avg_volume(30) on 12h
-# Short when 1d Williams %R > -20 (overbought) AND 1w EMA < EMA200 previous (downtrend) AND volume > 1.3 * avg_volume(30) on 12h
-# Exit when 1d Williams %R crosses back through -50 (mean reversion)
+# Hypothesis: 4h strategy using 1d Williams %R for mean reversion + 1w EMA200 trend filter + volume confirmation
+# Long when 1d Williams %R < -80 (oversold) AND 1w EMA > EMA200 previous (uptrend) AND volume > 1.3 * avg_volume(20) on 4h
+# Short when 1d Williams %R > -20 (overbought) AND 1w EMA < EMA200 previous (downtrend) AND volume > 1.3 * avg_volume(20) on 4h
+# Exit when 1d Williams %R crosses back above -50 (for long) or below -50 (for short)
 # Uses discrete sizing 0.25 to balance return and risk
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
-# Williams %R provides mean reversion signals at extremes
+# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
+# Williams %R provides reliable mean reversion signals in ranging markets
 # 1w EMA200 trend filter ensures we trade with the dominant weekly trend
-# Volume confirmation (1.3x) validates signal strength while limiting overtrading
+# Volume confirmation validates signal strength while limiting overtrading
 
-name = "12h_1dWilliamsR_1wEMA200_Trend_VolumeConfirm"
-timeframe = "12h"
+name = "4h_1dWilliamsR_1wEMA200_Trend_VolumeConfirm"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,20 +29,20 @@ def generate_signals(prices):
     
     # Get 1d data ONCE before loop for Williams %R calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:  # Need at least 14 completed daily bars for Williams %R
+    if len(df_1d) < 14:  # Need at least 14 completed 1d bars for Williams %R
         return np.zeros(n)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    # Calculate 1d Williams %R: (highest high - close) / (highest high - lowest low) * -100
     highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
     lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     williams_r_1d = -100 * (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14)
-    # Handle division by zero when highest_high == lowest_low
+    # Handle division by zero when high == low
     williams_r_1d = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r_1d)
     
-    # Align 1d Williams %R to 12h timeframe (wait for completed 1d bar)
+    # Align 1d Williams %R to 4h timeframe (wait for completed 1d bar)
     williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r_1d)
     
     # Get 1w data ONCE before loop for EMA200 trend filter
@@ -55,9 +55,9 @@ def generate_signals(prices):
     ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
     ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
-    # Calculate volume confirmation: volume > 1.3 * 30-period average volume on 12h
-    avg_volume_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_confirm = volume > (1.3 * avg_volume_30)
+    # Calculate volume confirmation: volume > 1.3 * 20-period average volume on 4h
+    avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.3 * avg_volume_20)
     
     # Session filter: 08-20 UTC (pre-compute for efficiency)
     hours = prices.index.hour
@@ -69,7 +69,7 @@ def generate_signals(prices):
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN or outside session
         if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_200_1w_aligned[i]) or 
-            np.isnan(avg_volume_30[i]) or not in_session[i]):
+            np.isnan(avg_volume_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -89,14 +89,14 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R crosses back above -50 (mean reversion)
+            # Exit long: Williams %R crosses back above -50
             if williams_r_aligned[i] > -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R crosses back below -50 (mean reversion)
+            # Exit short: Williams %R crosses back below -50
             if williams_r_aligned[i] < -50:
                 signals[i] = 0.0
                 position = 0
