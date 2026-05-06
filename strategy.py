@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1-day KAMA for trend direction with RSI(14) for momentum and volume confirmation
-# Long when KAMA is rising (bullish trend) and RSI < 30 (oversold) with volume > 1.5x 20-period average
-# Short when KAMA is falling (bearish trend) and RSI > 70 (overbought) with volume > 1.5x 20-period average
-# Uses daily KAMA to capture trend, RSI for mean-reversion entries, volume for confirmation
-# Designed to work in bull markets via buying dips in uptrends and in bear markets via selling rallies in downtrends
-# Target: 15-25 trades per year (60-100 over 4 years) with 0.25 position sizing
+# Hypothesis: 4h strategy using 1-day Williams %R with 1-week EMA trend filter and volume confirmation
+# Long when Williams %R < -80 (oversold) + price > 1-week EMA50 + volume > 1.5x 20-period average
+# Short when Williams %R > -20 (overbought) + price < 1-week EMA50 + volume > 1.5x 20-period average
+# Williams %R identifies overextended moves, EMA50 provides trend direction, volume confirms strength
+# Designed to work in both bull (buy dips in uptrend) and bear (sell rallies in downtrend) markets
+# Target: 20-40 trades per year (80-160 over 4 years) with 0.25 position sizing
 
-name = "12h_1dKAMA_RSI_Volume_v2"
-timeframe = "12h"
+name = "4h_1dWilliamsR_1wEMA50_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,41 +24,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1-day KAMA (adaptive moving average)
+    # Calculate 1-day Williams %R (14-period)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate Efficiency Ratio (ER) for KAMA
-    change = abs(df_1d['close'].diff(10))
-    volatility = df_1d['close'].diff().abs().rolling(window=10).sum()
-    er = change / volatility
-    er = er.fillna(0)
+    highest_high = df_1d['high'].rolling(window=14, min_periods=14).max().values
+    lowest_low = df_1d['low'].rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    williams_r[highest_high == lowest_low] = -50  # avoid division by zero
     
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # Calculate 1-week EMA50 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Calculate KAMA
-    kama = np.zeros(len(df_1d))
-    kama[0] = df_1d['close'].iloc[0]
-    for i in range(1, len(df_1d)):
-        kama[i] = kama[i-1] + sc.iloc[i] * (df_1d['close'].iloc[i] - kama[i-1])
+    ema_50 = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align KAMA to 12h timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    
-    # Calculate RSI(14) on 1-day data
-    delta = df_1d['close'].diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50)  # Fill NaN with neutral 50
-    
-    # Align RSI to 12h timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi.values)
+    # Align indicators to 4h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
     
     # Volume confirmation: >1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -71,9 +56,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):  # Start after KAMA/RSI warmup
+    for i in range(50, n):  # Start after EMA warmup
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_50_aligned[i]) or 
             np.isnan(volume_filter[i]) or
             not session_filter[i]):
             if position != 0:
@@ -82,24 +67,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: KAMA rising (bullish trend) and RSI < 30 (oversold) with volume confirmation
-            if kama_aligned[i] > kama_aligned[i-1] and rsi_aligned[i] < 30 and volume_filter[i]:
+            # Long: Williams %R oversold (< -80) + price above weekly EMA50 + volume confirmation
+            if williams_r_aligned[i] < -80 and close[i] > ema_50_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA falling (bearish trend) and RSI > 70 (overbought) with volume confirmation
-            elif kama_aligned[i] < kama_aligned[i-1] and rsi_aligned[i] > 70 and volume_filter[i]:
+            # Short: Williams %R overbought (> -20) + price below weekly EMA50 + volume confirmation
+            elif williams_r_aligned[i] > -20 and close[i] < ema_50_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: KAMA starts falling or RSI > 70 (overbought)
-            if kama_aligned[i] < kama_aligned[i-1] or rsi_aligned[i] > 70:
+            # Exit long: Williams %R returns to neutral (> -50) or price breaks below weekly EMA50
+            if williams_r_aligned[i] > -50 or close[i] < ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: KAMA starts rising or RSI < 30 (oversold)
-            if kama_aligned[i] > kama_aligned[i-1] or rsi_aligned[i] < 30:
+            # Exit short: Williams %R returns to neutral (< -50) or price breaks above weekly EMA50
+            if williams_r_aligned[i] < -50 or close[i] > ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
