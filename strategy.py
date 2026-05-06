@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h/1d trend alignment with volume confirmation
-# Long when 4h EMA21 > 4h EMA50, 1d close > 1d EMA50, price pulls back to 4h EMA21 with volume spike
-# Short when 4h EMA21 < 4h EMA50, 1d close < 1d EMA50, price bounces to 4h EMA21 with volume spike
-# Uses higher timeframe for trend direction (4h/1d) and 1h for precise entry on pullbacks
-# Volume spike confirms institutional interest during retracements
-# Target: 15-37 trades/year (60-150 over 4 years) with 0.20 position sizing
+# Hypothesis: 6h strategy using 1-week RSI extremes with 1-day ADX filter and volume confirmation
+# Long when weekly RSI < 30 (oversold) + daily ADX > 25 (trending) + volume > 1.5x average
+# Short when weekly RSI > 70 (overbought) + daily ADX > 25 (trending) + volume > 1.5x average
+# Weekly RSI identifies extremes, daily ADX ensures trending environment, volume confirms strength.
+# Works in bull/bear markets by fading extremes in trending conditions.
+# Target: 12-37 trades per year (50-150 over 4 years) with 0.25 position sizing.
 
-name = "1h_4h1dEMA21_50_PullbackVolume_v1"
-timeframe = "1h"
+name = "6h_1wRSI_1dADX_TrendFade_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,35 +24,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 4h EMA21 and EMA50 ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Calculate 1-week RSI ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_4h) < 50:
+    if len(df_1w) < 14:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    ema21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Weekly RSI (14-period)
+    delta = pd.Series(df_1w['close']).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi_1w = (100 - (100 / (1 + rs))).fillna(50).values
     
-    # Align 4h EMAs to 1h timeframe
-    ema21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema21_4h)
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Align weekly RSI to 6h timeframe
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
     
-    # Calculate 1d EMA50 ONCE before loop
+    # Calculate 1-day ADX for trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 50:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # True Range calculation for 1-day ADX
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     
-    # Align 1d EMA50 to 1h timeframe
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Directional Movement
+    dm_plus = np.where((df_1d['high'] - df_1d['high'].shift(1)) > (df_1d['low'].shift(1) - df_1d['low']), 
+                       np.maximum(df_1d['high'] - df_1d['high'].shift(1), 0), 0)
+    dm_minus = np.where((df_1d['low'].shift(1) - df_1d['low']) > (df_1d['high'] - df_1d['high'].shift(1)), 
+                        np.maximum(df_1d['low'].shift(1) - df_1d['low'], 0), 0)
     
-    # Volume confirmation: >2.0x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (2.0 * vol_ma_20)
+    # Smooth TR and DM
+    tr_smooth = pd.Series(tr).rolling(window=14, min_periods=14).sum()
+    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum()
+    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum()
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / tr_smooth.replace(0, np.nan)
+    di_minus = 100 * dm_minus_smooth / tr_smooth.replace(0, np.nan)
+    
+    # DX and ADX
+    dx = 100 * abs(di_plus - di_minus) / (di_plus + di_minus).replace(0, np.nan)
+    adx_1d = dx.rolling(window=14, min_periods=14).mean().values
+    
+    # Align ADX to 6h timeframe
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Volume confirmation: >1.5x 50-period average
+    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    volume_filter = volume > (1.5 * vol_ma_50)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -63,44 +89,35 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(ema21_4h_aligned[i]) or np.isnan(ema50_4h_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_filter[i]) or
-            not session_filter[i]):
+        if (np.isnan(rsi_1w_aligned[i]) or np.isnan(adx_1d_aligned[i]) or 
+            np.isnan(volume_filter[i]) or not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: 4h uptrend (EMA21 > EMA50), 1d uptrend (close > EMA50), pullback to 4h EMA21 with volume spike
-            if (ema21_4h_aligned[i] > ema50_4h_aligned[i] and 
-                close[i] > ema50_1d_aligned[i] and
-                low[i] <= ema21_4h_aligned[i] * 1.005 and  # Allow small tolerance for pullback
-                high[i] >= ema21_4h_aligned[i] * 0.995 and
-                volume_filter[i]):
-                signals[i] = 0.20
+            # Long: weekly RSI oversold (<30) + trending (ADX>25) + volume confirmation
+            if rsi_1w_aligned[i] < 30 and adx_1d_aligned[i] > 25 and volume_filter[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: 4h downtrend (EMA21 < EMA50), 1d downtrend (close < EMA50), bounce to 4h EMA21 with volume spike
-            elif (ema21_4h_aligned[i] < ema50_4h_aligned[i] and 
-                  close[i] < ema50_1d_aligned[i] and
-                  high[i] >= ema21_4h_aligned[i] * 0.995 and  # Allow small tolerance for bounce
-                  low[i] <= ema21_4h_aligned[i] * 1.005 and
-                  volume_filter[i]):
-                signals[i] = -0.20
+            # Short: weekly RSI overbought (>70) + trending (ADX>25) + volume confirmation
+            elif rsi_1w_aligned[i] > 70 and adx_1d_aligned[i] > 25 and volume_filter[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: 4h trend breaks down (EMA21 < EMA50) or 1d trend breaks down
-            if ema21_4h_aligned[i] < ema50_4h_aligned[i] or close[i] < ema50_1d_aligned[i]:
+            # Exit long: weekly RSI returns to neutral (>50) or ADX weakens (<20)
+            if rsi_1w_aligned[i] > 50 or adx_1d_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: 4h trend breaks up (EMA21 > EMA50) or 1d trend breaks up
-            if ema21_4h_aligned[i] > ema50_4h_aligned[i] or close[i] > ema50_1d_aligned[i]:
+            # Exit short: weekly RSI returns to neutral (<50) or ADX weakens (<20)
+            if rsi_1w_aligned[i] < 50 or adx_1d_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
