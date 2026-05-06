@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using weekly Donchian breakout with volume confirmation and ADX trend filter
-# - Uses 1w Donchian channels (20-period) for long-term structure
-# - Uses 4h volume spike for entry confirmation
-# - Uses 4h ADX > 25 to filter for trending markets only
-# - Enters long when price breaks above 1w Donchian upper band with volume and trend
-# - Enters short when price breaks below 1w Donchian lower band with volume and trend
-# - Exits when price returns to 1w Donchian middle (median) or opposite band
-# - Designed to capture major trend moves with institutional level respect
-# - Target: 80-180 total trades over 4 years (20-45/year) with 0.25 position sizing
+# Hypothesis: 1d KAMA direction + RSI(2) mean reversion + 1w trend filter
+# - Uses daily KAMA (adaptive moving average) for trend direction
+# - Uses 2-period RSI for mean-reversion entries against the trend
+# - Uses weekly ADX > 20 to filter for trending markets only
+# - Enters long when price < KAMA and RSI(2) < 10 in weekly uptrend
+# - Enters short when price > KAMA and RSI(2) > 90 in weekly downtrend
+# - Exits when RSI(2) crosses 50 (mean reversion complete)
+# - Designed to catch pullbacks in strong trends with low trade frequency
+# - Target: 30-100 total trades over 4 years (7-25/year) with 0.25 position sizing
 
-name = "4h_1wDonchian_20_Volume_ADX_Trend"
-timeframe = "4h"
+name = "1d_KAMA_RSI2_1wADX_Trend"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,33 +25,17 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1w data for Donchian channels
+    # Get weekly data for ADX trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate 1w Donchian channels (20-period)
+    # Calculate 1w ADX (14-period) for trend strength
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Donchian upper and lower bands
-    upper_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    middle_20 = (upper_20 + lower_20) / 2  # Median line for exit
-    
-    # Align 1w Donchian channels to 4h timeframe
-    upper_20_4h = align_htf_to_ltf(prices, df_1w, upper_20)
-    lower_20_4h = align_htf_to_ltf(prices, df_1w, lower_20)
-    middle_20_4h = align_htf_to_ltf(prices, df_1w, middle_20)
-    
-    # Volume filter (4h timeframe)
-    vol_ma_10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
-    volume_spike = volume > (1.8 * vol_ma_10)  # Strong volume confirmation
-    
-    # ADX filter (4h timeframe) - trend strength
     def calculate_adx(high, low, close, period=14):
         plus_dm = np.zeros_like(high)
         minus_dm = np.zeros_like(high)
@@ -96,41 +80,93 @@ def generate_signals(prices):
         
         return adx
     
-    adx_values = calculate_adx(high, low, close, 14)
-    adx_filter = adx_values > 25  # Strong trend filter
+    adx_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
+    adx_1w_filter = adx_1w > 20  # Trending market filter
+    
+    # Calculate daily KAMA (adaptive moving average)
+    # ER = Efficiency Ratio, SC = Smoothing Constant
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0)  # placeholder, will compute properly
+    
+    # Proper ER calculation
+    price_change = np.abs(np.diff(close, n=10, prepend=close[:10]))
+    volatility_sum = np.zeros_like(close)
+    for i in range(10, len(close)):
+        volatility_sum[i] = np.sum(np.abs(np.diff(close[i-9:i+1])))
+    
+    er = np.zeros_like(close)
+    for i in range(10, len(close)):
+        if volatility_sum[i] != 0:
+            er[i] = price_change[i] / volatility_sum[i]
+        else:
+            er[i] = 0
+    
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Calculate KAMA
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # Calculate daily RSI(2)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Wilder's smoothing for RSI
+    avg_gain = np.zeros_like(close)
+    avg_loss = np.zeros_like(close)
+    avg_gain[1] = gain[1]
+    avg_loss[1] = loss[1]
+    
+    for i in range(2, len(close)):
+        avg_gain[i] = (avg_gain[i-1] * 1 + gain[i]) / 2
+        avg_loss[i] = (avg_loss[i-1] * 1 + loss[i]) / 2
+    
+    rs = np.zeros_like(close)
+    rs[avg_loss != 0] = avg_gain[avg_loss != 0] / avg_loss[avg_loss != 0]
+    rsi = np.zeros_like(close)
+    rsi = 100 - (100 / (1 + rs))
+    rsi[avg_loss == 0] = 100  # When no losses, RSI = 100
+    
+    # Align weekly ADX filter to daily timeframe
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w_filter)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(30, n):
         # Skip if any critical value is NaN
-        if (np.isnan(upper_20_4h[i]) or np.isnan(lower_20_4h[i]) or 
-            np.isnan(middle_20_4h[i]) or np.isnan(volume_spike[i]) or 
-            np.isnan(adx_filter[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or 
+            np.isnan(adx_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above 1w Donchian upper with volume and trend
-            if close[i] > upper_20_4h[i] and volume_spike[i] and adx_filter[i]:
+            # Long: price below KAMA and RSI(2) oversold in weekly uptrend
+            if close[i] < kama[i] and rsi[i] < 10 and adx_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below 1w Donchian lower with volume and trend
-            elif close[i] < lower_20_4h[i] and volume_spike[i] and adx_filter[i]:
+            # Short: price above KAMA and RSI(2) overbought in weekly downtrend
+            elif close[i] > kama[i] and rsi[i] > 90 and not adx_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to middle OR breaks below lower band
-            if close[i] < middle_20_4h[i] or close[i] < lower_20_4h[i]:
+            # Exit long: RSI(2) crosses above 50 (mean reversion complete)
+            if rsi[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to middle OR breaks above upper band
-            if close[i] > middle_20_4h[i] or close[i] > upper_20_4h[i]:
+            # Exit short: RSI(2) crosses below 50 (mean reversion complete)
+            if rsi[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
