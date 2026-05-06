@@ -3,133 +3,95 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Donchian breakout with volume confirmation and 1d ADX trend filter
-# - Uses 1d Donchian(20) channels for breakout signals
-# - Filters with 1d ADX(14) > 25 to ensure trending markets
-# - Requires volume spike (>2x 20-period average) for confirmation
-# - Exits when price crosses back below/above 1d midpoint or ADX drops below 20
-# - Designed to capture strong trends with proper risk control in both bull and bear markets
-# - Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
+# Hypothesis: 1d strategy using weekly RSI for mean reversion and daily volume for confirmation
+# - Uses 1w RSI(14) to identify oversold/overbought conditions
+# - Uses 1d volume spike (2x 20-day average) for confirmation
+# - Enters long when 1w RSI < 30 and price closes above 1d open with volume spike
+# - Enters short when 1w RSI > 70 and price closes below 1d open with volume spike
+# - Exits when RSI returns to neutral zone (40-60) or opposite signal occurs
+# - Designed to capture mean reversion in weekly extremes with daily confirmation
+# - Target: 30-100 total trades over 4 years (7-25/year) with 0.25 position sizing
 
-name = "12h_1dDonchian_ADX_Volume_Breakout"
-timeframe = "12h"
+name = "1d_1wRSI_1dVolume_MeanReversion"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
+    open_ = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian channels and ADX calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 1w data for RSI calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
         return np.zeros(n)
     
-    # Calculate 1d Donchian channels (20-period high/low)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1w RSI (14)
+    close_1w = df_1w['close'].values
+    delta = np.diff(close_1w, prepend=close_1w[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Donchian upper and lower bands
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
+    # Wilder's smoothing for RSI
+    def wilders_rsi(gain, loss, period):
+        avg_gain = np.zeros_like(gain)
+        avg_loss = np.zeros_like(loss)
+        if len(gain) < period:
+            return np.full_like(gain, 50.0)
+        avg_gain[period-1] = np.mean(gain[:period])
+        avg_loss[period-1] = np.mean(loss[:period])
+        for i in range(period, len(gain)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
     
-    # Calculate 1d ADX (14-period)
-    def calculate_adx(high, low, close, period=14):
-        # True Range
-        tr1 = high - low
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = tr1[0]
-        
-        # Directional Movement
-        dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                           np.maximum(high - np.roll(high, 1), 0), 0)
-        dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                            np.maximum(np.roll(low, 1) - low, 0), 0)
-        dm_plus[0] = 0
-        dm_minus[0] = 0
-        
-        # Smoothing (Wilder's)
-        def wilders_smoothing(data, period):
-            result = np.zeros_like(data)
-            if len(data) < period:
-                return result
-            result[period-1] = np.nansum(data[:period])
-            for i in range(period, len(data)):
-                result[i] = result[i-1] - (result[i-1] / period) + data[i]
-            return result
-        
-        atr = wilders_smoothing(tr, period)
-        dm_plus_smooth = wilders_smoothing(dm_plus, period)
-        dm_minus_smooth = wilders_smoothing(dm_minus, period)
-        
-        # Directional Indicators
-        di_plus = 100 * dm_plus_smooth / atr
-        di_minus = 100 * dm_minus_smooth / atr
-        
-        # DX and ADX
-        dx = np.zeros_like(close)
-        dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-        dx[np.isnan(dx) | np.isinf(dx)] = 0
-        
-        adx = wilders_smoothing(dx, period)
-        return adx
+    rsi_1w = wilders_rsi(gain, loss, 14)
     
-    adx = calculate_adx(high_1d, low_1d, close_1d, 14)
+    # Align 1w RSI to daily timeframe
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
     
-    # Align 1d indicators to 12h timeframe
-    donchian_high_12h = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_12h = align_htf_to_ltf(prices, df_1d, donchian_low)
-    donchian_mid_12h = align_htf_to_ltf(prices, df_1d, donchian_mid)
-    adx_12h = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume filters (12h timeframe)
+    # Daily volume spike (2x 20-day average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)  # Volume confirmation
+    volume_spike = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if any critical value is NaN
-        if (np.isnan(donchian_high_12h[i]) or np.isnan(donchian_low_12h[i]) or 
-            np.isnan(donchian_mid_12h[i]) or np.isnan(adx_12h[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(rsi_1w_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Look for trending market (ADX > 25) and breakout with volume
-            trending = adx_12h[i] > 25
-            
-            if trending:
-                # Long: price breaks above Donchian high with volume spike
-                if close[i] > donchian_high_12h[i] and volume_spike[i]:
-                    signals[i] = 0.25
-                    position = 1
-                # Short: price breaks below Donchian low with volume spike
-                elif close[i] < donchian_low_12h[i] and volume_spike[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # Long: 1w RSI oversold (<30) and price closes above open with volume spike
+            if rsi_1w_aligned[i] < 30 and close[i] > open_[i] and volume_spike[i]:
+                signals[i] = 0.25
+                position = 1
+            # Short: 1w RSI overbought (>70) and price closes below open with volume spike
+            elif rsi_1w_aligned[i] > 70 and close[i] < open_[i] and volume_spike[i]:
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Exit long: price crosses below Donchian mid OR ADX drops below 20 (trend weakening)
-            if close[i] < donchian_mid_12h[i] or adx_12h[i] < 20:
+            # Exit long: RSI returns to neutral (>=40) or opposite signal
+            if rsi_1w_aligned[i] >= 40 or (rsi_1w_aligned[i] > 70 and close[i] < open_[i] and volume_spike[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above Donchian mid OR ADX drops below 20 (trend weakening)
-            if close[i] > donchian_mid_12h[i] or adx_12h[i] < 20:
+            # Exit short: RSI returns to neutral (<=60) or opposite signal
+            if rsi_1w_aligned[i] <= 60 or (rsi_1w_aligned[i] < 30 and close[i] > open_[i] and volume_spike[i]):
                 signals[i] = 0.0
                 position = 0
             else:
