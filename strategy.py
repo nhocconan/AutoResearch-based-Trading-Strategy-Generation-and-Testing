@@ -1,18 +1,18 @@
-# US2314
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy combining 12h trend filter (HMA21) with 4h Donchian breakout
-# Uses volume confirmation (>1.5x 20-period average) to filter breakouts
-# Trend filter prevents counter-trend entries: long only when price above 12h HMA21, short only when below
-# Donchian(20) breakouts capture momentum moves; exits on opposite Donchian(10) touch for quick reversion
-# Works in both bull/bear markets: trend filter adapts to market direction, breakouts capture momentum
-# Target: 80-180 total trades over 4 years (20-45/year) with 0.25 position sizing
+# Hypothesis: 1h strategy using 4h Donchian channel breakouts with volume confirmation
+# Price breaking above/below 4h Donchian channel (20-period high/low) indicates trend continuation
+# Volume > 1.5x 20-period average confirms institutional participation
+# Use 1d EMA50 as trend filter: only long when price > EMA50, short when price < EMA50
+# Trade only during active session (08-20 UTC) to reduce noise
+# Target: 60-150 total trades over 4 years (15-37/year) with 0.20 position sizing
+# Works in both bull/bear markets: breakouts capture trends, EMA filter avoids counter-trend trades
 
-name = "4h_Donchian20_HMA21_12hTrend_VolumeFilter_v1"
-timeframe = "4h"
+name = "1h_Donchian20_4hBreakout_1dEMA50_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,53 +25,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 12h HMA21 trend filter ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    
-    if len(df_12h) < 21:
+    # Calculate 4h Donchian channel (20-period high/low) ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate HMA(21) on 12h close
-    close_12h = df_12h['close'].values
-    n_hma = 21
-    wma2 = np.zeros_like(close_12h)
-    wma1 = np.zeros_like(close_12h)
-    sqrt_n = int(np.sqrt(n_hma))
+    # Donchian channel: 20-period high and low
+    high_20 = pd.Series(df_4h['high']).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(df_4h['low']).rolling(window=20, min_periods=20).min().values
     
-    # WMA(n/2)
-    half_n = n_hma // 2
-    weights_half = np.arange(1, half_n + 1)
-    sum_weights_half = weights_half.sum()
-    for i in range(half_n, len(close_12h)):
-        wma1[i] = np.dot(close_12h[i-half_n+1:i+1], weights_half) / sum_weights_half
+    # Align 4h Donchian levels to 1h timeframe
+    donchian_high = align_htf_to_ltf(prices, df_4h, high_20)
+    donchian_low = align_htf_to_ltf(prices, df_4h, low_20)
     
-    # WMA(n)
-    weights_full = np.arange(1, n_hma + 1)
-    sum_weights_full = weights_full.sum()
-    for i in range(n_hma, len(close_12h)):
-        wma2[i] = np.dot(close_12h[i-n_hma+1:i+1], weights_full) / sum_weights_full
+    # Calculate 1d EMA50 for trend filter ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # HMA = 2*WMA(n/2) - WMA(n)
-    hma_12h = 2 * wma1 - wma2
-    # Final WMA(sqrt(n)) on the HMA
-    weights_sqrt = np.arange(1, sqrt_n + 1)
-    sum_weights_sqrt = weights_sqrt.sum()
-    hma_final = np.zeros_like(close_12h)
-    for i in range(sqrt_n, len(hma_12h)):
-        hma_final[i] = np.dot(hma_12h[i-sqrt_n+1:i+1], weights_sqrt) / sum_weights_sqrt
-    
-    # Align 12h HMA to 4h timeframe
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_final)
-    
-    # Calculate 4h Donchian channels
-    donchian_len = 20
-    upper_donchian = pd.Series(high).rolling(window=donchian_len, min_periods=donchian_len).max().values
-    lower_donchian = pd.Series(low).rolling(window=donchian_len, min_periods=donchian_len).min().values
-    
-    # Exit channel (shorter for reversion)
-    exit_len = 10
-    upper_exit = pd.Series(high).rolling(window=exit_len, min_periods=exit_len).max().values
-    lower_exit = pd.Series(low).rolling(window=exit_len, min_periods=exit_len).min().values
+    ema_50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
     # Volume confirmation: >1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -86,8 +59,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(hma_12h_aligned[i]) or np.isnan(upper_donchian[i]) or np.isnan(lower_donchian[i]) or
-            np.isnan(upper_exit[i]) or np.isnan(lower_exit[i]) or np.isnan(volume_filter[i]) or
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(volume_filter[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -95,27 +68,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long entry: price breaks above upper Donchian + volume + above 12h HMA
-            if close[i] > upper_donchian[i] and volume_filter[i] and close[i] > hma_12h_aligned[i]:
-                signals[i] = 0.25
+            # Long: price breaks above 4h Donchian high + volume + above 1d EMA50
+            if close[i] > donchian_high[i] and volume_filter[i] and close[i] > ema_50_aligned[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short entry: price breaks below lower Donchian + volume + below 12h HMA
-            elif close[i] < lower_donchian[i] and volume_filter[i] and close[i] < hma_12h_aligned[i]:
-                signals[i] = -0.25
+            # Short: price breaks below 4h Donchian low + volume + below 1d EMA50
+            elif close[i] < donchian_low[i] and volume_filter[i] and close[i] < ema_50_aligned[i]:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Long exit: price touches lower exit channel (mean reversion) or breaks below Donchian
-            if close[i] < lower_exit[i] or close[i] < lower_donchian[i]:
+            # Exit long: price breaks below 4h Donchian low (trend failure)
+            if close[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: price touches upper exit channel or breaks above Donchian
-            if close[i] > upper_exit[i] or close[i] > upper_donchian[i]:
+            # Exit short: price breaks above 4h Donchian high (trend failure)
+            if close[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
