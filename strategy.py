@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume spike
-# Long when price breaks above 20-period Donchian high AND 1d EMA34 uptrend AND volume > 2.0 * 20-bar avg volume
-# Short when price breaks below 20-period Donchian low AND 1d EMA34 downtrend AND volume > 2.0 * 20-bar avg volume
-# Exit with signal=0 when price reverses back to the midpoint of the Donchian channel
-# Uses discrete sizing 0.25 to balance opportunity and drawdown
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
-# Donchian provides clear structure; 1d EMA34 ensures higher-timeframe trend alignment
-# Volume spike confirms institutional participation
-# Works in bull via buying strength on upside breakouts, works in bear via selling strength on downside breakdowns
+# Hypothesis: 4h Camarilla H3/L3 breakout with 12h volume regime filter and ATR stop
+# Long when price breaks above H3 (bullish breakout) AND 12h volume > 1.5 * 24-bar avg volume (regime filter)
+# Short when price breaks below L3 (bearish breakdown) AND 12h volume > 1.5 * 24-bar avg volume
+# Exit with signal=0 when price reverts to the 12h VWAP (mean reversion to institutional value area)
+# Uses discrete sizing 0.25 to limit fee drag and manage drawdown
+# Target: 80-160 total trades over 4 years (20-40/year) for 4h timeframe
+# H3/L3 levels are stronger than R3/S3 for breakouts with institutional follow-through
+# 12h volume regime filter ensures we only trade during high-participation moves
+# 12h VWAP exit provides adaptive mean reversion target that works in both bull and bear markets
 
-name = "12h_Donchian20_1dEMA34_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_12hVolRegime_VWAPExit_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,74 +27,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
-        return np.zeros(n)
-    close_1d = df_1d['close'].values
-    
-    # Calculate 1d EMA34
-    close_1d_series = pd.Series(close_1d)
-    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align HTF indicators to 12h timeframe (wait for completed HTF bar)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Calculate Donchian channels from 12h data (more stable than lower timeframes)
+    # Get 12h data ONCE before loop for volume regime filter and VWAP
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    if len(df_12h) < 24:
         return np.zeros(n)
     high_12h = df_12h['high'].values
     low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Donchian formula: 20-period high/low
-    high_12h_series = pd.Series(high_12h)
-    low_12h_series = pd.Series(low_12h)
-    donchian_high = high_12h_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_12h_series.rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2.0
+    # Calculate 12h VWAP (volume-weighted average price)
+    typical_price_12h = (high_12h + low_12h + close_12h) / 3.0
+    pv_12h = typical_price_12h * volume_12h
+    cum_pv_12h = np.nancumsum(pv_12h)
+    cum_vol_12h = np.nancumsum(volume_12h)
+    vwap_12h = np.divide(cum_pv_12h, cum_vol_12h, out=np.full_like(cum_pv_12h, np.nan), where=cum_vol_12h!=0)
     
-    # Align Donchian channels to 12h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_12h, donchian_mid)
+    # Calculate 12h volume regime: volume > 1.5 * 24-bar average volume
+    avg_volume_24 = pd.Series(volume_12h).rolling(window=24, min_periods=24).mean().values
+    volume_regime = volume_12h > (1.5 * avg_volume_24)
     
-    # Calculate volume confirmation: volume > 2.0 * 20-bar average volume (stricter for fewer trades)
-    avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * avg_volume_20)
+    # Align HTF indicators to 4h timeframe (wait for completed HTF bar)
+    vwap_12h_aligned = align_htf_to_ltf(prices, df_12h, vwap_12h)
+    volume_regime_aligned = align_htf_to_ltf(prices, df_12h, volume_regime)
+    
+    # Get 1d data for Camarilla levels (more stable than intraday)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
+        return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Camarilla formula: H-L range based
+    # H3/L3 are the key levels for breakout/breakdown with institutional relevance
+    H3 = close_1d + (high_1d - low_1d) * 1.1 / 6
+    L3 = close_1d - (high_1d - low_1d) * 1.1 / 6
+    
+    # Align Camarilla levels to 4h timeframe
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(donchian_mid_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(vwap_12h_aligned[i]) or np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or
+            np.isnan(volume_regime_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Donchian breakout signals with trend and volume filters
-            # Long: price breaks above Donchian high AND uptrend AND volume spike
-            if close[i] > donchian_high_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_spike[i]:
+            # Camarilla H3/L3 breakout/breakdown signals with volume regime filter
+            # Long: price breaks above H3 (bullish breakout) AND volume regime active
+            if close[i] > H3_aligned[i] and volume_regime_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low AND downtrend AND volume spike
-            elif close[i] < donchian_low_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_spike[i]:
+            # Short: price breaks below L3 (bearish breakdown) AND volume regime active
+            elif close[i] < L3_aligned[i] and volume_regime_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price reverses back to Donchian midpoint (mean reversion)
-            if close[i] < donchian_mid_aligned[i]:
+            # Exit long: price reverts to 12h VWAP (mean reversion to value area)
+            if close[i] >= vwap_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price reverses back to Donchian midpoint (mean reversion)
-            if close[i] > donchian_mid_aligned[i]:
+            # Exit short: price reverts to 12h VWAP (mean reversion to value area)
+            if close[i] <= vwap_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
