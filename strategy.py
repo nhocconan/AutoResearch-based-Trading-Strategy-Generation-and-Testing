@@ -1,18 +1,18 @@
+# 2025-01-01-1d-01
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Keltner Channels with ATR-based volatility filter
-# - Long when price breaks above upper Keltner Channel with ATR(14) > 1.0 and volume spike
-# - Short when price breaks below lower Keltner Channel with ATR(14) > 1.0 and volume spike
-# - Exit when price crosses back inside Keltner Channels
-# - Designed to capture volatility breakouts in both trending and ranging markets
-# - Uses 1d Keltner Channels (EMA20 + 2*ATR(10)) for robust volatility-based bands
-# - Target: 100-200 total trades over 4 years (25-50/year) with 0.25 position sizing
+# Hypothesis: 1d strategy using 1-week EMA10 trend filter with RSI(14) mean reversion
+# - Long when RSI < 30 (oversold) and price > weekly EMA10 (uptrend filter)
+# - Short when RSI > 70 (overbought) and price < weekly EMA10 (downtrend filter)
+# - Exit when RSI crosses back to neutral (40-60 range)
+# - Designed to capture mean-reversion bounces in trending markets
+# - Target: 30-100 total trades over 4 years (7-25/year) with 0.25 position sizing
 
-name = "4h_KeltnerBreakout_ATR14_Volume"
-timeframe = "4h"
+name = "1d_RSI14_MeanReversion_1wEMA10"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,79 +21,64 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for Keltner Channel calculations
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 1w data for EMA10 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1w EMA10 for trend filter
+    ema_10_1w = pd.Series(df_1w['close'].values).ewm(span=10, adjust=False, min_periods=10).mean().values
+    ema_10_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_10_1w)
     
-    # Calculate 1d EMA20 for Keltner Channel center
-    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate RSI(14) on daily timeframe
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate 1d ATR(10) for Keltner Channel width
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_10_1d = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Wilder's smoothing (alpha = 1/14)
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[13] = np.mean(gain[1:14])  # First average
+    avg_loss[13] = np.mean(loss[1:14])
     
-    # Calculate 1d Keltner Channels
-    kc_upper_1d = ema_20_1d + (2 * atr_10_1d)
-    kc_lower_1d = ema_20_1d - (2 * atr_10_1d)
+    for i in range(14, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # Align 1d indicators to 4h timeframe
-    kc_upper_4h = align_htf_to_ltf(prices, df_1d, kc_upper_1d)
-    kc_lower_4h = align_htf_to_ltf(prices, df_1d, kc_lower_1d)
-    
-    # Calculate 4h ATR(14) for volatility filter (must be > 1.0)
-    tr1_4h = np.abs(high[1:] - low[1:])
-    tr2_4h = np.abs(high[1:] - close[:-1])
-    tr3_4h = np.abs(low[1:] - close[:-1])
-    tr_4h = np.concatenate([[np.nan], np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))])
-    atr_14_4h = pd.Series(tr_4h).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Volume filter: 4h volume > 1.5x 20-period MA
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma_20)
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(14, n):  # Start after RSI warmup
         # Skip if any critical value is NaN
-        if (np.isnan(kc_upper_4h[i]) or np.isnan(kc_lower_4h[i]) or 
-            np.isnan(atr_14_4h[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(ema_10_1w_aligned[i]) or np.isnan(rsi[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above upper Keltner Channel with ATR filter and volume spike
-            if close[i] > kc_upper_4h[i] and atr_14_4h[i] > 1.0 and volume_spike[i]:
+            # Long: RSI < 30 (oversold) and price > weekly EMA10 (uptrend)
+            if rsi[i] < 30 and close[i] > ema_10_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Keltner Channel with ATR filter and volume spike
-            elif close[i] < kc_lower_4h[i] and atr_14_4h[i] > 1.0 and volume_spike[i]:
+            # Short: RSI > 70 (overbought) and price < weekly EMA10 (downtrend)
+            elif rsi[i] > 70 and close[i] < ema_10_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses back inside Keltner Channel (below upper)
-            if close[i] < kc_upper_4h[i]:
+            # Exit long: RSI crosses back to neutral (>= 40)
+            if rsi[i] >= 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses back inside Keltner Channel (above lower)
-            if close[i] > kc_lower_4h[i]:
+            # Exit short: RSI crosses back to neutral (<= 60)
+            if rsi[i] <= 60:
                 signals[i] = 0.0
                 position = 0
             else:
