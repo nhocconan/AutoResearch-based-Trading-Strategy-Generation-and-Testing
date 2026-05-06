@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using 1w Camarilla pivot R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
-# Long when price breaks above 1w Camarilla R3 level AND 1d EMA34 > EMA34 previous (uptrend) AND volume > 2.0 * avg_volume(20) on 1d
-# Short when price breaks below 1w Camarilla S3 level AND 1d EMA34 < EMA34 previous (downtrend) AND volume > 2.0 * avg_volume(20) on 1d
-# Exit when price retests the 1w Camarilla pivot point (midpoint of R3/S3)
-# Uses discrete sizing 0.25 to balance return and risk
-# Target: 50-100 total trades over 4 years (12-25/year) for 1d timeframe
-# 1w Camarilla provides strong structural pivot levels with high probability reaction
+# Hypothesis: 12h strategy using 1d Camarilla pivot R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Long when price breaks above 1d Camarilla R3 level AND 1d EMA34 > EMA34 previous (uptrend) AND volume > 2.0 * avg_volume(20) on 12h
+# Short when price breaks below 1d Camarilla S3 level AND 1d EMA34 < EMA34 previous (downtrend) AND volume > 2.0 * avg_volume(20) on 12h
+# Exit when price retests the 1d Camarilla pivot point (midpoint of R3/S3)
+# Uses discrete sizing 0.30 to balance return and risk
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# 1d Camarilla provides strong structural pivot levels with high probability reaction
 # 1d EMA34 ensures we trade with the intermediate trend filter
 # Volume confirmation validates breakout strength while limiting false signals
 # Works in both bull (buy breakouts) and bear (sell breakdowns) markets
 
-name = "1d_1wCamarilla_R3S3_Breakout_1dEMA34_Trend_Volume"
-timeframe = "1d"
+name = "12h_1dCamarilla_R3S3_Breakout_1dEMA34_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,37 +28,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data ONCE before loop for Camarilla pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:  # Need at least 5 completed weekly bars for pivot calculation
+    # Get 1d data ONCE before loop for Camarilla pivot calculation and EMA34
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 5:  # Need at least 5 completed daily bars for pivot calculation
         return np.zeros(n)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1w Camarilla pivot levels (R3, S3, and pivot point)
+    # Calculate 1d Camarilla pivot levels (R3, S3, and pivot point)
     # Camarilla formulas:
     # Pivot = (H + L + C) / 3
     # R3 = C + (H - L) * 1.1 / 4
     # S3 = C - (H - L) * 1.1 / 4
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    r3_1w = close_1w + (high_1w - low_1w) * 1.1 / 4.0
-    s3_1w = close_1w - (high_1w - low_1w) * 1.1 / 4.0
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    r3_1d = close_1d + (high_1d - low_1d) * 1.1 / 4.0
+    s3_1d = close_1d - (high_1d - low_1d) * 1.1 / 4.0
     
-    # Align 1w Camarilla levels to 1d timeframe (wait for completed 1w bar)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    
-    # Get 1d data ONCE before loop for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:  # Need at least 34 completed 1d bars for EMA34
-        return np.zeros(n)
-    close_1d = df_1d['close'].values
+    # Calculate 1d EMA34 for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align 1d indicators to 12h timeframe (wait for completed 1d bar)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate volume confirmation: volume > 2.0 * 20-period average volume on 1d
+    # Calculate volume confirmation: volume > 2.0 * 20-period average volume on 12h
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (2.0 * avg_volume_20)
     
@@ -75,31 +71,31 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above 1w Camarilla R3, 1d EMA34 > EMA34 previous (uptrend), volume spike
+            # Long: price breaks above 1d Camarilla R3, 1d EMA34 > EMA34 previous (uptrend), volume spike
             if (close[i] > r3_aligned[i] and 
                 ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and 
                 volume_confirm[i]):
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
-            # Short: price breaks below 1w Camarilla S3, 1d EMA34 < EMA34 previous (downtrend), volume spike
+            # Short: price breaks below 1d Camarilla S3, 1d EMA34 < EMA34 previous (downtrend), volume spike
             elif (close[i] < s3_aligned[i] and 
                   ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and 
                   volume_confirm[i]):
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit long: price retests the 1w Camarilla pivot point
+            # Exit long: price retests the 1d Camarilla pivot point
             if close[i] <= pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit short: price retests the 1w Camarilla pivot point
+            # Exit short: price retests the 1d Camarilla pivot point
             if close[i] >= pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
