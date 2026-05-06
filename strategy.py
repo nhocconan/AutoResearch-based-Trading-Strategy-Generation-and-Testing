@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla R3/S3 breakout with 1w EMA34 trend filter and volume confirmation
-# Long when price breaks above R3 AND close > 1w EMA34 (uptrend) AND volume > 2.0 * 20-bar avg volume
-# Short when price breaks below S3 AND close < 1w EMA34 (downtrend) AND volume > 2.0 * 20-bar avg volume
-# Exit when price retouches the Camarilla pivot level (mean reversion to equilibrium)
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
+# Long when price breaks above Donchian upper band AND close > 1d EMA34 (uptrend) AND volume > 2.0 * 20-bar avg volume
+# Short when price breaks below Donchian lower band AND close < 1d EMA34 (downtrend) AND volume > 2.0 * 20-bar avg volume
+# Exit when price retouches the Donchian midpoint (mean reversion to equilibrium)
 # Uses discrete sizing 0.25 to balance return and fee drag
-# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe
-# 1w EMA34 provides intermediate trend filter between 1d and longer-term for better regime adaptation
-# Volume spike threshold increased to 2.0x to reduce false breakouts and lower trade frequency
-# Pivot retouch exit works in ranging markets and captures mean reversion after breakout failure
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# 1d EMA34 provides longer-term trend filter to avoid counter-trend trades in bear markets
+# Volume spike threshold set to 2.0x to reduce false breakouts and lower trade frequency
+# Donchian midpoint exit works in ranging markets and captures mean reversion after breakout failure
 
-name = "1d_Camarilla_R3S3_1wEMA34_VolumeSpike_v1"
-timeframe = "1d"
+name = "12h_Donchian20_1dEMA34_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,30 +27,29 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels for 1d timeframe (based on previous bar)
-    ph = np.concatenate([[high[0]], high[:-1]])  # previous high
-    pl = np.concatenate([[low[0]], low[:-1]])    # previous low
-    pc = np.concatenate([[close[0]], close[:-1]]) # previous close
+    # Calculate Donchian channels for 12h timeframe (based on previous 20 bars)
+    # Upper band: highest high of previous 20 bars
+    # Lower band: lowest low of previous 20 bars
+    # Midpoint: average of upper and lower bands
+    ph = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    pl = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    pivot = (ph + pl + pc) / 3.0
-    range_ = ph - pl
+    upper_band = ph
+    lower_band = pl
+    midpoint = (upper_band + lower_band) / 2.0
     
-    # Camarilla levels (R3/S3 = standard breakout thresholds with good balance)
-    r3 = pivot + (range_ * 1.1 / 4.0)
-    s3 = pivot - (range_ * 1.1 / 4.0)
-    
-    # Get 1w data ONCE before loop for EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Get 1d data ONCE before loop for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1w EMA34
-    close_1w_series = pd.Series(close_1w)
-    ema34_1w = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 1d EMA34
+    close_1d_series = pd.Series(close_1d)
+    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align HTF indicators to 1d timeframe (wait for completed HTF bar)
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Align HTF indicators to 12h timeframe (wait for completed HTF bar)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Calculate volume confirmation: volume > 2.0 * 20-bar average volume
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -61,33 +60,33 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN
-        if (np.isnan(r3[i]) or np.isnan(s3[i]) or 
-            np.isnan(ema34_1w_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
+            np.isnan(midpoint[i]) or np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Camarilla R3/S3 breakout signals with trend and volume filters
-            # Long: Break above R3 AND uptrend AND volume spike
-            if close[i] > r3[i] and close[i] > ema34_1w_aligned[i] and volume_spike[i]:
+            # Donchian breakout signals with trend and volume filters
+            # Long: Break above upper band AND uptrend AND volume spike
+            if close[i] > upper_band[i] and close[i] > ema34_1d_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S3 AND downtrend AND volume spike
-            elif close[i] < s3[i] and close[i] < ema34_1w_aligned[i] and volume_spike[i]:
+            # Short: Break below lower band AND downtrend AND volume spike
+            elif close[i] < lower_band[i] and close[i] < ema34_1d_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price retouches pivot level (mean reversion)
-            if close[i] <= pivot[i]:
+            # Exit long: Price retouches midpoint level (mean reversion)
+            if close[i] <= midpoint[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price retouches pivot level (mean reversion)
-            if close[i] >= pivot[i]:
+            # Exit short: Price retouches midpoint level (mean reversion)
+            if close[i] >= midpoint[i]:
                 signals[i] = 0.0
                 position = 0
             else:
