@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1-day pivot points (R1/S1 for breakouts, R2/S2 for reversals) with volume confirmation and volatility filter
-# Breakouts above R1 or below S1 with volume > 2x 20-period average and ATR > 20-period average ATR indicate strong momentum
-# Reversals at R2 or S2 with volume and volatility filters capture mean reversion within daily range
-# Works in bull/bear markets: breakouts capture trends, reversals capture pullbacks within trend
-# Target: 75-200 total trades over 4 years (19-50/year) with 0.25 position sizing
+# Hypothesis: 1d strategy using weekly Bollinger Bands with mean reversion in low volatility regime
+# Weekly Bollinger Bands (20,2) define dynamic support/resistance
+# Mean reversion when price touches bands with volume confirmation in low volatility (ADX < 25)
+# Exit at weekly middle band (20-period SMA)
+# Works in bull/bear markets: mean reversion captures pullbacks in trends and range-bound behavior
+# Target: 30-100 total trades over 4 years (7-25/year) with 0.30 position sizing
 
-name = "4h_1dPivot_R1S2_VolumeVolFilter_v1"
-timeframe = "4h"
+name = "1d_weeklyBB_meanrev_ADXvol_filter_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,48 +24,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d pivot points ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Calculate weekly Bollinger Bands ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 2:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Previous day's OHLC for pivot calculation
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Weekly Bollinger Bands (20, 2)
+    weekly_close = df_1w['close'].values
+    bb_length = 20
+    bb_mult = 2.0
     
-    # Pivot point calculation
-    # Pivot = (previous high + previous low + previous close) / 3
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_ = prev_high - prev_low
+    # Basis (SMA)
+    basis = pd.Series(weekly_close).rolling(window=bb_length, min_periods=bb_length).mean().values
+    # Deviation
+    dev = bb_mult * pd.Series(weekly_close).rolling(window=bb_length, min_periods=bb_length).std().values
+    # Upper and Lower Bands
+    upper = basis + dev
+    lower = basis - dev
     
-    # Support and Resistance levels
-    r1 = pivot + (range_ * 1.0)
-    r2 = pivot + (range_ * 2.0)
-    s1 = pivot - (range_ * 1.0)
-    s2 = pivot - (range_ * 2.0)
+    # Align weekly bands to daily timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_1w, upper)
+    lower_aligned = align_htf_to_ltf(prices, df_1w, lower)
+    basis_aligned = align_htf_to_ltf(prices, df_1w, basis)
     
-    # Align 1d levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    # ADX for volatility regime filter (weekly)
+    # Calculate True Range
+    tr1 = df_1w['high'] - df_1w['low']
+    tr2 = np.abs(df_1w['high'] - df_1w['close'].shift(1))
+    tr3 = np.abs(df_1w['low'] - df_1w['close'].shift(1))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    # Calculate Directional Movement
+    dm_plus = np.where((df_1w['high'] - df_1w['high'].shift(1)) > (df_1w['low'].shift(1) - df_1w['low']), 
+                       np.maximum(df_1w['high'] - df_1w['high'].shift(1), 0), 0)
+    dm_minus = np.where((df_1w['low'].shift(1) - df_1w['low']) > (df_1w['high'] - df_1w['high'].shift(1)), 
+                        np.maximum(df_1w['low'].shift(1) - df_1w['low'], 0), 0)
+    # Smooth TR, DM+ and DM- with Wilder's smoothing (using EMA with alpha=1/period)
+    tr_14 = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
+    dm_plus_14 = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False).mean().values
+    dm_minus_14 = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False).mean().values
+    # Calculate DI+ and DI-
+    di_plus = 100 * dm_plus_14 / tr_14
+    di_minus = 100 * dm_minus_14 / tr_14
+    # Calculate DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
     
-    # Volume confirmation: >2.0x 20-period average (higher threshold to reduce trades)
+    # Align ADX to daily timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    
+    # Volume confirmation: >1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (2.0 * vol_ma_20)
+    volume_filter = volume > (1.5 * vol_ma_20)
     
-    # Volatility filter: ATR(14) > 20-period average ATR
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(np.maximum(tr1, tr2), tr3)])
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma_20 = pd.Series(atr_14).rolling(window=20, min_periods=20).mean().values
-    vol_filter = atr_14 > atr_ma_20
+    # Low volatility regime: ADX < 25 (range-bound market)
+    vol_regime = adx_aligned < 25
     
-    # Pre-compute session filter (08-20 UTC)
+    # Session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     session_filter = (hours >= 8) & (hours <= 20)
     
@@ -73,8 +89,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(s2_aligned[i]) or np.isnan(volume_filter[i]) or np.isnan(vol_filter[i]) or
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or np.isnan(basis_aligned[i]) or 
+            np.isnan(volume_filter[i]) or np.isnan(vol_regime[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -82,35 +98,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long breakout: price breaks above R1 with volume confirmation and volatility
-            if close[i] > r1_aligned[i] and volume_filter[i] and vol_filter[i]:
-                signals[i] = 0.25
+            # Long: price touches lower band with volume confirmation in low volatility regime
+            if close[i] <= lower_aligned[i] and volume_filter[i] and vol_regime[i]:
+                signals[i] = 0.30
                 position = 1
-            # Short breakout: price breaks below S1 with volume confirmation and volatility
-            elif close[i] < s1_aligned[i] and volume_filter[i] and vol_filter[i]:
-                signals[i] = -0.25
-                position = -1
-            # Long reversal: price rejects S2 with volume confirmation and volatility
-            elif close[i] < s2_aligned[i] and close[i] > s2_aligned[i] * 0.995 and volume_filter[i] and vol_filter[i]:
-                signals[i] = 0.25
-                position = 1
-            # Short reversal: price rejects R2 with volume confirmation and volatility
-            elif close[i] > r2_aligned[i] and close[i] < r2_aligned[i] * 1.005 and volume_filter[i] and vol_filter[i]:
-                signals[i] = -0.25
+            # Short: price touches upper band with volume confirmation in low volatility regime
+            elif close[i] >= upper_aligned[i] and volume_filter[i] and vol_regime[i]:
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below S1 (failed support) or reaches R2 (take profit)
-            if close[i] < s1_aligned[i] or close[i] > r2_aligned[i]:
+            # Exit long: price reaches middle band (mean reversion target)
+            if close[i] >= basis_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit short: price breaks above R1 (failed resistance) or reaches S2 (take profit)
-            if close[i] > r1_aligned[i] or close[i] < s2_aligned[i]:
+            # Exit short: price reaches middle band (mean reversion target)
+            if close[i] <= basis_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
