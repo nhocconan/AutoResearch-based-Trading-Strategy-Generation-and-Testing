@@ -1,45 +1,101 @@
-# 1. Hypothesis: The strategy uses a 12-hour Exponential Moving Average (EMA50) as a trend filter on the 4-hour timeframe, combined with price action relative to the EMA and volume confirmation to capture trending moves while avoiding whipsaws in ranging markets. The EMA50 on the 12-hour timeframe provides a smoother, more reliable trend signal than shorter-term EMAs, reducing false signals during choppy periods. Volume confirmation ensures that price moves are supported by participation, increasing the likelihood of sustained trends. The strategy is designed to work in both bull and bear markets by dynamically adapting to the prevailing trend direction as defined by the 12-hour EMA50, thus avoiding the pitfalls of fixed-direction strategies. The 4-hour timeframe balances responsiveness with reduced noise, targeting a trade frequency within the optimal range to minimize fee drag.
-
-# 2. Implementation: The strategy calculates the 12-hour EMA50 once before the main loop using the `get_htf_data` function, then aligns it to the 4-hour chart using `align_htf_to_ltf` to ensure no look-ahead bias. Entry conditions require the price to be on the correct side of the EMA (above for long, below for short) and volume to exceed 1.5 times its 20-period moving average. Positions are held until the price crosses back over the EMA, at which point the signal returns to zero. Position sizing is set to 0.25 (25% of capital) to balance risk and reward, using discrete levels to minimize fee churn from frequent signal changes. All indicators use appropriate `min_periods` to avoid look-ahead bias, and the main loop processes data in a vectorized manner where possible, with only the state-dependent logic in a loop.
-
-# 3. The strategy adheres to all rules: it calls `get_htf_data` only once before the loop, uses `align_htf_to_ltf` for proper multi-timeframe alignment without manual index mapping, avoids any form of resampling or manual timeframe conversion, uses discrete position sizes (0.0, ±0.25), includes exit logic via signal changes (no simulated intrabar stops), and respects the 4-hour timeframe as required. The use of volume and EMA trend filtering is intended to produce a moderate number of trades (targeting 20-50 per year per symbol) to avoid the fee drag that has caused recent strategy failures.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_EMA50_12hTrend_VolumeFilter_v1"
-timeframe = "4h"
+# Hypothesis: 1d KAMA + RSI + Chop regime filter
+# Uses KAMA (Kaufman Adaptive Moving Average) on 1d for trend direction
+# RSI(14) for momentum confirmation with overbought/oversold levels
+# Choppiness Index(14) to detect ranging markets (CHOP > 61.8) and avoid trend signals in chop
+# Designed for 1d timeframe to target 30-100 total trades over 4 years (7-25/year)
+# Works in both bull/bear: KAMA catches trends, RSI avoids exhaustion, Chop filter prevents whipsaws in ranging markets
+
+name = "1d_KAMA_RSI_ChopFilter_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
     # Calculate HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_12h) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate 12h EMA50
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # Calculate KAMA(10) on 1d timeframe
+    def kama(data, period=10):
+        # Efficiency Ratio
+        change = np.abs(np.diff(data, n=period))
+        volatility = np.sum(np.abs(np.diff(data)), axis=0) if len(data) > 1 else 0
+        er = np.where(volatility != 0, change / volatility, 0)
+        # Smoothing constants
+        sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
+        # Initialize KAMA
+        kama_vals = np.full_like(data, np.nan)
+        if len(data) > period:
+            kama_vals[period] = data[period]
+            for i in range(period+1, len(data)):
+                kama_vals[i] = kama_vals[i-1] + sc[i] * (data[i] - kama_vals[i-1])
+        return kama_vals
     
-    # Calculate volume confirmation filter (>1.5x 20-bar average)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_20)
+    kama_1d = kama(close_1d, 10)
     
-    # Align HTF indicators to 4h timeframe (primary)
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate RSI(14) on 1d timeframe
+    def rsi(data, period=14):
+        delta = np.diff(data)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = np.zeros_like(data)
+        avg_loss = np.zeros_like(data)
+        if len(data) > period:
+            avg_gain[period] = np.mean(gain[:period])
+            avg_loss[period] = np.mean(loss[:period])
+            for i in range(period+1, len(data)):
+                avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
+                avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi_vals = 100 - (100 / (1 + rs))
+        return rsi_vals
+    
+    rsi_1d = rsi(close_1d, 14)
+    
+    # Calculate Choppiness Index(14) on 1d timeframe
+    def choppy(data_high, data_low, data_close, period=14):
+        # True Range
+        tr1 = np.abs(data_high[1:] - data_low[1:])
+        tr2 = np.abs(data_high[1:] - data_close[:-1])
+        tr3 = np.abs(data_low[1:] - data_close[:-1])
+        tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+        atr = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
+        
+        # Highest high and lowest low over period
+        max_h = pd.Series(data_high).rolling(window=period, min_periods=period).max().values
+        min_l = pd.Series(data_low).rolling(window=period, min_periods=period).min().values
+        
+        # Chop = 100 * log10(atr / (max_h - min_l)) / log10(period)
+        range_hl = max_h - min_l
+        chop = np.where((range_hl > 0) & (atr > 0), 
+                        100 * np.log10(atr / range_hl) / np.log10(period), 50)
+        return chop
+    
+    chop_1d = choppy(high_1d, low_1d, close_1d, 14)
+    
+    # Align HTF indicators to 1d timeframe (primary)
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -48,9 +104,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(30, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_filter[i]) or
+        if (np.isnan(kama_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or np.isnan(chop_1d_aligned[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -58,27 +114,35 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long entry: price above EMA AND volume confirmation
-            if close[i] > ema_50_12h_aligned[i] and volume_filter[i]:
+            # Long entry: price > KAMA AND RSI > 50 AND Chop < 61.8 (trending market)
+            if (close[i] > kama_1d_aligned[i] and 
+                rsi_1d_aligned[i] > 50 and 
+                chop_1d_aligned[i] < 61.8):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price below EMA AND volume confirmation
-            elif close[i] < ema_50_12h_aligned[i] and volume_filter[i]:
+            # Short entry: price < KAMA AND RSI < 50 AND Chop < 61.8 (trending market)
+            elif (close[i] < kama_1d_aligned[i] and 
+                  rsi_1d_aligned[i] < 50 and 
+                  chop_1d_aligned[i] < 61.8):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Stay long if price remains above EMA
-            if close[i] > ema_50_12h_aligned[i]:
+            # Exit long: price < KAMA OR RSI < 40 (momentum loss) OR Chop > 61.8 (chop regime)
+            if (close[i] < kama_1d_aligned[i] or 
+                rsi_1d_aligned[i] < 40 or 
+                chop_1d_aligned[i] > 61.8):
+                signals[i] = 0.0
+                position = 0
+            else:
                 signals[i] = 0.25
-            else:
-                signals[i] = 0.0
-                position = 0
         elif position == -1:
-            # Stay short if price remains below EMA
-            if close[i] < ema_50_12h_aligned[i]:
-                signals[i] = -0.25
-            else:
+            # Exit short: price > KAMA OR RSI > 60 (momentum loss) OR Chop > 61.8 (chop regime)
+            if (close[i] > kama_1d_aligned[i] or 
+                rsi_1d_aligned[i] > 60 or 
+                chop_1d_aligned[i] > 61.8):
                 signals[i] = 0.0
                 position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
