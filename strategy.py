@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using daily Camarilla pivot levels with volume confirmation
-# Camarilla levels (R3/S3 for reversals, R4/S4 for breakouts) provide institutional support/resistance
-# Price breaking above R4 or below S4 with volume > 1.5x 20-period average indicates institutional breakout
-# Price rejecting at R3 or S3 with volume confirmation indicates mean reversion opportunity
-# Works in both bull/bear markets: breakouts capture trends, reversals capture pullbacks
-# Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
+# Hypothesis: 1d strategy using weekly Donchian breakouts with volume confirmation
+# Weekly Donchian channels capture long-term structural breaks in price
+# Breakouts above weekly high or below weekly low with volume > 2x 20-period average
+# indicate institutional participation and trend continuation
+# Works in both bull/bear markets: captures breakouts in trending phases
+# Target: 30-100 total trades over 4 years (7-25/year) with 0.30 position sizing
 
-name = "4h_Camarilla_R3S4_VolumeBreakout_Reversal_v1"
-timeframe = "4h"
+name = "1d_Donchian20_WeeklyBreakout_Volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,37 +24,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate daily Camarilla pivot levels ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Calculate weekly Donchian channels ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 2:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Weekly Donchian high/low (20-period)
+    high_20 = pd.Series(df_1w['high'].values).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(df_1w['low'].values).rolling(window=20, min_periods=20).min().values
     
-    # Camarilla pivot levels
-    # Pivot = (previous high + previous low + previous close) / 3
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_ = prev_high - prev_low
+    # Align weekly levels to daily timeframe
+    donchian_high = align_htf_to_ltf(prices, df_1w, high_20)
+    donchian_low = align_htf_to_ltf(prices, df_1w, low_20)
     
-    # Resistance and Support levels
-    r4 = pivot + (range_ * 1.1 / 2)
-    r3 = pivot + (range_ * 1.1 / 4)
-    s3 = pivot - (range_ * 1.1 / 4)
-    s4 = pivot - (range_ * 1.1 / 2)
-    
-    # Align daily levels to 4h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # Volume confirmation: >1.5x 20-period average
+    # Volume confirmation: >2x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_20)
+    volume_filter = volume > (2.0 * vol_ma_20)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -65,44 +51,35 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(s4_aligned[i]) or np.isnan(volume_filter[i]) or
-            not session_filter[i]):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(volume_filter[i]) or not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long breakout: price breaks above R4 with volume confirmation
-            if close[i] > r4_aligned[i] and volume_filter[i]:
-                signals[i] = 0.25
+            # Long breakout: price breaks above weekly Donchian high with volume confirmation
+            if close[i] > donchian_high[i] and volume_filter[i]:
+                signals[i] = 0.30
                 position = 1
-            # Short breakout: price breaks below S4 with volume confirmation
-            elif close[i] < s4_aligned[i] and volume_filter[i]:
-                signals[i] = -0.25
-                position = -1
-            # Long reversal: price rejects S3 with volume confirmation (bounce from support)
-            elif close[i] < s3_aligned[i] and close[i] > s3_aligned[i] * 0.998 and volume_filter[i]:
-                signals[i] = 0.25
-                position = 1
-            # Short reversal: price rejects R3 with volume correction (rejection from resistance)
-            elif close[i] > r3_aligned[i] and close[i] < r3_aligned[i] * 1.002 and volume_filter[i]:
-                signals[i] = -0.25
+            # Short breakout: price breaks below weekly Donchian low with volume confirmation
+            elif close[i] < donchian_low[i] and volume_filter[i]:
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below S3 (failed support) or reaches R4 (take profit)
-            if close[i] < s3_aligned[i] or close[i] > r4_aligned[i]:
+            # Exit long: price breaks below weekly Donchian low (trend reversal)
+            if close[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit short: price breaks above R3 (failed resistance) or reaches S4 (take profit)
-            if close[i] > r3_aligned[i] or close[i] < s4_aligned[i]:
+            # Exit short: price breaks above weekly Donchian high (trend reversal)
+            if close[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
