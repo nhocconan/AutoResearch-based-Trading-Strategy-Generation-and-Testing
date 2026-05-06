@@ -3,22 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI(14) mean reversion with 4h/1d trend filter and volume confirmation
-# Uses 4h EMA50 for trend direction and 1d RSI for overbought/oversold extremes
-# Entry: RSI(14) < 30 in uptrend (price > 4h EMA50) or RSI > 70 in downtrend (price < 4h EMA50)
-# Volume filter: current volume > 1.5x 20-bar average to ensure participation
-# Session filter: 08-20 UTC to avoid low-liquidity hours
-# Fixed position size 0.20 to limit drawdown and reduce trade frequency
-# Target: 60-150 total trades over 4 years (15-37/year) to minimize fee drag
-# Works in bull/bear: mean reversion works in ranges, trend filter avoids counter-trend traps
+# Hypothesis: 6h weekly pivot mean reversion with 1d trend filter and volume confirmation
+# Uses weekly pivot levels (R1/S1) for mean reversion entries in ranging markets
+# Filters trades with 1d EMA50 trend to avoid counter-trend moves
+# Volume spike (>1.5x 20-bar average) confirms participation
+# Designed for 6h timeframe to target 50-150 total trades over 4 years (12-37/year)
+# Works in bull/bear: mean reversion in ranges, trend filter avoids whipsaw in trends
 
-name = "1h_RSI14_4hEMA50_1dRSI_MeanRev_Volume"
-timeframe = "1h"
+name = "6h_WeeklyPivot_R1S1_MeanRev_1dEMA50_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -26,80 +24,99 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 4h EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
-    
-    # Calculate 1d RSI(14) for overbought/oversold levels
+    # Calculate HTF data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    
+    if len(df_1w) < 1 or len(df_1d) < 50:
         return np.zeros(n)
+    
+    # Calculate weekly pivot points (using prior week's OHLC)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Weekly pivot: P = (H + L + C) / 3
+    # R1 = 2*P - L
+    # S1 = 2*P - H
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
+    
+    # Calculate 1d EMA50 trend filter
     close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    close_1d_series = pd.Series(close_1d)
+    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 1h RSI(14) for entry signals
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_14 = 100 - (100 / (1 + rs))
+    # Calculate ATR(14) for stoploss
+    tr1 = np.abs(high[1:] - low[1:])
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Volume filter: >1.5x 20-bar average
+    # Calculate volume spike filter (>1.5x 20-bar average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma_20)
     
-    # Session filter (08-20 UTC)
+    # Align HTF indicators to 6h timeframe (primary)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    long_extreme = 0.0
+    short_extreme = 0.0
     
-    for i in range(30, n):
+    for i in range(100, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(rsi_14[i]) or np.isnan(volume_filter[i]) or
+        if (np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(volume_filter[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                long_extreme = 0.0
+                short_extreme = 0.0
             continue
         
         if position == 0:
-            # Long signal: RSI oversold (<30) AND uptrend (price > 4h EMA50) AND volume
-            if rsi_14[i] < 30 and close[i] > ema50_4h_aligned[i] and volume_filter[i]:
-                signals[i] = 0.20
+            # Long mean reversion: price < S1 AND uptrend (price > EMA50) AND volume spike
+            if close[i] < s1_1w_aligned[i] and close[i] > ema50_1d_aligned[i] and volume_filter[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short signal: RSI overbought (>70) AND downtrend (price < 4h EMA50) AND volume
-            elif rsi_14[i] > 70 and close[i] < ema50_4h_aligned[i] and volume_filter[i]:
-                signals[i] = -0.20
+                long_extreme = close[i]
+            # Short mean reversion: price > R1 AND downtrend (price < EMA50) AND volume spike
+            elif close[i] > r1_1w_aligned[i] and close[i] < ema50_1d_aligned[i] and volume_filter[i]:
+                signals[i] = -0.25
                 position = -1
+                short_extreme = close[i]
         elif position == 1:
-            # Exit long: RSI returns to neutral (>50) or trend fails
-            if rsi_14[i] > 50 or close[i] <= ema50_4h_aligned[i]:
+            # Update long extreme
+            long_extreme = max(long_extreme, close[i])
+            # Exit long: price retraces 25% of ATR from extreme OR reverts to pivot
+            pivot_1w_current = (r1_1w_aligned[i] + s1_1w_aligned[i]) / 2.0  # Approximate pivot from R1/S1
+            if close[i] <= long_extreme - 0.25 * atr[i] or close[i] >= pivot_1w_current:
                 signals[i] = 0.0
                 position = 0
+                long_extreme = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: RSI returns to neutral (<50) or trend fails
-            if rsi_14[i] < 50 or close[i] >= ema50_4h_aligned[i]:
+            # Update short extreme
+            short_extreme = min(short_extreme, close[i])
+            # Exit short: price retraces 25% of ATR from extreme OR reverts to pivot
+            pivot_1w_current = (r1_1w_aligned[i] + s1_1w_aligned[i]) / 2.0  # Approximate pivot from R1/S1
+            if close[i] >= short_extreme + 0.25 * atr[i] or close[i] <= pivot_1w_current:
                 signals[i] = 0.0
                 position = 0
+                short_extreme = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
