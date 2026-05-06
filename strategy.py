@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h/1d for directional bias and 1h for precise entry timing
-# Uses 4h Supertrend (ATR=10, mult=3) for primary trend direction
-# Uses 1d RSI(14) with extreme thresholds (RSI<30 for long, RSI>70 for short) for momentum extremes
-# Enters only during 08-20 UTC session with volume confirmation (volume > 1.2x 20-period MA)
-# Target: 15-30 trades per year (60-120 over 4 years) with 0.20 position sizing
-# Designed to work in both bull and bear markets by combining trend following with mean reversion extremes
+# Hypothesis: 6h strategy using 1-week Ichimoku Cloud filter from 1-day timeframe for trend direction,
+# with entry triggered by Tenkan/Kijun cross on 1-day and confirmed by price position relative to cloud.
+# Long when price is above cloud, Tenkan > Kijun, and price closes above Tenkan.
+# Short when price is below cloud, Tenkan < Kijun, and price closes below Tenkan.
+# Uses weekly timeframe for regime filter (price above/below weekly cloud) to avoid counter-trend trades.
+# Designed to work in trending markets (both bull and bear) by following Ichimoku trend signals.
+# Target: 50-150 total trades over 4 years = 12-37/year with 0.25 position sizing.
 
-name = "1h_4hSupertrend_1dRSI_Extreme_Volume"
-timeframe = "1h"
+name = "6h_Ichimoku_Cloud_Filter_TK_Cross_1d"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,90 +23,57 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Calculate 4h Supertrend (ATR=10, mult=3)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 11:
-        return np.zeros(n)
-    
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # True Range
-    tr1 = high_4h[1:] - low_4h[1:]
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value is NaN
-    
-    # ATR(10)
-    atr_10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
-    
-    # Supertrend calculation
-    hl2 = (high_4h + low_4h) / 2
-    upper_band = hl2 + (3 * atr_10)
-    lower_band = hl2 - (3 * atr_10)
-    
-    upper_band_final = np.full_like(close_4h, np.nan)
-    lower_band_final = np.full_like(close_4h, np.nan)
-    supertrend = np.full_like(close_4h, np.nan)
-    direction = np.full_like(close_4h, 1)  # 1 for uptrend, -1 for downtrend
-    
-    for i in range(1, len(close_4h)):
-        if np.isnan(atr_10[i]) or np.isnan(atr_10[i-1]):
-            upper_band_final[i] = upper_band[i]
-            lower_band_final[i] = lower_band[i]
-        else:
-            if close_4h[i-1] > upper_band_final[i-1]:
-                upper_band_final[i] = upper_band[i]
-            else:
-                upper_band_final[i] = min(upper_band[i], upper_band_final[i-1])
-            
-            if close_4h[i-1] < lower_band_final[i-1]:
-                lower_band_final[i] = lower_band[i]
-            else:
-                lower_band_final[i] = max(lower_band[i], lower_band_final[i-1])
-        
-        if np.isnan(upper_band_final[i]) or np.isnan(lower_band_final[i]):
-            supertrend[i] = np.nan
-            direction[i] = direction[i-1] if i > 0 else 1
-        else:
-            if close_4h[i] <= upper_band_final[i]:
-                supertrend[i] = upper_band_final[i]
-                direction[i] = -1
-            else:
-                supertrend[i] = lower_band_final[i]
-                direction[i] = 1
-    
-    # Align Supertrend direction to 1h timeframe
-    supertrend_direction = align_htf_to_ltf(prices, df_4h, direction)
-    
-    # Calculate 1d RSI(14)
+    # Get 1-day data for Ichimoku calculations
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 15:
+    if len(df_1d) < 52:  # Need enough data for Ichimoku (26*2)
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    delta = np.diff(close_1d)
-    delta = np.concatenate([[np.nan], delta])
+    # Calculate Ichimoku components on 1-day data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
+    tenkan_sen = (pd.Series(high_1d).rolling(window=9, min_periods=9).max() + 
+                  pd.Series(low_1d).rolling(window=9, min_periods=9).min()) / 2
     
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    # Kijun-sen (Base Line): (26-period high + low) / 2
+    kijun_sen = (pd.Series(high_1d).rolling(window=26, min_periods=26).max() + 
+                 pd.Series(low_1d).rolling(window=26, min_periods=26).min()) / 2
     
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi_14 = 100 - (100 / (1 + rs))
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
     
-    # Align RSI to 1h timeframe
-    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
+    # Senkou Span B (Leading Span B): (52-period high + low) / 2
+    senkou_span_b = (pd.Series(high_1d).rolling(window=52, min_periods=52).max() + 
+                     pd.Series(low_1d).rolling(window=52, min_periods=52).min()) / 2
     
-    # Volume confirmation: >1.2x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.2 * vol_ma_20)
+    # Align Ichimoku components to 6h timeframe
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen.values)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen.values)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a.values)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b.values)
+    
+    # Get 1-week data for regime filter (cloud)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 52:
+        return np.zeros(n)
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    
+    # Calculate weekly Ichimoku components
+    tenkan_sen_1w = (pd.Series(high_1w).rolling(window=9, min_periods=9).max() + 
+                     pd.Series(low_1w).rolling(window=9, min_periods=9).min()) / 2
+    kijun_sen_1w = (pd.Series(high_1w).rolling(window=26, min_periods=26).max() + 
+                    pd.Series(low_1w).rolling(window=26, min_periods=26).min()) / 2
+    senkou_span_a_1w = ((tenkan_sen_1w + kijun_sen_1w) / 2)
+    senkou_span_b_1w = (pd.Series(high_1w).rolling(window=52, min_periods=52).max() + 
+                        pd.Series(low_1w).rolling(window=52, min_periods=52).min()) / 2
+    
+    # Align weekly Ichimoku components to 6h timeframe
+    senkou_span_a_1w_aligned = align_htf_to_ltf(prices, df_1w, senkou_span_a_1w.values)
+    senkou_span_b_1w_aligned = align_htf_to_ltf(prices, df_1w, senkou_span_b_1w.values)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -114,38 +82,54 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after warmup
+    for i in range(52, n):  # Start after Ichimoku warmup
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(supertrend_direction[i]) or np.isnan(rsi_14_aligned[i]) or 
-            np.isnan(volume_filter[i]) or
+        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
+            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or
+            np.isnan(senkou_span_a_1w_aligned[i]) or np.isnan(senkou_span_b_1w_aligned[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Determine if price is above or below weekly cloud (regime filter)
+        weekly_cloud_top = np.maximum(senkou_span_a_1w_aligned[i], senkou_span_b_1w_aligned[i])
+        weekly_cloud_bottom = np.minimum(senkou_span_a_1w_aligned[i], senkou_span_b_1w_aligned[i])
+        price_above_weekly_cloud = close[i] > weekly_cloud_top
+        price_below_weekly_cloud = close[i] < weekly_cloud_bottom
+        
         if position == 0:
-            # Long: 4h uptrend AND 1d RSI < 30 (oversold) with volume confirmation
-            if supertrend_direction[i] == 1 and rsi_14_aligned[i] < 30 and volume_filter[i]:
-                signals[i] = 0.20
+            # Long: price above daily cloud, Tenkan > Kijun, price closes above Tenkan
+            daily_cloud_top = np.maximum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+            daily_cloud_bottom = np.minimum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+            price_above_daily_cloud = close[i] > daily_cloud_top
+            tenkan_above_kijun = tenkan_sen_aligned[i] > kijun_sen_aligned[i]
+            price_above_tenkan = close[i] > tenkan_sen_aligned[i]
+            
+            if (price_above_weekly_cloud and price_above_daily_cloud and 
+                tenkan_above_kijun and price_above_tenkan):
+                signals[i] = 0.25
                 position = 1
-            # Short: 4h downtrend AND 1d RSI > 70 (overbought) with volume confirmation
-            elif supertrend_direction[i] == -1 and rsi_14_aligned[i] > 70 and volume_filter[i]:
-                signals[i] = -0.20
+            # Short: price below daily cloud, Tenkan < Kijun, price closes below Tenkan
+            elif (price_below_weekly_cloud and close[i] < daily_cloud_bottom and 
+                  tenkan_sen_aligned[i] < kijun_sen_aligned[i] and 
+                  close[i] < tenkan_sen_aligned[i]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: 4h downtrend OR 1d RSI > 70 (overbought)
-            if supertrend_direction[i] == -1 or rsi_14_aligned[i] > 70:
+            # Exit long: price closes below Tenkan or below daily cloud
+            if close[i] < tenkan_sen_aligned[i] or close[i] < daily_cloud_bottom:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: 4h uptrend OR 1d RSI < 30 (oversold)
-            if supertrend_direction[i] == 1 or rsi_14_aligned[i] < 30:
+            # Exit short: price closes above Tenkan or above daily cloud
+            if close[i] > tenkan_sen_aligned[i] or close[i] > daily_cloud_top:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
