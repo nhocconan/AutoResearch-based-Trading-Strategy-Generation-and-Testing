@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy combining weekly pivot points with price action rejection signals
-# Uses weekly pivot levels (from prior week) as key support/resistance. Enter long when price
-# rejects below S1 with bullish engulfing candle, enter short when price rejects above R1 with
-# bearish engulfing candle. Volume confirmation ensures institutional participation. Works in
-# both bull and bear markets: rejections at key levels often precede reversals or continuations.
-# Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing.
+# Hypothesis: 4h strategy using daily pivot points with volume confirmation and momentum filter
+# Daily pivots provide key support/resistance. Breakouts above R1 or below S1 with volume > 2x 20-period average
+# indicate strong momentum. Momentum filter (RSI > 55 for long, < 45 for short) ensures trend alignment.
+# Works in bull/bear markets: breakouts capture trends, momentum filter avoids counter-trend trades.
+# Target: 75-200 total trades over 4 years (19-50/year) with 0.25 position sizing.
 
-name = "6h_weeklyPivot_Rejection_Volume_v1"
-timeframe = "6h"
+name = "4h_1dPivot_R1S1_MomVol_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,16 +23,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate weekly pivot points ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Calculate 1d pivot points ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 2:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Previous week's OHLC for pivot calculation
-    prev_close = df_1w['close'].shift(1).values
-    prev_high = df_1w['high'].shift(1).values
-    prev_low = df_1w['low'].shift(1).values
+    # Previous day's OHLC for pivot calculation
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
     # Pivot point calculation
     pivot = (prev_high + prev_low + prev_close) / 3
@@ -43,26 +42,24 @@ def generate_signals(prices):
     r1 = pivot + range_
     s1 = pivot - range_
     
-    # Align weekly levels to 6h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    # Align 1d levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Bullish engulfing: current green candle engulfs previous red candle
-    bullish_engulf = (close > open_) & (open_ < close_prev) & (close >= close_prev) & (open_ <= open_prev)
-    # Bearish engulfing: current red candle engulfs previous green candle
-    bearish_engulf = (close < open_) & (open_ > close_prev) & (close <= close_prev) & (open_ >= open_prev)
-    # Where open_ = open prices, close_prev = previous close, open_prev = previous open
-    open_ = prices['open'].values
-    close_prev = np.roll(close, 1)
-    close_prev[0] = close[0]
-    open_prev = np.roll(open_, 1)
-    open_prev[0] = open_[0]
-    bullish_engulf = (close > open_) & (open_ < close_prev) & (close >= close_prev) & (open_ <= open_prev)
-    bearish_engulf = (close < open_) & (open_ > close_prev) & (close <= close_prev) & (open_ >= open_prev)
-    
-    # Volume confirmation: >1.8x 20-period average
+    # Volume confirmation: >2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.8 * vol_ma_20)
+    volume_filter = volume > (2.0 * vol_ma_20)
+    
+    # Momentum filter: RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_long = rsi > 55
+    rsi_short = rsi < 45
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -74,7 +71,7 @@ def generate_signals(prices):
     for i in range(50, n):
         # Skip if any critical value is NaN or outside session
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(volume_filter[i]) or np.isnan(bullish_engulf[i]) or np.isnan(bearish_engulf[i]) or
+            np.isnan(volume_filter[i]) or np.isnan(rsi_long[i]) or np.isnan(rsi_short[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -82,24 +79,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: bullish engulfing at or above S1 with volume confirmation
-            if bullish_engulf[i] and close[i] >= s1_aligned[i] and volume_filter[i]:
+            # Long breakout: price breaks above R1 with volume and momentum confirmation
+            if close[i] > r1_aligned[i] and volume_filter[i] and rsi_long[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish engulfing at or below R1 with volume confirmation
-            elif bearish_engulf[i] and close[i] <= r1_aligned[i] and volume_filter[i]:
+            # Short breakout: price breaks below S1 with volume and momentum confirmation
+            elif close[i] < s1_aligned[i] and volume_filter[i] and rsi_short[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: bearish engulfing at or below R1 or price closes below S1
-            if bearish_engulf[i] and close[i] <= r1_aligned[i] or close[i] < s1_aligned[i]:
+            # Exit long: price breaks below S1 (failed support) or RSI turns bearish
+            if close[i] < s1_aligned[i] or rsi[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: bullish engulfing at or above S1 or price closes above R1
-            if bullish_engulf[i] and close[i] >= s1_aligned[i] or close[i] > r1_aligned[i]:
+            # Exit short: price breaks above R1 (failed resistance) or RSI turns bullish
+            if close[i] > r1_aligned[i] or rsi[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
