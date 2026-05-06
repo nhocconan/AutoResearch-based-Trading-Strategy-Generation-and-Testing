@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using 1w Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
-# Long when price breaks above 1w Donchian upper channel (20) AND 1w EMA50 > EMA50 previous (uptrend) AND volume > 2.0 * avg_volume(20) on 1d
-# Short when price breaks below 1w Donchian lower channel (20) AND 1w EMA50 < EMA50 previous (downtrend) AND volume > 2.0 * avg_volume(20) on 1d
-# Exit when price retests the 1w Donchian midpoint (median of upper/lower)
+# Hypothesis: 12h strategy using 1d Camarilla pivot R3/S3 breakout with 1d volume spike and choppiness regime filter
+# Long when price breaks above 1d Camarilla R3 level AND volume > 2.0 * avg_volume(20) AND CHOP(14) > 61.8 (range regime)
+# Short when price breaks below 1d Camarilla S3 level AND volume > 2.0 * avg_volume(20) AND CHOP(14) > 61.8 (range regime)
+# Exit when price retests the 1d Camarilla pivot point (PP)
 # Uses discrete sizing 0.25 to balance return and risk
-# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe
-# 1w Donchian provides strong structural breakout levels with continuation probability
-# 1w EMA50 ensures we trade with the dominant weekly trend filter
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# Camarilla pivots provide strong intraday support/resistance levels with high reversal probability
 # Volume confirmation validates breakout strength while limiting false signals
-# Works in both bull (buy breakouts) and bear (sell breakdowns) markets
+# Choppiness filter ensures we only trade in ranging markets where mean reversion works best
+# Works in both bull (buy R3 breakouts) and bear (sell S3 breakdowns) markets by fading extremes
 
-name = "1d_Donchian20_1wEMA50_Trend_Volume"
-timeframe = "1d"
+name = "12h_CamarillaR3S3_Volume_Chop"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,31 +28,53 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data ONCE before loop for Donchian channel calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:  # Need at least 20 completed weekly bars for Donchian
+    # Get 1d data ONCE before loop for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:  # Need at least 2 completed daily bars for pivot calculation
         return np.zeros(n)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1w Donchian channel (20-period)
-    upper_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    midpoint_20 = (upper_20 + lower_20) / 2.0
+    # Calculate 1d Camarilla pivot levels
+    # Pivot Point (PP) = (High + Low + Close) / 3
+    pp = (high_1d + low_1d + close_1d) / 3.0
+    # R3 = Close + (High - Low) * 1.1 / 4
+    r3 = close_1d + (high_1d - low_1d) * 1.1 / 4.0
+    # S3 = Close - (High - Low) * 1.1 / 4
+    s3 = close_1d - (high_1d - low_1d) * 1.1 / 4.0
     
-    # Align 1w Donchian levels to 1d timeframe (wait for completed 1w bar)
-    upper_aligned = align_htf_to_ltf(prices, df_1w, upper_20)
-    lower_aligned = align_htf_to_ltf(prices, df_1w, lower_20)
-    midpoint_aligned = align_htf_to_ltf(prices, df_1w, midpoint_20)
+    # Align 1d Camarilla levels to 12h timeframe (wait for completed 1d bar)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Get 1w data ONCE before loop for EMA50 trend filter (same timeframe as Donchian)
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Calculate volume confirmation: volume > 2.0 * 20-period average volume on 1d
+    # Calculate volume confirmation: volume > 2.0 * 20-period average volume on 12h
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (2.0 * avg_volume_20)
+    
+    # Calculate Choppiness Index (CHOP) on 12h timeframe
+    # CHOP = 100 * log10(sum(ATR(14)) / (log10(n) * (highest_high - lowest_low)))
+    # Simplified: CHOP = 100 * log10(ATR_sum / (log10(period) * range))
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR is just high-low
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    range_14 = highest_high_14 - lowest_low_14
+    
+    # Avoid division by zero and log of zero
+    log_range = np.log10(np.maximum(range_14, 1e-10))
+    log_atr_sum = np.log10(np.maximum(atr_14 * 14, 1e-10))
+    log_n = np.log10(14)
+    chop = 100 * (log_atr_sum / (log_n * log_range))
+    # Handle edge cases where range is zero ( chop becomes 100 * log(small)/0 -> inf)
+    chop = np.where(range_14 == 0, 100.0, chop)
+    chop_regime = chop > 61.8  # Range regime (mean revert)
     
     # Session filter: 08-20 UTC (pre-compute for efficiency)
     hours = prices.index.hour
@@ -63,36 +85,36 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN or outside session
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or np.isnan(midpoint_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(avg_volume_20[i]) or not in_session[i]):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(avg_volume_20[i]) or np.isnan(chop[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above 1w Donchian upper, 1w EMA50 > EMA50 previous (uptrend), volume spike, in session
-            if (close[i] > upper_aligned[i] and 
-                ema_50_1w_aligned[i] > ema_50_1w_aligned[i-1] and 
-                volume_confirm[i]):
+            # Long: price breaks above 1d Camarilla R3, volume spike, in range regime
+            if (close[i] > r3_aligned[i] and 
+                volume_confirm[i] and 
+                chop_regime[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 1w Donchian lower, 1w EMA50 < EMA50 previous (downtrend), volume spike, in session
-            elif (close[i] < lower_aligned[i] and 
-                  ema_50_1w_aligned[i] < ema_50_1w_aligned[i-1] and 
-                  volume_confirm[i]):
+            # Short: price breaks below 1d Camarilla S3, volume spike, in range regime
+            elif (close[i] < s3_aligned[i] and 
+                  volume_confirm[i] and 
+                  chop_regime[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price retests the 1w Donchian midpoint
-            if close[i] <= midpoint_aligned[i]:
+            # Exit long: price retests the 1d Camarilla pivot point (PP)
+            if close[i] <= pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price retests the 1w Donchian midpoint
-            if close[i] >= midpoint_aligned[i]:
+            # Exit short: price retests the 1d Camarilla pivot point (PP)
+            if close[i] >= pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
