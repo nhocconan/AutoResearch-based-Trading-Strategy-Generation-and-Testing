@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
-# Long when price breaks above Donchian(20) upper band AND close > 1w EMA50 (uptrend) AND volume > 1.5 * 20-bar avg volume
-# Short when price breaks below Donchian(20) lower band AND close < 1w EMA50 (downtrend) AND volume > 1.5 * 20-bar avg volume
-# Exit when price crosses opposite Donchian band (mean reversion) or trend filter fails
-# Uses discrete sizing 0.25 to control fee drag and drawdown
-# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe
-# Donchian channels provide structural breakouts; 1w EMA50 ensures higher-timeframe trend alignment
-# Volume spike confirms institutional participation; works in both bull and bear markets via trend filter
+# Hypothesis: 6h Bollinger Bandwidth regime filter + 1d Camarilla pivot breakout
+# Long when price breaks above R4 AND bandwidth < 20th percentile (low volatility squeeze)
+# Short when price breaks below S4 AND bandwidth < 20th percentile (low volatility squeeze)
+# Exit when price reverts to VWAP (mean reversion in range) or bandwidth expands > 80th percentile (trend start)
+# Uses discrete sizing 0.25 to control fee drag
+# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
+# Bollinger Bandwidth identifies low volatility regimes conducive to breakouts
+# Camarilla R4/S4 are strong breakout levels from 1d timeframe
+# VWAP exit provides mean reversion edge in ranging markets
 
-name = "1d_Donchian20_1wEMA50_Volume_v1"
-timeframe = "1d"
+name = "6h_BBW_Camarilla_R4S4_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,66 +22,80 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian(20) channels
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate Bollinger Bandwidth (20, 2) on 6h data
+    close_series = pd.Series(close)
+    basis = close_series.rolling(window=20, min_periods=20).mean()
+    dev = close_series.rolling(window=20, min_periods=20).std()
+    upper = basis + 2.0 * dev
+    lower = basis - 2.0 * dev
+    bandwidth = ((upper - lower) / basis) * 100
     
-    # Get 1w data ONCE before loop for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Calculate 20th and 80th percentiles of bandwidth for regime filtering
+    bandwidth_series = pd.Series(bandwidth)
+    bw_percentile_20 = bandwidth_series.rolling(window=100, min_periods=100).quantile(0.20)
+    bw_percentile_80 = bandwidth_series.rolling(window=100, min_periods=100).quantile(0.80)
+    
+    # Calculate VWAP for exit signal
+    typical_price = (high + low + close) / 3.0
+    vwap = (typical_price * volume).cumsum() / volume.cumsum()
+    vwap = vwap.replace(to_replace=np.nan, method='ffill').values
+    
+    # Get 1d data ONCE before loop for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
     
-    # Calculate 1w EMA50
-    close_1w_series = pd.Series(close_1w)
-    ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Camarilla pivot levels from 1d OHLC
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Align HTF indicators to 1d timeframe (wait for completed HTF bar)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Camarilla levels: R4 = close + 1.5*(high-low), S4 = close - 1.5*(high-low)
+    camarilla_r4 = close_1d + 1.5 * (high_1d - low_1d)
+    camarilla_s4 = close_1d - 1.5 * (high_1d - low_1d)
     
-    # Calculate volume confirmation: volume > 1.5 * 20-bar average volume
-    avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * avg_volume_20)
+    # Align HTF indicators to 6h timeframe (wait for completed HTF bar)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(bandwidth[i]) or np.isnan(bw_percentile_20[i]) or 
+            np.isnan(bw_percentile_80[i]) or np.isnan(vwap[i]) or
+            np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Donchian breakout signals with trend and volume filters
-            # Long: price breaks above upper band AND uptrend AND volume spike
-            if close[i] > donchian_upper[i] and close[i] > ema50_1w_aligned[i] and volume_spike[i]:
+            # Entry conditions: breakout in low volatility regime
+            # Long: price breaks above R4 AND bandwidth < 20th percentile (squeeze)
+            if close[i] > camarilla_r4_aligned[i] and bandwidth[i] < bw_percentile_20[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower band AND downtrend AND volume spike
-            elif close[i] < donchian_lower[i] and close[i] < ema50_1w_aligned[i] and volume_spike[i]:
+            # Short: price breaks below S4 AND bandwidth < 20th percentile (squeeze)
+            elif close[i] < camarilla_s4_aligned[i] and bandwidth[i] < bw_percentile_20[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below lower band (mean reversion) or trend fails
-            if close[i] < donchian_lower[i] or close[i] < ema50_1w_aligned[i]:
+            # Exit long: price reverts to VWAP OR bandwidth expands > 80th percentile (trend start)
+            if close[i] <= vwap[i] or bandwidth[i] > bw_percentile_80[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above upper band (mean reversion) or trend fails
-            if close[i] > donchian_upper[i] or close[i] > ema50_1w_aligned[i]:
+            # Exit short: price reverts to VWAP OR bandwidth expands > 80th percentile (trend start)
+            if close[i] >= vwap[i] or bandwidth[i] > bw_percentile_80[i]:
                 signals[i] = 0.0
                 position = 0
             else:
