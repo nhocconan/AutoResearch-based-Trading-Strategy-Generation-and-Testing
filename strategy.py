@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 trend filter and volume confirmation
-# Uses Camarilla pivot levels for intraday structure, 4h EMA50 for trend alignment (reduces whipsaw)
-# Volume spike (>1.5x 20-bar average) confirms breakout strength
-# ATR-based stoploss via signal=0 when price retests opposite Camarilla level
+# Hypothesis: 1h Donchian channel breakout with 1d EMA200 trend filter and volume confirmation
+# Uses Donchian(20) for structure, 1d EMA200 for trend alignment (reduces whipsaw in bear markets)
+# Volume spike (>1.8x 20-bar average) confirms breakout strength
+# ATR-based stoploss via signal=0 when price retests opposite Donchian level
 # Discrete sizing 0.20 to limit fee drag; target 60-150 total trades over 4 years
 # Proven pattern: price channel breakouts with volume confirmation work on BTC/ETH in both bull/bear
 
-name = "1h_Camarilla_R3S3_4hEMA50_VolumeConfirm_v1"
+name = "1h_Donchian20_1dEMA200_VolumeConfirm_v1"
 timeframe = "1h"
 leverage = 1.0
 
@@ -25,82 +25,64 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Calculate HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_4h) < 50:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 4h EMA50 trend filter
-    close_4h_series = pd.Series(close_4h)
-    ema50_4h = close_4h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1d EMA200 trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema200_1d = close_1d_series.ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Calculate volume spike filter (>1.5x 20-bar average)
+    # Calculate 1h Donchian channel (20-period)
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_high = high_roll
+    donchian_low = low_roll
+    
+    # Calculate volume spike filter (>1.8x 20-bar average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_20)
-    
-    # Calculate 1h Camarilla pivot levels (using previous 4h bar)
-    # Camarilla: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), S3 = C - ((H-L)*1.1/4)
-    # We use the previous completed 4h bar to calculate levels for current 1h bar
-    camarilla_high = []
-    camarilla_low = []
-    for i in range(len(close_4h)):
-        if i == 0:
-            camarilla_high.append(np.nan)
-            camarilla_low.append(np.nan)
-        else:
-            h = high_4h[i-1]
-            l = low_4h[i-1]
-            c = close_4h[i-1]
-            r3 = c + ((h - l) * 1.1 / 4)
-            s3 = c - ((h - l) * 1.1 / 4)
-            camarilla_high.append(r3)
-            camarilla_low.append(s3)
-    
-    camarilla_high = np.array(camarilla_high)
-    camarilla_low = np.array(camarilla_low)
+    volume_filter = volume > (1.8 * vol_ma_20)
     
     # Align HTF indicators to 1h timeframe
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
-    camarilla_high_aligned = align_htf_to_ltf(prices, df_4h, camarilla_high)
-    camarilla_low_aligned = align_htf_to_ltf(prices, df_4h, camarilla_low)
-    volume_filter_aligned = align_htf_to_ltf(prices, df_4h, volume_filter)
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any critical value is NaN
-        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(camarilla_high_aligned[i]) or 
-            np.isnan(camarilla_low_aligned[i]) or np.isnan(volume_filter_aligned[i])):
+        if (np.isnan(ema200_1d_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long breakout: price > R3 AND uptrend (price > EMA50) AND volume spike
-            if close[i] > camarilla_high_aligned[i] and close[i] > ema50_4h_aligned[i] and volume_filter_aligned[i]:
+            # Long breakout: price > Donchian high AND uptrend (price > EMA200) AND volume spike
+            if close[i] > donchian_high[i] and close[i] > ema200_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.20
                 position = 1
-            # Short breakdown: price < S3 AND downtrend (price < EMA50) AND volume spike
-            elif close[i] < camarilla_low_aligned[i] and close[i] < ema50_4h_aligned[i] and volume_filter_aligned[i]:
+            # Short breakdown: price < Donchian low AND downtrend (price < EMA200) AND volume spike
+            elif close[i] < donchian_low[i] and close[i] < ema200_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: price retests S3 from above (trend reversal)
-            if close[i] <= camarilla_low_aligned[i]:
+            # Exit long: price retests Donchian low from above (trend reversal)
+            if close[i] <= donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.20
         elif position == -1:
-            # Exit short: price retests R3 from below (trend reversal)
-            if close[i] >= camarilla_high_aligned[i]:
+            # Exit short: price retests Donchian high from below (trend reversal)
+            if close[i] >= donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
