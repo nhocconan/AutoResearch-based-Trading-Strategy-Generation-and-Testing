@@ -3,21 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 12h Camarilla pivot levels with breakout and fade logic
-# - Fade (counter-trend) at R3/S3 levels when price reverses from these levels with volume confirmation
-# - Breakout (trend-following) at R4/S4 levels when price breaks through with volume expansion
-# - Uses 12h Camarilla levels calculated from prior 12h bar's range
-# - Adds 1d EMA34 filter to only take trades in direction of daily trend
-# - Designed to work in ranging markets (fades at R3/S3) and trending markets (breakouts at R4/S4)
-# - Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
+# Hypothesis: 4h strategy using 1-day Volume Weighted Average Price (VWAP) with
+# mean reversion at VWAP bands and trend filter. VWAP acts as dynamic support/resistance.
+# Mean reversion: long when price touches VWAP lower band with rejection, short at upper band.
+# Trend filter: only take trades in direction of 1-day EMA50 to avoid counter-trend in strong trends.
+# Volume confirmation: require volume > 1.5x 20-period average to confirm interest.
+# Target: 20-50 trades/year with 0.30 position sizing to minimize fee drag.
 
-name = "6h_Camarilla_R3S3_R4S4_1dEMA34_Trend_Filter"
-timeframe = "6h"
+name = "4h_VWAP_MeanReversion_EMA50_TrendFilter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,46 +24,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Camarilla calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
-    
-    # Calculate Camarilla levels for each 12h bar: based on prior bar's range
-    # R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low)
-    # S3 = close - 1.1*(high-low), S4 = close - 1.5*(high-low)
-    prev_close = df_12h['close'].shift(1)
-    prev_high = df_12h['high'].shift(1)
-    prev_low = df_12h['low'].shift(1)
-    
-    # Avoid division by zero in case of doji bars
-    price_range = prev_high - prev_low
-    price_range = np.where(price_range == 0, 0.0001, price_range)
-    
-    R4 = prev_close + 1.5 * price_range
-    R3 = prev_close + 1.1 * price_range
-    S3 = prev_close - 1.1 * price_range
-    S4 = prev_close - 1.5 * price_range
-    
-    # Align Camarilla levels to 6h timeframe
-    R4_6h = align_htf_to_ltf(prices, df_12h, R4.values)
-    R3_6h = align_htf_to_ltf(prices, df_12h, R3.values)
-    S3_6h = align_htf_to_ltf(prices, df_12h, S3.values)
-    S4_6h = align_htf_to_ltf(prices, df_12h, S4.values)
-    
-    # 1d EMA34 for trend filter
+    # Get 1d data for VWAP and EMA calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate typical price and VWAP for each 1d bar
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    vwap_numerator = (typical_price * df_1d['volume']).cumsum()
+    vwap_denominator = df_1d['volume'].cumsum()
+    vwap = vwap_numerator / vwap_denominator
     
-    # Volume filters
+    # Reset VWAP calculation at each new day (when cumulative volume resets)
+    # Handle case where volume is zero at start of day
+    vol_reset = df_1d['volume'] == 0
+    vwap = vwap.where(~vol_reset, typical_price)
+    
+    # Calculate VWAP bands (1 ATR width)
+    atr_1d = pd.Series(df_1d['high'] - df_1d['low']).rolling(window=14, min_periods=14).mean()
+    vwap_upper = vwap + atr_1d
+    vwap_lower = vwap - atr_1d
+    
+    # Align VWAP and bands to 4h timeframe
+    vwap_4h = align_htf_to_ltf(prices, df_1d, vwap.values)
+    vwap_upper_4h = align_htf_to_ltf(prices, df_1d, vwap_upper.values)
+    vwap_lower_4h = align_htf_to_ltf(prices, df_1d, vwap_lower.values)
+    
+    # 1-day EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume filter: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.3 * vol_ma_20)  # Volume confirmation
-    volume_expansion = volume > np.roll(volume, 1)  # Current volume > previous
-    volume_expansion[0] = False
+    volume_filter = volume > (1.5 * vol_ma_20)
     
     # Session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -73,10 +65,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after warmup
+    for i in range(50, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(R4_6h[i]) or np.isnan(R3_6h[i]) or np.isnan(S3_6h[i]) or np.isnan(S4_6h[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_filter[i]) or np.isnan(volume_expansion[i]) or
+        if (np.isnan(vwap_4h[i]) or np.isnan(vwap_upper_4h[i]) or np.isnan(vwap_lower_4h[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_filter[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -84,51 +76,37 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Fade at R3/S3: counter-trend entry when price reverses from these levels
-            # Long fade at S3: price touches S3 and closes back above it
-            if close[i] <= S3_6h[i] * 1.001 and close[i] > S3_6h[i] and volume_filter[i]:
-                # Only take long fade if below daily EMA (bearish context)
-                if close[i] < ema_34_1d_aligned[i]:
-                    signals[i] = 0.25
+            # Mean reversion long at VWAP lower band: price touches lower band and closes above it
+            if close[i] <= vwap_lower_4h[i] * 1.002 and close[i] > vwap_lower_4h[i] and volume_filter[i]:
+                # Only take long if above daily EMA50 (bullish bias)
+                if close[i] > ema_50_1d_aligned[i]:
+                    signals[i] = 0.30
                     position = 1
-            # Short fade at R3: price touches R3 and closes back below it
-            elif close[i] >= R3_6h[i] * 0.999 and close[i] < R3_6h[i] and volume_filter[i]:
-                # Only take short fade if above daily EMA (bullish context)
-                if close[i] > ema_34_1d_aligned[i]:
-                    signals[i] = -0.25
-                    position = -1
-            # Breakout at R4/S4: trend-following entry when price breaks through
-            # Long breakout at R4: price breaks above R4 with volume expansion
-            elif close[i] > R4_6h[i] and volume_expansion[i]:
-                # Only take long breakout if above daily EMA (bullish context)
-                if close[i] > ema_34_1d_aligned[i]:
-                    signals[i] = 0.25
-                    position = 1
-            # Short breakout at S4: price breaks below S4 with volume expansion
-            elif close[i] < S4_6h[i] and volume_expansion[i]:
-                # Only take short breakout if below daily EMA (bearish context)
-                if close[i] < ema_34_1d_aligned[i]:
-                    signals[i] = -0.25
+            # Mean reversion short at VWAP upper band: price touches upper band and closes below it
+            elif close[i] >= vwap_upper_4h[i] * 0.998 and close[i] < vwap_upper_4h[i] and volume_filter[i]:
+                # Only take short if below daily EMA50 (bearish bias)
+                if close[i] < ema_50_1d_aligned[i]:
+                    signals[i] = -0.30
                     position = -1
         elif position == 1:
-            # Exit long: price reaches R3 (profit target) or breaks below S4 (stop)
-            if close[i] >= R3_6h[i] * 0.999:  # Take profit at R3
+            # Exit long: price reaches VWAP (mean reversion target) or breaks above upper band (stop)
+            if close[i] >= vwap_4h[i] * 0.999:  # Take profit at VWAP
                 signals[i] = 0.0
                 position = 0
-            elif close[i] < S4_6h[i]:  # Stop loss if breaks below S4
+            elif close[i] > vwap_upper_4h[i]:  # Stop loss if breaks above upper band
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit short: price reaches S3 (profit target) or breaks above R4 (stop)
-            if close[i] <= S3_6h[i] * 1.001:  # Take profit at S3
+            # Exit short: price reaches VWAP (mean reversion target) or breaks below lower band (stop)
+            if close[i] <= vwap_4h[i] * 1.001:  # Take profit at VWAP
                 signals[i] = 0.0
                 position = 0
-            elif close[i] > R4_6h[i]:  # Stop loss if breaks above R4
+            elif close[i] < vwap_lower_4h[i]:  # Stop loss if breaks below lower band
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
