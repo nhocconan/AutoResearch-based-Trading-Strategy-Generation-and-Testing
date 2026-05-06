@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1d ATR expansion for volatility regime + 1w Donchian(20) breakout for direction + volume confirmation
-# Long when 1d ATR(14) > 1.5 * ATR(50) (high volatility regime) AND price breaks above 1w Donchian(20) high AND volume > 2.0 * avg_volume(20) on 6h
-# Short when 1d ATR(14) > 1.5 * ATR(50) (high volatility regime) AND price breaks below 1w Donchian(20) low AND volume > 2.0 * avg_volume(20) on 6h
-# Exit when ATR contraction: ATR(14) < 1.2 * ATR(50) (return to normal volatility)
+# Hypothesis: 12h strategy using 1d RSI extremes with 1w Supertrend trend filter and volume spike confirmation
+# Long when 1d RSI < 30 (oversold) AND 1w Supertrend = uptrend AND volume > 2.0 * avg_volume(20) on 12h
+# Short when 1d RSI > 70 (overbought) AND 1w Supertrend = downtrend AND volume > 2.0 * avg_volume(20) on 12h
+# Exit when 1d RSI crosses back through 50 (mean reversion to midpoint)
 # Uses discrete sizing 0.25 to balance return and risk
-# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
-# ATR expansion identifies periods of increased momentum and breakout potential
-# 1w Donchian(20) provides structure and directional bias from higher timeframe
-# Volume confirmation validates breakout strength while limiting false signals
-# Works in both bull (buy breakouts) and bear (sell breakdowns) markets
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# RSI extremes provide high-probability reversal points in ranging markets
+# 1w Supertrend filter ensures we trade with the dominant weekly trend
+# Volume spike confirmation (2.0x) validates reversal strength while limiting overtrading
+# Works in both bull (buy oversold dips) and bear (sell overbought rallies) markets
 
-name = "6h_1dATR_Expansion_1wDonchian20_Breakout_Volume"
-timeframe = "6h"
+name = "12h_1dRSI_Extreme_1wSupertrend_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,45 +28,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for ATR calculation
+    # Get 1d data ONCE before loop for RSI calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:  # Need at least 50 completed 1d bars for ATR(50)
+    if len(df_1d) < 14:  # Need at least 14 completed 1d bars for RSI
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate True Range for 1d
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[high_1d[0] - low_1d[0]], tr])  # First TR is just high-low
+    # Calculate 1d RSI(14)
+    delta = pd.Series(close_1d).diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d = rsi_1d.fillna(50).values  # Fill NaN with 50 (neutral)
     
-    # Calculate ATR(14) and ATR(50) for 1d
-    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_50_1d = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    # Align 1d RSI to 12h timeframe (wait for completed 1d bar)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Align 1d ATR values to 6h timeframe (wait for completed 1d bar)
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
-    atr_50_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_50_1d)
-    
-    # Get 1w data ONCE before loop for Donchian(20) calculation
+    # Get 1w data ONCE before loop for Supertrend trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:  # Need at least 20 completed weekly bars for Donchian(20)
+    if len(df_1w) < 10:  # Need at least 10 completed weekly bars for Supertrend
         return np.zeros(n)
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1w Donchian(20) channels
-    highest_high_20_1w = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    lowest_low_20_1w = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # Calculate 1w Supertrend (ATR=10, multiplier=3.0)
+    atr_period = 10
+    multiplier = 3.0
     
-    # Align 1w Donchian values to 6h timeframe (wait for completed 1w bar)
-    highest_high_20_1w_aligned = align_htf_to_ltf(prices, df_1w, highest_high_20_1w)
-    lowest_low_20_1w_aligned = align_htf_to_ltf(prices, df_1w, lowest_low_20_1w)
+    # True Range
+    tr1 = pd.Series(high_1w) - pd.Series(low_1w)
+    tr2 = abs(pd.Series(high_1w) - pd.Series(close_1w).shift(1))
+    tr3 = abs(pd.Series(low_1w) - pd.Series(close_1w).shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(alpha=1/atr_period, adjust=False, min_periods=atr_period).mean().values
     
-    # Calculate volume confirmation: volume > 2.0 * 20-period average volume on 6h
+    # Basic Upper and Lower Bands
+    hl2 = (pd.Series(high_1w) + pd.Series(low_1w)) / 2
+    upper_band = hl2 + (multiplier * atr)
+    lower_band = hl2 - (multiplier * atr)
+    
+    # Initialize Supertrend
+    supertrend = np.zeros(len(close_1w))
+    direction = np.ones(len(close_1w))  # 1 for uptrend, -1 for downtrend
+    
+    for i in range(1, len(close_1w)):
+        if close_1w[i] > upper_band[i-1]:
+            direction[i] = 1
+        elif close_1w[i] < lower_band[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+            if direction[i] == 1 and lower_band[i] < lower_band[i-1]:
+                lower_band[i] = lower_band[i-1]
+            if direction[i] == -1 and upper_band[i] > upper_band[i-1]:
+                upper_band[i] = upper_band[i-1]
+    
+        supertrend[i] = (lower_band[i] if direction[i] == 1 else upper_band[i])
+    
+    # Align 1w Supertrend direction to 12h timeframe (wait for completed 1w bar)
+    supertrend_direction_aligned = align_htf_to_ltf(prices, df_1w, direction)
+    
+    # Calculate volume confirmation: volume > 2.0 * 20-period average volume on 12h
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (2.0 * avg_volume_20)
     
@@ -79,8 +105,7 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN or outside session
-        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(atr_50_1d_aligned[i]) or 
-            np.isnan(highest_high_20_1w_aligned[i]) or np.isnan(lowest_low_20_1w_aligned[i]) or 
+        if (np.isnan(rsi_aligned[i]) or np.isnan(supertrend_direction_aligned[i]) or 
             np.isnan(avg_volume_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -88,28 +113,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: ATR expansion + price breaks above 1w Donchian high + volume spike + in session
-            if (atr_14_1d_aligned[i] > 1.5 * atr_50_1d_aligned[i] and 
-                close[i] > highest_high_20_1w_aligned[i] and 
+            # Long: RSI < 30 (oversold), Supertrend uptrend (direction=1), volume spike, in session
+            if (rsi_aligned[i] < 30 and 
+                supertrend_direction_aligned[i] == 1 and 
                 volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: ATR expansion + price breaks below 1w Donchian low + volume spike + in session
-            elif (atr_14_1d_aligned[i] > 1.5 * atr_50_1d_aligned[i] and 
-                  close[i] < lowest_low_20_1w_aligned[i] and 
+            # Short: RSI > 70 (overbought), Supertrend downtrend (direction=-1), volume spike, in session
+            elif (rsi_aligned[i] > 70 and 
+                  supertrend_direction_aligned[i] == -1 and 
                   volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: ATR contraction (return to normal volatility)
-            if atr_14_1d_aligned[i] < 1.2 * atr_50_1d_aligned[i]:
+            # Exit long: RSI crosses back above 50 (mean reversion)
+            if rsi_aligned[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: ATR contraction (return to normal volatility)
-            if atr_14_1d_aligned[i] < 1.2 * atr_50_1d_aligned[i]:
+            # Exit short: RSI crosses back below 50 (mean reversion)
+            if rsi_aligned[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
