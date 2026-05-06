@@ -3,19 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h Supertrend for trend direction and 1h pullbacks to EMA21 for entry
-# - Uses 4h Supertrend (ATR=10, mult=3) to determine trend direction (long only in uptrend, short only in downtrend)
-# - Uses 1h EMA21 as dynamic support/resistance for pullback entries
-# - Enters long when 4h Supertrend is uptrend and 1h price pulls back to touch EMA21 from above
-# - Enters short when 4h Supertrend is downtrend and 1h price pulls back to touch EMA21 from below
-# - Uses volume confirmation (1h volume > 1.5x 20-period average) to filter weak moves
-# - Exits when price closes beyond EMA21 in the opposite direction or Supertrend flips
-# - Designed to capture trend continuation moves with low frequency and high win rate
-# - Target: 60-150 total trades over 4 years (15-37/year) with 0.20 position sizing
-# - Works in bull markets by riding uptrends, works in bear markets by riding downtrends
+# Hypothesis: 6h strategy using weekly pivot-based mean reversion with volume confirmation
+# - Uses weekly Camarilla pivot levels (R3/S3) for mean reversion entries
+# - Uses daily trend filter (price above/below 20 EMA) to align with higher timeframe
+# - Uses 6h volume spike for entry confirmation
+# - Enters long when price touches S3 with bullish daily trend and volume
+# - Enters short when price touches R3 with bearish daily trend and volume
+# - Exits when price reaches the weekly pivot (midpoint) or opposite S3/R3 level
+# - Designed to capture mean reversion moves in ranging markets while respecting trend
+# - Target: 80-160 total trades over 4 years (20-40/year) with 0.25 position sizing
 
-name = "1h_4hSupertrend_EMA21_Pullback"
-timeframe = "1h"
+name = "6h_WeeklyCamarilla_R3S3_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,124 +27,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Supertrend
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Get weekly data for Camarilla pivot levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Calculate weekly Camarilla pivot levels (based on previous week)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate ATR for Supertrend
-    def calculate_atr(high, low, close, period=10):
-        tr = np.zeros_like(high)
-        for i in range(1, len(high)):
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        atr = np.zeros_like(high)
-        atr[period-1] = np.mean(tr[1:period+1])
-        for i in range(period, len(high)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        return atr
+    # Weekly pivot point (PP) = (H + L + C) / 3
+    pp_1w = (high_1w + low_1w + close_1w) / 3
+    # Weekly range
+    range_1w = high_1w - low_1w
     
-    atr_4h = calculate_atr(high_4h, low_4h, close_4h, 10)
+    # Camarilla levels
+    r3_1w = pp_1w + (range_1w * 1.1 / 4)  # R3 = PP + 1.1 * range / 4
+    s3_1w = pp_1w - (range_1w * 1.1 / 4)  # S3 = PP - 1.1 * range / 4
+    r4_1w = pp_1w + (range_1w * 1.1 / 2)  # R4 = PP + 1.1 * range / 2
+    s4_1w = pp_1w - (range_1w * 1.1 / 2)  # S4 = PP - 1.1 * range / 2
     
-    # Calculate Supertrend
-    def supertrend(high, low, close, atr, multiplier=3):
-        hl2 = (high + low) / 2
-        upper = hl2 + (multiplier * atr)
-        lower = hl2 - (multiplier * atr)
-        
-        upper_band = np.zeros_like(close)
-        lower_band = np.zeros_like(close)
-        upper_band[0] = upper[0]
-        lower_band[0] = lower[0]
-        
-        for i in range(1, len(close)):
-            upper_band[i] = upper[i] if (upper[i] < upper_band[i-1] or close[i-1] > upper_band[i-1]) else upper_band[i-1]
-            lower_band[i] = lower[i] if (lower[i] > lower_band[i-1] or close[i-1] < lower_band[i-1]) else lower_band[i-1]
-        
-        trend = np.ones_like(close)
-        for i in range(1, len(close)):
-            if close[i] > upper_band[i-1]:
-                trend[i] = 1
-            elif close[i] < lower_band[i-1]:
-                trend[i] = -1
-            else:
-                trend[i] = trend[i-1]
-                if trend[i] == 1 and lower_band[i] < lower_band[i-1]:
-                    lower_band[i] = lower_band[i-1]
-                if trend[i] == -1 and upper_band[i] > upper_band[i-1]:
-                    upper_band[i] = upper_band[i-1]
-        
-        return trend, upper_band, lower_band
+    # Align weekly Camarilla levels to 6h timeframe
+    r3_1w_6h = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_1w_6h = align_htf_to_ltf(prices, df_1w, s3_1w)
+    r4_1w_6h = align_htf_to_ltf(prices, df_1w, r4_1w)
+    s4_1w_6h = align_htf_to_ltf(prices, df_1w, s4_1w)
+    pp_1w_6h = align_htf_to_ltf(prices, df_1w, pp_1w)  # Pivot for exit
     
-    trend_4h, upper_band_4h, lower_band_4h = supertrend(high_4h, low_4h, close_4h, atr_4h, 3)
+    # Daily trend filter: price above/below 20 EMA
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Align 4h Supertrend components to 1h
-    trend_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_4h)
-    upper_band_4h_aligned = align_htf_to_ltf(prices, df_4h, upper_band_4h)
-    lower_band_4h_aligned = align_htf_to_ltf(prices, df_4h, lower_band_4h)
+    close_1d = df_1d['close'].values
+    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d_6h = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
-    # 1h EMA21 for pullback entries
-    close_series = pd.Series(close)
-    ema21 = close_series.ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Daily trend: 1 = bullish (price > EMA20), -1 = bearish (price < EMA20)
+    daily_trend = np.where(close_1d > ema_20_1d, 1, -1)
+    daily_trend_6h = align_htf_to_ltf(prices, df_1d, daily_trend)
     
-    # Volume confirmation (1h)
+    # Volume filter (6h timeframe)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma_20)
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    volume_spike = volume > (2.0 * vol_ma_20)  # Strong volume confirmation
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Skip if any critical value is NaN
-        if (np.isnan(trend_4h_aligned[i]) or np.isnan(ema21[i]) or 
-            np.isnan(volume_confirm[i]) or np.isnan(session_filter[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        if not session_filter[i]:
+        if (np.isnan(r3_1w_6h[i]) or np.isnan(s3_1w_6h[i]) or 
+            np.isnan(pp_1w_6h[i]) or np.isnan(daily_trend_6h[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: 4h uptrend + price touches EMA21 from above + volume
-            if (trend_4h_aligned[i] == 1 and 
-                low[i] <= ema21[i] and 
-                close[i] > ema21[i] and 
-                volume_confirm[i]):
-                signals[i] = 0.20
+            # Long: price touches S3 with bullish daily trend and volume spike
+            if (low[i] <= s3_1w_6h[i] and 
+                daily_trend_6h[i] == 1 and 
+                volume_spike[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: 4h downtrend + price touches EMA21 from below + volume
-            elif (trend_4h_aligned[i] == -1 and 
-                  high[i] >= ema21[i] and 
-                  close[i] < ema21[i] and 
-                  volume_confirm[i]):
-                signals[i] = -0.20
+            # Short: price touches R3 with bearish daily trend and volume spike
+            elif (high[i] >= r3_1w_6h[i] and 
+                  daily_trend_6h[i] == -1 and 
+                  volume_spike[i]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price closes below EMA21 OR 4h trend flips to downtrend
-            if close[i] < ema21[i] or trend_4h_aligned[i] == -1:
+            # Exit long: price reaches pivot (PP) or breaks below S4 (stop)
+            if close[i] >= pp_1w_6h[i] or low[i] <= s4_1w_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price closes above EMA21 OR 4h trend flips to uptrend
-            if close[i] > ema21[i] or trend_4h_aligned[i] == 1:
+            # Exit short: price reaches pivot (PP) or breaks above R4 (stop)
+            if close[i] <= pp_1w_6h[i] or high[i] >= r4_1w_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
