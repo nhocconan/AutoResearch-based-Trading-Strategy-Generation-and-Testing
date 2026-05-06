@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
-# Long when price breaks above 12h Camarilla R3 level AND 1d EMA34 > EMA34 previous (uptrend) AND volume > 2.0 * avg_volume(20) on 4h
-# Short when price breaks below 12h Camarilla S3 level AND 1d EMA34 < EMA34 previous (downtrend) AND volume > 2.0 * avg_volume(20) on 4h
-# Exit when price crosses back through the 12h Camarilla pivot point (mean reversion to center)
+# Hypothesis: 1d strategy using 1w Bollinger Band squeeze breakout with 1w EMA200 trend filter
+# Long when price breaks above upper BB(20,2) AND 1w close > 1w EMA200 (bullish regime) AND volume > 1.5 * avg_volume(20)
+# Short when price breaks below lower BB(20,2) AND 1w close < 1w EMA200 (bearish regime) AND volume > 1.5 * avg_volume(20)
+# Exit when price crosses back through 20-period SMA (mean reversion to middle band)
 # Uses discrete sizing 0.25 to balance return and risk
-# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
-# Camarilla levels provide mathematical support/resistance based on prior day's range
-# 1d EMA34 trend filter ensures we trade with the dominant daily trend
-# Volume spike confirmation (2.0x) validates breakout strength while limiting overtrading
+# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe
+# Bollinger Band squeeze identifies low volatility periods primed for breakout
+# 1w EMA200 regime filter ensures we trade with the dominant weekly trend
+# Volume confirmation validates breakout strength while limiting false signals
 # Works in both bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend) markets
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "4h"
+name = "1d_1wBB_Squeeze_Breakout_1wEMA200_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,52 +28,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data ONCE before loop for Camarilla calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:  # Need at least 2 completed 12h bars for Camarilla (previous bar)
+    # Get 1w data ONCE before loop for Bollinger Bands and EMA200
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:  # Need at least 200 completed weekly bars for EMA200
         return np.zeros(n)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 12h Camarilla levels from previous 12h bar
-    # Camarilla: Pivot = (H + L + C)/3, Range = H - L
-    # R3 = Pivot + (H - L) * 1.1/2, S3 = Pivot - (H - L) * 1.1/2
-    prev_high_12h = np.roll(high_12h, 1)
-    prev_low_12h = np.roll(low_12h, 1)
-    prev_close_12h = np.roll(close_12h, 1)
-    # First bar has no previous bar, set to NaN
-    prev_high_12h[0] = np.nan
-    prev_low_12h[0] = np.nan
-    prev_close_12h[0] = np.nan
+    # Calculate 1w Bollinger Bands (20,2)
+    sma_20_1w = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
+    std_20_1w = pd.Series(close_1w).rolling(window=20, min_periods=20).std().values
+    upper_bb_1w = sma_20_1w + (2.0 * std_20_1w)
+    lower_bb_1w = sma_20_1w - (2.0 * std_20_1w)
     
-    pivot_12h = (prev_high_12h + prev_low_12h + prev_close_12h) / 3.0
-    range_12h = prev_high_12h - prev_low_12h
-    r3_12h = pivot_12h + (range_12h * 1.1 / 2.0)
-    s3_12h = pivot_12h - (range_12h * 1.1 / 2.0)
-    # Handle invalid ranges (when high == low)
-    r3_12h = np.where(np.isnan(range_12h) | (range_12h == 0), np.nan, r3_12h)
-    s3_12h = np.where(np.isnan(range_12h) | (range_12h == 0), np.nan, s3_12h)
-    pivot_12h = np.where(np.isnan(range_12h) | (range_12h == 0), np.nan, pivot_12h)
+    # Align 1w Bollinger Bands to 1d timeframe (wait for completed 1w bar)
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1w, upper_bb_1w)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1w, lower_bb_1w)
+    sma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_20_1w)
     
-    # Align 12h Camarilla levels to 4h timeframe (wait for completed 12h bar)
-    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
-    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
-    pivot_12h_aligned = align_htf_to_ltf(prices, df_12h, pivot_12h)
+    # Calculate 1w EMA200 for trend filter
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
-    # Get 1d data ONCE before loop for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:  # Need at least 34 completed daily bars for EMA34
-        return np.zeros(n)
-    close_1d = df_1d['close'].values
-    
-    # Calculate 1d EMA34
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Calculate volume confirmation: volume > 2.0 * 20-period average volume on 4h
+    # Calculate volume confirmation: volume > 1.5 * 20-period average volume on 1d
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * avg_volume_20)
+    volume_confirm = volume > (1.5 * avg_volume_20)
     
     # Session filter: 08-20 UTC (pre-compute for efficiency)
     hours = prices.index.hour
@@ -84,36 +64,36 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN or outside session
-        if (np.isnan(r3_12h_aligned[i]) or np.isnan(s3_12h_aligned[i]) or np.isnan(pivot_12h_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(avg_volume_20[i]) or not in_session[i]):
+        if (np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or 
+            np.isnan(ema_200_1w_aligned[i]) or np.isnan(avg_volume_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R3, 1d EMA34 > EMA34 previous (uptrend), volume spike, in session
-            if (close[i] > r3_12h_aligned[i] and 
-                ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and 
+            # Long: price breaks above upper BB AND 1w close > 1w EMA200 (bullish) AND volume spike
+            if (close[i] > upper_bb_aligned[i] and 
+                close_1w[-1] > ema_200_1w_aligned[i] and  # Use latest completed 1w close for regime
                 volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3, 1d EMA34 < EMA34 previous (downtrend), volume spike, in session
-            elif (close[i] < s3_12h_aligned[i] and 
-                  ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and 
+            # Short: price breaks below lower BB AND 1w close < 1w EMA200 (bearish) AND volume spike
+            elif (close[i] < lower_bb_aligned[i] and 
+                  close_1w[-1] < ema_200_1w_aligned[i] and  # Use latest completed 1w close for regime
                   volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses back below pivot point (mean reversion)
-            if close[i] < pivot_12h_aligned[i]:
+            # Exit long: price crosses back below 20-period SMA (mean reversion)
+            if close[i] < sma_20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses back above pivot point (mean reversion)
-            if close[i] > pivot_12h_aligned[i]:
+            # Exit short: price crosses back above 20-period SMA (mean reversion)
+            if close[i] > sma_20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
