@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
-# Uses 1d Camarilla pivot levels (R3/S3) for structure, 1d EMA34 for trend alignment (reduces whipsaw)
-# Volume spike (>2.0x 20-bar average) confirms breakout strength
-# ATR-based trailing stop via signal=0 when price retraces 30% of ATR from extreme
-# Discrete sizing 0.30 to balance profit potential and fee drag; target 100-180 total trades over 4 years (25-45/year)
-# Works in both bull/bear: breakouts capture momentum, trend filter avoids counter-trend traps, volume filter ensures participation
+# Hypothesis: 4h Donchian channel breakout with 1d ADX trend filter and volume confirmation
+# Uses 4h Donchian(20) for structure, 1d ADX(14) > 25 for strong trend alignment (reduces whipsaw in ranging markets)
+# Volume spike (>1.8x 20-bar average) confirms breakout strength
+# ATR-based trailing stop via signal=0 when price retraces 25% of ATR from extreme
+# Discrete sizing 0.25 to minimize fee drag; target 80-160 total trades over 4 years (20-40/year)
+# Works in both bull/bear: breakouts capture momentum, ADX filter avoids false breakouts in chop, volume filter ensures participation
 
-name = "4h_Camarilla_R3S3_1dEMA34_VolumeSpike_v1"
+name = "4h_Donchian20_1dADX25_VolumeConfirm_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -27,23 +27,46 @@ def generate_signals(prices):
     # Calculate HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 34:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA34 trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 1d ADX(14) trend filter
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_1d = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 1d Camarilla pivot levels (R3, S3)
-    # Camarilla: R4 = close + 1.5*(high-low), R3 = close + 1.125*(high-low), etc.
-    # We use R3 and S3 as key breakout levels
-    camarilla_range = high_1d - low_1d
-    r3_1d = close_1d + 1.125 * camarilla_range
-    s3_1d = close_1d - 1.125 * camarilla_range
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Smoothed DM and TR
+    tr_period = 14
+    tr_sum = pd.Series(tr_1d).rolling(window=tr_period, min_periods=tr_period).sum().values
+    dm_plus_sum = pd.Series(dm_plus).rolling(window=tr_period, min_periods=tr_period).sum().values
+    dm_minus_sum = pd.Series(dm_minus).rolling(window=tr_period, min_periods=tr_period).sum().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_sum / tr_sum
+    di_minus = 100 * dm_minus_sum / tr_sum
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate 4h Donchian(20) channels
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Calculate ATR(14) for stoploss
     tr1 = np.abs(high[1:] - low[1:])
@@ -52,14 +75,12 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate volume spike filter (>2.0x 20-bar average)
+    # Calculate volume spike filter (>1.8x 20-bar average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (2.0 * vol_ma_20)
+    volume_filter = volume > (1.8 * vol_ma_20)
     
     # Align HTF indicators to 4h timeframe
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # Pre-compute session filter (08-20 UTC)
     hours = prices.index.hour
@@ -72,8 +93,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or 
-            np.isnan(s3_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(volume_filter[i]) or
+        if (np.isnan(adx_1d_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(atr[i]) or np.isnan(volume_filter[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -83,35 +104,35 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long breakout: price > R3 AND uptrend (price > EMA34) AND volume spike
-            if close[i] > r3_1d_aligned[i] and close[i] > ema34_1d_aligned[i] and volume_filter[i]:
-                signals[i] = 0.30
+            # Long breakout: price > Donchian High AND strong trend (ADX > 25) AND volume spike
+            if close[i] > donchian_high[i] and adx_1d_aligned[i] > 25 and volume_filter[i]:
+                signals[i] = 0.25
                 position = 1
                 long_extreme = close[i]
-            # Short breakdown: price < S3 AND downtrend (price < EMA34) AND volume spike
-            elif close[i] < s3_1d_aligned[i] and close[i] < ema34_1d_aligned[i] and volume_filter[i]:
-                signals[i] = -0.30
+            # Short breakdown: price < Donchian Low AND strong trend (ADX > 25) AND volume spike
+            elif close[i] < donchian_low[i] and adx_1d_aligned[i] > 25 and volume_filter[i]:
+                signals[i] = -0.25
                 position = -1
                 short_extreme = close[i]
         elif position == 1:
             # Update long extreme
             long_extreme = max(long_extreme, close[i])
-            # Exit long: price retraces 30% of ATR from extreme (tighter stop for 4h)
-            if close[i] <= long_extreme - 0.3 * atr[i]:
+            # Exit long: price retraces 25% of ATR from extreme (tighter stop for 4h)
+            if close[i] <= long_extreme - 0.25 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 long_extreme = 0.0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
             # Update short extreme
             short_extreme = min(short_extreme, close[i])
-            # Exit short: price retraces 30% of ATR from extreme
-            if close[i] >= short_extreme + 0.3 * atr[i]:
+            # Exit short: price retraces 25% of ATR from extreme
+            if close[i] >= short_extreme + 0.25 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 short_extreme = 0.0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
