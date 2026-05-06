@@ -3,19 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Donchian breakout with volume spike and ADX trend filter
-# - Uses 1d Donchian channels (20-period) for long-term structure
-# - Uses 4h volume spike (2x 10-period average) for entry confirmation
-# - Uses 4h ADX > 25 to filter for trending markets only
-# - Enters long when price breaks above 1d Donchian upper with volume and trend
-# - Enters short when price breaks below 1d Donchian lower with volume and trend
-# - Exits when price returns to 1d Donchian middle (median)
-# - Position size: 0.25 (25% of capital)
-# - Designed to capture major trend moves with institutional level respect
-# - Target: 80-180 total trades over 4 years (20-45/year)
+# Hypothesis: 12h strategy using daily Chandelier Exit for trend-following with volume confirmation
+# - Uses 1d ATR-based Chandelier Exit (22, 3.0) for trend direction and exit signals
+# - Uses 12h volume spike (1.5x 20-period MA) for entry confirmation
+# - Enters long when price closes above long Chandelier Exit with volume confirmation
+# - Enters short when price closes below short Chandelier Exit with volume confirmation
+# - Exits when price reverses and touches the opposite Chandelier Exit
+# - Designed to capture major trends while whipsaw-resistant in sideways markets
+# - Target: 60-120 total trades over 4 years (15-30/year) with 0.25 position sizing
 
-name = "4h_1dDonchian_20_Volume_ADX_Trend_v2"
-timeframe = "4h"
+name = "12h_1dChandelier_22_3.0_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,108 +26,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian channels
+    # Get 1d data for Chandelier Exit calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 22:
         return np.zeros(n)
     
-    # Calculate 1d Donchian channels (20-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    middle_20 = (upper_20 + lower_20) / 2  # Median line for exit
+    # Calculate True Range for ATR
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Align 1d Donchian channels to 4h timeframe
-    upper_20_4h = align_htf_to_ltf(prices, df_1d, upper_20)
-    lower_20_4h = align_htf_to_ltf(prices, df_1d, lower_20)
-    middle_20_4h = align_htf_to_ltf(prices, df_1d, middle_20)
+    # Calculate ATR(22) using Wilder's smoothing
+    atr = np.zeros_like(tr)
+    atr[21] = np.mean(tr[0:22])  # Simple average for first value
+    for i in range(22, len(tr)):
+        atr[i] = (atr[i-1] * 21 + tr[i]) / 22
     
-    # Volume filter (4h timeframe) - volume spike > 2x 10-period average
-    vol_ma_10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
-    volume_spike = volume > (2.0 * vol_ma_10)
+    # Chandelier Exit calculation (22-period, 3.0 multiplier)
+    # Long Exit: highest high - 3*ATR
+    # Short Exit: lowest low + 3*ATR
+    highest_high = np.zeros_like(high_1d)
+    lowest_low = np.zeros_like(low_1d)
     
-    # ADX filter (4h timeframe) - trend strength
-    def calculate_adx(high, low, close, period=14):
-        plus_dm = np.zeros_like(high)
-        minus_dm = np.zeros_like(high)
-        tr = np.zeros_like(high)
-        
-        for i in range(1, len(high)):
-            plus_dm[i] = max(high[i] - high[i-1], 0)
-            minus_dm[i] = max(low[i-1] - low[i], 0)
-            if plus_dm[i] < minus_dm[i]:
-                plus_dm[i] = 0
-            if minus_dm[i] < plus_dm[i]:
-                minus_dm[i] = 0
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        # Wilder's smoothing
-        atr = np.zeros_like(high)
-        plus_di = np.zeros_like(high)
-        minus_di = np.zeros_like(high)
-        
-        atr[period-1] = np.mean(tr[1:period+1])
-        plus_dm_sum = np.sum(plus_dm[1:period+1])
-        minus_dm_sum = np.sum(minus_dm[1:period+1])
-        
-        for i in range(period, len(high)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-            plus_dm_sum = plus_dm_sum - (plus_dm[i-period+1] if i-period+1 >= 0 else 0) + plus_dm[i]
-            minus_dm_sum = minus_dm_sum - (minus_dm[i-period+1] if i-period+1 >= 0 else 0) + minus_dm[i]
-            plus_di[i] = 100 * plus_dm_sum / (atr[i] * period) if atr[i] != 0 else 0
-            minus_di[i] = 100 * minus_dm_sum / (atr[i] * period) if atr[i] != 0 else 0
-        
-        dx = np.zeros_like(high)
-        adx = np.zeros_like(high)
-        for i in range(2*period-1, len(high)):
-            di_diff = abs(plus_di[i] - minus_di[i])
-            di_sum = plus_di[i] + minus_di[i]
-            dx[i] = 100 * di_diff / di_sum if di_sum != 0 else 0
-        
-        # Smooth DX to get ADX
-        adx[2*period-1] = np.mean(dx[2*period-1:3*period]) if 3*period <= len(high) else 0
-        for i in range(3*period, len(high)):
-            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx
+    highest_high[21] = np.max(high_1d[0:22])
+    lowest_low[21] = np.min(low_1d[0:22])
     
-    adx_values = calculate_adx(high, low, close, 14)
-    adx_filter = adx_values > 25  # Strong trend filter
+    for i in range(22, len(high_1d)):
+        highest_high[i] = max(highest_high[i-1], high_1d[i])
+        lowest_low[i] = min(lowest_low[i-1], low_1d[i])
+    
+    long_exit = highest_high - 3.0 * atr
+    short_exit = lowest_low + 3.0 * atr
+    
+    # Align Chandelier Exits to 12h timeframe
+    long_exit_12h = align_htf_to_ltf(prices, df_1d, long_exit)
+    short_exit_12h = align_htf_to_ltf(prices, df_1d, short_exit)
+    
+    # Volume filter (12h timeframe)
+    vol_ma_20 = np.zeros_like(volume)
+    for i in range(20, len(volume)):
+        vol_ma_20[i] = np.mean(volume[i-20:i])
+    volume_spike = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if any critical value is NaN
-        if (np.isnan(upper_20_4h[i]) or np.isnan(lower_20_4h[i]) or 
-            np.isnan(middle_20_4h[i]) or np.isnan(volume_spike[i]) or 
-            np.isnan(adx_filter[i])):
+        if (np.isnan(long_exit_12h[i]) or np.isnan(short_exit_12h[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above 1d Donchian upper with volume and trend
-            if close[i] > upper_20_4h[i] and volume_spike[i] and adx_filter[i]:
+            # Long: close above long Chandelier Exit with volume confirmation
+            if close[i] > long_exit_12h[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below 1d Donchian lower with volume and trend
-            elif close[i] < lower_20_4h[i] and volume_spike[i] and adx_filter[i]:
+            # Short: close below short Chandelier Exit with volume confirmation
+            elif close[i] < short_exit_12h[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to middle
-            if close[i] < middle_20_4h[i]:
+            # Exit long: price touches or crosses short Chandelier Exit
+            if close[i] <= short_exit_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to middle
-            if close[i] > middle_20_4h[i]:
+            # Exit short: price touches or crosses long Chandelier Exit
+            if close[i] >= long_exit_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
