@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Donchian channel breakout with 1h volume spike and choppiness regime filter
-# Long when price breaks above 1d Donchian(20) high AND 1h volume > 2.0 * avg_volume(20) AND chop > 61.8 (range regime)
-# Short when price breaks below 1d Donchian(20) low AND 1h volume > 2.0 * avg_volume(20) AND chop > 61.8 (range regime)
-# Exit when price crosses 1d EMA50 (trend reversal)
+# Hypothesis: 4h strategy using 1d Camarilla pivot breakout with 1w EMA50 trend filter and volume confirmation
+# Long when price breaks above 1d Camarilla R3 level AND 1w EMA50 > EMA200 AND volume > 2.0 * avg_volume(20)
+# Short when price breaks below 1d Camarilla S3 level AND 1w EMA50 < EMA200 AND volume > 2.0 * avg_volume(20)
+# Exit when price crosses 1d EMA50 (trend reversal signal)
 # Uses discrete sizing 0.25 to balance return and drawdown
 # Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
-# 1d Donchian provides clear structure with proven breakout edge in ranging markets
-# Volume confirmation filters weak breakouts
-# Choppiness regime ensures we only trade in ranging markets where mean reversion works
+# 1d Camarilla provides clear structure with proven breakout edge
+# 1w EMA50/EMA200 filter ensures alignment with higher timeframe trend (works in bull/bear)
+# Volume confirmation filters weak breakouts (reduces false signals)
 
-name = "4h_1dDonchian20_1hVolumeSpike_ChopRange_v1"
+name = "4h_1dCamarillaR3S3_1wEMA50Trend_Volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -27,85 +27,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for Donchian channels and EMA
+    # Get 1d data ONCE before loop for Camarilla pivots and EMA
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:  # Need sufficient data for Donchian and EMA
+    if len(df_1d) < 50:  # Need sufficient data for EMA50
         return np.zeros(n)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Donchian(20) channels based on previous 1d bar
-    high_series_1d = pd.Series(high_1d)
-    low_series_1d = pd.Series(low_1d)
-    donchian_high_1d = high_series_1d.rolling(window=20, min_periods=20).max().shift(1).values
-    donchian_low_1d = low_series_1d.rolling(window=20, min_periods=20).min().shift(1).values
+    # Calculate 1d Camarilla pivot levels based on previous 1d bar
+    # Camarilla: R3 = Close + 1.25 * (High - Low), S3 = Close - 1.25 * (High - Low)
+    camarilla_r3_1d = close_1d + 1.25 * (high_1d - low_1d)
+    camarilla_s3_1d = close_1d - 1.25 * (high_1d - low_1d)
     
-    # Calculate 1d EMA50 for trend exit
+    # Calculate 1d EMA50 for trend filter
     close_series_1d = pd.Series(close_1d)
     ema_50_1d = close_series_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Get 1h data ONCE before loop for volume and choppiness
-    df_1h = get_htf_data(prices, '1h')
-    if len(df_1h) < 30:  # Need sufficient data for volume and chop
+    # Get 1w data ONCE before loop for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:  # Need sufficient data for EMA200
         return np.zeros(n)
-    volume_1h = df_1h['volume'].values
-    high_1h = df_1h['high'].values
-    low_1h = df_1h['low'].values
-    close_1h = df_1h['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1h volume confirmation: volume > 2.0 * 20-period average volume
-    volume_series_1h = pd.Series(volume_1h)
-    avg_volume_20_1h = volume_series_1h.rolling(window=20, min_periods=20).mean().values
-    volume_spike_1h = volume_1h > (2.0 * avg_volume_20_1h)
+    # Calculate 1w EMA50 and EMA200 for trend filter
+    close_series_1w = pd.Series(close_1w)
+    ema_50_1w = close_series_1w.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_200_1w = close_series_1w.ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Calculate 1h choppiness index: CHOP(14) = 100 * log10(sum(ATR(14)) / log10(range(14)))
-    # Simplified: CHOP > 61.8 = ranging market (good for mean reversion/breakout fade)
-    tr1 = np.maximum(high_1h[1:] - low_1h[:-1], np.abs(high_1h[1:] - close_1h[:-1]))
-    tr1 = np.maximum(tr1, np.abs(low_1h[1:] - close_1h[:-1]))
-    tr1 = np.concatenate([[np.nan], tr1])  # align with index
-    
-    atr_14 = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
-    high_max_14 = pd.Series(high_1h).rolling(window=14, min_periods=14).max().values
-    low_min_14 = pd.Series(low_1h).rolling(window=14, min_periods=14).min().values
-    range_14 = high_max_14 - low_min_14
-    
-    # Avoid division by zero
-    chop_1h = np.where(range_14 > 0, 100 * np.log10(atr_14 * 14 / range_14) / np.log10(14), 50)
-    chop_1h = np.where(np.isnan(chop_1h), 50, chop_1h)
-    chop_range = chop_1h > 61.8  # ranging market
-    
-    # Align 1d Donchian levels and EMA to 4h timeframe (wait for completed 1d bar)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_1d)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_1d)
+    # Align 1d Camarilla levels and EMA to 4h timeframe (wait for completed 1d bar)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align 1h volume spike and chop to 4h timeframe (wait for completed 1h bar)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1h, volume_spike_1h)
-    chop_range_aligned = align_htf_to_ltf(prices, df_1h, chop_range)
+    # Align 1w EMA indicators to 4h timeframe (wait for completed 1w bar)
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    
+    # Calculate volume confirmation: volume > 2.0 * 20-period average volume
+    avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (2.0 * avg_volume_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_spike_aligned[i]) or 
-            np.isnan(chop_range_aligned[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(ema_200_1w_aligned[i]) or np.isnan(avg_volume_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above 1d Donchian high with volume spike and chop > 61.8 (range)
-            if (close[i] > donchian_high_aligned[i] and close[i-1] <= donchian_high_aligned[i-1] and 
-                volume_spike_aligned[i] and chop_range_aligned[i]):
+            # Long: price breaks above 1d Camarilla R3 with 1w EMA50 > EMA200 and volume confirmation
+            if (close[i] > camarilla_r3_aligned[i] and close[i-1] <= camarilla_r3_aligned[i-1] and 
+                ema_50_1w_aligned[i] > ema_200_1w_aligned[i] and volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 1d Donchian low with volume spike and chop > 61.8 (range)
-            elif (close[i] < donchian_low_aligned[i] and close[i-1] >= donchian_low_aligned[i-1] and 
-                  volume_spike_aligned[i] and chop_range_aligned[i]):
+            # Short: price breaks below 1d Camarilla S3 with 1w EMA50 < EMA200 and volume confirmation
+            elif (close[i] < camarilla_s3_aligned[i] and close[i-1] >= camarilla_s3_aligned[i-1] and 
+                  ema_50_1w_aligned[i] < ema_200_1w_aligned[i] and volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
