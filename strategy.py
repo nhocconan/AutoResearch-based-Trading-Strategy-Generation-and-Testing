@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using Donchian channel breakout with volume confirmation and daily trend filter
-# Donchian(20) provides clear breakout levels, volume surge confirms momentum, daily EMA50 filters trend direction
-# Works in bull markets via breakouts, in bear via mean reversion at channel boundaries
-# Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
+# Hypothesis: 4h strategy using 1d Donchian breakout with volume confirmation and chop regime filter
+# Daily Donchian(20) breakout captures strong trends; volume > 1.5x 20-period average confirms momentum
+# Choppiness Index (14) > 61.8 indicates ranging (avoid breakouts), < 38.2 indicates trending (favor breakouts)
+# Works in bull/bear markets: breakouts capture trends, chop filter avoids false signals in ranges
+# Target: 75-200 total trades over 4 years (19-50/year) with 0.25 position sizing
 
-name = "12h_Donchian20_VolumeTrendFilter_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1d_VolumeChopFilter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,28 +23,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate daily EMA for trend filter ONCE before loop
+    # Calculate daily Donchian channels (20-period) ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Daily 50-period EMA for trend filter
+    # Daily Donchian channels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Donchian upper and lower bands (20-period)
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
+    # Align daily Donchian levels to 4h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    
+    # Volume confirmation: >1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma_20)
+    
+    # Choppiness Index (14) on daily timeframe - regime filter
+    # CHOP = 100 * log10(sum(TR over n) / (HHV(high, n) - LLV(low, n))) / log10(n)
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    # Need close prices for TR calculation
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    uptrend = close > ema_50_1d_aligned
-    downtrend = close < ema_50_1d_aligned
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR is just high-low
     
-    # Calculate Donchian channel (20-period) on 12h data
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    upper_channel = high_series.rolling(window=20, min_periods=20).max().values
-    lower_channel = low_series.rolling(window=20, min_periods=20).min().values
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    hh = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     
-    # Volume confirmation: >1.8x 30-period average
-    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_filter = volume > (1.8 * vol_ma_30)
+    # Avoid division by zero
+    range_hl = hh - ll
+    chop = np.where(range_hl != 0, 100 * np.log10(atr_sum / range_hl) / np.log10(14), 50)
+    
+    # Chop regime: >61.8 = ranging (avoid breakouts), <38.2 = trending (favor breakouts)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    trending_market = chop_aligned < 38.2  # Favor breakouts in trending markets
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -54,8 +76,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
-            np.isnan(volume_filter[i]) or np.isnan(ema_50_1d_aligned[i]) or
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(volume_filter[i]) or np.isnan(chop_aligned[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -63,24 +85,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long breakout: price breaks above upper channel with volume confirmation and uptrend
-            if close[i] > upper_channel[i] and volume_filter[i] and uptrend[i]:
+            # Long breakout: price breaks above daily Donchian high with volume confirmation in trending market
+            if close[i] > donchian_high_aligned[i] and volume_filter[i] and trending_market[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short breakout: price breaks below lower channel with volume confirmation and downtrend
-            elif close[i] < lower_channel[i] and volume_filter[i] and downtrend[i]:
+            # Short breakout: price breaks below daily Donchian low with volume confirmation in trending market
+            elif close[i] < donchian_low_aligned[i] and volume_filter[i] and trending_market[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below lower channel (failed breakout) or reaches upper channel (take profit at channel top)
-            if close[i] < lower_channel[i] or close[i] >= upper_channel[i]:
+            # Exit long: price breaks below daily Donchian low (failed breakout) or time-based exit
+            if close[i] < donchian_low_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above upper channel (failed breakdown) or reaches lower channel (take profit at channel bottom)
-            if close[i] > upper_channel[i] or close[i] <= lower_channel[i]:
+            # Exit short: price breaks above daily Donchian high (failed breakdown) or time-based exit
+            if close[i] > donchian_high_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
