@@ -3,21 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
-# Long when price breaks above Donchian(20) upper band AND price > 1w EMA50 (uptrend) AND volume > 2.0 * 20-period avg volume
-# Short when price breaks below Donchian(20) lower band AND price < 1w EMA50 (downtrend) AND volume > 2.0 * 20-period avg volume
-# Exit with ATR-based trailing stop: signal→0 when long and price < highest_high - 2.5 * ATR OR short and price > lowest_low + 2.5 * ATR
-# Uses discrete sizing 0.25 to manage drawdown (BTC -77% in 2022 → ~19.25% loss at 0.25 exposure)
-# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe
-# Donchian channels provide structure, 1w EMA50 filters primary trend, volume threshold ensures conviction breakout
+# Hypothesis: 6h Bollinger Band Width regime filter + 12h Donchian(20) breakout + volume confirmation
+# BB Width < 20th percentile = ranging market (fade at bands)
+# BB Width > 80th percentile = trending market (breakout continuation)
+# In ranging: long at lower band, short at upper band with volume confirmation
+# In trending: breakout above upper Donchian(20) or below lower Donchian(20) with volume confirmation
+# Uses 12h HTF for Donchian calculation to reduce noise, 6h for BB Width regime
+# Discrete sizing 0.25 to manage drawdown, target 50-150 total trades over 4 years
+# Works in bull via breakout continuation, works in bear via mean reversion in ranging markets
 
-name = "1d_Donchian20_1wEMA50_Volume_v1"
-timeframe = "1d"
+name = "6h_BBWidth_DonchianBreakout_12hVolume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,84 +26,89 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data ONCE before loop for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 12h data ONCE before loop for Donchian calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Calculate 1w EMA50
-    close_1w_series = pd.Series(close_1w)
-    ema_50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 12h Donchian channels (20-period)
+    high_12h_series = pd.Series(high_12h)
+    low_12h_series = pd.Series(low_12h)
+    donchian_high_20 = high_12h_series.rolling(window=20, min_periods=20).max().values
+    donchian_low_20 = low_12h_series.rolling(window=20, min_periods=20).min().values
     
-    # Calculate Donchian(20) channels
-    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align 12h Donchian channels to 6h timeframe (wait for completed 12h bar)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high_20)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low_20)
     
-    # Calculate ATR(14) for stoploss
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period TR is just high-low
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate Bollinger Bands and Width on 6h close
+    close_series = pd.Series(close)
+    sma_20 = close_series.rolling(window=20, min_periods=20).mean().values
+    std_20 = close_series.rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + (2.0 * std_20)
+    lower_bb = sma_20 - (2.0 * std_20)
+    bb_width = (upper_bb - lower_bb) / sma_20  # Normalized width
     
-    # Calculate volume confirmation: volume > 2.0 * 20-period average volume
+    # Calculate BB Width percentiles (using 50-period lookback for regime)
+    bb_width_series = pd.Series(bb_width)
+    bb_width_pct = bb_width_series.rolling(window=50, min_periods=50).rank(pct=True).values * 100
+    
+    # Volume confirmation: volume > 1.3 * 20-period average volume
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * avg_volume_20)
-    
-    # Align HTF indicators to 1d timeframe (wait for completed HTF bar)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    volume_spike = volume > (1.3 * avg_volume_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    highest_high_since_entry = 0.0
-    lowest_low_since_entry = 0.0
     
     for i in range(50, n):  # Start after warmup period
         # Skip if any value is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr_14[i]) or np.isnan(volume_spike[i]) or
-            np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(upper_bb[i]) or np.isnan(lower_bb[i]) or np.isnan(bb_width_pct[i]) or
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                highest_high_since_entry = 0.0
-                lowest_low_since_entry = 0.0
             continue
         
         if position == 0:
-            # Donchian breakout signals with trend and volume filters
-            bullish_breakout = close[i] > highest_high_20[i-1]  # Break above prior 20-period high
-            bearish_breakout = close[i] < lowest_low_20[i-1]    # Break below prior 20-period low
+            # Regime detection: BB Width percentile
+            is_ranging = bb_width_pct[i] < 30  # Lower 30% = ranging market
+            is_trending = bb_width_pct[i] > 70  # Upper 30% = trending market
             
-            # Long: bullish breakout AND uptrend AND volume spike
-            if bullish_breakout and close[i] > ema_50_1w_aligned[i] and volume_spike[i]:
-                signals[i] = 0.25
-                position = 1
-                highest_high_since_entry = high[i]
-            # Short: bearish breakout AND downtrend AND volume spike
-            elif bearish_breakout and close[i] < ema_50_1w_aligned[i] and volume_spike[i]:
-                signals[i] = -0.25
-                position = -1
-                lowest_low_since_entry = low[i]
+            # In ranging market: mean reversion at Bollinger Bands
+            if is_ranging:
+                # Long at lower BB with volume spike
+                if close[i] <= lower_bb[i] and volume_spike[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # Short at upper BB with volume spike
+                elif close[i] >= upper_bb[i] and volume_spike[i]:
+                    signals[i] = -0.25
+                    position = -1
+            # In trending market: Donchian breakout continuation
+            elif is_trending:
+                # Long on breakout above Donchian high with volume spike
+                if close[i] > donchian_high_aligned[i] and volume_spike[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # Short on breakout below Donchian low with volume spike
+                elif close[i] < donchian_low_aligned[i] and volume_spike[i]:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Update highest high since entry
-            highest_high_since_entry = max(highest_high_since_entry, high[i])
-            # Exit long: price drops below highest_high - 2.5 * ATR (trailing stop)
-            if close[i] < highest_high_since_entry - 2.5 * atr_14[i]:
+            # Exit long: price crosses below SMA(20) or opposite BB touch
+            if close[i] < sma_20[i] or close[i] >= upper_bb[i]:
                 signals[i] = 0.0
                 position = 0
-                highest_high_since_entry = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Update lowest low since entry
-            lowest_low_since_entry = min(lowest_low_since_entry, low[i])
-            # Exit short: price rises above lowest_low + 2.5 * ATR (trailing stop)
-            if close[i] > lowest_low_since_entry + 2.5 * atr_14[i]:
+            # Exit short: price crosses above SMA(20) or opposite BB touch
+            if close[i] > sma_20[i] or close[i] <= lower_bb[i]:
                 signals[i] = 0.0
                 position = 0
-                lowest_low_since_entry = 0.0
             else:
                 signals[i] = -0.25
     
