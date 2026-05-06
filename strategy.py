@@ -3,22 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using weekly Williams %R (Williams %R) with overbought/oversold levels and mean reversion
-# - Uses Williams %R (14) calculated on weekly timeframe for overbought/oversold signals
-# - Long when weekly Williams %R crosses above -80 from below (oversold bounce)
-# - Short when weekly Williams %R crosses below -20 from above (overbought rejection)
-# - Filters trades with daily RSI(14) to avoid counter-trend entries in strong trends
-# - Uses volume confirmation (volume > 1.5x 20-period MA) to ensure participation
-# - Designed to work in ranging markets (mean reversion at extremes) and avoid strong trends
-# - Target: 30-100 total trades over 4 years (7-25/year) with 0.25 position sizing
+# Hypothesis: 6h strategy using 12h ATR-based volatility breakout with 1d trend filter
+# - Enter long when price breaks above 12h high + 1.5 * ATR(12h) with volume expansion
+# - Enter short when price breaks below 12h low - 1.5 * ATR(12h) with volume expansion
+# - Only take trades in direction of 1d EMA34 to avoid counter-trend in strong trends
+# - Uses 12h ATR calculated from prior 12h bar to avoid look-ahead
+# - Designed to capture breakouts in both trending and ranging markets
+# - Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
 
-name = "1d_WilliamsR_Weekly_OBOS_MeanReversion"
-timeframe = "1d"
+name = "6h_ATRBreakout_1dEMA34_TrendFilter"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,72 +25,100 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Williams %R calculation
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 14:
+    # Get 12h data for ATR calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Calculate Williams %R on weekly data: (Highest High - Close) / (Highest High - Lowest Low) * -100
-    # Williams %R = -100 * (HH - C) / (HH - LL), ranges from 0 to -100
-    # Overbought: > -20, Oversold: < -80
-    highest_high = pd.Series(df_weekly['high']).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(df_weekly['low']).rolling(window=14, min_periods=14).min().values
+    # Calculate ATR(12h) based on prior 12h bar's true range
+    # True Range = max(high-low, abs(high-prev_close), abs(low-prev_close))
+    prev_close = df_12h['close'].shift(1)
+    tr1 = df_12h['high'] - df_12h['low']
+    tr2 = np.abs(df_12h['high'] - prev_close)
+    tr3 = np.abs(df_12h['low'] - prev_close)
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # ATR(12h) with Wilder's smoothing (same as RMA)
+    atr_12h = np.zeros_like(tr)
+    atr_12h[0] = tr[0]  # Initialize with first TR
+    for i in range(1, len(tr)):
+        atr_12h[i] = (atr_12h[i-1] * 12 + tr[i]) / 13  # Wilder's smoothing
+    
+    # Calculate breakout levels: prior 12h high/low ± 1.5 * ATR
+    prev_high = df_12h['high'].shift(1)
+    prev_low = df_12h['low'].shift(1)
+    atr_shifted = atr_12h.shift(1)
     
     # Avoid division by zero
-    range_ww = highest_high - lowest_low
-    range_ww = np.where(range_ww == 0, 0.0001, range_ww)
+    atr_shifted = np.where(atr_shifted == 0, 0.0001, atr_shifted)
     
-    williams_r = -100 * (highest_high - df_weekly['close'].values) / range_ww
+    breakout_high = prev_high + 1.5 * atr_shifted
+    breakout_low = prev_low - 1.5 * atr_shifted
     
-    # Align Williams %R to daily timeframe (no extra delay needed as it's based on current weekly bar)
-    williams_r_daily = align_htf_to_ltf(prices, df_weekly, williams_r)
+    # Align breakout levels to 6h timeframe
+    breakout_high_6h = align_htf_to_ltf(prices, df_12h, breakout_high.values)
+    breakout_low_6h = align_htf_to_ltf(prices, df_12h, breakout_low.values)
     
-    # Daily RSI(14) for trend filter (avoid counter-trend in strong trends)
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / np.where(avg_loss == 0, 0.0001, avg_loss)
-    rsi = 100 - (100 / (1 + rs))
+    # 1d EMA34 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
     
-    # Volume confirmation: volume > 1.5x 20-day moving average
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume filters
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmation = volume > (1.5 * vol_ma_20)
+    volume_filter = volume > (1.5 * vol_ma_20)  # Volume expansion filter
+    volume_expansion = volume > np.roll(volume, 1)  # Current volume > previous
+    volume_expansion[0] = False
+    
+    # Session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after warmup for indicators
-        # Skip if any critical value is NaN
-        if (np.isnan(williams_r_daily[i]) or np.isnan(rsi[i]) or np.isnan(volume_confirmation[i])):
+    for i in range(20, n):  # Start after warmup
+        # Skip if any critical value is NaN or outside session
+        if (np.isnan(breakout_high_6h[i]) or np.isnan(breakout_low_6h[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_filter[i]) or np.isnan(volume_expansion[i]) or
+            not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long signal: Williams %R crosses above -80 from below (oversold bounce)
-            williams_r_prev = williams_r_daily[i-1] if i > 0 else williams_r_daily[i]
-            if (williams_r_prev <= -80 and williams_r_daily[i] > -80 and 
-                rsi[i] < 60 and volume_confirmation[i]):  # Avoid overbought RSI
-                signals[i] = 0.25
-                position = 1
-            # Short signal: Williams %R crosses below -20 from above (overbought rejection)
-            elif (williams_r_prev >= -20 and williams_r_daily[i] < -20 and 
-                  rsi[i] > 40 and volume_confirmation[i]):  # Avoid oversold RSI
-                signals[i] = -0.25
-                position = -1
+            # Long breakout: price breaks above breakout_high with volume expansion
+            if close[i] > breakout_high_6h[i] and volume_expansion[i] and volume_filter[i]:
+                # Only take long if above daily EMA (bullish context)
+                if close[i] > ema_34_1d_aligned[i]:
+                    signals[i] = 0.25
+                    position = 1
+            # Short breakout: price breaks below breakout_low with volume expansion
+            elif close[i] < breakout_low_6h[i] and volume_expansion[i] and volume_filter[i]:
+                # Only take short if below daily EMA (bearish context)
+                if close[i] < ema_34_1d_aligned[i]:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Exit long: Williams %R reaches overbought (-20) or RSI overbought
-            if williams_r_daily[i] >= -20 or rsi[i] >= 70:
+            # Exit long: price breaks below breakout_low (stop) or reaches breakout_high (target)
+            if close[i] < breakout_low_6h[i]:  # Stop loss
+                signals[i] = 0.0
+                position = 0
+            elif close[i] > breakout_high_6h[i]:  # Take profit at breakout level
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R reaches oversold (-80) or RSI oversold
-            if williams_r_daily[i] <= -80 or rsi[i] <= 30:
+            # Exit short: price breaks above breakout_high (stop) or reaches breakout_low (target)
+            if close[i] > breakout_high_6h[i]:  # Stop loss
+                signals[i] = 0.0
+                position = 0
+            elif close[i] < breakout_low_6h[i]:  # Take profit at breakout level
                 signals[i] = 0.0
                 position = 0
             else:
