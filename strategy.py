@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Donchian channel (20) breakout with 1d ADX trend filter and volume confirmation
-# Long when price breaks above 1d Donchian upper channel AND 1d ADX > 25 AND volume > 2.0 * avg_volume(20) on 12h
-# Short when price breaks below 1d Donchian lower channel AND 1d ADX > 25 AND volume > 2.0 * avg_volume(20) on 12h
-# Exit when price crosses the 1d Donchian midpoint (mean of upper and lower channel)
+# Hypothesis: 1d strategy using 1w Camarilla pivot R3/S3 breakout with 1w EMA34 trend filter and volume confirmation
+# Long when price breaks above 1w Camarilla R3 level AND 1w EMA34 is rising AND volume > 1.5 * avg_volume(20) on 1d
+# Short when price breaks below 1w Camarilla S3 level AND 1w EMA34 is falling AND volume > 1.5 * avg_volume(20) on 1d
+# Exit when price crosses the 1w Camarilla pivot point (midpoint of R3/S3)
 # Uses discrete sizing 0.25 to balance profit potential and drawdown control
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
-# 1d Donchian(20) provides clear breakout levels with proven effectiveness
-# 1d ADX > 25 ensures we only trade in trending markets, reducing whipsaws
-# High volume threshold (2.0x) controls trade frequency while capturing strong breakouts
-# Works in both bull (buy breakouts) and bear (sell breakdowns) markets by trading with the 1d trend
+# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe
+# 1w Camarilla R3/S3 provides strong breakout levels with lower false signals vs 1d
+# 1w EMA34 ensures we trade with the weekly trend while reducing noise
+# Moderate volume threshold (1.5x) controls trade frequency while capturing genuine breakouts
+# Works in both bull (buy breakouts) and bear (sell breakdowns) markets by trading with the 1w trend
 
-name = "12h_1dDonchian20_Breakout_1dADX25_Trend_Volume"
-timeframe = "12h"
+name = "1d_1wCamarilla_R3S3_Breakout_1wEMA34_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,110 +28,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for Donchian channel and ADX calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # Need at least 30 completed daily bars for ADX(14) with warmup
+    # Get 1w data ONCE before loop for Camarilla pivot and EMA34 calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:  # Need at least 34 completed weekly bars for EMA34
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d Donchian channel (20)
-    # Upper channel = highest high over last 20 periods
-    # Lower channel = lowest low over last 20 periods
-    # Middle channel = (upper + lower) / 2
-    high_max_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_min_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    upper_20 = high_max_20
-    lower_20 = low_min_20
-    middle_20 = (upper_20 + lower_20) / 2.0
+    # Calculate 1w Camarilla pivot levels (R3, S3, and pivot point)
+    # Camarilla formulas:
+    # Pivot = (H + L + C) / 3
+    # R3 = C + (H - L) * 1.1 / 4
+    # S3 = C - (H - L) * 1.1 / 4
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    r3_1w = close_1w + (high_1w - low_1w) * 1.1 / 4.0
+    s3_1w = close_1w - (high_1w - low_1w) * 1.1 / 4.0
     
-    # Align 1d Donchian levels to 12h timeframe (wait for completed 1d bar)
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
-    middle_aligned = align_htf_to_ltf(prices, df_1d, middle_20)
+    # Align 1w Camarilla levels to 1d timeframe (wait for completed 1w bar)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
     
-    # Calculate 1d ADX(14) trend filter
-    # ADX calculation: +DM, -DM, TR, then smoothed to get +DI, -DI, DX, then ADX
-    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Calculate 1w EMA34 trend filter
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Add initial zero for index alignment
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    tr = np.concatenate([[0], tr])
-    
-    # Smooth with Wilder's smoothing (alpha = 1/period)
-    def wilders_smoothing(data, period):
-        result = np.zeros_like(data)
-        result[period-1] = np.nansum(data[:period])  # First value is simple average
-        for i in range(period, len(data)):
-            result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
-    
-    period = 14
-    if len(plus_dm) < period:
-        adx_1d = np.full(len(close_1d), np.nan)
-    else:
-        smoothed_plus_dm = wilders_smoothing(plus_dm, period)
-        smoothed_minus_dm = wilders_smoothing(minus_dm, period)
-        smoothed_tr = wilders_smoothing(tr, period)
-        
-        # Avoid division by zero
-        plus_di = 100 * smoothed_plus_dm / np.where(smoothed_tr == 0, 1, smoothed_tr)
-        minus_di = 100 * smoothed_minus_dm / np.where(smoothed_tr == 0, 1, smoothed_tr)
-        
-        dx = 100 * np.abs(plus_di - minus_di) / np.where((plus_di + minus_di) == 0, 1, (plus_di + minus_di))
-        adx_1d = wilders_smoothing(dx, period)
-    
-    # Align 1d ADX to 12h timeframe (wait for completed 1d bar)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Calculate volume confirmation: volume > 2.0 * 20-period average volume on 12h
+    # Calculate volume confirmation: volume > 1.5 * 20-period average volume on 1d
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * avg_volume_20)
+    volume_confirm = volume > (1.5 * avg_volume_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or np.isnan(middle_aligned[i]) or 
-            np.isnan(adx_1d_aligned[i]) or np.isnan(avg_volume_20[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(pivot_aligned[i]) or 
+            np.isnan(ema_34_1w_aligned[i]) or np.isnan(avg_volume_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above 1d Donchian upper channel, ADX > 25, volume spike
-            if (close[i] > upper_aligned[i] and 
-                adx_1d_aligned[i] > 25 and 
+            # Long: price breaks above 1w Camarilla R3, EMA34 rising, volume spike
+            if (close[i] > r3_aligned[i] and 
+                ema_34_1w_aligned[i] > ema_34_1w_aligned[i-1] and 
                 volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 1d Donchian lower channel, ADX > 25, volume spike
-            elif (close[i] < lower_aligned[i] and 
-                  adx_1d_aligned[i] > 25 and 
+            # Short: price breaks below 1w Camarilla S3, EMA34 falling, volume spike
+            elif (close[i] < s3_aligned[i] and 
+                  ema_34_1w_aligned[i] < ema_34_1w_aligned[i-1] and 
                   volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below the 1d Donchian middle channel
-            if close[i] < middle_aligned[i]:
+            # Exit long: price crosses below the 1w Camarilla pivot point
+            if close[i] < pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above the 1d Donchian middle channel
-            if close[i] > middle_aligned[i]:
+            # Exit short: price crosses above the 1w Camarilla pivot point
+            if close[i] > pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
