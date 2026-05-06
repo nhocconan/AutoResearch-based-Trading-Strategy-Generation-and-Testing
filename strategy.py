@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Camarilla H4/L4 breakout with 1d EMA34 trend filter and volume confirmation
-# Long when price breaks above 1d Camarilla H4 AND 1d EMA34 > EMA34 previous (uptrend) AND volume > 1.8 * avg_volume(20) on 4h
-# Short when price breaks below 1d Camarilla L4 AND 1d EMA34 < EMA34 previous (downtrend) AND volume > 1.8 * avg_volume(20) on 4h
+# Hypothesis: 4h strategy using 1d Camarilla H4/L4 breakout with 1w EMA34 trend filter and volume confirmation
+# Long when price breaks above 1d Camarilla H4 AND 1w EMA34 rising (uptrend) AND volume > 1.5 * avg_volume(20) on 4h
+# Short when price breaks below 1d Camarilla L4 AND 1w EMA34 falling (downtrend) AND volume > 1.5 * avg_volume(20) on 4h
 # Exit when price crosses back through the 1d Camarilla midpoint (H4/L4 average)
 # Uses discrete sizing 0.25 to balance return and risk
 # Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
-# 1d Camarilla H4/L4 provides strong breakout levels that reduce whipsaw
-# 1d EMA34 trend filter ensures we trade with the dominant daily trend
-# Volume confirmation (1.8x) validates breakout strength while limiting overtrading
+# 1d Camarilla H4/L4 provides strong breakout levels that reduce whipsaw vs H3/L3
+# 1w EMA34 trend filter ensures we trade with the dominant weekly trend with less lag than EMA50
+# Volume confirmation (1.5x) validates breakout strength while limiting overtrading
 
-name = "4h_1dCamarillaH4L4_1dEMA34_Trend_VolumeConfirm"
+name = "4h_1dCamarillaH4L4_1wEMA34_Trend_VolumeConfirm"
 timeframe = "4h"
 leverage = 1.0
 
@@ -47,13 +47,19 @@ def generate_signals(prices):
     camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4_1d)
     camarilla_mid_aligned = align_htf_to_ltf(prices, df_1d, camarilla_mid_1d)
     
-    # Get 1d data ONCE before loop for EMA34 trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Get 1w data ONCE before loop for EMA34 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:  # Need at least 34 completed weekly bars for EMA34
+        return np.zeros(n)
+    close_1w = df_1w['close'].values
     
-    # Calculate volume confirmation: volume > 1.8 * 20-period average volume on 4h
+    # Calculate 1w EMA34
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Calculate volume confirmation: volume > 1.5 * 20-period average volume on 4h
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.8 * avg_volume_20)
+    volume_confirm = volume > (1.5 * avg_volume_20)
     
     # Session filter: 08-20 UTC (pre-compute for efficiency)
     hours = prices.index.hour
@@ -65,22 +71,22 @@ def generate_signals(prices):
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN or outside session
         if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(avg_volume_20[i]) or not in_session[i]):
+            np.isnan(ema_34_1w_aligned[i]) or np.isnan(avg_volume_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above 1d Camarilla H4, 1d EMA34 > EMA34 previous (uptrend), volume confirmation, in session
+            # Long: price breaks above 1d Camarilla H4, 1w EMA34 rising (uptrend), volume confirmation, in session
             if (close[i] > camarilla_h4_aligned[i] and 
-                ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and 
+                ema_34_1w_aligned[i] > ema_34_1w_aligned[i-1] and 
                 volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 1d Camarilla L4, 1d EMA34 < EMA34 previous (downtrend), volume confirmation, in session
+            # Short: price breaks below 1d Camarilla L4, 1w EMA34 falling (downtrend), volume confirmation, in session
             elif (close[i] < camarilla_l4_aligned[i] and 
-                  ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and 
+                  ema_34_1w_aligned[i] < ema_34_1w_aligned[i-1] and 
                   volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
