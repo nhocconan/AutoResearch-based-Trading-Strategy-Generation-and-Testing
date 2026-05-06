@@ -3,21 +3,24 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Donchian breakout with volume confirmation and 1d ADX trend filter
-# - Uses 1d Donchian(20) breakout for entry signals
-# - Uses 1d ADX(14) > 25 to confirm trending market
-# - Requires volume > 1.5x 20-period MA for confirmation
-# - Exits when price crosses back below/above 1d Donchian midpoint
-# - Designed to capture strong trending moves with volume confirmation
-# - Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
+# Hypothesis: 1h strategy using 4h Donchian breakout for trend direction and 1d volume confirmation for entry timing
+# - Uses 4h Donchian channel (20-period) to identify trend direction
+# - Uses 1d volume spike (2x 20-day average) to confirm institutional participation
+# - Enters long when price breaks above 4h upper Donchian band with volume spike in uptrend
+# - Enters short when price breaks below 4h lower Donchian band with volume spike in downtrend
+# - Exits when price returns to 4h Donchian middle band (mean reversion within the channel)
+# - Uses session filter (08-20 UTC) to avoid low-liquidity periods
+# - Position size: 0.20 (20% of capital) to manage risk during drawdowns
+# - Designed to capture breakouts with institutional validation while minimizing false signals
+# - Target: 60-150 total trades over 4 years (15-37/year) with controlled frequency
 
-name = "12h_1dDonchian_ADX_Volume_Breakout"
-timeframe = "12h"
+name = "1h_4hDonchian_1dVolume_Breakout"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,104 +28,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian and ADX calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 4h data for Donchian channel calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate 1d Donchian channels (20 period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get 1d data for volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Donchian upper and lower bands
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
+    # Calculate 4h Donchian Channel (20-period)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # Calculate 1d ADX (14 period)
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    # Upper band: highest high over 20 periods
+    donchian_upper = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    # Lower band: lowest low over 20 periods
+    donchian_lower = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Middle band: average of upper and lower
+    donchian_middle = (donchian_upper + donchian_lower) / 2
     
-    # Directional Movement
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    up_move[0] = 0
-    down_move[0] = 0
+    # Calculate 1d volume spike (2x 20-day average)
+    volume_1d = df_1d['volume'].values
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike_1d = volume_1d > (2.0 * vol_ma_20)
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Align 4h indicators to 1h timeframe
+    donchian_upper_1h = align_htf_to_ltf(prices, df_4h, donchian_upper)
+    donchian_lower_1h = align_htf_to_ltf(prices, df_4h, donchian_lower)
+    donchian_middle_1h = align_htf_to_ltf(prices, df_4h, donchian_middle)
     
-    # Wilder's smoothing for ATR, +DM, -DM
-    def wilders_smoothing(data, period):
-        result = np.zeros_like(data)
-        if len(data) < period:
-            return result
-        result[period-1] = np.nansum(data[:period])
-        for i in range(period, len(data)):
-            result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
+    # Align 1d volume spike to 1h timeframe
+    volume_spike_1h = align_htf_to_ltf(prices, df_1d, volume_spike_1d.astype(float))
     
-    atr = wilders_smoothing(tr, 14)
-    plus_dm_smooth = wilders_smoothing(plus_dm, 14)
-    minus_dm_smooth = wilders_smoothing(minus_dm, 14)
-    
-    # DI+ and DI-
-    plus_di = 100 * plus_dm_smooth / atr
-    minus_di = 100 * minus_dm_smooth / atr
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = wilders_smoothing(dx, 14)
-    
-    # Volume filter (12h timeframe)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma_20)
-    
-    # Align 1d indicators to 12h timeframe
-    donchian_high_12h = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_12h = align_htf_to_ltf(prices, df_1d, donchian_low)
-    donchian_mid_12h = align_htf_to_ltf(prices, df_1d, donchian_mid)
-    adx_12h = align_htf_to_ltf(prices, df_1d, adx)
+    # Session filter: 08-20 UTC (avoid low-liquidity periods)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(20, n):  # Start after warmup
         # Skip if any critical value is NaN
-        if (np.isnan(donchian_high_12h[i]) or np.isnan(donchian_low_12h[i]) or 
-            np.isnan(donchian_mid_12h[i]) or np.isnan(adx_12h[i]) or np.isnan(volume_confirm[i])):
+        if (np.isnan(donchian_upper_1h[i]) or np.isnan(donchian_lower_1h[i]) or 
+            np.isnan(donchian_middle_1h[i]) or np.isnan(volume_spike_1h[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Apply session filter
+        if not in_session[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above Donchian high with volume and ADX > 25
-            if close[i] > donchian_high_12h[i] and volume_confirm[i] and adx_12h[i] > 25:
-                signals[i] = 0.25
+            # Long: price breaks above 4h upper Donchian band with volume spike
+            if close[i] > donchian_upper_1h[i] and volume_spike_1h[i]:
+                signals[i] = 0.20
                 position = 1
-            # Enter short: price breaks below Donchian low with volume and ADX > 25
-            elif close[i] < donchian_low_12h[i] and volume_confirm[i] and adx_12h[i] > 25:
-                signals[i] = -0.25
+            # Short: price breaks below 4h lower Donchian band with volume spike
+            elif close[i] < donchian_lower_1h[i] and volume_spike_1h[i]:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below Donchian midpoint
-            if close[i] < donchian_mid_12h[i]:
+            # Exit long: price returns to 4h Donchian middle band (mean reversion)
+            if close[i] <= donchian_middle_1h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: price crosses above Donchian midpoint
-            if close[i] > donchian_mid_12h[i]:
+            # Exit short: price returns to 4h Donchian middle band (mean reversion)
+            if close[i] >= donchian_middle_1h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
