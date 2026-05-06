@@ -3,21 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using Donchian(20) breakout with 1d Supertrend trend filter and volume confirmation
-# - Uses Donchian channel breakout for entry signals
-# - Uses 1d Supertrend (ATR=10, multiplier=3) to filter for trend direction
+# Hypothesis: 4h Donchian breakout with volume confirmation and ADX trend filter
+# - Uses Donchian channel (20-period high/low) for breakout signals
 # - Requires volume spike (2x 20-period average) for confirmation
-# - Exits when price reverses back into the Donchian channel
-# - Designed to capture strong trending moves with confirmation to reduce whipsaws
-# - Target: 75-200 total trades over 4 years (19-50/year) with 0.25 position sizing
+# - Uses 1d ADX > 25 to ensure trending market (avoids ranging markets)
+# - Exits when price crosses opposite Donchian band or volatility expands
+# - Designed to work in both bull and bear markets by following established trends
+# - Target: 15-30 trades/year (60-120 over 4 years) with 0.25 position sizing
 
-name = "4h_DonchianBreakout_Supertrend_Volume"
+name = "4h_Donchian_Breakout_Volume_ADX"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,18 +25,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Supertrend calculation
+    # Get 4h data for Donchian calculation (self-reference)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    
+    # Get 1d data for ADX calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     # Calculate 4h Donchian Channel (20)
-    high_4h = high
-    low_4h = low
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    
+    # Upper band (20-period high)
     donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    # Lower band (20-period low)
     donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 1d Supertrend (ATR=10, multiplier=3)
+    # Calculate 1d ADX (14)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -46,46 +54,43 @@ def generate_signals(prices):
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    tr[0] = tr1[0]  # First period
     
-    # ATR(10)
-    atr_10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Basic Upper and Lower Bands
-    basic_ub = (high_1d + low_1d) / 2 + 3 * atr_10
-    basic_lb = (high_1d + low_1d) / 2 - 3 * atr_10
+    # Smoothed values (Wilder's smoothing)
+    def wilders_smoothing(data, period):
+        result = np.zeros_like(data)
+        if len(data) >= period:
+            result[period-1] = np.nansum(data[:period])
+            for i in range(period, len(data)):
+                result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
     
-    # Final Upper and Lower Bands
-    final_ub = np.zeros_like(basic_ub)
-    final_lb = np.zeros_like(basic_lb)
-    final_ub[0] = basic_ub[0]
-    final_lb[0] = basic_lb[0]
+    tr14 = wilders_smoothing(tr, 14)
+    dm_plus_14 = wilders_smoothing(dm_plus, 14)
+    dm_minus_14 = wilders_smoothing(dm_minus, 14)
     
-    for i in range(1, len(basic_ub)):
-        if basic_ub[i] < final_ub[i-1] or close_1d[i-1] > final_ub[i-1]:
-            final_ub[i] = basic_ub[i]
-        else:
-            final_ub[i] = final_ub[i-1]
-            
-        if basic_lb[i] > final_lb[i-1] or close_1d[i-1] < final_lb[i-1]:
-            final_lb[i] = basic_lb[i]
-        else:
-            final_lb[i] = final_lb[i-1]
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_14 / (tr14 + 1e-10)
+    di_minus = 100 * dm_minus_14 / (tr14 + 1e-10)
     
-    # Supertrend
-    supertrend = np.zeros_like(close_1d)
-    supertrend[0] = final_ub[0]
-    for i in range(1, len(supertrend)):
-        if supertrend[i-1] == final_ub[i-1]:
-            supertrend[i] = final_lb[i] if close_1d[i] <= final_lb[i] else final_ub[i]
-        else:
-            supertrend[i] = final_ub[i] if close_1d[i] >= final_ub[i] else final_lb[i]
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = wilders_smoothing(dx, 14)
     
-    # Determine trend direction: 1 for uptrend (price above Supertrend), -1 for downtrend
-    trend_dir = np.where(close_1d > supertrend, 1, -1)
+    # Align 4h indicators to 4h timeframe (no change needed, but for consistency)
+    donchian_high_4h = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_4h = align_htf_to_ltf(prices, df_4h, donchian_low)
     
-    # Align 1d indicators to 4h timeframe
-    trend_dir_4h = align_htf_to_ltf(prices, df_1d, trend_dir)
+    # Align 1d ADX to 4h timeframe
+    adx_4h = align_htf_to_ltf(prices, df_1d, adx)
     
     # Volume filters (4h timeframe)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -94,36 +99,37 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(100, n):  # Start after warmup
         # Skip if any critical value is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(trend_dir_4h[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(donchian_high_4h[i]) or np.isnan(donchian_low_4h[i]) or 
+            np.isnan(adx_4h[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Look for breakout with trend alignment and volume confirmation
-            bullish_breakout = close[i] > donchian_high[i] and trend_dir_4h[i] == 1
-            bearish_breakout = close[i] < donchian_low[i] and trend_dir_4h[i] == -1
+            # Look for breakout with volume confirmation and strong trend
+            long_breakout = close[i] > donchian_high_4h[i]
+            short_breakout = close[i] < donchian_low_4h[i]
+            strong_trend = adx_4h[i] > 25
             
-            if bullish_breakout and volume_spike[i]:
+            if long_breakout and volume_spike[i] and strong_trend:
                 signals[i] = 0.25
                 position = 1
-            elif bearish_breakout and volume_spike[i]:
+            elif short_breakout and volume_spike[i] and strong_trend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks back below Donchian low
-            if close[i] < donchian_low[i]:
+            # Exit long: price crosses below lower Donchian band
+            if close[i] < donchian_low_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks back above Donchian high
-            if close[i] > donchian_high[i]:
+            # Exit short: price crosses above upper Donchian band
+            if close[i] > donchian_high_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
