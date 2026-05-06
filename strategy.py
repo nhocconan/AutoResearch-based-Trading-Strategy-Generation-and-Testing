@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using 1w Donchian channel breakout with 1d EMA34 trend filter and volume confirmation
-# Long when price breaks above 1w Donchian(20) upper band AND 1d EMA34 is rising AND 1d volume > 1.5 * avg_volume(20)
-# Short when price breaks below 1w Donchian(20) lower band AND 1d EMA34 is falling AND 1d volume > 1.5 * avg_volume(20)
-# Exit when price returns to 1w Donchian(20) midpoint
-# Uses discrete sizing 0.30 to balance profit potential and drawdown control
-# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe
-# 1w Donchian provides strong weekly support/resistance levels from higher timeframe structure
-# 1d EMA34 ensures we trade with the daily trend while reducing noise
+# Hypothesis: 12h strategy using 1d Donchian(20) breakout with 1d ADX(14) trend filter and volume confirmation
+# Long when price breaks above 1d Donchian upper band AND 1d ADX > 25 AND 12h volume > 1.5 * avg_volume(20)
+# Short when price breaks below 1d Donchian lower band AND 1d ADX > 25 AND 12h volume > 1.5 * avg_volume(20)
+# Exit when price returns to 1d Donchian midpoint
+# Uses discrete sizing 0.25 to balance profit potential and drawdown control
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# 1d Donchian provides strong support/resistance levels from higher timeframe structure
+# 1d ADX ensures we trade only in trending markets while reducing noise in ranging markets
 # Volume confirmation filters out low-conviction breakouts
 # Works in both bull (breakout continuations) and bear (breakdown continuations) markets
 
-name = "1d_1wDonchian20_Breakout_1dEMA34_Trend_Volume"
-timeframe = "1d"
+name = "12h_1dDonchian20_Breakout_1dADX_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,34 +28,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data ONCE before loop for Donchian channel calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:  # Need at least 20 completed weekly bars for Donchian(20)
-        return np.zeros(n)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    
-    # Calculate 1w Donchian channel (20-period)
-    upper_1w = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    lower_1w = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    mid_1w = (upper_1w + lower_1w) / 2.0
-    
-    # Align 1w Donchian levels to 1d timeframe (wait for completed 1w bar)
-    upper_1w_aligned = align_htf_to_ltf(prices, df_1w, upper_1w)
-    lower_1w_aligned = align_htf_to_ltf(prices, df_1w, lower_1w)
-    mid_1w_aligned = align_htf_to_ltf(prices, df_1w, mid_1w)
-    
-    # Get 1d data ONCE before loop for EMA34 trend filter
+    # Get 1d data ONCE before loop for Donchian channel and ADX calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:  # Need at least 34 completed daily bars for EMA34
+    if len(df_1d) < 20:  # Need at least 20 completed daily bars for Donchian(20)
         return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA34 trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1d Donchian channel (20-period)
+    upper_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lower_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    mid_1d = (upper_1d + lower_1d) / 2.0
     
-    # Calculate volume confirmation: volume > 1.5 * 20-period average volume on 1d
+    # Align 1d Donchian levels to 12h timeframe (wait for completed 1d bar)
+    upper_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_1d)
+    lower_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_1d)
+    mid_1d_aligned = align_htf_to_ltf(prices, df_1d, mid_1d)
+    
+    # Calculate 1d ADX(14) trend filter
+    # Calculate True Range
+    tr1 = pd.Series(high_1d - low_1d).abs()
+    tr2 = pd.Series(high_1d - close_1d.shift(1)).abs()
+    tr3 = pd.Series(low_1d - close_1d.shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    
+    # Calculate Directional Movement
+    up_move = pd.Series(high_1d - high_1d.shift(1))
+    down_move = pd.Series(low_1d.shift(1) - low_1d)
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smooth DM and TR
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean() / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean() / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Align 1d ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate volume confirmation: volume > 1.5 * 20-period average volume on 12h
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (1.5 * avg_volume_20)
     
@@ -64,8 +78,8 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN
-        if (np.isnan(upper_1w_aligned[i]) or np.isnan(lower_1w_aligned[i]) or 
-            np.isnan(mid_1w_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or
+        if (np.isnan(upper_1d_aligned[i]) or np.isnan(lower_1d_aligned[i]) or 
+            np.isnan(mid_1d_aligned[i]) or np.isnan(adx_aligned[i]) or
             np.isnan(avg_volume_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -73,29 +87,29 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above 1w Donchian upper band, EMA34 rising, volume spike
-            if (close[i] > upper_1w_aligned[i] and close[i-1] <= upper_1w_aligned[i-1] and 
-                ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and volume_confirm[i]):
-                signals[i] = 0.30
+            # Long: price breaks above 1d Donchian upper band, ADX > 25, volume spike
+            if (close[i] > upper_1d_aligned[i] and close[i-1] <= upper_1d_aligned[i-1] and 
+                adx_aligned[i] > 25 and volume_confirm[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 1w Donchian lower band, EMA34 falling, volume spike
-            elif (close[i] < lower_1w_aligned[i] and close[i-1] >= lower_1w_aligned[i-1] and 
-                  ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and volume_confirm[i]):
-                signals[i] = -0.30
+            # Short: price breaks below 1d Donchian lower band, ADX > 25, volume spike
+            elif (close[i] < lower_1d_aligned[i] and close[i-1] >= lower_1d_aligned[i-1] and 
+                  adx_aligned[i] > 25 and volume_confirm[i]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to 1w Donchian midpoint
-            if close[i] <= mid_1w_aligned[i]:
+            # Exit long: price returns to 1d Donchian midpoint
+            if close[i] <= mid_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to 1w Donchian midpoint
-            if close[i] >= mid_1w_aligned[i]:
+            # Exit short: price returns to 1d Donchian midpoint
+            if close[i] >= mid_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
