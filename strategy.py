@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h Donchian channel breakout with volume confirmation and 1d EMA200 trend filter
-# Long when price breaks above 4h Donchian upper (20-period) with volume > 1.5x average and price above 1-day EMA200
-# Short when price breaks below 4h Donchian lower (20-period) with volume > 1.5x average and price below 1-day EMA200
-# Uses 4h for signal direction (structure), 1h only for entry timing precision
-# Session filter (08-20 UTC) reduces noise trades
-# Position size: 0.20 (20% of capital) to manage drawdown
-# Target: 15-30 trades per year (60-120 over 4 years) to avoid fee drag
+# Hypothesis: 6h strategy using weekly Bollinger Bands with daily ADX trend filter and volume confirmation
+# Long when price closes below weekly BB lower band with ADX > 25 (strong trend) and volume > 1.5x average
+# Short when price closes above weekly BB upper band with ADX > 25 and volume > 1.5x average
+# Weekly Bollinger Bands provide dynamic support/resistance on higher timeframe
+# ADX filter ensures we only trade in strong trending conditions, reducing whipsaws
+# Volume confirmation adds conviction to the breakout/breakdown
+# Works in bull/bear markets: captures continuation of strong trends filtered by volatility bands
+# Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
 
-name = "1h_4hDonchian_20_1dEMA200_Volume_Breakout_v1"
-timeframe = "1h"
+name = "6h_weeklyBB_ADX_Volume_Trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,74 +26,112 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 4h Donchian channel (20-period) ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Calculate weekly Bollinger Bands ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
     
-    if len(df_4h) < 20:
+    if len(df_weekly) < 20:
         return np.zeros(n)
     
-    # Donchian channels: 20-period high and low
-    high_20 = pd.Series(df_4h['high']).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(df_4h['low']).rolling(window=20, min_periods=20).min().values
+    # Weekly close for Bollinger Bands
+    weekly_close = df_weekly['close'].values
+    weekly_ma = pd.Series(weekly_close).rolling(window=20, min_periods=20).mean().values
+    weekly_std = pd.Series(weekly_close).rolling(window=20, min_periods=20).std().values
     
-    # Upper and lower bands
-    donchian_upper = high_20
-    donchian_lower = low_20
+    # Bollinger Bands: 2 standard deviations
+    bb_upper = weekly_ma + (2 * weekly_std)
+    bb_lower = weekly_ma - (2 * weekly_std)
     
-    # Align 4h Donchian levels to 1h timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower)
+    # Align weekly BB levels to 6h timeframe
+    bb_upper_aligned = align_htf_to_ltf(prices, df_weekly, bb_upper)
+    bb_lower_aligned = align_htf_to_ltf(prices, df_weekly, bb_lower)
+    weekly_ma_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ma)
     
-    # 1-day EMA200 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    # Calculate daily ADX for trend filter
+    df_daily = get_htf_data(prices, '1d')
+    
+    if len(df_daily) < 14:
         return np.zeros(n)
-    ema_200_1d = pd.Series(df_1d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Volume confirmation: >1.5x 24-period average (6h equivalent)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_filter = volume > (1.5 * vol_ma_24)
+    # True Range calculation
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
+    close_daily = df_daily['close'].values
     
-    # Pre-compute session filter (08-20 UTC)
+    tr1 = high_daily - low_daily
+    tr2 = np.abs(high_daily - np.roll(close_daily, 1))
+    tr3 = np.abs(low_daily - np.roll(close_daily, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period has no previous close
+    
+    # Directional Movement
+    dm_plus = np.where((high_daily - np.roll(high_daily, 1)) > (np.roll(low_daily, 1) - low_daily),
+                       np.maximum(high_daily - np.roll(high_daily, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_daily, 1) - low_daily) > (high_daily - np.roll(high_daily, 1)),
+                        np.maximum(np.roll(low_daily, 1) - low_daily, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed values
+    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
+    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_14 / tr_14
+    di_minus = 100 * dm_minus_14 / tr_14
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align daily ADX to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_daily, adx)
+    
+    # Volume confirmation: >1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma_20)
+    
+    # Pre-compute session filter (00-24 UTC - trade all hours for 6h)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    session_filter = np.ones(n, dtype=bool)  # Trade all hours
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
-        # Skip if any critical value is NaN or outside session
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
-            np.isnan(ema_200_aligned[i]) or np.isnan(volume_filter[i]) or
-            not session_filter[i]):
+        # Skip if any critical value is NaN
+        if (np.isnan(bb_upper_aligned[i]) or np.isnan(bb_lower_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        if position == 0:
-            # Long breakout: price breaks above Donchian upper with volume and trend confirmation
-            if close[i] > donchian_upper_aligned[i] and volume_filter[i] and close[i] > ema_200_aligned[i]:
-                signals[i] = 0.20
+        # Only trade when ADX indicates strong trend (> 25)
+        strong_trend = adx_aligned[i] > 25
+        
+        if position == 0 and strong_trend:
+            # Long entry: price closes below weekly BB lower band with volume confirmation
+            if close[i] < bb_lower_aligned[i] and volume_filter[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short breakout: price breaks below Donchian lower with volume and trend confirmation
-            elif close[i] < donchian_lower_aligned[i] and volume_filter[i] and close[i] < ema_200_aligned[i]:
-                signals[i] = -0.20
+            # Short entry: price closes above weekly BB upper band with volume confirmation
+            elif close[i] > bb_upper_aligned[i] and volume_filter[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below Donchian lower (failed breakout) or trend turns bearish
-            if close[i] < donchian_lower_aligned[i] or close[i] < ema_200_aligned[i]:
+            # Exit long: price crosses above weekly middle band (mean reversion signal)
+            if close[i] > weekly_ma_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above Donchian upper (failed breakdown) or trend turns bullish
-            if close[i] > donchian_upper_aligned[i] or close[i] > ema_200_aligned[i]:
+            # Exit short: price crosses below weekly middle band (mean reversion signal)
+            if close[i] < weekly_ma_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
