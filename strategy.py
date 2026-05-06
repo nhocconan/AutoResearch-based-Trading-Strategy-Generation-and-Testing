@@ -3,17 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour timeframe with 12-hour Donchian breakout + 1-day EMA trend filter + volume confirmation
-# Uses 12h Donchian channel breakout for directional entries (long at upper band, short at lower band)
-# Confirms trend using 1d EMA50 (price above/below EMA50 for long/short bias)
-# Volume filter requires >1.8x 20-period average to ensure participation
-# ATR-based stoploss exits when price moves against position by 2.5x ATR(14)
-# Designed for 4h timeframe targeting 100-200 total trades over 4 years (25-50/year)
-# Works in bull markets via breakouts and bear markets via short breakdowns
-# Uses proper multi-timeframe data loading with single pre-loop calls to get_htf_data
+# Hypothesis: 6h Camarilla pivot levels from 1d timeframe
+# Uses Camarilla pivot calculation (R1-S1, R2-S2, R3-S3, R4-S4) from daily candles
+# Fades at R3/S3 (mean reversion) and breaks out at R4/S4 (trend continuation)
+# Requires volume confirmation (>1.5x 20-bar average) to avoid false signals
+# Designed for 6h timeframe to target 50-150 total trades over 4 years (12-37/year)
+# Works in both bull/bear: captures reversals at extreme levels and breakouts in strong moves
 
-name = "4h_Donchian20_12h_1dEMA50_VolumeConfirm_v1"
-timeframe = "4h"
+name = "6h_Camarilla_R3S3_R4S4_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,38 +25,48 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Calculate HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_12h) < 20 or len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Camarilla pivot levels from previous day
+    high_prev = df_1d['high'].shift(1).values
+    low_prev = df_1d['low'].shift(1).values
+    close_prev = df_1d['close'].shift(1).values
     
-    # Calculate 12h Donchian channels (20-period)
-    donch_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # Camarilla formulas
+    # R4 = close + (high - low) * 1.5
+    # R3 = close + (high - low) * 1.25
+    # R2 = close + (high - low) * 1.166
+    # R1 = close + (high - low) * 1.083
+    # S1 = close - (high - low) * 1.083
+    # S2 = close - (high - low) * 1.166
+    # S3 = close - (high - low) * 1.25
+    # S4 = close - (high - low) * 1.5
+    high_low_range = high_prev - low_prev
+    r4 = close_prev + high_low_range * 1.5
+    r3 = close_prev + high_low_range * 1.25
+    r2 = close_prev + high_low_range * 1.166
+    r1 = close_prev + high_low_range * 1.083
+    s1 = close_prev - high_low_range * 1.083
+    s2 = close_prev - high_low_range * 1.166
+    s3 = close_prev - high_low_range * 1.25
+    s4 = close_prev - high_low_range * 1.5
     
-    # Calculate 1d EMA50 trend filter
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Calculate ATR(14) for 4h timeframe (for stoploss)
-    tr1 = np.abs(high[1:] - low[1:])
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate volume confirmation filter (>1.8x 20-period average)
+    # Calculate volume confirmation filter (>1.5x 20-bar average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.8 * vol_ma_20)
+    volume_filter = volume > (1.5 * vol_ma_20)
     
-    # Align HTF indicators to 4h timeframe (primary)
-    donch_high_aligned = align_htf_to_ltf(prices, df_12h, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_12h, donch_low)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Align HTF Camarilla levels to 6h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -69,8 +77,9 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(atr[i]) or np.isnan(volume_filter[i]) or
+        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(r2_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(s2_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(volume_filter[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -78,24 +87,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long entry: price breaks above 12h Donchian high AND above 1d EMA50 AND volume confirmation
-            if (close[i] > donch_high_aligned[i] and close[i] > ema_50_aligned[i] and volume_filter[i]):
+            # Long fade at S3: price touches or goes below S3 but closes back above it
+            if close[i] <= s3_aligned[i] and close[i] > s2_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below 12h Donchian low AND below 1d EMA50 AND volume confirmation
-            elif (close[i] < donch_low_aligned[i] and close[i] < ema_50_aligned[i] and volume_filter[i]):
+            # Short fade at R3: price touches or goes above R3 but closes back below it
+            elif close[i] >= r3_aligned[i] and close[i] < r2_aligned[i] and volume_filter[i]:
+                signals[i] = -0.25
+                position = -1
+            # Long breakout at R4: price breaks above R4 with volume
+            elif close[i] > r4_aligned[i] and volume_filter[i]:
+                signals[i] = 0.25
+                position = 1
+            # Short breakdown at S4: price breaks below S4 with volume
+            elif close[i] < s4_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long position: exit if price closes below 12h Donchian low (trailing stop)
-            if close[i] < donch_low_aligned[i]:
+            # Exit long: price reaches R1 (profit target) or S2 (stop loss)
+            if close[i] >= r1_aligned[i] or close[i] <= s2_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short position: exit if price closes above 12h Donchian high (trailing stop)
-            if close[i] > donch_high_aligned[i]:
+            # Exit short: price reaches S1 (profit target) or R2 (stop loss)
+            if close[i] <= s1_aligned[i] or close[i] >= r2_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
