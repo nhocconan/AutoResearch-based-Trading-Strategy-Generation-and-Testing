@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Camarilla R3/S3 breakout with 1w volume spike and ADX regime filter
-# Long when price breaks above 1d Camarilla R3 level AND 1w volume > 2.0 * avg_volume(20) AND 1w ADX > 25
-# Short when price breaks below 1d Camarilla S3 level AND 1w volume > 2.0 * avg_volume(20) AND 1w ADX > 25
-# Exit when price crosses 1d Camarilla pivot level (mean reversion to equilibrium)
+# Hypothesis: 1d strategy using 1w Camarilla R3/S3 breakout with 1d volume spike and ADX regime filter
+# Long when price breaks above 1w Camarilla R3 level AND 1d volume > 2.0 * avg_volume(20) AND 1d ADX > 25
+# Short when price breaks below 1w Camarilla S3 level AND 1d volume > 2.0 * avg_volume(20) AND 1d ADX > 25
+# Exit when price crosses 1w Camarilla pivot level (mean reversion to equilibrium)
 # Uses discrete sizing 0.25 to balance return and drawdown
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
-# 1d Camarilla provides daily structure with proven R3/S3 breakout edge
+# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe
+# 1w Camarilla provides weekly structure with proven R3/S3 breakout edge
 # Volume spike confirms institutional participation (reduces false breakouts)
 # ADX > 25 ensures we only trade in trending markets (works in bull/bear regimes)
 
-name = "12h_1dCamarillaR3S3_1wVolumeSpike_ADX_v1"
-timeframe = "12h"
+name = "1d_1wCamarillaR3S3_1dVolumeSpike_ADX_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,34 +27,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:  # Need sufficient data for pivots
-        return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate 1d Camarilla pivot levels based on previous 1d bar
-    # Camarilla: R3 = Close + 1.125 * (High - Low), S3 = Close - 1.125 * (High - Low)
-    camarilla_r3_1d = close_1d + 1.125 * (high_1d - low_1d)
-    camarilla_s3_1d = close_1d - 1.125 * (high_1d - low_1d)
-    camarilla_pivot_1d = (high_1d + low_1d + close_1d) / 3.0  # Standard pivot for exit
-    
-    # Get 1w data ONCE before loop for volume and ADX
+    # Get 1w data ONCE before loop for Camarilla pivots
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:  # Need sufficient data for ADX and volume average
+    if len(df_1w) < 5:  # Need sufficient data for pivots
         return np.zeros(n)
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
     
-    # Calculate 1w volume confirmation: volume > 2.0 * 20-period average volume
-    avg_volume_20_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
-    volume_spike_1w = volume_1w > (2.0 * avg_volume_20_1w)
+    # Calculate 1w Camarilla pivot levels based on previous 1w bar
+    # Camarilla: R3 = Close + 1.125 * (High - Low), S3 = Close - 1.125 * (High - Low)
+    camarilla_r3_1w = close_1w + 1.125 * (high_1w - low_1w)
+    camarilla_s3_1w = close_1w - 1.125 * (high_1w - low_1w)
+    camarilla_pivot_1w = (high_1w + low_1w + close_1w) / 3.0  # Standard pivot for exit
     
-    # Calculate 1w ADX for regime filter (trending market detection)
+    # Get 1d data ONCE before loop for volume and ADX
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:  # Need sufficient data for ADX and volume average
+        return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
+    
+    # Calculate 1d volume confirmation: volume > 2.0 * 20-period average volume
+    avg_volume_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike_1d = volume_1d > (2.0 * avg_volume_20_1d)
+    
+    # Calculate 1d ADX for regime filter (trending market detection)
     # ADX calculation: +DI, -DI, DX, then ADX smoothed
     def calculate_adx(high, low, close, period=14):
         # True Range
@@ -97,17 +97,17 @@ def generate_signals(prices):
         adx = smooth(dx, period)
         return adx
     
-    adx_1w = calculate_adx(high_1w, low_1w, close_1w, period=14)
-    adx_filter_1w = adx_1w > 25  # Trending market regime
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, period=14)
+    adx_filter_1d = adx_1d > 25  # Trending market regime
     
-    # Align 1d Camarilla levels to 12h timeframe (wait for completed 1d bar)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
-    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot_1d)
+    # Align 1w Camarilla levels to 1d timeframe (wait for completed 1w bar)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3_1w)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3_1w)
+    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1w, camarilla_pivot_1w)
     
-    # Align 1w indicators to 12h timeframe (wait for completed 1w bar)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1w, volume_spike_1w)
-    adx_filter_aligned = align_htf_to_ltf(prices, df_1w, adx_filter_1w)
+    # Align 1d indicators to 1d timeframe (no additional delay needed for same timeframe)
+    volume_spike_aligned = volume_spike_1d.copy()
+    adx_filter_aligned = adx_filter_1d.copy()
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -123,25 +123,25 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above 1d Camarilla R3 with volume spike and ADX > 25
+            # Long: price breaks above 1w Camarilla R3 with volume spike and ADX > 25
             if (close[i] > camarilla_r3_aligned[i] and close[i-1] <= camarilla_r3_aligned[i-1] and 
                 volume_spike_aligned[i] and adx_filter_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 1d Camarilla S3 with volume spike and ADX > 25
+            # Short: price breaks below 1w Camarilla S3 with volume spike and ADX > 25
             elif (close[i] < camarilla_s3_aligned[i] and close[i-1] >= camarilla_s3_aligned[i-1] and 
                   volume_spike_aligned[i] and adx_filter_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below 1d Camarilla pivot (mean reversion)
+            # Exit long: price crosses below 1w Camarilla pivot (mean reversion)
             if close[i] < camarilla_pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above 1d Camarilla pivot (mean reversion)
+            # Exit short: price crosses above 1w Camarilla pivot (mean reversion)
             if close[i] > camarilla_pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
