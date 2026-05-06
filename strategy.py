@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using weekly Bollinger Bands with volume confirmation
-# - Uses 1w Bollinger Bands (20, 2.0) for dynamic support/resistance
-# - Uses 1d volume spike for entry confirmation
-# - Enters long when price breaks above upper band with volume spike
-# - Enters short when price breaks below lower band with volume spike
-# - Exits when price returns to middle band
-# - Designed to capture weekly trends with statistical significance
-# - Target: 30-100 total trades over 4 years (7-25/year) with 0.25 position sizing
+# Hypothesis: 6h strategy using 12h Donchian channel breakout with 1d trend filter and volume confirmation
+# - Uses 12h Donchian(20) for breakout signals
+# - Uses 1d EMA50 for trend filter (long only above, short only below)
+# - Uses 6h volume spike for entry confirmation
+# - Designed to capture medium-term momentum with trend alignment
+# - Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
+# - Works in bull (breakouts with trend) and bear (breakouts against trend filtered out)
 
-name = "1d_1wBBands_1dVolume_Breakout"
-timeframe = "1d"
+name = "6h_12hDonchian_20_1dEMA50_VolumeBreakout"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,26 +25,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for Bollinger Bands
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 12h data for Donchian channel
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate 1w Bollinger Bands (20, 2.0)
-    close_1w = df_1w['close'].values
-    sma_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).std().values
+    # Calculate 12h Donchian channel (20-period)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    upper_band = sma_20 + (2.0 * std_20)
-    middle_band = sma_20
-    lower_band = sma_20 - (2.0 * std_20)
+    # Donchian upper and lower bands
+    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # Align 1w Bollinger Bands to 1d timeframe
-    upper_1d = align_htf_to_ltf(prices, df_1w, upper_band)
-    middle_1d = align_htf_to_ltf(prices, df_1w, middle_band)
-    lower_1d = align_htf_to_ltf(prices, df_1w, lower_band)
+    # Align 12h Donchian levels to 6h timeframe
+    donchian_high_6h = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_6h = align_htf_to_ltf(prices, df_12h, donchian_low)
     
-    # Volume filter (1d timeframe)
+    # Get 1d data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    # Calculate 1d EMA50
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align 1d EMA50 to 6h timeframe
+    ema_50_1d_6h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume filter (6h timeframe)
     vol_ma_10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
     volume_spike = volume > (2.0 * vol_ma_10)  # Strong volume confirmation
     
@@ -54,32 +63,32 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical value is NaN
-        if (np.isnan(upper_1d[i]) or np.isnan(middle_1d[i]) or 
-            np.isnan(lower_1d[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(donchian_high_6h[i]) or np.isnan(donchian_low_6h[i]) or 
+            np.isnan(ema_50_1d_6h[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above upper band with volume spike
-            if close[i] > upper_1d[i] and volume_spike[i]:
+            # Long: price breaks above 12h Donchian high AND above 1d EMA50 with volume spike
+            if close[i] > donchian_high_6h[i] and close[i] > ema_50_1d_6h[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below lower band with volume spike
-            elif close[i] < lower_1d[i] and volume_spike[i]:
+            # Short: price breaks below 12h Donchian low AND below 1d EMA50 with volume spike
+            elif close[i] < donchian_low_6h[i] and close[i] < ema_50_1d_6h[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to middle band
-            if close[i] < middle_1d[i]:
+            # Exit long: price returns to 12h Donchian low OR breaks below 1d EMA50
+            if close[i] < donchian_low_6h[i] or close[i] < ema_50_1d_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to middle band
-            if close[i] > middle_1d[i]:
+            # Exit short: price returns to 12h Donchian high OR breaks above 1d EMA50
+            if close[i] > donchian_high_6h[i] or close[i] > ema_50_1d_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
