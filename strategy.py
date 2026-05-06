@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Camarilla pivot breakout with 1d EMA34 trend filter and volume confirmation
-# Long when price breaks above 1d Camarilla R3 level AND 1d EMA34 > EMA89 AND volume > 2.0 * avg_volume(20)
-# Short when price breaks below 1d Camarilla S3 level AND 1d EMA34 < EMA89 AND volume > 2.0 * avg_volume(20)
+# Hypothesis: 12h strategy using 1d Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Long when price breaks above 1d Camarilla R3 AND 1d EMA34 > EMA89 AND volume > 2.0 * avg_volume(20)
+# Short when price breaks below 1d Camarilla S3 AND 1d EMA34 < EMA89 AND volume > 2.0 * avg_volume(20)
 # Exit when price touches 1d Camarilla pivot point (PP) or opposite S1/R1 level
 # Uses discrete sizing 0.25 to balance return and drawdown control
-# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
 # 1d Camarilla provides strong institutional support/resistance levels
 # 1d EMA34/EMA89 filter ensures alignment with daily trend, reducing counter-trend trades
 # High volume confirmation (2.0x) filters weak breakouts
 # Works in bull (trend continuation breakouts above R3) and bear (trend continuation breakdowns below S3)
 
-name = "4h_1dCamarilla_R3S3_Breakout_1dEMA34Trend_Volume"
-timeframe = "4h"
+name = "12h_1dCamarilla_R3S3_Breakout_1dEMA34Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -53,7 +53,7 @@ def generate_signals(prices):
     r4_1d = close_1d + (range_1d * 1.1 / 2)
     s4_1d = close_1d - (range_1d * 1.1 / 2)
     
-    # Align 1d Camarilla levels to 4h timeframe (wait for completed 1d bar)
+    # Align 1d Camarilla levels to 12h timeframe (wait for completed 1d bar)
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
@@ -65,7 +65,7 @@ def generate_signals(prices):
     ema_34_1d = close_series_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_89_1d = close_series_1d.ewm(span=89, adjust=False, min_periods=89).mean().values
     
-    # Align 1d EMA values to 4h timeframe (wait for completed 1d bar)
+    # Align 1d EMA values to 12h timeframe (wait for completed 1d bar)
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     ema_89_aligned = align_htf_to_ltf(prices, df_1d, ema_89_1d)
     
