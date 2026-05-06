@@ -3,14 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy combining 12h Donchian breakout with volume confirmation
-# and 1d ADX for trend strength to filter false breakouts. Uses ATR-based stops
-# to manage risk. Designed to capture momentum in trending markets while
-# avoiding whipsaws in ranging conditions. Target: 20-40 trades/year with
-# 0.25 position sizing to balance risk and return.
+# Hypothesis: 1h strategy using 4h RSI for momentum and 1d ATR for volatility filtering
+# - Uses 4h RSI(14) to identify momentum extremes (oversold <30, overbought >70)
+# - Uses 1d ATR(14) normalized by price to filter for adequate volatility
+# - Enters long when RSI crosses above 30 from below with adequate volatility
+# - Enters short when RSI crosses below 70 from above with adequate volatility
+# - Exits when RSI returns to neutral zone (40-60)
+# - Designed to capture mean reversion moves during volatile periods with momentum confirmation
+# - Target: 60-150 total trades over 4 years (15-37/year) with 0.20 position sizing
+# - Uses 4h for signal direction (RSI momentum), 1h only for entry timing
+# - Session filter: 08-20 UTC to reduce noise
 
-name = "4h_12hDonchian_1dADX_Volume"
-timeframe = "4h"
+name = "1h_4hRSI_1dATR_MeanReversion"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,26 +28,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Donchian channel calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 4h data for RSI calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 14:
         return np.zeros(n)
     
-    # Get 1d data for ADX calculation
+    # Get 1d data for ATR calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate 12h Donchian channel (20-period)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Calculate 4h RSI (14)
+    close_4h = df_4h['close'].values
+    delta = np.diff(close_4h, prepend=close_4h[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Upper band: highest high of last 20 periods
-    donchian_upper = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    # Lower band: lowest low of last 20 periods
-    donchian_lower = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # Wilder's smoothing for RSI
+    def wilders_smoothing(data, period):
+        result = np.zeros_like(data)
+        if len(data) < period:
+            return result
+        result[period-1] = np.nansum(data[:period])
+        for i in range(period, len(data)):
+            result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
     
-    # Calculate 1d ADX (14-period)
+    gain_smoothed = wilders_smoothing(gain, 14)
+    loss_smoothed = wilders_smoothing(loss, 14)
+    rs = gain_smoothed / (loss_smoothed + 1e-10)
+    rsi_4h = 100 - (100 / (1 + rs))
+    
+    # Calculate 1d ATR (14)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -54,85 +71,62 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # First period
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    atr_14 = wilders_smoothing(tr, 14)
+    # Normalize ATR by price to get volatility percentage
+    atr_percent = atr_14 / close_1d
     
-    # Wilder's smoothing function
-    def wilders_smoothing(data, period):
-        result = np.zeros_like(data)
-        if len(data) < period:
-            return result
-        result[period-1] = np.nansum(data[:period])
-        for i in range(period, len(data)):
-            result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
+    # Align 4h RSI to 1h timeframe
+    rsi_4h_1h = align_htf_to_ltf(prices, df_4h, rsi_4h)
     
-    tr14 = wilders_smoothing(tr, 14)
-    dm_plus_14 = wilders_smoothing(dm_plus, 14)
-    dm_minus_14 = wilders_smoothing(dm_minus, 14)
+    # Align 1d ATR percent to 1h timeframe
+    atr_percent_1h = align_htf_to_ltf(prices, df_1d, atr_percent)
     
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_14 / (tr14 + 1e-10)
-    di_minus = 100 * dm_minus_14 / (tr14 + 1e-10)
+    # Calculate RSI cross signals
+    rsi_above_30 = rsi_4h_1h > 30
+    rsi_below_70 = rsi_4h_1h < 70
+    rsi_cross_above_30 = (rsi_above_30 & ~np.roll(rsi_above_30, 1)) | ((np.arange(len(rsi_above_30)) == 0) & rsi_above_30[0])
+    rsi_cross_below_70 = (~rsi_below_70 & np.roll(rsi_below_70, 1)) | ((np.arange(len(rsi_below_70)) == 0) & ~rsi_below_70[0])
     
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = wilders_smoothing(dx, 14)
+    # Volatility filter: ATR percent > 1% (adjustable threshold)
+    vol_filter = atr_percent_1h > 0.01
     
-    # Align 12h Donchian channels to 4h timeframe
-    donchian_upper_4h = align_htf_to_ltf(prices, df_12h, donchian_upper)
-    donchian_lower_4h = align_htf_to_ltf(prices, df_12h, donchian_lower)
-    
-    # Align 1d ADX to 4h timeframe
-    adx_4h = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume filters (4h timeframe)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma_20)  # Volume confirmation
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after warmup
         # Skip if any critical value is NaN
-        if (np.isnan(donchian_upper_4h[i]) or np.isnan(donchian_lower_4h[i]) or
-            np.isnan(adx_4h[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(rsi_4h_1h[i]) or np.isnan(atr_percent_1h[i]) or 
+            np.isnan(rsi_cross_above_30[i]) or np.isnan(rsi_cross_below_70[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Look for strong trend (ADX > 25) and volume confirmation
-            strong_trend = adx_4h[i] > 25
-            
-            if strong_trend and volume_spike[i]:
-                # Long: price breaks above 12h Donchian upper band
-                if close[i] > donchian_upper_4h[i]:
-                    signals[i] = 0.25
-                    position = 1
-                # Short: price breaks below 12h Donchian lower band
-                elif close[i] < donchian_lower_4h[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # Look for RSI cross with volatility and session filters
+            if rsi_cross_above_30[i] and vol_filter[i] and session_filter[i]:
+                signals[i] = 0.20
+                position = 1
+            elif rsi_cross_below_70[i] and vol_filter[i] and session_filter[i]:
+                signals[i] = -0.20
+                position = -1
         elif position == 1:
-            # Exit long: price crosses below 12h Donchian lower band
-            if close[i] < donchian_lower_4h[i]:
+            # Exit long: RSI returns to neutral zone (above 40)
+            if rsi_4h_1h[i] >= 40:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: price crosses above 12h Donchian upper band
-            if close[i] > donchian_upper_4h[i]:
+            # Exit short: RSI returns to neutral zone (below 60)
+            if rsi_4h_1h[i] <= 60:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
