@@ -3,15 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with 1d EMA50 trend filter and volume spike
-# Uses 1d Williams Alligator (Jaw/Teeth/Lips) for trend direction, 1d EMA50 for additional trend filter
-# Volume spike (>2.0x 24-bar average) confirms breakout strength
-# ATR-based trailing stop via signal=0 when price retraces 30% of ATR from extreme
-# Discrete sizing 0.25 to balance profit potential and fee drag; target 60-120 total trades over 4 years (15-30/year)
-# Works in both bull/bear: Alligator catches trends, EMA50 filter avoids counter-trend traps, volume filter ensures participation
+# Hypothesis: 4h EMA(21) trend with 1d RSI(14) mean reversion for entries
+# Uses 4h EMA for trend direction and 1d RSI for oversold/overbought entries
+# Entry long when price > EMA21 AND RSI < 30 (oversold in uptrend)
+# Entry short when price < EMA21 AND RSI > 70 (overbought in downtrend)
+# Exit when RSI reverts to neutral (40-60 range) or opposite signal
+# Volume confirmation (>1.5x 20-bar average) ensures participation
+# Designed for both bull/bear markets: trend filter avoids counter-trend traps,
+# RSI mean reversion captures bounces in trends and reversals in extremes
+# Target: 20-40 trades/year (80-160 total over 4 years) to minimize fee drag
 
-name = "12h_WilliamsAlligator_1dEMA50_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_EMA21_1dRSI_MeanRev_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,48 +30,32 @@ def generate_signals(prices):
     # Calculate HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 50:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA50 trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 4h EMA21 trend filter
+    close_series = pd.Series(close)
+    ema21 = close_series.ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Calculate 1d Williams Alligator (SMMA: 13, 8, 5 periods with future shift)
-    def smma(arr, period):
-        result = np.full_like(arr, np.nan, dtype=np.float64)
-        if len(arr) < period:
-            return result
-        sma = np.mean(arr[:period])
-        result[period-1] = sma
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
+    # Calculate 1d RSI(14)
+    delta = pd.Series(close_1d).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d = rsi_1d.values
     
-    jaw = smma(close_1d, 13)  # Blue line
-    teeth = smma(close_1d, 8)  # Red line
-    lips = smma(close_1d, 5)   # Green line
+    # Calculate volume filter (>1.5x 20-bar average)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma_20)
     
-    # Calculate ATR(14) for stoploss
-    tr1 = np.abs(high[1:] - low[1:])
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate volume spike filter (>2.0x 24-bar average)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_filter = volume > (2.0 * vol_ma_24)
-    
-    # Align HTF indicators to 12h timeframe (primary)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    # Align HTF indicators to 4h timeframe (primary)
+    ema21_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), ema21)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -76,51 +63,37 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    long_extreme = 0.0
-    short_extreme = 0.0
     
     for i in range(100, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(atr[i]) or np.isnan(volume_filter[i]) or
-            not session_filter[i]):
+        if (np.isnan(ema21_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(volume_filter[i]) or not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                long_extreme = 0.0
-                short_extreme = 0.0
             continue
         
         if position == 0:
-            # Alligator alignment: Lips > Teeth > Jaw = uptrend, Lips < Teeth < Jaw = downtrend
-            # Long: Lips > Teeth > Jaw AND price > EMA50 AND volume spike
-            if lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i] and close[i] > ema50_1d_aligned[i] and volume_filter[i]:
+            # Long entry: price > EMA21 (uptrend) AND RSI < 30 (oversold) AND volume
+            if close[i] > ema21_aligned[i] and rsi_1d_aligned[i] < 30 and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-                long_extreme = close[i]
-            # Short: Lips < Teeth < Jaw AND price < EMA50 AND volume spike
-            elif lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i] and close[i] < ema50_1d_aligned[i] and volume_filter[i]:
+            # Short entry: price < EMA21 (downtrend) AND RSI > 70 (overbought) AND volume
+            elif close[i] < ema21_aligned[i] and rsi_1d_aligned[i] > 70 and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
-                short_extreme = close[i]
         elif position == 1:
-            # Update long extreme
-            long_extreme = max(long_extreme, close[i])
-            # Exit long: price retraces 30% of ATR from extreme
-            if close[i] <= long_extreme - 0.30 * atr[i]:
+            # Long exit: RSI reverts to neutral (>=40) or opposite signal
+            if rsi_1d_aligned[i] >= 40 or close[i] < ema21_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-                long_extreme = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Update short extreme
-            short_extreme = min(short_extreme, close[i])
-            # Exit short: price retraces 30% of ATR from extreme
-            if close[i] >= short_extreme + 0.30 * atr[i]:
+            # Short exit: RSI reverts to neutral (<=60) or opposite signal
+            if rsi_1d_aligned[i] <= 60 or close[i] > ema21_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-                short_extreme = 0.0
             else:
                 signals[i] = -0.25
     
