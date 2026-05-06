@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
-# Long when price breaks above Camarilla R3 AND price > 1d EMA34 (uptrend) AND volume > 2.0 * 20-period avg volume
-# Short when price breaks below Camarilla S3 AND price < 1d EMA34 (downtrend) AND volume > 2.0 * 20-period avg volume
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Long when price breaks above Camarilla R3 level AND price > 1d EMA34 (uptrend) AND volume > 1.8 * 20-period avg volume
+# Short when price breaks below Camarilla S3 level AND price < 1d EMA34 (downtrend) AND volume > 1.8 * 20-period avg volume
 # Exit with ATR-based trailing stop: signal→0 when long and price < highest_high - 2.5 * ATR OR short and price > lowest_low + 2.5 * ATR
 # Uses discrete sizing 0.25 to balance risk and return (BTC -77% in 2022 → ~19.3% loss at 0.25 exposure)
-# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
-# Camarilla levels provide institutional structure, 1d EMA34 filters primary trend, high volume threshold (2.0x) ensures strong breakout momentum
-# Wider ATR stop (2.5x) reduces whipsaw in volatile 6h timeframe while maintaining risk control
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# Camarilla levels provide precise intraday support/resistance, 1d EMA34 filters primary trend, volume confirmation ensures breakout momentum
+# Higher volume threshold (1.8x) and wider ATR stop (2.5x) reduce whipsaw in ranging markets
 
-name = "6h_Camarilla_R3_S3_Breakout_1dEMA34_Volume_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,12 +31,14 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
     # Calculate 1d EMA34
     close_1d_series = pd.Series(close_1d)
     ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate 6h ATR(14) for stoploss
+    # Calculate 12h ATR(14) for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -44,26 +46,22 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First period TR is just high-low
     atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate Camarilla levels from previous 1d bar (using typical price)
-    typical_price = (high + low + close) / 3.0
-    prev_typical = np.roll(typical_price, 1)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
+    # Calculate Camarilla levels from previous 1d bar
+    # R3 = close + 1.1*(high-low)*1.1/4, S3 = close - 1.1*(high-low)*1.1/4
+    camarilla_range = (high_1d - low_1d) * 1.1
+    camarilla_r3 = close_1d + camarilla_range / 4
+    camarilla_s3 = close_1d - camarilla_range / 4
     
-    # Camarilla calculation: based on previous day's range
-    camarilla_range = prev_high - prev_low
-    camarilla_r3 = prev_close + camarilla_range * 1.1 / 4.0
-    camarilla_s3 = prev_close - camarilla_range * 1.1 / 4.0
-    
-    # Calculate volume confirmation: volume > 2.0 * 20-period average volume
-    avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * avg_volume_20)
-    
-    # Align HTF indicators to 6h timeframe (wait for completed HTF bar)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align Camarilla levels to 12h timeframe (wait for completed 1d bar)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Calculate volume confirmation: volume > 1.8 * 20-period average volume
+    avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.8 * avg_volume_20)
+    
+    # Align HTF indicators to 12h timeframe (wait for completed HTF bar)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
