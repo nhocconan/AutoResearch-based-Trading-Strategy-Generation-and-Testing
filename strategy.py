@@ -3,19 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h price action filtered by 4h trend (Supertrend) and 1d momentum (RSI)
-# Uses 4h Supertrend for trend direction, 1d RSI for momentum strength, and volume spike for confirmation
-# Enters on 1h pullbacks to the Supertrend in the direction of the higher timeframe trend
-# Designed for low trade frequency (15-30/year) to avoid fee drag, works in bull/bear via trend following
-# Static position size 0.20 to manage drawdown; exits via opposite signal or trend reversal
+# Hypothesis: 6h Donchian(20) breakout with 1w ADX(20) trend filter and volume spike
+# Uses 1w ADX to filter only strong trends, avoiding chop/whipsaw
+# Volume spike (>1.5x 20-bar average) confirms breakout momentum
+# Works in both bull/bear: breakouts capture momentum, ADX filter avoids weak trends
+# Target: 50-150 total trades over 4 years (12-37/year)
+# Position size: 0.25
 
-name = "1h_Supertrend4h_RSI1d_VolumeFilter_v1"
-timeframe = "1h"
+name = "6h_Donchian20_1wADX20_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,104 +24,77 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 4h Supertrend (ATR=10, mult=3.0) for trend direction
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Calculate HTF data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # True Range
-    tr1 = np.abs(high_4h[1:] - low_4h[1:])
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
-    tr_4h = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate 1w ADX(20) trend filter
+    # TR = max(high-low, |high-prev_close|, |low-prev_close|)
+    tr1 = np.abs(high_1w[1:] - low_1w[1:])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # ATR(10)
-    atr_4h = pd.Series(tr_4h).ewm(alpha=1/10, adjust=False, min_periods=10).mean().values
+    # +DM = max(high - prev_high, 0) if high - prev_high > prev_low - low else 0
+    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
+                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
     
-    # Supertrend calculation
-    hl2 = (high_4h + low_4h) / 2
-    upper_band = hl2 + 3.0 * atr_4h
-    lower_band = hl2 - 3.0 * atr_4h
+    # -DM = max(prev_low - low, 0) if prev_low - low > high - prev_high else 0
+    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
+                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Initialize arrays
-    upper_band_final = np.full_like(upper_band, np.nan)
-    lower_band_final = np.full_like(lower_band, np.nan)
-    supertrend = np.full_like(close_4h, np.nan)
-    trend = np.ones_like(close_4h, dtype=int)  # 1 for uptrend, -1 for downtrend
+    # Wilder's smoothing
+    def wilder_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        alpha = 1.0 / period
+        result[period-1] = np.nanmean(data[:period])
+        for i in range(period, len(data)):
+            result[i] = result[i-1] + alpha * (data[i] - result[i-1])
+        return result
     
-    # First valid value
-    start_idx = 10
-    if len(close_4h) > start_idx:
-        upper_band_final[start_idx] = upper_band[start_idx]
-        lower_band_final[start_idx] = lower_band[start_idx]
-        supertrend[start_idx] = upper_band_final[start_idx]
-        trend[start_idx] = 1
-        
-        for i in range(start_idx + 1, len(close_4h)):
-            # Upper band
-            if upper_band[i] < upper_band_final[i-1] or close_4h[i-1] > upper_band_final[i-1]:
-                upper_band_final[i] = upper_band[i]
-            else:
-                upper_band_final[i] = upper_band_final[i-1]
-            
-            # Lower band
-            if lower_band[i] > lower_band_final[i-1] or close_4h[i-1] < lower_band_final[i-1]:
-                lower_band_final[i] = lower_band[i]
-            else:
-                lower_band_final[i] = lower_band_final[i-1]
-            
-            # Trend
-            if trend[i-1] == 1 and close_4h[i] <= lower_band_final[i]:
-                trend[i] = -1
-                supertrend[i] = upper_band_final[i]
-            elif trend[i-1] == -1 and close_4h[i] >= upper_band_final[i]:
-                trend[i] = 1
-                supertrend[i] = lower_band_final[i]
-            elif trend[i-1] == 1:
-                trend[i] = 1
-                supertrend[i] = lower_band_final[i]
-            else:
-                trend[i] = -1
-                supertrend[i] = upper_band_final[i]
+    atr_1w = wilder_smooth(tr, 20)
+    dm_plus_smooth = wilder_smooth(dm_plus, 20)
+    dm_minus_smooth = wilder_smooth(dm_minus, 20)
     
-    # Align Supertrend trend to 1h
-    supertrend_trend_4h = trend  # 1 for uptrend, -1 for downtrend
-    supertrend_trend_1h = align_htf_to_ltf(prices, df_4h, supertrend_trend_4h)
+    # DI+ and DI-
+    di_plus = np.where(atr_1w != 0, 100 * dm_plus_smooth / atr_1w, 0)
+    di_minus = np.where(atr_1w != 0, 100 * dm_minus_smooth / atr_1w, 0)
     
-    # Calculate 1d RSI(14) for momentum strength
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx_1w = wilder_smooth(dx, 20)
     
-    close_1d = df_1d['close'].values
-    delta = np.diff(close_1d)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate ATR(14) for 6h timeframe (for stoploss)
+    tr1_6h = np.abs(high[1:] - low[1:])
+    tr2_6h = np.abs(high[1:] - close[:-1])
+    tr3_6h = np.abs(low[1:] - close[:-1])
+    tr_6h = np.concatenate([[np.nan], np.maximum(tr1_6h, np.maximum(tr2_6h, tr3_6h))])
+    atr_6h = pd.Series(tr_6h).rolling(window=14, min_periods=14).mean().values
     
-    # Wilder's smoothing for RSI
-    avg_gain = np.full_like(gain, np.nan)
-    avg_loss = np.full_like(loss, np.nan)
-    avg_gain[13] = np.nanmean(gain[1:14])
-    avg_loss[13] = np.nanmean(loss[1:14])
+    # Volume spike filter (>1.5x 20-bar average)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma_20)
     
-    for i in range(14, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # 6h Donchian channels (20-period)
+    def donchian_channels(high_arr, low_arr, period):
+        upper = pd.Series(high_arr).rolling(window=period, min_periods=period).max().values
+        lower = pd.Series(low_arr).rolling(window=period, min_periods=period).min().values
+        return upper, lower
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d = np.concatenate([[np.nan] * 14, rsi_1d])
+    donchian_upper_6h, donchian_lower_6h = donchian_channels(high, low, 20)
     
-    # Align RSI to 1h
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    
-    # Volume spike filter (>2.0x 24-bar average)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_filter = volume > (2.0 * vol_ma_24)
+    # Align HTF indicators to 6h timeframe
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -128,38 +102,51 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    long_extreme = 0.0
+    short_extreme = 0.0
     
     for i in range(100, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(supertrend_trend_1h[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(volume_filter[i]) or not session_filter[i]):
+        if (np.isnan(adx_1w_aligned[i]) or np.isnan(donchian_upper_6h[i]) or 
+            np.isnan(donchian_lower_6h[i]) or np.isnan(atr_6h[i]) or np.isnan(volume_filter[i]) or
+            not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                long_extreme = 0.0
+                short_extreme = 0.0
             continue
         
         if position == 0:
-            # Long entry: 4h uptrend, 1d RSI > 50 (bullish momentum), volume spike
-            if supertrend_trend_1h[i] == 1 and rsi_1d_aligned[i] > 50 and volume_filter[i]:
-                signals[i] = 0.20
+            # Long breakout: price > Upper Donchian AND strong trend (ADX > 20) AND volume spike
+            if close[i] > donchian_upper_6h[i] and adx_1w_aligned[i] > 20 and volume_filter[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short entry: 4h downtrend, 1d RSI < 50 (bearish momentum), volume spike
-            elif supertrend_trend_1h[i] == -1 and rsi_1d_aligned[i] < 50 and volume_filter[i]:
-                signals[i] = -0.20
+                long_extreme = close[i]
+            # Short breakdown: price < Lower Donchian AND strong trend (ADX > 20) AND volume spike
+            elif close[i] < donchian_lower_6h[i] and adx_1w_aligned[i] > 20 and volume_filter[i]:
+                signals[i] = -0.25
                 position = -1
+                short_extreme = close[i]
         elif position == 1:
-            # Exit long: 4h trend turns down OR RSI turns bearish
-            if supertrend_trend_1h[i] == -1 or rsi_1d_aligned[i] < 50:
+            # Update long extreme
+            long_extreme = max(long_extreme, close[i])
+            # Exit long: price retraces 25% of ATR from extreme
+            if close[i] <= long_extreme - 0.25 * atr_6h[i]:
                 signals[i] = 0.0
                 position = 0
+                long_extreme = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: 4h trend turns up OR RSI turns bullish
-            if supertrend_trend_1h[i] == 1 or rsi_1d_aligned[i] > 50:
+            # Update short extreme
+            short_extreme = min(short_extreme, close[i])
+            # Exit short: price retraces 25% of ATR from extreme
+            if close[i] >= short_extreme + 0.25 * atr_6h[i]:
                 signals[i] = 0.0
                 position = 0
+                short_extreme = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
