@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1-day pivot points (R1/S1 for breakout, R2/S2 for reversal) with volume confirmation and volatility filter.
-# Breakout above R1 or below S1 with volume > 1.5x 20-period average indicates strong momentum.
-# Rejection at R2 or S2 with volume confirmation indicates mean reversion within daily range.
-# Volatility filter: ATR(14) > 20-period average ATR to avoid choppy markets.
-# Works in bull/bear markets: breakouts capture trends, reversals capture pullbacks within trend.
-# Target: 75-200 total trades over 4 years (19-50/year) with 0.25 position sizing.
+# Hypothesis: 1d strategy using weekly pivot points with volume confirmation and volatility filter
+# Weekly pivots (R1/S1 for breakouts, R2/S2 for reversals) provide key support/resistance levels
+# Breakout above R1 or below S1 with volume > 1.5x 20-period average indicates strong momentum
+# Rejection at R2 or S2 with volume confirmation indicates mean reversion within weekly range
+# Volatility filter: ATR(14) > 20-period average ATR to avoid choppy markets
+# Works in bull/bear markets: breakouts capture trends, reversals capture pullbacks within trend
+# Target: 30-100 total trades over 4 years (7-25/year) with 0.25 position sizing
 
-name = "4h_1dPivot_R1S2_VolumeVolFilter_v1"
-timeframe = "4h"
+name = "1d_weeklyPivot_R1S2_VolumeVolFilter_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,16 +25,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d pivot points ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Calculate weekly pivot points ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 2:
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Previous day's OHLC for pivot calculation
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Previous week's OHLC for pivot calculation
+    prev_close = df_1w['close'].shift(1).values
+    prev_high = df_1w['high'].shift(1).values
+    prev_low = df_1w['low'].shift(1).values
     
     # Pivot point calculation
     # Pivot = (previous high + previous low + previous close) / 3
@@ -46,13 +47,13 @@ def generate_signals(prices):
     s1 = pivot - (range_ * 1.0)
     s2 = pivot - (range_ * 2.0)
     
-    # Align 1d levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    # Align weekly levels to 1d timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
     
-    # Volume confirmation: >1.5x 20-period average (balanced threshold)
+    # Volume confirmation: >1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma_20)
     
