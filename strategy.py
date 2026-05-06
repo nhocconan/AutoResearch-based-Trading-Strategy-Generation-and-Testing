@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Supertrend for trend direction and 1w Bollinger Band width for volatility regime
-# - Uses 1w Bollinger Band width percentile to identify low volatility regimes (squeeze) - contrarian indicator
-# - Uses 1d Supertrend to confirm trend direction and strength
-# - Enters long when price breaks above 1d high with volume spike in low vol + bullish Supertrend
-# - Enters short when price breaks below 1d low with volume spike in low vol + bearish Supertrend
-# - Exits when price crosses back below/above 1d close or volatility expands (BB width > 80th percentile)
-# - Designed to capture volatility breakouts after weekly consolidation with daily trend confirmation
-# - Target: 80-160 total trades over 4 years (20-40/year) with 0.25 position sizing
+# Hypothesis: 4h strategy using 12h Choppiness Index for regime detection and 1d EMA crossover for trend
+# - Uses 12h Choppiness Index to identify trending vs ranging markets
+# - Uses 1d EMA crossover (8/21) to determine trend direction
+# - Enters long when market is trending (CHOP < 38.2) and EMA 8 crosses above EMA 21
+# - Enters short when market is trending (CHOP < 38.2) and EMA 8 crosses below EMA 21
+# - Uses volume spike as confirmation for entry
+# - Exits when market becomes ranging (CHOP > 61.8) or opposite EMA crossover occurs
+# - Designed to capture trending moves while avoiding choppy markets
+# - Target: 100-200 total trades over 4 years (25-50/year) with 0.25 position sizing
 
-name = "4h_1wBBWidth_1dSupertrend_Breakout"
+name = "4h_12hChop_1dEMA_Crossover"
 timeframe = "4h"
 leverage = 1.0
 
@@ -26,31 +27,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for 1d high/low and Supertrend calculation
+    # Get 12h data for Choppiness Index calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 14:
+        return np.zeros(n)
+    
+    # Get 1d data for EMA calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 21:
         return np.zeros(n)
     
-    # Get 1w data for Bollinger Band width calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
-    
-    # Calculate 1d high and low for breakout levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate 1d Supertrend (10, 3.0)
-    atr_period = 10
-    multiplier = 3.0
+    # Calculate 12h Choppiness Index (14)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
     # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    tr[0] = tr1[0]
     
     # ATR using Wilder's smoothing
     def wilders_smoothing(data, period):
@@ -62,118 +59,70 @@ def generate_signals(prices):
             result[i] = result[i-1] - (result[i-1] / period) + data[i]
         return result
     
-    atr = wilders_smoothing(tr, atr_period)
+    atr_12h = wilders_smoothing(tr, 14)
     
-    # Basic Upper and Lower Bands
-    basic_ub = (high_1d + low_1d) / 2 + multiplier * atr
-    basic_lb = (high_1d + low_1d) / 2 - multiplier * atr
+    # Calculate highest high and lowest low over 14 periods
+    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
     
-    # Final Upper and Lower Bands
-    final_ub = np.zeros_like(basic_ub)
-    final_lb = np.zeros_like(basic_lb)
-    final_ub[0] = basic_ub[0]
-    final_lb[0] = basic_lb[0]
+    # Chop = 100 * log10(sum(ATR14) / (HH14 - LL14)) / log10(14)
+    sum_atr = pd.Series(atr_12h).rolling(window=14, min_periods=14).sum().values
+    chop = 100 * np.log10(sum_atr / (highest_high - lowest_low)) / np.log10(14)
+    chop = np.where((highest_high - lowest_low) == 0, 50, chop)  # Avoid division by zero
     
-    for i in range(1, len(basic_ub)):
-        if basic_ub[i] < final_ub[i-1] or close_1d[i-1] > final_ub[i-1]:
-            final_ub[i] = basic_ub[i]
-        else:
-            final_ub[i] = final_ub[i-1]
-            
-        if basic_lb[i] > final_lb[i-1] or close_1d[i-1] < final_lb[i-1]:
-            final_lb[i] = basic_lb[i]
-        else:
-            final_lb[i] = final_lb[i-1]
+    # Calculate 1d EMA crossover (8, 21)
+    close_1d = df_1d['close'].values
+    ema_8 = pd.Series(close_1d).ewm(span=8, adjust=False, min_periods=8).mean().values
+    ema_21 = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Supertrend
-    supertrend = np.zeros_like(close_1d)
-    supertrend[0] = final_ub[0]
-    for i in range(1, len(supertrend)):
-        if supertrend[i-1] == final_ub[i-1]:
-            if close_1d[i] <= final_ub[i]:
-                supertrend[i] = final_ub[i]
-            else:
-                supertrend[i] = final_lb[i]
-        else:
-            if close_1d[i] >= final_lb[i]:
-                supertrend[i] = final_lb[i]
-            else:
-                supertrend[i] = final_ub[i]
+    # EMA crossover signals
+    ema_cross_up = np.where((ema_8 > ema_21) & (np.roll(ema_8, 1) <= np.roll(ema_21, 1)), 1, 0)
+    ema_cross_down = np.where((ema_8 < ema_21) & (np.roll(ema_8, 1) >= np.roll(ema_21, 1)), 1, 0)
     
-    # Supertrend direction: 1 for uptrend, -1 for downtrend
-    supertrend_dir = np.where(close_1d > supertrend, 1, -1)
+    # Align 12h Choppiness Index to 4h timeframe
+    chop_4h = align_htf_to_ltf(prices, df_12h, chop)
     
-    # Calculate 1w Bollinger Bands (20, 2)
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    
-    # Middle band (SMA20)
-    sma_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
-    # Standard deviation
-    std_dev = pd.Series(close_1w).rolling(window=20, min_periods=20).std().values
-    # Upper and lower bands
-    upper_bb = sma_20 + (2 * std_dev)
-    lower_bb = sma_20 - (2 * std_dev)
-    # Bollinger Band width
-    bb_width = (upper_bb - lower_bb) / sma_20
-    
-    # Calculate 1w BB width percentile rank (lookback 50 periods)
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-    ).values
-    
-    # Align 1d indicators to 4h timeframe
-    high_1d_4h = align_htf_to_ltf(prices, df_1d, high_1d)
-    low_1d_4h = align_htf_to_ltf(prices, df_1d, low_1d)
-    close_1d_4h = align_htf_to_ltf(prices, df_1d, close_1d)
-    supertrend_dir_4h = align_htf_to_ltf(prices, df_1d, supertrend_dir)
-    
-    # Align 1w BB width percentile to 4h timeframe
-    bb_width_percentile_4h = align_htf_to_ltf(prices, df_1w, bb_width_percentile)
+    # Align 1d EMA and crossover signals to 4h timeframe
+    ema_8_4h = align_htf_to_ltf(prices, df_1d, ema_8)
+    ema_21_4h = align_htf_to_ltf(prices, df_1d, ema_21)
+    ema_cross_up_4h = align_htf_to_ltf(prices, df_1d, ema_cross_up)
+    ema_cross_down_4h = align_htf_to_ltf(prices, df_1d, ema_cross_down)
     
     # Volume filters (4h timeframe)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)  # Strong volume confirmation
+    vol_ma_10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    volume_spike = volume > (1.5 * vol_ma_10)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after warmup
         # Skip if any critical value is NaN
-        if (np.isnan(high_1d_4h[i]) or np.isnan(low_1d_4h[i]) or np.isnan(close_1d_4h[i]) or
-            np.isnan(supertrend_dir_4h[i]) or np.isnan(bb_width_percentile_4h[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(chop_4h[i]) or np.isnan(ema_8_4h[i]) or np.isnan(ema_21_4h[i]) or
+            np.isnan(ema_cross_up_4h[i]) or np.isnan(ema_cross_down_4h[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Look for low volatility regime (BB width < 20th percentile) and bullish/bearish Supertrend
-            low_vol_regime = bb_width_percentile_4h[i] < 20
-            bullish_trend = supertrend_dir_4h[i] == 1
-            bearish_trend = supertrend_dir_4h[i] == -1
-            
-            if low_vol_regime:
-                # Long: price breaks above 1d high with volume spike in bullish trend
-                if bullish_trend and close[i] > high_1d_4h[i] and volume_spike[i]:
-                    signals[i] = 0.25
-                    position = 1
-                # Short: price breaks below 1d low with volume spike in bearish trend
-                elif bearish_trend and close[i] < low_1d_4h[i] and volume_spike[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # Enter long: trending market (CHOP < 38.2) + EMA bullish crossover + volume spike
+            if chop_4h[i] < 38.2 and ema_cross_up_4h[i] == 1 and volume_spike[i]:
+                signals[i] = 0.25
+                position = 1
+            # Enter short: trending market (CHOP < 38.2) + EMA bearish crossover + volume spike
+            elif chop_4h[i] < 38.2 and ema_cross_down_4h[i] == 1 and volume_spike[i]:
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Exit long: price crosses below 1d close OR volatility expands (BB width > 80th percentile)
-            if close[i] < close_1d_4h[i] or bb_width_percentile_4h[i] > 80:
+            # Exit long: market becomes ranging (CHOP > 61.8) OR EMA bearish crossover
+            if chop_4h[i] > 61.8 or ema_cross_down_4h[i] == 1:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above 1d close OR volatility expands (BB width > 80th percentile)
-            if close[i] > close_1d_4h[i] or bb_width_percentile_4h[i] > 80:
+            # Exit short: market becomes ranging (CHOP > 61.8) OR EMA bullish crossover
+            if chop_4h[i] > 61.8 or ema_cross_up_4h[i] == 1:
                 signals[i] = 0.0
                 position = 0
             else:
