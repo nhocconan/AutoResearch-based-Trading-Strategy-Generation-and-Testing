@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
-# Uses Camarilla pivot levels from 1d for structure, 1d EMA34 for trend alignment (reduces counter-trend trades)
-# Volume > 1.5x 20-bar average volume confirms breakout strength
-# Discrete sizing 0.25 to limit fee drag; target 50-150 total trades over 4 years (12-37/year)
-# Proven pattern: Camarilla breakouts with volume/trend confirmation work on BTC/ETH in both bull/bear
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Uses Camarilla pivot levels from 1d for precise entry/exit, 1d EMA34 for trend alignment
+# Volume > 1.5x 20-bar average confirms institutional participation
+# Discrete sizing 0.25 to limit fee drag; target 75-200 total trades over 4 years
+# Proven pattern: Camarilla breakouts with volume/volatility confirmation work on BTC/ETH in both bull/bear
 
-name = "12h_Camarilla_R3S3_1dEMA34_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dEMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -43,15 +43,15 @@ def generate_signals(prices):
     close_1d_series = pd.Series(close_1d)
     ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate volume spike filter (volume > 1.5x 20-period average)
+    # Calculate volume filter: volume > 1.5x 20-bar average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma_20)
+    volume_filter = volume > (1.5 * vol_ma_20)
     
-    # Align HTF indicators to 12h timeframe
+    # Align HTF indicators to 4h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
+    volume_filter_aligned = align_htf_to_ltf(prices, df_1d, volume_filter)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -59,7 +59,7 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if any critical value is NaN
         if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_spike_aligned[i])):
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_filter_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,11 +67,11 @@ def generate_signals(prices):
         
         if position == 0:
             # Long breakout: price > Camarilla R3 AND uptrend (price > EMA34) AND volume spike
-            if close[i] > camarilla_r3_aligned[i] and close[i] > ema34_1d_aligned[i] and volume_spike_aligned[i]:
+            if close[i] > camarilla_r3_aligned[i] and close[i] > ema34_1d_aligned[i] and volume_filter_aligned[i]:
                 signals[i] = 0.25
                 position = 1
             # Short breakdown: price < Camarilla S3 AND downtrend (price < EMA34) AND volume spike
-            elif close[i] < camarilla_s3_aligned[i] and close[i] < ema34_1d_aligned[i] and volume_spike_aligned[i]:
+            elif close[i] < camarilla_s3_aligned[i] and close[i] < ema34_1d_aligned[i] and volume_filter_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
