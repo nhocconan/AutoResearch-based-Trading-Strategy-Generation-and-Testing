@@ -3,19 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator with 1d EMA34 trend filter and volume spike confirmation
-# Long when price > Alligator Jaw (teeth) AND 1d close > 1d EMA34 AND volume > 2.0 * 20-bar average volume
-# Short when price < Alligator Jaw (teeth) AND 1d close < 1d EMA34 AND volume > 2.0 * 20-bar average volume
-# Exit when price crosses back below/above Alligator Lips
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation
+# Long when price breaks above 12h Donchian upper band AND 1d close > 1d EMA34 AND volume > 2.0 * 20-bar average volume
+# Short when price breaks below 12h Donchian lower band AND 1d close < 1d EMA34 AND volume > 2.0 * 20-bar average volume
+# Exit when price retests the 12h Donchian midpoint (mean of upper and lower bands)
 # Uses discrete sizing 0.25 to balance return and fee drag
-# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
-# Williams Alligator (SMAs: 13,8,5) provides trend identification with built-in smoothing
-# 1d EMA34 filters for higher timeframe trend alignment (proven BTC/ETH edge from Camarilla winners)
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# Donchian breakouts capture strong momentum moves, filtered by 1d trend to avoid counter-trend trades
 # Volume spike confirmation reduces false breakouts during low participation
 # Works in both bull and bear markets by following the 1d trend
 
-name = "6h_WilliamsAlligator_1dEMA34_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Donchian20_1dEMA34_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,30 +27,33 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 6h Williams Alligator and 1d EMA34 ONCE before loop
-    df_6h = get_htf_data(prices, '6h')
+    # Calculate 12h Donchian bands and 1d EMA34 ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_6h) < 13 or len(df_1d) < 34:
+    if len(df_12h) < 20 or len(df_1d) < 34:
         return np.zeros(n)
     
-    close_6h = df_6h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Williams Alligator (SMAs: Jaw=13, Teeth=8, Lips=5)
-    close_6h_series = pd.Series(close_6h)
-    alligator_jaw = close_6h_series.rolling(window=13, min_periods=13).mean().values  # Blue line
-    alligator_teeth = close_6h_series.rolling(window=8, min_periods=8).mean().values    # Red line
-    alligator_lips = close_6h_series.rolling(window=5, min_periods=5).mean().values   # Green line
+    # Calculate 12h Donchian bands (20-period)
+    high_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    donchian_upper = high_20
+    donchian_lower = low_20
+    donchian_mid = (donchian_upper + donchian_lower) / 2.0
     
     # Calculate 1d EMA34 trend filter
     close_1d_series = pd.Series(close_1d)
     ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align HTF indicators to 6h timeframe (wait for completed bars)
-    alligator_jaw_aligned = align_htf_to_ltf(prices, df_6h, alligator_jaw)
-    alligator_teeth_aligned = align_htf_to_ltf(prices, df_6h, alligator_teeth)
-    alligator_lips_aligned = align_htf_to_ltf(prices, df_6h, alligator_lips)
+    # Align HTF indicators to 12h timeframe (wait for completed bars)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_12h, donchian_mid)
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Volume confirmation: volume > 2.0 * 20-bar average volume (spike filter)
@@ -64,8 +66,8 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN
-        if (np.isnan(alligator_jaw_aligned[i]) or np.isnan(alligator_teeth_aligned[i]) or 
-            np.isnan(alligator_lips_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or 
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(donchian_mid_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -73,24 +75,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price > Alligator Jaw (teeth) AND uptrend AND volume spike
-            if close[i] > alligator_jaw_aligned[i] and close[i] > ema34_1d_aligned[i] and volume_spike[i]:
+            # Long breakout: price > upper band AND uptrend AND volume spike
+            if close[i] > donchian_upper_aligned[i] and close[i] > ema34_1d_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price < Alligator Jaw (teeth) AND downtrend AND volume spike
-            elif close[i] < alligator_jaw_aligned[i] and close[i] < ema34_1d_aligned[i] and volume_spike[i]:
+            # Short breakdown: price < lower band AND downtrend AND volume spike
+            elif close[i] < donchian_lower_aligned[i] and close[i] < ema34_1d_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses back below Alligator Lips
-            if close[i] < alligator_lips_aligned[i]:
+            # Exit long: price retests midpoint from above
+            if close[i] <= donchian_mid_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses back above Alligator Lips
-            if close[i] > alligator_lips_aligned[i]:
+            # Exit short: price retests midpoint from below
+            if close[i] >= donchian_mid_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
