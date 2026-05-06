@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using 1w Donchian breakout with volume confirmation and volatility filter
-# - Uses 1w Donchian channels (20-period) to identify major trend breakouts
-# - Confirms with 1d volume spike (>2x 20-day average) for institutional participation
-# - Filters out low-volatility choppy markets using 1d ADX (>25) to ensure trending conditions
-# - Exits when price crosses back below/above the 1w Donchian midpoint or volatility collapses
-# - Designed to capture major trend moves while avoiding whipsaws in ranging markets
-# - Target: 30-100 total trades over 4 years (7-25/year) with 0.25 position sizing
+# Hypothesis: 12h strategy using 1d Donchian breakout with 1w trend filter and volume confirmation
+# - Uses 1d Donchian channel (20-period high/low) for breakout signals
+# - Uses 1w EMA (50-period) for trend direction filter
+# - Requires volume spike (2x 20-period average) for confirmation
+# - Exits when price crosses back below/above the 10-period EMA on 1d
+# - Designed to capture strong trending moves with institutional volume
+# - Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
 
-name = "1d_WeeklyDonchian_Breakout_Volume_ADX"
-timeframe = "1d"
+name = "12h_DonchianBreakout_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,78 +25,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for Donchian channel calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Get 1d data for ADX calculation
+    # Get 1d data for Donchian channel and EMA exit
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1w Donchian Channels (20-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Upper band (20-period high)
-    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    # Lower band (20-period low)
-    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    # Middle band (average of upper and lower)
-    donchian_mid = (donchian_high + donchian_low) / 2
-    
-    # Calculate 1d ADX (14)
+    # Calculate 1d Donchian Channel (20-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    
+    # Upper band (20-period high)
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    # Lower band (20-period low)
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 1d EMA (10-period) for exit
     close_1d = df_1d['close'].values
+    ema_10 = pd.Series(close_1d).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    # Calculate 1w EMA (50-period) for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Align 1d indicators to 12h timeframe
+    donchian_high_12h = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_12h = align_htf_to_ltf(prices, df_1d, donchian_low)
+    ema_10_12h = align_htf_to_ltf(prices, df_1d, ema_10)
     
-    # Smoothed values (Wilder's smoothing)
-    def wilders_smoothing(data, period):
-        result = np.zeros_like(data)
-        if len(data) < period:
-            return result
-        result[period-1] = np.nansum(data[:period])
-        for i in range(period, len(data)):
-            result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
+    # Align 1w EMA to 12h timeframe
+    ema_50_1w_12h = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    tr14 = wilders_smoothing(tr, 14)
-    dm_plus_14 = wilders_smoothing(dm_plus, 14)
-    dm_minus_14 = wilders_smoothing(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_14 / (tr14 + 1e-10)
-    di_minus = 100 * dm_minus_14 / (tr14 + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = wilders_smoothing(dx, 14)
-    
-    # Align 1w indicators to 1d timeframe
-    donchian_high_1d = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_1d = align_htf_to_ltf(prices, df_1w, donchian_low)
-    donchian_mid_1d = align_htf_to_ltf(prices, df_1w, donchian_mid)
-    
-    # Align 1d ADX to 1d timeframe (no change needed but keeping for consistency)
-    adx_1d = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume filters (1d timeframe)
+    # Volume filters (12h timeframe)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma_20)  # Strong volume confirmation
     
@@ -105,8 +69,8 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup
         # Skip if any critical value is NaN
-        if (np.isnan(donchian_high_1d[i]) or np.isnan(donchian_low_1d[i]) or 
-            np.isnan(donchian_mid_1d[i]) or np.isnan(adx_1d[i]) or
+        if (np.isnan(donchian_high_12h[i]) or np.isnan(donchian_low_12h[i]) or 
+            np.isnan(ema_10_12h[i]) or np.isnan(ema_50_1w_12h[i]) or
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -114,28 +78,25 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Look for strong trend (ADX > 25) to avoid ranging markets
-            strong_trend = adx_1d[i] > 25
-            
-            if strong_trend:
-                # Long: price breaks above weekly Donchian high with volume spike
-                if close[i] > donchian_high_1d[i] and volume_spike[i]:
-                    signals[i] = 0.25
-                    position = 1
-                # Short: price breaks below weekly Donchian low with volume spike
-                elif close[i] < donchian_low_1d[i] and volume_spike[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # Look for breakout with volume spike and trend alignment
+            # Long: price breaks above Donchian high with volume spike and price > 1w EMA50
+            if close[i] > donchian_high_12h[i] and volume_spike[i] and close[i] > ema_50_1w_12h[i]:
+                signals[i] = 0.25
+                position = 1
+            # Short: price breaks below Donchian low with volume spike and price < 1w EMA50
+            elif close[i] < donchian_low_12h[i] and volume_spike[i] and close[i] < ema_50_1w_12h[i]:
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Exit long: price crosses below weekly Donchian midpoint
-            if close[i] < donchian_mid_1d[i]:
+            # Exit long: price crosses below 10-period EMA on 1d
+            if close[i] < ema_10_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above weekly Donchian midpoint
-            if close[i] > donchian_mid_1d[i]:
+            # Exit short: price crosses above 10-period EMA on 1d
+            if close[i] > ema_10_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
