@@ -3,21 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using weekly pivot points with volume confirmation and trend filter
-# Weekly pivots (R1/S1 for breakouts, R2/S2 for reversals) provide key weekly levels
-# Breakout above R1 or below S1 with volume > 1.8x 20-period average indicates strong momentum
-# Rejection at R2 or S2 with volume confirmation indicates mean reversion within weekly range
-# Trend filter: 20-period EMA on 1d timeframe to avoid counter-trend trades
-# Works in bull/bear markets: breakouts capture trends, reversals capture pullbacks within trend
-# Target: 30-100 total trades over 4 years (7-25/year) with 0.25 position sizing
+# Hypothesis: 6h strategy using 1-day RSI with Bollinger Bands mean reversion
+# In bear/range markets (2025+), price tends to revert to mean after extreme RSI moves
+# RSI(14) > 70 with price touching upper Bollinger Band (20,2) = short signal
+# RSI(14) < 30 with price touching lower Bollinger Band (20,2) = long signal
+# Volume confirmation: current volume > 1.5x 20-period average to avoid false signals
+# Trend filter: 50-period EMA on 6x timeframe to avoid counter-trend trades in strong trends
+# Works in bull/bear: mean reversion works in ranges, trend filter avoids whipsaws in trends
+# Target: 60-120 total trades over 4 years (15-30/year) with 0.25 position sizing
 
-name = "1d_WeeklyPivot_R1S2_VolumeTrendFilter_v1"
-timeframe = "1d"
+name = "6h_RSI_Bollinger_MeanReversion_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,54 +26,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate weekly pivot points ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Calculate daily RSI and Bollinger Bands ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 2:
+    if len(df_1d) < 34:  # Need enough for RSI(14) and BB(20)
         return np.zeros(n)
     
-    # Previous week's OHLC for pivot calculation
-    prev_close = df_1w['close'].shift(1).values
-    prev_high = df_1w['high'].shift(1).values
-    prev_low = df_1w['low'].shift(1).values
+    # Daily RSI(14)
+    close_1d = pd.Series(df_1d['close'].values)
+    delta = close_1d.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_1d = (100 - (100 / (1 + rs))).values
     
-    # Pivot point calculation
-    # Pivot = (previous high + previous low + previous close) / 3
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_ = prev_high - prev_low
+    # Daily Bollinger Bands (20,2)
+    sma_20 = close_1d.rolling(window=20, min_periods=20).mean()
+    std_20 = close_1d.rolling(window=20, min_periods=20).std()
+    upper_bb = sma_20 + (2 * std_20)
+    lower_bb = sma_20 - (2 * std_20)
     
-    # Support and Resistance levels
-    r1 = pivot + (range_ * 1.0)
-    r2 = pivot + (range_ * 2.0)
-    s1 = pivot - (range_ * 1.0)
-    s2 = pivot - (range_ * 2.0)
+    # Align daily indicators to 6h timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb.values)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb.values)
     
-    # Align weekly levels to 1d timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
-    
-    # Volume confirmation: >1.8x 20-period average (higher threshold to reduce trades)
+    # Volume confirmation: >1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.8 * vol_ma_20)
+    volume_filter = volume > (1.5 * vol_ma_20)
     
-    # Trend filter: 20-period EMA on 1d timeframe
+    # Trend filter: 50-period EMA on 6h timeframe
     close_series = pd.Series(close)
-    ema_20 = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    uptrend = close > ema_20
-    downtrend = close < ema_20
+    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend = close > ema_50
+    downtrend = close < ema_50
     
-    # Pre-compute session filter (08-20 UTC) - for daily, use full day
-    session_filter = np.ones(n, dtype=bool)  # Trade all day on 1d timeframe
+    # Pre-compute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        # Skip if any critical value is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(s2_aligned[i]) or np.isnan(volume_filter[i]) or np.isnan(ema_20[i]) or
+    for i in range(60, n):
+        # Skip if any critical value is NaN or outside session
+        if (np.isnan(rsi_aligned[i]) or np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or
+            np.isnan(volume_filter[i]) or np.isnan(ema_50[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -80,32 +81,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long breakout: price breaks above R1 with volume confirmation and uptrend
-            if close[i] > r1_aligned[i] and volume_filter[i] and uptrend[i]:
+            # Long signal: RSI < 30 (oversold) and price at or below lower Bollinger Band
+            if rsi_aligned[i] < 30 and close[i] <= lower_bb_aligned[i] and volume_filter[i] and uptrend[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short breakout: price breaks below S1 with volume confirmation and downtrend
-            elif close[i] < s1_aligned[i] and volume_filter[i] and downtrend[i]:
-                signals[i] = -0.25
-                position = -1
-            # Long reversal: price rejects S2 with volume confirmation (bounce from support)
-            elif close[i] < s2_aligned[i] and close[i] > s2_aligned[i] * 0.995 and volume_filter[i] and uptrend[i]:
-                signals[i] = 0.25
-                position = 1
-            # Short reversal: price rejects R2 with volume confirmation (rejection from resistance)
-            elif close[i] > r2_aligned[i] and close[i] < r2_aligned[i] * 1.005 and volume_filter[i] and downtrend[i]:
+            # Short signal: RSI > 70 (overbought) and price at or above upper Bollinger Band
+            elif rsi_aligned[i] > 70 and close[i] >= upper_bb_aligned[i] and volume_filter[i] and downtrend[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below S1 (failed support) or reaches R2 (take profit)
-            if close[i] < s1_aligned[i] or close[i] > r2_aligned[i]:
+            # Exit long: RSI returns to neutral (50) or price reaches middle of Bollinger Bands
+            bb_middle = (upper_bb_aligned[i] + lower_bb_aligned[i]) / 2
+            if rsi_aligned[i] >= 50 or close[i] >= bb_middle:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above R1 (failed resistance) or reaches S2 (take profit)
-            if close[i] > r1_aligned[i] or close[i] < s2_aligned[i]:
+            # Exit short: RSI returns to neutral (50) or price reaches middle of Bollinger Bands
+            bb_middle = (upper_bb_aligned[i] + lower_bb_aligned[i]) / 2
+            if rsi_aligned[i] <= 50 or close[i] <= bb_middle:
                 signals[i] = 0.0
                 position = 0
             else:
