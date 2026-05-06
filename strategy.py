@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using weekly Bollinger Bands with daily RSI confirmation
-# Weekly Bollinger Bands identify overbought/oversold conditions on longer timeframe
-# Daily RSI provides timing for mean reversion entries when price touches bands
-# Works in both bull/bear markets: mean reversion in ranging markets, trend following in strong trends
+# Hypothesis: 4h strategy using daily Donchian breakout with volume confirmation and ADX trend filter
+# Daily Donchian channels provide strong structural support/resistance levels
+# Breakout above 20-day high or below 20-day low with volume > 1.5x 20-period average indicates institutional interest
+# ADX > 25 on daily timeframe confirms trending environment to avoid false breakouts in ranging markets
+# Works in both bull/bear markets: breakouts capture trends, with volume and ADX filters reducing false signals
 # Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
 
-name = "12h_BollingerRSI_MeanReversion_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Volume_ADX_TrendFilter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,42 +24,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate weekly Bollinger Bands ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Weekly Bollinger Bands (20, 2)
-    weekly_close = df_1w['close'].values
-    bb_middle = pd.Series(weekly_close).rolling(window=20, min_periods=20).mean().values
-    bb_std = pd.Series(weekly_close).rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + (2 * bb_std)
-    bb_lower = bb_middle - (2 * bb_std)
-    
-    # Align weekly bands to 12h timeframe
-    bb_upper_aligned = align_htf_to_ltf(prices, df_1w, bb_upper)
-    bb_lower_aligned = align_htf_to_ltf(prices, df_1w, bb_lower)
-    bb_middle_aligned = align_htf_to_ltf(prices, df_1w, bb_middle)
-    
-    # Calculate daily RSI ONCE before loop
+    # Calculate daily Donchian channels and ADX ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 14:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Daily RSI (14)
-    daily_close = df_1d['close'].values
-    delta = np.diff(daily_close, prepend=daily_close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Daily Donchian channels (20-period)
+    high_20 = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
     
-    # Align daily RSI to 12h timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # Daily ADX calculation (14-period)
+    plus_dm = pd.Series(df_1d['high']).diff()
+    minus_dm = pd.Series(df_1d['low']).diff()
+    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
+    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+    
+    tr1 = pd.Series(df_1d['high']) - pd.Series(df_1d['low'])
+    tr2 = abs(pd.Series(df_1d['high']) - pd.Series(df_1d['close']).shift(1))
+    tr3 = abs(pd.Series(df_1d['low']) - pd.Series(df_1d['close']).shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    
+    atr_14 = tr.rolling(window=14, min_periods=14).mean()
+    plus_di_14 = 100 * (plus_dm.rolling(window=14, min_periods=14).mean() / atr_14)
+    minus_di_14 = 100 * (minus_dm.rolling(window=14, min_periods=14).mean() / atr_14)
+    dx = (abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)) * 100
+    adx_14 = dx.rolling(window=14, min_periods=14).mean()
+    
+    # Align daily indicators to 4h timeframe
+    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_14.values)
     
     # Volume confirmation: >1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -73,8 +69,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(bb_upper_aligned[i]) or np.isnan(bb_lower_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(volume_filter[i]) or
+        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(volume_filter[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -82,24 +78,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long entry: price touches lower BB and RSI oversold (<30) with volume confirmation
-            if close[i] <= bb_lower_aligned[i] and rsi_aligned[i] < 30 and volume_filter[i]:
+            # Long entry: price breaks above 20-day high with volume and trend confirmation
+            if close[i] > high_20_aligned[i] and volume_filter[i] and adx_aligned[i] > 25:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price touches upper BB and RSI overbought (>70) with volume confirmation
-            elif close[i] >= bb_upper_aligned[i] and rsi_aligned[i] > 70 and volume_filter[i]:
+            # Short entry: price breaks below 20-day low with volume and trend confirmation
+            elif close[i] < low_20_aligned[i] and volume_filter[i] and adx_aligned[i] > 25:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price reaches middle BB or RSI overbought
-            if close[i] >= bb_middle_aligned[i] or rsi_aligned[i] > 70:
+            # Exit long: price breaks below 20-day low or ADX weakens
+            if close[i] < low_20_aligned[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price reaches middle BB or RSI oversold
-            if close[i] <= bb_middle_aligned[i] or rsi_aligned[i] < 30:
+            # Exit short: price breaks above 20-day high or ADX weakens
+            if close[i] > high_20_aligned[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
