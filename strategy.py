@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h KAMA direction with 12h volume confirmation and 1d ATR stop
-# Uses KAMA(10) for trend filtering - adapts to market noise, reducing whipsaw in ranging markets
-# Volume spike (>2x 20-bar average) confirms breakout strength
-# ATR-based trailing stop via signal=0 when price retraces 30% of ATR from extreme
-# Designed for low trade frequency (<30/year) to minimize fee drag while capturing strong trends
-# Works in both bull/bear: KAMA adapts to volatility, volume filter ensures participation, ATR stop manages risk
+# Hypothesis: 1d KAMA direction filter with 1w EMA40 trend and volume confirmation
+# Uses 1d KAMA (adaptive moving average) for trend identification, 1w EMA40 for higher timeframe trend alignment
+# Volume spike (>2.0x 20-bar average) confirms momentum
+# Discrete sizing 0.25 to balance profit and fee drag; target 40-80 total trades over 4 years (10-20/year)
+# Works in bull/bear: KAMA adapts to volatility, EMA40 filter prevents counter-trend trades, volume ensures participation
 
-name = "4h_KAMA_12hVolume_1dATR_Stop_v1"
-timeframe = "4h"
+name = "1d_KAMA_1wEMA40_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,59 +18,61 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    df_1d = get_htf_data(prices, '1d')
+    # Calculate 1w EMA40 trend filter ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_12h) < 20 or len(df_1d) < 14:
+    if len(df_1w) < 40:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
+    close_1w = df_1w['close'].values
+    close_1w_series = pd.Series(close_1w)
+    ema40_1w = close_1w_series.ewm(span=40, adjust=False, min_periods=40).mean().values
     
-    # Calculate 12h volume spike filter (>2x 20-bar average)
-    vol_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    volume_spike_12h = volume_12h > (2.0 * vol_ma_20_12h)
+    # Calculate 1d KAMA (adaptive moving average)
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close, n=10))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # will be corrected below
     
-    # Calculate ATR(14) for stoploss (1d)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate KAMA(10) on 4h close
-    # KAMA requires Efficiency Ratio and smoothing constants
-    change = np.abs(np.diff(close, k=10))  # 10-period net change
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # 10-period sum of absolute changes
-    # Pad volatility array to match length
-    volatility = np.concatenate([np.full(9, np.nan), volatility])
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    # Calculate KAMA
-    kama = np.full_like(close, np.nan)
-    kama[9] = close[9]  # Initialize
+    # Proper ER calculation
+    price_diff = np.diff(close, n=10)
+    change_10 = np.abs(price_diff)
+    volatility_10 = np.zeros_like(close)
     for i in range(10, len(close)):
-        if not np.isnan(sc[i]) and not np.isnan(kama[i-1]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
+        volatility_10[i] = np.sum(np.abs(np.diff(close[i-10:i+1])))
     
-    # Align HTF indicators to 4h timeframe
-    volume_spike_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_spike_12h)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Avoid division by zero
+    er = np.zeros_like(close)
+    mask = volatility_10 != 0
+    er[mask] = change_10[mask] / volatility_10[mask]
+    
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    
+    # Calculate KAMA
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # Calculate ATR(14) for stoploss
+    tr1 = np.abs(high[1:] - low[1:])
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate volume spike filter (>2.0x 20-bar average)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (2.0 * vol_ma_20)
+    
+    # Align HTF indicators to 1d timeframe
+    ema40_1w_aligned = align_htf_to_ltf(prices, df_1w, ema40_1w)
+    kama_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), kama)  # Self-align for 1d
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -82,10 +83,11 @@ def generate_signals(prices):
     long_extreme = 0.0
     short_extreme = 0.0
     
-    for i in range(10, n):
+    for i in range(50, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(kama[i]) or np.isnan(volume_spike_12h_aligned[i]) or 
-            np.isnan(atr_1d_aligned[i]) or not session_filter[i]):
+        if (np.isnan(ema40_1w_aligned[i]) or np.isnan(kama_aligned[i]) or 
+            np.isnan(atr[i]) or np.isnan(volume_filter[i]) or
+            not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -94,21 +96,21 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long entry: price > KAMA AND volume spike
-            if close[i] > kama[i] and volume_spike_12h_aligned[i]:
+            # Long: price > KAMA AND uptrend (price > EMA40_1w) AND volume spike
+            if close[i] > kama_aligned[i] and close[i] > ema40_1w_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
                 long_extreme = close[i]
-            # Short entry: price < KAMA AND volume spike
-            elif close[i] < kama[i] and volume_spike_12h_aligned[i]:
+            # Short: price < KAMA AND downtrend (price < EMA40_1w) AND volume spike
+            elif close[i] < kama_aligned[i] and close[i] < ema40_1w_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
                 short_extreme = close[i]
         elif position == 1:
             # Update long extreme
             long_extreme = max(long_extreme, close[i])
-            # Exit long: price retraces 30% of ATR from extreme
-            if close[i] <= long_extreme - 0.30 * atr_1d_aligned[i]:
+            # Exit long: price retraces 25% of ATR from extreme
+            if close[i] <= long_extreme - 0.25 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 long_extreme = 0.0
@@ -117,8 +119,8 @@ def generate_signals(prices):
         elif position == -1:
             # Update short extreme
             short_extreme = min(short_extreme, close[i])
-            # Exit short: price retraces 30% of ATR from extreme
-            if close[i] >= short_extreme + 0.30 * atr_1d_aligned[i]:
+            # Exit short: price retraces 25% of ATR from extreme
+            if close[i] >= short_extreme + 0.25 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 short_extreme = 0.0
