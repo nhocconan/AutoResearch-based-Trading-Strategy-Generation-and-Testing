@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# 6h_1dATR_Based_Volume_Breakout_Trend_Filter
-# Uses daily ATR for volatility-adjusted breakout levels and volume confirmation
-# Designed for 6h timeframe to capture volatility breakouts aligned with daily trend
-# Works in both bull and bear markets by following daily trend and filtering with volume spikes
+# 4h_1dCamarilla_R1S1_Breakout_1dEMA34_Trend_Volume_v5
+# Uses daily Camarilla pivot levels (R1/S1) as breakout levels with daily trend filter (EMA34)
+# and daily volume confirmation. Designed for 4h timeframe to capture major pivot breaks
+# with trend alignment, working in both bull and bear markets by following the daily trend.
+# Tightened volume threshold and added ADX filter to reduce trade frequency and improve win rate.
+# Target: 75-200 total trades over 4 years (19-50/year) with 0.30 position sizing.
 
-name = "6h_1dATR_Based_Volume_Breakout_Trend_Filter"
-timeframe = "6h"
+name = "4h_1dCamarilla_R1S1_Breakout_1dEMA34_Trend_Volume_v5"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,63 +24,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ATR, trend, and volume
+    # Get daily data for Camarilla pivots and trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily ATR (14-period) for volatility
+    # Calculate daily Camarilla pivot levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr = np.zeros(len(high_1d))
-    tr[0] = high_1d[0] - low_1d[0]
-    for i in range(1, len(high_1d)):
-        tr[i] = max(high_1d[i] - low_1d[i], 
-                   abs(high_1d[i] - close_1d[i-1]), 
-                   abs(low_1d[i] - close_1d[i-1]))
+    # Pivot point (PP) = (H + L + C) / 3
+    pp = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # ATR (14-period) using Wilder's smoothing
-    atr_14 = np.zeros(len(high_1d))
-    atr_14[13] = np.mean(tr[1:14])  # Initialize with simple average
-    for i in range(14, len(high_1d)):
-        atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
+    # Camarilla levels (R1/S1 - tighter range for fewer trades)
+    r1 = pp + range_1d * 1.1 / 12
+    s1 = pp - range_1d * 1.1 / 12
     
-    # Calculate daily ATR-based breakout levels (similar to Donchian but ATR-adjusted)
-    # Upper band: highest high of last 20 days + 0.5 * ATR
-    # Lower band: lowest low of last 20 days - 0.5 * ATR
-    lookback = 20
-    upper_band = np.zeros(len(high_1d))
-    lower_band = np.zeros(len(high_1d))
-    
-    for i in range(lookback-1, len(high_1d)):
-        highest_high = np.max(high_1d[i-lookback+1:i+1])
-        lowest_low = np.min(low_1d[i-lookback+1:i+1])
-        upper_band[i] = highest_high + 0.5 * atr_14[i]
-        lower_band[i] = lowest_low - 0.5 * atr_14[i]
-    
-    # Align ATR-based bands to 6h timeframe
-    upper_band_6h = align_htf_to_ltf(prices, df_1d, upper_band)
-    lower_band_6h = align_htf_to_ltf(prices, df_1d, lower_band)
+    # Align Camarilla levels to 4h timeframe
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
     
     # Daily EMA34 for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_6h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_34_4h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Daily volume filter (20-period MA) with threshold for significant volume
+    # Daily volume filter (20-period MA) with higher threshold
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)  # Volume spike threshold
+    volume_spike = volume > (3.0 * vol_ma_20)  # Increased threshold for stronger confirmation
+    
+    # ADX filter for trend strength (using 1d data)
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros(len(high))
+        minus_dm = np.zeros(len(high))
+        tr = np.zeros(len(high))
+        
+        for i in range(1, len(high)):
+            plus_dm[i] = max(0, high[i] - high[i-1])
+            minus_dm[i] = max(0, low[i-1] - low[i])
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        # Smooth using Wilder's smoothing (alpha = 1/period)
+        atr = np.zeros(len(high))
+        atr[period] = np.mean(tr[1:period+1])
+        for i in range(period+1, len(high)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        
+        plus_di = np.zeros(len(high))
+        minus_di = np.zeros(len(high))
+        dx = np.zeros(len(high))
+        
+        for i in range(period, len(high)):
+            plus_dm_sum = np.sum(plus_dm[i-period+1:i+1])
+            minus_dm_sum = np.sum(minus_dm[i-period+1:i+1])
+            if atr[i] != 0:
+                plus_di[i] = 100 * plus_dm_sum / (atr[i] * period)
+                minus_di[i] = 100 * minus_dm_sum / (atr[i] * period)
+                if plus_di[i] + minus_di[i] != 0:
+                    dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
+        
+        adx = np.zeros(len(high))
+        adx[2*period-1] = np.mean(dx[period:2*period])
+        for i in range(2*period, len(high)):
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
+    
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    adx_4h = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_entry = 0
+    bars_since_entry = 0  # Track holding period
     
     for i in range(50, n):
         # Skip if any critical value is NaN
-        if (np.isnan(upper_band_6h[i]) or np.isnan(lower_band_6h[i]) or 
-            np.isnan(ema_34_6h[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or 
+            np.isnan(ema_34_4h[i]) or np.isnan(volume_spike[i]) or np.isnan(adx_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -88,31 +111,33 @@ def generate_signals(prices):
         bars_since_entry += 1
         
         if position == 0:
-            # Long: break above upper band with uptrend and volume confirmation
-            if close[i] > upper_band_6h[i] and close[i] > ema_34_6h[i] and volume_spike[i]:
-                signals[i] = 0.25
+            # Long: break above R1 with uptrend (ADX > 20), EMA34 filter, and volume
+            if close[i] > r1_4h[i] and adx_4h[i] > 20 and close[i] > ema_34_4h[i] and volume_spike[i]:
+                signals[i] = 0.30
                 position = 1
                 bars_since_entry = 0
-            # Short: break below lower band with downtrend and volume confirmation
-            elif close[i] < lower_band_6h[i] and close[i] < ema_34_6h[i] and volume_spike[i]:
-                signals[i] = -0.25
+            # Short: break below S1 with downtrend (ADX > 20), EMA34 filter, and volume
+            elif close[i] < s1_4h[i] and adx_4h[i] > 20 and close[i] < ema_34_4h[i] and volume_spike[i]:
+                signals[i] = -0.30
                 position = -1
                 bars_since_entry = 0
         elif position == 1:
-            # Exit: price returns below EMA34 or breaks below lower band
-            if bars_since_entry >= 2 and (close[i] < ema_34_6h[i] or close[i] < lower_band_6h[i]):
+            # Exit conditions: price returns to EMA34 or breaks below S1
+            # Minimum holding period of 3 bars to reduce churn
+            if bars_since_entry >= 3 and (close[i] < ema_34_4h[i] or close[i] < s1_4h[i]):
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit: price returns above EMA34 or breaks above upper band
-            if bars_since_entry >= 2 and (close[i] > ema_34_6h[i] or close[i] > upper_band_6h[i]):
+            # Exit conditions: price returns to EMA34 or breaks above R1
+            # Minimum holding period of 3 bars to reduce churn
+            if bars_since_entry >= 3 and (close[i] > ema_34_4h[i] or close[i] > r1_4h[i]):
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
