@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d EMA trend filter
-# Donchian breakouts capture momentum in both bull and bear markets
-# Volume confirmation ensures breakouts have institutional participation
-# 1d EMA filter avoids counter-trend trades (long only above EMA, short only below)
-# Target: 20-50 total trades over 4 years (5-12/year) with 0.30 position sizing
-# Uses proven structure from DB top performers: price channel + volume + trend
+# Hypothesis: 4h strategy using weekly Bollinger Bands with volume confirmation and trend filter
+# Weekly Bollinger Bands (20, 2) provide dynamic support/resistance levels
+# Breakout above upper band or below lower band with volume > 1.8x 20-period average indicates strong momentum
+# Trend filter: 20-period EMA on 4h timeframe to avoid counter-trend trades
+# Works in bull/bear markets: breakouts capture trends, reversals capture pullbacks within trend
+# Target: 75-200 total trades over 4 years (19-50/year) with 0.25 position sizing
 
-name = "4h_Donchian20_Volume_1dEMA_Trend_v1"
+name = "4h_WeeklyBB20_2_VolumeTrendFilter_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,23 +24,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian channels (20-period) on 4h
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate weekly Bollinger Bands ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d EMA(34) for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Weekly close for Bollinger Bands
+    weekly_close = df_1w['close'].values
+    close_series = pd.Series(weekly_close)
     
-    # Volume confirmation: >1.5x 20-period average (moderate threshold to control trade frequency)
+    # Bollinger Bands (20, 2)
+    sma_20 = close_series.rolling(window=20, min_periods=20).mean().values
+    std_20 = close_series.rolling(window=20, min_periods=20).std().values
+    upper_band = sma_20 + (2 * std_20)
+    lower_band = sma_20 - (2 * std_20)
+    
+    # Align weekly bands to 4h timeframe
+    upper_band_aligned = align_htf_to_ltf(prices, df_1w, upper_band)
+    lower_band_aligned = align_htf_to_ltf(prices, df_1w, lower_band)
+    
+    # Volume confirmation: >1.8x 20-period average (higher threshold to reduce trades)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_20)
+    volume_filter = volume > (1.8 * vol_ma_20)
+    
+    # Trend filter: 20-period EMA on 4h timeframe
+    close_series = pd.Series(close)
+    ema_20 = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    uptrend = close > ema_20
+    downtrend = close < ema_20
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -51,8 +63,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_filter[i]) or
+        if (np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]) or 
+            np.isnan(volume_filter[i]) or np.isnan(ema_20[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -60,27 +72,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long breakout: price breaks above Donchian high with volume and uptrend
-            if close[i] > donchian_high[i] and volume_filter[i] and close[i] > ema_34_1d_aligned[i]:
-                signals[i] = 0.30
+            # Long breakout: price breaks above upper band with volume confirmation and uptrend
+            if close[i] > upper_band_aligned[i] and volume_filter[i] and uptrend[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short breakout: price breaks below Donchian low with volume and downtrend
-            elif close[i] < donchian_low[i] and volume_filter[i] and close[i] < ema_34_1d_aligned[i]:
-                signals[i] = -0.30
+            # Short breakout: price breaks below lower band with volume confirmation and downtrend
+            elif close[i] < lower_band_aligned[i] and volume_filter[i] and downtrend[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below Donchian low (failed breakout) or reaches opposite band
-            if close[i] < donchian_low[i]:
+            # Exit long: price breaks below lower band (failed breakout) or reaches upper band (take profit)
+            if close[i] < lower_band_aligned[i] or close[i] > upper_band_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above Donchian high (failed breakdown) or reaches opposite band
-            if close[i] > donchian_high[i]:
+            # Exit short: price breaks above upper band (failed breakdown) or reaches lower band (take profit)
+            if close[i] > upper_band_aligned[i] or close[i] < lower_band_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
