@@ -3,23 +3,23 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using weekly Bollinger Bands with mean reversion in ranging markets
-# - Uses 1w Bollinger Bands (20-period, 2 std) for mean reversion signals
-# - Uses 4h RSI(14) for overbought/oversold confirmation
-# - Uses 4h ADX < 20 to filter for ranging markets only
-# - Enters long when price touches lower BB and RSI < 30 in ranging market
-# - Enters short when price touches upper BB and RSI > 70 in ranging market
-# - Exits when price returns to BB middle (20-period SMA)
-# - Designed to profit from mean reversion in ranging markets while avoiding trends
-# - Target: 80-180 total trades over 4 years (20-45/year) with 0.25 position sizing
+# Hypothesis: 1d strategy using weekly Donchian breakout with volume confirmation and ADX trend filter
+# - Uses 1w Donchian channels (20-period) for long-term structure
+# - Uses 1d volume spike for entry confirmation
+# - Uses 1d ADX > 25 to filter for trending markets only
+# - Enters long when price breaks above 1w Donchian upper band with volume and trend
+# - Enters short when price breaks below 1w Donchian lower band with volume and trend
+# - Exits when price returns to 1w Donchian middle (median) or opposite band
+# - Designed to capture major trend moves with institutional level respect
+# - Target: 30-100 total trades over 4 years (7-25/year) with 0.25 position sizing
 
-name = "4h_1wBB_20_2_RSI_ADX_Range"
-timeframe = "4h"
+name = "1d_1wDonchian_20_Volume_ADX_Trend"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,55 +27,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for Bollinger Bands
+    # Get 1w data for Donchian channels
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 1w Bollinger Bands (20-period, 2 std)
+    # Calculate 1w Donchian channels (20-period)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    sma_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + (2 * std_20)
-    lower_bb = sma_20 - (2 * std_20)
-    middle_bb = sma_20  # Middle band for exit
     
-    # Align 1w Bollinger Bands to 4h timeframe
-    upper_bb_4h = align_htf_to_ltf(prices, df_1w, upper_bb)
-    lower_bb_4h = align_htf_to_ltf(prices, df_1w, lower_bb)
-    middle_bb_4h = align_htf_to_ltf(prices, df_1w, middle_bb)
+    # Donchian upper and lower bands
+    upper_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    lower_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    middle_20 = (upper_20 + lower_20) / 2  # Median line for exit
     
-    # RSI filter (4h timeframe)
-    def calculate_rsi(close, period=14):
-        delta = np.diff(close, prepend=close[0])
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = np.zeros_like(close)
-        avg_loss = np.zeros_like(close)
-        
-        avg_gain[period-1] = np.mean(gain[1:period+1])
-        avg_loss[period-1] = np.mean(loss[1:period+1])
-        
-        for i in range(period, len(close)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-        
-        rs = np.zeros_like(close)
-        rsi = np.zeros_like(close)
-        for i in range(period, len(close)):
-            if avg_loss[i] != 0:
-                rs[i] = avg_gain[i] / avg_loss[i]
-                rsi[i] = 100 - (100 / (1 + rs[i]))
-            else:
-                rsi[i] = 100
-        return rsi
+    # Align 1w Donchian channels to 1d timeframe
+    upper_20_1d = align_htf_to_ltf(prices, df_1w, upper_20)
+    lower_20_1d = align_htf_to_ltf(prices, df_1w, lower_20)
+    middle_20_1d = align_htf_to_ltf(prices, df_1w, middle_20)
     
-    rsi_values = calculate_rsi(close, 14)
-    rsi_oversold = rsi_values < 30
-    rsi_overbought = rsi_values > 70
+    # Volume filter (1d timeframe)
+    vol_ma_10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    volume_spike = volume > (1.8 * vol_ma_10)  # Strong volume confirmation
     
-    # ADX filter (4h timeframe) - range market (low ADX)
+    # ADX filter (1d timeframe) - trend strength
     def calculate_adx(high, low, close, period=14):
         plus_dm = np.zeros_like(high)
         minus_dm = np.zeros_like(high)
@@ -121,40 +97,40 @@ def generate_signals(prices):
         return adx
     
     adx_values = calculate_adx(high, low, close, 14)
-    adx_filter = adx_values < 20  # Ranging market filter
+    adx_filter = adx_values > 25  # Strong trend filter
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any critical value is NaN
-        if (np.isnan(upper_bb_4h[i]) or np.isnan(lower_bb_4h[i]) or 
-            np.isnan(middle_bb_4h[i]) or np.isnan(rsi_oversold[i]) or 
-            np.isnan(rsi_overbought[i]) or np.isnan(adx_filter[i])):
+        if (np.isnan(upper_20_1d[i]) or np.isnan(lower_20_1d[i]) or 
+            np.isnan(middle_20_1d[i]) or np.isnan(volume_spike[i]) or 
+            np.isnan(adx_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price touches lower BB and RSI oversold in ranging market
-            if low[i] <= lower_bb_4h[i] and rsi_oversold[i] and adx_filter[i]:
+            # Long: break above 1w Donchian upper with volume and trend
+            if close[i] > upper_20_1d[i] and volume_spike[i] and adx_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price touches upper BB and RSI overbought in ranging market
-            elif high[i] >= upper_bb_4h[i] and rsi_overbought[i] and adx_filter[i]:
+            # Short: break below 1w Donchian lower with volume and trend
+            elif close[i] < lower_20_1d[i] and volume_spike[i] and adx_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to middle BB
-            if close[i] >= middle_bb_4h[i]:
+            # Exit long: price returns to middle OR breaks below lower band
+            if close[i] < middle_20_1d[i] or close[i] < lower_20_1d[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to middle BB
-            if close[i] <= middle_bb_4h[i]:
+            # Exit short: price returns to middle OR breaks above upper band
+            if close[i] > middle_20_1d[i] or close[i] > upper_20_1d[i]:
                 signals[i] = 0.0
                 position = 0
             else:
