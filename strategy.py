@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Donchian breakout with 1w EMA trend filter and volume confirmation
-# Long when price breaks above 1d Donchian upper (20) AND 1w EMA34 > EMA89 AND volume > 2.0 * avg_volume(20)
-# Short when price breaks below 1d Donchian lower (20) AND 1w EMA34 < EMA89 AND volume > 2.0 * avg_volume(20)
-# Exit when price touches 1d Donchian midpoint
-# Uses discrete sizing 0.25 to control drawdown and minimize fee churn
-# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
-# 1d Donchian provides strong daily structural breakout levels
-# 1w EMA filter ensures alignment with weekly trend, reducing counter-trend trades in bear markets
-# High volume confirmation (2.0x) filters weak breakouts and ensures institutional participation
-# Works in bull (trend continuation breakouts) and bear (trend continuation breakdowns with volume)
+# Hypothesis: 12h strategy using 1d Donchian breakout with 1w EMA trend filter and volume confirmation
+# Long when price breaks above 1d Donchian upper (20) AND 1w EMA34 > EMA89 AND volume > 1.5 * avg_volume(20)
+# Short when price breaks below 1d Donchian lower (20) AND 1w EMA34 < EMA89 AND volume > 1.5 * avg_volume(20)
+# Exit when price touches 1d Donchian midpoint or opposite Donchian level
+# Uses discrete sizing 0.25 to balance return and drawdown control
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# 1d Donchian provides strong structural breakout levels
+# 1w EMA filter ensures alignment with long-term trend, reducing counter-trend trades
+# Volume confirmation filters weak breakouts
+# Works in bull (trend continuation breakouts) and bear (trend continuation breakdowns)
 
-name = "4h_1dDonchian20_1wEMATrend_Volume"
-timeframe = "4h"
+name = "12h_1dDonchian20_1wEMATrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -43,7 +43,7 @@ def generate_signals(prices):
     donchian_lower_1d = low_series_1d.rolling(window=20, min_periods=20).min().values
     donchian_middle_1d = (donchian_upper_1d + donchian_lower_1d) / 2.0
     
-    # Align 1d Donchian levels to 4h timeframe (wait for completed 1d bar)
+    # Align 1d Donchian levels to 12h timeframe (wait for completed 1d bar)
     donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper_1d)
     donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower_1d)
     donchian_middle_aligned = align_htf_to_ltf(prices, df_1d, donchian_middle_1d)
@@ -59,13 +59,13 @@ def generate_signals(prices):
     ema_34_1w = close_series_1w.ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_89_1w = close_series_1w.ewm(span=89, adjust=False, min_periods=89).mean().values
     
-    # Align 1w EMA values to 4h timeframe (wait for completed 1w bar)
+    # Align 1w EMA values to 12h timeframe (wait for completed 1w bar)
     ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     ema_89_aligned = align_htf_to_ltf(prices, df_1w, ema_89_1w)
     
-    # Calculate volume confirmation: volume > 2.0 * 20-period average volume on 4h
+    # Calculate volume confirmation: volume > 1.5 * 20-period average volume on 12h
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * avg_volume_20)
+    volume_confirm = volume > (1.5 * avg_volume_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -92,15 +92,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price touches 1d Donchian middle (profit take or reversal)
-            if close[i] <= donchian_middle_aligned[i]:
+            # Exit long: price touches 1d Donchian middle or lower (reversal or profit take)
+            if close[i] <= donchian_middle_aligned[i] or close[i] <= donchian_lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price touches 1d Donchian middle (profit take or reversal)
-            if close[i] >= donchian_middle_aligned[i]:
+            # Exit short: price touches 1d Donchian middle or upper (reversal or profit take)
+            if close[i] >= donchian_middle_aligned[i] or close[i] >= donchian_upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
