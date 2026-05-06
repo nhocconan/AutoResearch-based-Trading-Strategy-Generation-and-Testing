@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
 # Uses 1d Camarilla pivot levels (R3/S3) for structure, 1d EMA34 for trend alignment (reduces whipsaw)
 # Volume spike (>2.0x 20-bar average) confirms breakout strength
 # ATR-based trailing stop via signal=0 when price retraces 30% of ATR from extreme
-# Discrete sizing 0.30 to balance profit potential and fee drag; target 50-150 total trades over 4 years (12-37/year)
+# Discrete sizing 0.30 to balance profit potential and fee drag; target 100-180 total trades over 4 years (25-45/year)
 # Works in both bull/bear: breakouts capture momentum, trend filter avoids counter-trend traps, volume filter ensures participation
 
-name = "12h_Camarilla_R3S3_1dEMA34_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dEMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -39,6 +39,8 @@ def generate_signals(prices):
     ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # Calculate 1d Camarilla pivot levels (R3, S3)
+    # Camarilla: R4 = close + 1.5*(high-low), R3 = close + 1.125*(high-low), etc.
+    # We use R3 and S3 as key breakout levels
     camarilla_range = high_1d - low_1d
     r3_1d = close_1d + 1.125 * camarilla_range
     s3_1d = close_1d - 1.125 * camarilla_range
@@ -54,7 +56,7 @@ def generate_signals(prices):
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (2.0 * vol_ma_20)
     
-    # Align HTF indicators to 12h timeframe
+    # Align HTF indicators to 4h timeframe
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
@@ -94,7 +96,7 @@ def generate_signals(prices):
         elif position == 1:
             # Update long extreme
             long_extreme = max(long_extreme, close[i])
-            # Exit long: price retraces 30% of ATR from extreme (tighter stop for 12h)
+            # Exit long: price retraces 30% of ATR from extreme (tighter stop for 4h)
             if close[i] <= long_extreme - 0.3 * atr[i]:
                 signals[i] = 0.0
                 position = 0
