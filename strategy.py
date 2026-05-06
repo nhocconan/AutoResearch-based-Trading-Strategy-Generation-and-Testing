@@ -3,19 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using weekly pivot point breakout with 1d trend filter and volume confirmation
-# Long when price breaks above weekly R1 AND 1d close > 1d open (bullish daily candle) AND 6h volume > 1.5 * avg_volume(20)
-# Short when price breaks below weekly S1 AND 1d close < 1d open (bearish daily candle) AND 6h volume > 1.5 * avg_volume(20)
-# Exit when price returns to weekly pivot point (PP)
-# Uses discrete sizing 0.25 to balance return and drawdown
-# Target: 80-120 total trades over 4 years (20-30/year) for 6h timeframe
-# Weekly pivot provides key institutional levels from prior week
-# 1d candle direction ensures alignment with recent daily momentum
+# Hypothesis: 12h strategy using 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
+# Long when price breaks above 1d Donchian(20) upper band AND 1w EMA50 is rising AND 12h volume > 1.3 * avg_volume(20)
+# Short when price breaks below 1d Donchian(20) lower band AND 1w EMA50 is falling AND 12h volume > 1.3 * avg_volume(20)
+# Exit when price returns to 1d Donchian(20) midpoint
+# Session filter: 08-20 UTC to avoid low-liquidity hours
+# Uses discrete sizing 0.25 to minimize fee churn and control drawdown
+# Target: 75-150 total trades over 4 years (19-37/year) for 12h timeframe
+# 1d Donchian provides intermediate structure, filtering out 12h noise
+# 1w EMA50 ensures we trade with the weekly trend while reducing whipsaws
 # Volume confirmation filters out low-conviction breakouts
-# Works in bull markets (breakout continuations) and bear markets (breakdown continuations)
+# Works in both bull (breakout continuations) and bear (breakdown continuations) markets
 
-name = "6h_WeeklyPivot_R1S1_Breakout_1dCandleDir_Volume"
-timeframe = "6h"
+name = "12h_1dDonchian20_Breakout_1wEMA50_Trend_Volume_Session"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,55 +28,49 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_price = prices['open'].values
     
     # Precompute session hours (08-20 UTC) once before loop
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get weekly data ONCE before loop for pivot point calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:  # Need at least 1 completed weekly bar
+    # Get 1d data ONCE before loop for Donchian channel calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:  # Need at least 20 completed daily bars for Donchian(20)
         return np.zeros(n)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Calculate 1d Donchian channel (20-period)
+    upper_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lower_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    mid_1d = (upper_1d + lower_1d) / 2.0
+    
+    # Align 1d Donchian levels to 12h timeframe (wait for completed 1d bar)
+    upper_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_1d)
+    lower_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_1d)
+    mid_1d_aligned = align_htf_to_ltf(prices, df_1d, mid_1d)
+    
+    # Get 1w data ONCE before loop for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:  # Need at least 50 completed weekly bars for EMA50
+        return np.zeros(n)
     close_1w = df_1w['close'].values
     
-    # Calculate weekly pivot point (PP), R1, S1
-    # PP = (H + L + C) / 3
-    # R1 = (2 * PP) - L
-    # S1 = (2 * PP) - H
-    pp_1w = (high_1w + low_1w + close_1w) / 3.0
-    r1_1w = (2 * pp_1w) - low_1w
-    s1_1w = (2 * pp_1w) - high_1w
+    # Calculate 1w EMA50 trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Align weekly pivot levels to 6h timeframe (wait for completed weekly bar)
-    pp_1w_aligned = align_htf_to_ltf(prices, df_1w, pp_1w)
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    
-    # Get 1d data ONCE before loop for candle direction filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:  # Need at least 1 completed daily bar
-        return np.zeros(n)
-    open_1d = df_1d['open'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate 1d candle direction: 1 for bullish (close > open), -1 for bearish (close < open), 0 for doji
-    candle_dir_1d = np.where(close_1d > open_1d, 1, np.where(close_1d < open_1d, -1, 0))
-    candle_dir_1d_aligned = align_htf_to_ltf(prices, df_1d, candle_dir_1d)
-    
-    # Calculate volume confirmation: volume > 1.5 * 20-period average volume on 6h
+    # Calculate volume confirmation: volume > 1.3 * 20-period average volume on 12h
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * avg_volume_20)
+    volume_confirm = volume > (1.3 * avg_volume_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN
-        if (np.isnan(pp_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or 
-            np.isnan(s1_1w_aligned[i]) or np.isnan(candle_dir_1d_aligned[i]) or
+        if (np.isnan(upper_1d_aligned[i]) or np.isnan(lower_1d_aligned[i]) or 
+            np.isnan(mid_1d_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or
             np.isnan(avg_volume_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -90,26 +85,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above weekly R1, bullish daily candle, volume spike
-            if (close[i] > r1_1w_aligned[i] and close[i-1] <= r1_1w_aligned[i-1] and 
-                candle_dir_1d_aligned[i] == 1 and volume_confirm[i]):
+            # Long: price breaks above 1d Donchian upper band, EMA50 rising, volume spike
+            if (close[i] > upper_1d_aligned[i] and close[i-1] <= upper_1d_aligned[i-1] and 
+                ema_50_1w_aligned[i] > ema_50_1w_aligned[i-1] and volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly S1, bearish daily candle, volume spike
-            elif (close[i] < s1_1w_aligned[i] and close[i-1] >= s1_1w_aligned[i-1] and 
-                  candle_dir_1d_aligned[i] == -1 and volume_confirm[i]):
+            # Short: price breaks below 1d Donchian lower band, EMA50 falling, volume spike
+            elif (close[i] < lower_1d_aligned[i] and close[i-1] >= lower_1d_aligned[i-1] and 
+                  ema_50_1w_aligned[i] < ema_50_1w_aligned[i-1] and volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to weekly pivot point (PP)
-            if close[i] <= pp_1w_aligned[i]:
+            # Exit long: price returns to 1d Donchian midpoint
+            if close[i] <= mid_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to weekly pivot point (PP)
-            if close[i] >= pp_1w_aligned[i]:
+            # Exit short: price returns to 1d Donchian midpoint
+            if close[i] >= mid_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
