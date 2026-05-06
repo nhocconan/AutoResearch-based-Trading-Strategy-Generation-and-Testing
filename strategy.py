@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with 1d EMA34 trend filter and volume confirmation
-# Uses Williams Alligator (Jaw=13, Teeth=8, Lips=5) smoothed with SMMA for trend direction
-# 1d EMA34 provides higher-timeframe trend alignment to reduce whipsaw in choppy markets
-# Volume spike (>1.8x 30-bar average) confirms participation and reduces false breakouts
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation
+# Uses 4h Donchian channels for structure, 12h EMA50 for trend alignment (reduces whipsaw)
+# Volume spike (>1.8x 30-bar average) confirms breakout strength
 # ATR-based trailing stop via signal=0 when price retraces 25% of ATR from extreme
-# Discrete sizing 0.25 balances profit potential and fee drag; targets 80-120 total trades over 4 years (20-30/year)
-# Works in both bull/bear: Alligator catches trends, EMA34 filter avoids counter-trend traps, volume filter ensures legitimacy
+# Discrete sizing 0.25 to balance profit potential and fee drag; target 80-150 total trades over 4 years (20-38/year)
+# Works in both bull/bear: breakouts capture momentum, trend filter avoids counter-trend traps, volume filter ensures participation
 
-name = "12h_WilliamsAlligator_1dEMA34_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Donchian20_12hEMA50_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,16 +25,20 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Calculate HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_1d) < 34:
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate 1d EMA34 trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 12h EMA50 trend filter
+    close_12h_series = pd.Series(close_12h)
+    ema50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Calculate Donchian(20) channels on 4h data
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Calculate ATR(14) for stoploss
     tr1 = np.abs(high[1:] - low[1:])
@@ -48,37 +51,12 @@ def generate_signals(prices):
     vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     volume_filter = volume > (1.8 * vol_ma_30)
     
-    # Align HTF indicators to 12h timeframe
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Align HTF indicators to 4h timeframe
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
     # Pre-compute session filter (08-20 UTC)
     hours = prices.index.hour
     session_filter = (hours >= 8) & (hours <= 20)
-    
-    # Williams Alligator: Smoothed Moving Average (SMMA) with specific periods
-    # Jaw: 13-period SMMA, shifted 8 bars forward
-    # Teeth: 8-period SMMA, shifted 5 bars forward  
-    # Lips: 5-period SMMA, shifted 3 bars forward
-    def smma(arr, period):
-        """Smoothed Moving Average"""
-        if len(arr) < period:
-            return np.full_like(arr, np.nan, dtype=float)
-        result = np.full_like(arr, np.nan, dtype=float)
-        # First value is simple SMA
-        result[period-1] = np.mean(arr[:period])
-        # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CLOSE) / period
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
-    
-    jaw = smma(close, 13)
-    teeth = smma(close, 8)
-    lips = smma(close, 5)
-    
-    # Shift as per Alligator specification
-    jaw_shifted = np.concatenate([np.full(8, np.nan), jaw[:-8]]) if len(jaw) > 8 else np.full_like(jaw, np.nan)
-    teeth_shifted = np.concatenate([np.full(5, np.nan), teeth[:-5]]) if len(teeth) > 5 else np.full_like(teeth, np.nan)
-    lips_shifted = np.concatenate([np.full(3, np.nan), lips[:-3]]) if len(lips) > 3 else np.full_like(lips, np.nan)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -87,8 +65,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(jaw_shifted[i]) or np.isnan(teeth_shifted[i]) or 
-            np.isnan(lips_shifted[i]) or np.isnan(atr[i]) or np.isnan(volume_filter[i]) or
+        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(highest_20[i]) or 
+            np.isnan(lowest_20[i]) or np.isnan(atr[i]) or np.isnan(volume_filter[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -98,13 +76,13 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Lips > Teeth > Jaw (bullish alignment) AND uptrend (price > EMA34) AND volume confirmation
-            if lips_shifted[i] > teeth_shifted[i] and teeth_shifted[i] > jaw_shifted[i] and close[i] > ema34_1d_aligned[i] and volume_filter[i]:
+            # Long breakout: price > upper Donchian AND uptrend (price > EMA50) AND volume confirmation
+            if close[i] > highest_20[i] and close[i] > ema50_12h_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
                 long_extreme = close[i]
-            # Short: Lips < Teeth < Jaw (bearish alignment) AND downtrend (price < EMA34) AND volume confirmation
-            elif lips_shifted[i] < teeth_shifted[i] and teeth_shifted[i] < jaw_shifted[i] and close[i] < ema34_1d_aligned[i] and volume_filter[i]:
+            # Short breakdown: price < lower Donchian AND downtrend (price < EMA50) AND volume confirmation
+            elif close[i] < lowest_20[i] and close[i] < ema50_12h_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
                 short_extreme = close[i]
