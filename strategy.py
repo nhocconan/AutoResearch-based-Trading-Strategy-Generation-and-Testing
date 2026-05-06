@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Donchian breakout with volume confirmation and 1d EMA34 trend filter
+# Hypothesis: 4h strategy using 1d Donchian breakout with volume confirmation and 1d EMA34 trend filter
 # - Long when price breaks above 1d Donchian high (20 periods) with volume expansion and price above 1d EMA34
 # - Short when price breaks below 1d Donchian low (20 periods) with volume expansion and price below 1d EMA34
 # - Exit when price crosses back below/above 1d EMA34
-# - Volume filter requires current volume > 1.3x 20-period average
+# - Volume filter requires current volume > 1.5x 20-period average to ensure strong breakouts
 # - Designed to capture strong trends while avoiding whipsaws in ranging markets
-# - Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
+# - Target: 40-80 total trades over 4 years (10-20/year) with 0.30 position sizing
+# - Uses higher timeframe (1d) structure for better signal quality and lower trade frequency
 
-name = "12h_DonchianBreakout_1dEMA34_Volume"
-timeframe = "12h"
+name = "4h_DonchianBreakout_1dEMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -43,14 +44,14 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d indicators to 12h timeframe
-    donchian_high_12h = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_12h = align_htf_to_ltf(prices, df_1d, donchian_low)
-    ema_34_1d_12h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align 1d indicators to 4h timeframe
+    donchian_high_4h = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_4h = align_htf_to_ltf(prices, df_1d, donchian_low)
+    ema_34_1d_4h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume filters (12h timeframe)
+    # Volume filters (4h timeframe)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.3 * vol_ma_20)  # Volume confirmation
+    volume_filter = volume > (1.5 * vol_ma_20)  # Volume confirmation - stricter threshold
     volume_expansion = volume > np.roll(volume, 1)  # Current volume > previous
     volume_expansion[0] = False
     
@@ -59,8 +60,8 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup
         # Skip if any critical value is NaN
-        if (np.isnan(donchian_high_12h[i]) or np.isnan(donchian_low_12h[i]) or 
-            np.isnan(ema_34_1d_12h[i]) or np.isnan(volume_filter[i]) or np.isnan(volume_expansion[i])):
+        if (np.isnan(donchian_high_4h[i]) or np.isnan(donchian_low_4h[i]) or 
+            np.isnan(ema_34_1d_4h[i]) or np.isnan(volume_filter[i]) or np.isnan(volume_expansion[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,26 +69,26 @@ def generate_signals(prices):
         
         if position == 0:
             # Long breakout: price breaks above Donchian high with volume expansion and above EMA34
-            if close[i] > donchian_high_12h[i] and volume_expansion[i] and close[i] > ema_34_1d_12h[i]:
-                signals[i] = 0.25
+            if close[i] > donchian_high_4h[i] and volume_expansion[i] and close[i] > ema_34_1d_4h[i]:
+                signals[i] = 0.30
                 position = 1
             # Short breakout: price breaks below Donchian low with volume expansion and below EMA34
-            elif close[i] < donchian_low_12h[i] and volume_expansion[i] and close[i] < ema_34_1d_12h[i]:
-                signals[i] = -0.25
+            elif close[i] < donchian_low_4h[i] and volume_expansion[i] and close[i] < ema_34_1d_4h[i]:
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
             # Exit long: price crosses below EMA34
-            if close[i] < ema_34_1d_12h[i]:
+            if close[i] < ema_34_1d_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
             # Exit short: price crosses above EMA34
-            if close[i] > ema_34_1d_12h[i]:
+            if close[i] > ema_34_1d_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
