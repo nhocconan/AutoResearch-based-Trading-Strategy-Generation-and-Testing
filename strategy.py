@@ -1,20 +1,20 @@
-# 12h_WeeklyPivot_R1S1_VolumeTrendFilter_v1
-# Hypothesis: 12h strategy using weekly pivot points with volume confirmation and trend filter
-# Weekly pivot points (R1/S1 for breakouts, R2/S2 for reversals) provide key weekly levels
-# Breakout above R1 or below S1 with volume > 1.5x 20-period average indicates momentum
-# Rejection at R2 or S2 with volume confirmation indicates mean reversion
-# Trend filter: 50-period EMA on 12h timeframe to avoid counter-trend trades
-# Works in bull/bear markets: breakouts capture trends, reversals capture pullbacks within trend
-# Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
-# Focus on BTC/ETH as primary targets, avoid SOL-only strategies
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_WeeklyPivot_R1S1_VolumeTrendFilter_v1"
-timeframe = "12h"
+# Hypothesis: 6h strategy combining 1-day ADX trend filter with 6h Williams %R mean reversion
+# ADX > 25 on daily timeframe indicates strong trend (use for trend-following entries)
+# ADX < 20 indicates ranging market (use for mean-reversion entries)
+# Williams %R on 6h: > -20 overbought, < -80 oversold
+# In trending markets (ADX>25): buy pullbacks to -80, sell rallies to -20
+# In ranging markets (ADX<20): fade extremes at -80/-20 with confirmation
+# Uses volume filter to avoid false signals
+# Works in bull/bear: adapts to regime via ADX
+# Target: 60-120 total trades over 4 years (15-30/year) with 0.25 position sizing
+
+name = "6h_ADX_WilliamsR_Regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,43 +27,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate weekly pivot points ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Calculate daily ADX ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Previous week's OHLC for pivot calculation
-    prev_close = df_1w['close'].shift(1).values
-    prev_high = df_1w['high'].shift(1).values
-    prev_low = df_1w['low'].shift(1).values
+    # True Range
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     
-    # Pivot point calculation
-    # Pivot = (previous high + previous low + previous close) / 3
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_ = prev_high - prev_low
+    # Directional Movement
+    dm_plus = df_1d['high'] - df_1d['high'].shift(1)
+    dm_minus = df_1d['low'].shift(1) - df_1d['low']
+    dm_plus = dm_plus.where((dm_plus > dm_minus) & (dm_plus > 0), 0)
+    dm_minus = dm_minus.where((dm_minus > dm_plus) & (dm_minus > 0), 0)
     
-    # Support and Resistance levels
-    r1 = pivot + (range_ * 1.0)
-    r2 = pivot + (range_ * 2.0)
-    s1 = pivot - (range_ * 1.0)
-    s2 = pivot - (range_ * 2.0)
+    # Smoothed values
+    atr = tr.rolling(window=14, min_periods=14).mean()
+    dm_plus_smooth = dm_plus.rolling(window=14, min_periods=14).sum()
+    dm_minus_smooth = dm_minus.rolling(window=14, min_periods=14).sum()
     
-    # Align weekly levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / atr
+    di_minus = 100 * dm_minus_smooth / atr
     
-    # Volume confirmation: >1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_20)
+    # DX and ADX
+    dx = 100 * abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = dx.rolling(window=14, min_periods=14).mean()
     
-    # Trend filter: 50-period EMA on 12h timeframe
-    close_series = pd.Series(close)
-    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend = close > ema_50
-    downtrend = close < ema_50
+    adx_values = adx.values
+    
+    # Align daily ADX to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_values)
+    
+    # Williams %R on 6h (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    williams_r = williams_r.fillna(-50).values  # neutral when undefined
+    
+    # Volume confirmation: >1.3x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    volume_filter = volume > (1.3 * vol_ma_20)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -72,43 +80,50 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(30, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(s2_aligned[i]) or np.isnan(volume_filter[i]) or np.isnan(ema_50[i]) or
-            not session_filter[i]):
+        if (np.isnan(adx_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(volume_filter[i]) or not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        adx_val = adx_aligned[i]
+        wr = williams_r[i]
+        vol_ok = volume_filter[i]
+        
         if position == 0:
-            # Long breakout: price breaks above R1 with volume confirmation and uptrend
-            if close[i] > r1_aligned[i] and volume_filter[i] and uptrend[i]:
-                signals[i] = 0.25
-                position = 1
-            # Short breakout: price breaks below S1 with volume confirmation and downtrend
-            elif close[i] < s1_aligned[i] and volume_filter[i] and downtrend[i]:
-                signals[i] = -0.25
-                position = -1
-            # Long reversal: price rejects S2 with volume confirmation (bounce from support)
-            elif close[i] < s2_aligned[i] and close[i] > s2_aligned[i] * 0.995 and volume_filter[i] and uptrend[i]:
-                signals[i] = 0.25
-                position = 1
-            # Short reversal: price rejects R2 with volume confirmation (rejection from resistance)
-            elif close[i] > r2_aligned[i] and close[i] < r2_aligned[i] * 1.005 and volume_filter[i] and downtrend[i]:
-                signals[i] = -0.25
-                position = -1
+            # Trending market (ADX > 25): mean reversion within trend
+            if adx_val > 25 and vol_ok:
+                # Long: pullback to oversold in uptrend
+                if wr < -80 and wr > -85:  # entering oversold zone
+                    signals[i] = 0.25
+                    position = 1
+                # Short: pullback to overbought in downtrend
+                elif wr > -20 and wr < -15:  # entering overbought zone
+                    signals[i] = -0.25
+                    position = -1
+            # Ranging market (ADX < 20): fade extremes
+            elif adx_val < 20 and vol_ok:
+                # Long: deep oversold bounce
+                if wr < -85:
+                    signals[i] = 0.25
+                    position = 1
+                # Short: deep overbought rejection
+                elif wr > -15:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Exit long: price breaks below S1 (failed support) or reaches R2 (take profit)
-            if close[i] < s1_aligned[i] or close[i] > r2_aligned[i]:
+            # Exit long: overbought or ADX weakening
+            if wr > -25 or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above R1 (failed resistance) or reaches S2 (take profit)
-            if close[i] > r1_aligned[i] or close[i] < s2_aligned[i]:
+            # Exit short: oversold or ADX weakening
+            if wr < -75 or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
