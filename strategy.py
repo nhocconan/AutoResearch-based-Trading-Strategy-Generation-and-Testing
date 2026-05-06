@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume spike
-# Long when price breaks above R3 AND price > 12h EMA50 (uptrend) AND volume > 2.0 * 20-bar avg volume
-# Short when price breaks below S3 AND price < 12h EMA50 (downtrend) AND volume > 2.0 * 20-bar avg volume
-# Exit with ATR-based trailing stop: signal→0 when long and price < highest_high - 2.5 * ATR OR short and price > lowest_low + 2.5 * ATR
-# Uses discrete sizing 0.25 to manage drawdown (BTC -77% in 2022 → ~19.25% loss at 0.25 exposure)
-# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
+# Hypothesis: 1h Camarilla R1/S1 breakout with 4h EMA50 trend filter and volume spike
+# Long when price breaks above R1 AND price > 4h EMA50 (uptrend) AND volume > 2.0 * 20-bar avg volume
+# Short when price breaks below S1 AND price < 4h EMA50 (downtrend) AND volume > 2.0 * 20-bar avg volume
+# Exit with ATR-based trailing stop: signal→0 when long and price < highest_high - 2.0 * ATR OR short and price > lowest_low + 2.0 * ATR
+# Uses discrete sizing 0.20 to manage drawdown (BTC -77% in 2022 → ~15.4% loss at 0.20 exposure)
+# Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe
+# Uses 4h/1d for signal direction, 1h only for entry timing
+# Session filter: 08-20 UTC to reduce noise trades
 # Camarilla pivots provide mathematically derived support/resistance levels with institutional relevance
 # Volume confirmation ensures conviction behind breakouts, reducing false signals
 # ATR trailing stop manages risk while allowing trends to develop
-# Works in bull via buying breakouts in uptrend, works in bear via selling breakdowns in downtrend
-# Using 12h EMA50 as HTF trend filter (more responsive than daily but still filters noise)
 
-name = "4h_Camarilla_R3S3_12hEMA50_VolumeSpike_v1"
-timeframe = "4h"
+name = "1h_Camarilla_R1S1_4hEMA50_VolumeSpike_Session_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,20 +29,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data ONCE before loop for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Precompute session hours (08-20 UTC) ONCE before loop
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # Get 4h data ONCE before loop for EMA50 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
-    close_12h = df_12h['close'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate 12h EMA50
-    close_12h_series = pd.Series(close_12h)
-    ema_50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 4h EMA50
+    close_4h_series = pd.Series(close_4h)
+    ema_50_4h = close_4h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate Camarilla pivot levels for 4h timeframe using previous 1d OHLC
-    # Camarilla: R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low), S3 = close - 1.1*(high-low), S4 = close - 1.5*(high-low)
-    # We use previous day's OHLC to calculate today's levels (no look-ahead)
-    # Shift 1d data by 1 to get previous completed day
+    # Calculate Camarilla pivot levels for 1h timeframe using previous 1d OHLC
+    # Camarilla: R1 = close + 0.105*(high-low), S1 = close - 0.105*(high-low)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -54,15 +56,15 @@ def generate_signals(prices):
     prev_low_1d[0] = np.nan
     
     # Calculate Camarilla levels for previous day
-    camarilla_R3 = prev_close_1d + 1.1 * (prev_high_1d - prev_low_1d)
-    camarilla_S3 = prev_close_1d - 1.1 * (prev_high_1d - prev_low_1d)
+    camarilla_R1 = prev_close_1d + 0.105 * (prev_high_1d - prev_low_1d)
+    camarilla_S1 = prev_close_1d - 0.105 * (prev_high_1d - prev_low_1d)
     
-    # Align HTF indicators to 4h timeframe (wait for completed HTF bar)
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    camarilla_R3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R3)
-    camarilla_S3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S3)
+    # Align HTF indicators to 1h timeframe (wait for completed HTF bar)
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
+    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
     
-    # Calculate 20-period ATR(20) for stoploss on 4h data
+    # Calculate 20-period ATR(20) for stoploss on 1h data
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -81,8 +83,17 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup period
         # Skip if any value is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(camarilla_R3_aligned[i]) or np.isnan(camarilla_S3_aligned[i]) or
+        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(camarilla_R1_aligned[i]) or np.isnan(camarilla_S1_aligned[i]) or
             np.isnan(atr_20[i]) or np.isnan(volume_spike[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+                highest_high_since_entry = 0.0
+                lowest_low_since_entry = 0.0
+            continue
+        
+        # Session filter: only trade between 08-20 UTC
+        if not in_session[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -92,38 +103,38 @@ def generate_signals(prices):
         
         if position == 0:
             # Camarilla breakout signals with trend and volume filters
-            breakout_up = close[i] > camarilla_R3_aligned[i]  # Price breaks above R3
-            breakout_down = close[i] < camarilla_S3_aligned[i]  # Price breaks below S3
+            breakout_up = close[i] > camarilla_R1_aligned[i]  # Price breaks above R1
+            breakout_down = close[i] < camarilla_S1_aligned[i]  # Price breaks below S1
             
             # Long: breakout up AND uptrend AND volume spike
-            if breakout_up and close[i] > ema_50_12h_aligned[i] and volume_spike[i]:
-                signals[i] = 0.25
+            if breakout_up and close[i] > ema_50_4h_aligned[i] and volume_spike[i]:
+                signals[i] = 0.20
                 position = 1
                 highest_high_since_entry = high[i]
             # Short: breakout down AND downtrend AND volume spike
-            elif breakout_down and close[i] < ema_50_12h_aligned[i] and volume_spike[i]:
-                signals[i] = -0.25
+            elif breakout_down and close[i] < ema_50_4h_aligned[i] and volume_spike[i]:
+                signals[i] = -0.20
                 position = -1
                 lowest_low_since_entry = low[i]
         elif position == 1:
             # Update highest high since entry
             highest_high_since_entry = max(highest_high_since_entry, high[i])
-            # Exit long: price drops below highest_high - 2.5 * ATR (trailing stop)
-            if close[i] < highest_high_since_entry - 2.5 * atr_20[i]:
+            # Exit long: price drops below highest_high - 2.0 * ATR (trailing stop)
+            if close[i] < highest_high_since_entry - 2.0 * atr_20[i]:
                 signals[i] = 0.0
                 position = 0
                 highest_high_since_entry = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
             # Update lowest low since entry
             lowest_low_since_entry = min(lowest_low_since_entry, low[i])
-            # Exit short: price rises above lowest_low + 2.5 * ATR (trailing stop)
-            if close[i] > lowest_low_since_entry + 2.5 * atr_20[i]:
+            # Exit short: price rises above lowest_low + 2.0 * ATR (trailing stop)
+            if close[i] > lowest_low_since_entry + 2.0 * atr_20[i]:
                 signals[i] = 0.0
                 position = 0
                 lowest_low_since_entry = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
