@@ -3,16 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Vortex indicator with 12h EMA50 trend filter and volume spike
-# Uses 12h EMA50 for trend alignment, reducing whipsaw in choppy markets
-# VI+ > VI- indicates bullish momentum, VI- > VI+ indicates bearish momentum
-# Volume spike (>2.0x 20-bar average) confirms breakout strength
-# ATR-based trailing stop via signal=0 when price retraces 30% of ATR from extreme
-# Discrete sizing 0.25 to balance profit potential and fee drag; target 80-160 total trades over 4 years (20-40/year)
-# Works in both bull/bear: trend filter ensures directional alignment, volume filter ensures participation
+# Hypothesis: 1h ADX + DI trend filter with 4h Donchian breakout and volume confirmation
+# Uses 4h Donchian breakouts for direction, 1h ADX>25 for trend strength, volume spike for confirmation
+# ADX filter prevents whipsaw in ranging markets, Donchian provides clear breakout levels
+# Works in bull/bear: trend filter aligns with momentum, volume ensures participation, breakouts capture trends
+# Target: 60-150 total trades over 4 years (15-37/year) with discrete sizing 0.20 to control fee drag
 
-name = "4h_Vortex_12hEMA50_VolumeSpike_v1"
-timeframe = "4h"
+name = "1h_ADX25_Donchian20_4hVolumeConfirm_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,51 +24,42 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Calculate HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    df_4h = get_htf_data(prices, '4h')
     
-    if len(df_12h) < 50:
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # Calculate 12h EMA50 trend filter
-    close_12h_series = pd.Series(close_12h)
-    ema50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 4h Donchian channels (20-period)
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Calculate ATR(14) for stoploss
+    # Calculate 1h ADX(14) and DI+
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
+    
     tr1 = np.abs(high[1:] - low[1:])
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate volume spike filter (>2.0x 20-bar average)
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate volume spike filter (>1.8x 20-bar average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (2.0 * vol_ma_20)
+    volume_filter = volume > (1.8 * vol_ma_20)
     
-    # Calculate Vortex Indicator (14)
-    tr = np.maximum(np.abs(high[1:] - low[1:]), 
-                    np.maximum(np.abs(high[1:] - close[:-1]), 
-                               np.abs(low[1:] - close[:-1])))
-    vm_plus = np.abs(high[1:] - low[:-1])
-    vm_minus = np.abs(low[1:] - high[:-1])
-    
-    # Pad arrays to match original length
-    tr = np.concatenate([[np.nan], tr])
-    vm_plus = np.concatenate([[np.nan], vm_plus])
-    vm_minus = np.concatenate([[np.nan], vm_minus])
-    
-    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    vm_plus14 = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values
-    vm_minus14 = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values
-    
-    vi_plus = vm_plus14 / tr14
-    vi_minus = vm_minus14 / tr14
-    
-    # Align HTF indicators to 4h timeframe (primary)
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    vi_plus_aligned = align_htf_to_ltf(prices, df_12h, vi_plus)
-    vi_minus_aligned = align_htf_to_ltf(prices, df_12h, vi_minus)
+    # Align HTF indicators to 1h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -78,51 +67,41 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    long_extreme = 0.0
-    short_extreme = 0.0
     
     for i in range(100, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(vi_plus_aligned[i]) or 
-            np.isnan(vi_minus_aligned[i]) or np.isnan(atr[i]) or np.isnan(volume_filter[i]) or
-            not session_filter[i]):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(adx[i]) or np.isnan(plus_di[i]) or np.isnan(minus_di[i]) or 
+            np.isnan(volume_filter[i]) or not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                long_extreme = 0.0
-                short_extreme = 0.0
             continue
         
         if position == 0:
-            # Long: VI+ > VI- (bullish momentum) AND uptrend (price > EMA50) AND volume spike
-            if vi_plus_aligned[i] > vi_minus_aligned[i] and close[i] > ema50_12h_aligned[i] and volume_filter[i]:
-                signals[i] = 0.25
+            # Long: price > Donchian high AND ADX>25 AND DI+ > DI- AND volume spike
+            if (close[i] > donchian_high_aligned[i] and adx[i] > 25 and 
+                plus_di[i] > minus_di[i] and volume_filter[i]):
+                signals[i] = 0.20
                 position = 1
-                long_extreme = close[i]
-            # Short: VI- > VI+ (bearish momentum) AND downtrend (price < EMA50) AND volume spike
-            elif vi_minus_aligned[i] > vi_plus_aligned[i] and close[i] < ema50_12h_aligned[i] and volume_filter[i]:
-                signals[i] = -0.25
+            # Short: price < Donchian low AND ADX>25 AND DI- > DI+ AND volume spike
+            elif (close[i] < donchian_low_aligned[i] and adx[i] > 25 and 
+                  minus_di[i] > plus_di[i] and volume_filter[i]):
+                signals[i] = -0.20
                 position = -1
-                short_extreme = close[i]
         elif position == 1:
-            # Update long extreme
-            long_extreme = max(long_extreme, close[i])
-            # Exit long: price retraces 30% of ATR from extreme
-            if close[i] <= long_extreme - 0.30 * atr[i]:
+            # Exit long: price < Donchian low OR ADX < 20 (trend weakening)
+            if close[i] < donchian_low_aligned[i] or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
-                long_extreme = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Update short extreme
-            short_extreme = min(short_extreme, close[i])
-            # Exit short: price retraces 30% of ATR from extreme
-            if close[i] >= short_extreme + 0.30 * atr[i]:
+            # Exit short: price > Donchian high OR ADX < 20 (trend weakening)
+            if close[i] > donchian_high_aligned[i] or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
-                short_extreme = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
