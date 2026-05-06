@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1w Camarilla pivot levels with volume confirmation and chop regime filter
-# Long when price breaks above 1w Camarilla R3 level AND volume > 1.5 * avg_volume(20) AND chop > 61.8 (range)
-# Short when price breaks below 1w Camarilla S3 level AND volume > 1.5 * avg_volume(20) AND chop > 61.8 (range)
-# Exit when price returns to 1w Camarilla midpoint (PP) or opposite Camarilla level touched
+# Hypothesis: 4h strategy using 1d Williams %R extreme readings with volume confirmation and 4h EMA50 trend filter
+# Long when 1d Williams %R < -80 (oversold) AND price > 4h EMA50 AND volume > 1.5 * avg_volume(20)
+# Short when 1d Williams %R > -20 (overbought) AND price < 4h EMA50 AND volume > 1.5 * avg_volume(20)
+# Exit when Williams %R returns to -50 level or opposite extreme touched
 # Uses discrete sizing 0.25 to balance return and drawdown control
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
-# 1w Camarilla R3/S3 represent strong breakout levels from weekly structure
-# Volume filter ensures institutional participation, reducing false breakouts
-# Chop regime filter (range market) improves mean reversion accuracy in sideways markets
-# Works in both bull (continuation breakouts) and bear (continuation breakdowns) markets
+# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
+# Williams %R identifies overextended moves likely to reverse
+# Volume filter ensures institutional participation, reducing false signals
+# EMA50 filter ensures trading with the intermediate-term trend
+# Works in both bull (buy dips in uptrend) and bear (sell rallies in downtrend) markets
 
-name = "12h_1wCamarilla_R3_S3_Breakout_Volume_Chop"
-timeframe = "12h"
+name = "4h_1dWilliamsR_Extreme_Volume_EMA50"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,82 +28,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data ONCE before loop for Camarilla pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:  # Need at least 2 completed 1w bars for Camarilla
+    # Get 1d data ONCE before loop for Williams %R calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:  # Need at least 14 periods for Williams %R
         return np.zeros(n)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1w Camarilla pivot levels (based on previous 1w bar)
-    # Pivot Point (PP) = (High + Low + Close) / 3
-    # R3 = PP + (High - Low) * 1.1/4
-    # S3 = PP - (High - Low) * 1.1/4
-    pp_1w = (high_1w + low_1w + close_1w) / 3.0
-    r3_1w = pp_1w + (high_1w - low_1w) * 1.1 / 4.0
-    s3_1w = pp_1w - (high_1w - low_1w) * 1.1 / 4.0
+    # Calculate 1d Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    # Williams %R = -100 * (HH - C) / (HH - LL) where HH=highest high, LL=lowest low over period
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Align 1w Camarilla levels to 12h timeframe (wait for completed 1w bar)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
-    pp_aligned = align_htf_to_ltf(prices, df_1w, pp_1w)
+    # Align 1d Williams %R to 4h timeframe (wait for completed 1d bar)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
-    # Calculate volume confirmation: volume > 1.5 * 20-period average volume on 12h
+    # Calculate 4h EMA50 for trend filter
+    close_s = pd.Series(close)
+    ema_50 = close_s.ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Calculate volume confirmation: volume > 1.5 * 20-period average volume on 4h
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (1.5 * avg_volume_20)
-    
-    # Calculate chop regime filter: CHOP > 61.8 indicates ranging market (good for mean reversion)
-    # CHOP = 100 * log10(sum(ATR(14),14) / (log10(HH(14)-LL(14)) * sqrt(14)))
-    # Simplified: CHOP > 61.8 = range, CHOP < 38.2 = trend
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = tr1[0]  # first bar has no previous close
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    hh_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    ll_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop_raw = 100 * np.log10(atr_14 * 14 / (hh_14 - ll_14)) / np.log10(14)
-    chop_raw = np.where((hh_14 - ll_14) > 0, chop_raw, 50.0)  # avoid division by zero
-    chop_filter = chop_raw > 61.8  # ranging market
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(pp_aligned[i]) or np.isnan(avg_volume_20[i]) or 
-            np.isnan(chop_raw[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_50[i]) or 
+            np.isnan(avg_volume_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above 1w Camarilla R3 level with volume confirmation AND chop > 61.8 (range)
-            if (close[i] > r3_aligned[i] and close[i-1] <= r3_aligned[i-1] and 
-                volume_confirm[i] and chop_filter[i]):
+            # Long: 1d Williams %R oversold (< -80) AND price > 4h EMA50 AND volume confirmation
+            if (williams_r_aligned[i] < -80 and close[i] > ema_50[i] and volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 1w Camarilla S3 level with volume confirmation AND chop > 61.8 (range)
-            elif (close[i] < s3_aligned[i] and close[i-1] >= s3_aligned[i-1] and 
-                  volume_confirm[i] and chop_filter[i]):
+            # Short: 1d Williams %R overbought (> -20) AND price < 4h EMA50 AND volume confirmation
+            elif (williams_r_aligned[i] > -20 and close[i] < ema_50[i] and volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to 1w Camarilla PP or touches S3 (reversal)
-            if close[i] <= pp_aligned[i] or close[i] <= s3_aligned[i]:
+            # Exit long: Williams %R returns to -50 or reaches overbought (> -20)
+            if williams_r_aligned[i] >= -50 or williams_r_aligned[i] > -20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to 1w Camarilla PP or touches R3 (reversal)
-            if close[i] >= pp_aligned[i] or close[i] >= r3_aligned[i]:
+            # Exit short: Williams %R returns to -50 or reaches oversold (< -80)
+            if williams_r_aligned[i] <= -50 or williams_r_aligned[i] < -80:
                 signals[i] = 0.0
                 position = 0
             else:
