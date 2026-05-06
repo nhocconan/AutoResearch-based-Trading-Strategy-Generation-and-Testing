@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1-day Camarilla pivot levels with trend filter and volume confirmation
-# Long when price breaks above R3 with price > 200-bar EMA and volume > 1.5x average
-# Short when price breaks below S3 with price < 200-bar EMA and volume > 1.5x average
-# Uses 1d pivot levels for institutional support/resistance, EMA200 for trend filter, volume for confirmation
-# Target: 25-40 trades per year (100-160 over 4 years) with 0.25 position sizing
+# Hypothesis: 1d strategy using 1-week Donchian(20) breakout with 1w EMA20 trend filter and volume confirmation
+# Long when price breaks above 20-week high with price > 20-week EMA and volume > 1.8x average
+# Short when price breaks below 20-week low with price < 20-week EMA and volume > 1.8x average
+# Uses 1w Donchian channels for institutional support/resistance, EMA20 for trend filter, volume for confirmation
+# Target: 15-25 trades per year (60-100 over 4 years) with 0.25 position sizing
 
-name = "4h_1dCamarilla_R3S3_EMA200_Volume_v1"
-timeframe = "4h"
+name = "1d_1wDonchian20_EMA20_Volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,34 +23,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate EMA200 on 4h close (needs 200 bars)
+    # Calculate EMA20 on 1d close (needs 20 bars)
     close_series = pd.Series(close)
-    ema200 = close_series.ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema20 = close_series.ewm(span=20, min_periods=20, adjust=False).mean().values
     
-    # Calculate 1-day Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Calculate 1-week Donchian(20) channels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Previous day's high, low, close
-    prev_high = df_1d['high'].shift(1)
-    prev_low = df_1d['low'].shift(1)
-    prev_close = df_1d['close'].shift(1)
+    # 20-week high and low
+    high_20w = pd.Series(df_1w['high']).rolling(window=20, min_periods=20).max().values
+    low_20w = pd.Series(df_1w['low']).rolling(window=20, min_periods=20).min().values
     
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
+    # Align Donchian levels to 1d timeframe
+    high_20w_aligned = align_htf_to_ltf(prices, df_1w, high_20w)
+    low_20w_aligned = align_htf_to_ltf(prices, df_1w, low_20w)
     
-    # Camarilla levels
-    r3 = pivot + (range_hl * 1.1 / 2)
-    s3 = pivot - (range_hl * 1.1 / 2)
-    
-    # Align Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3.values)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3.values)
-    
-    # Volume confirmation: >1.5x 50-period average
+    # Volume confirmation: >1.8x 50-period average
     vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
-    volume_filter = volume > (1.5 * vol_ma_50)
+    volume_filter = volume > (1.8 * vol_ma_50)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -59,10 +51,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(200, n):  # Start after EMA200 warmup
+    for i in range(20, n):  # Start after EMA20 warmup
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema200[i]) or np.isnan(volume_filter[i]) or
+        if (np.isnan(high_20w_aligned[i]) or np.isnan(low_20w_aligned[i]) or 
+            np.isnan(ema20[i]) or np.isnan(volume_filter[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -70,24 +62,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long breakout: price breaks above R3 with uptrend and volume confirmation
-            if close[i] > r3_aligned[i] and close[i] > ema200[i] and volume_filter[i]:
+            # Long breakout: price breaks above 20-week high with uptrend and volume confirmation
+            if close[i] > high_20w_aligned[i] and close[i] > ema20[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short breakout: price breaks below S3 with downtrend and volume confirmation
-            elif close[i] < s3_aligned[i] and close[i] < ema200[i] and volume_filter[i]:
+            # Short breakout: price breaks below 20-week low with downtrend and volume confirmation
+            elif close[i] < low_20w_aligned[i] and close[i] < ema20[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below S3 (support break)
-            if close[i] < s3_aligned[i]:
+            # Exit long: price breaks below 20-week low (support break)
+            if close[i] < low_20w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above R3 (resistance break)
-            if close[i] > r3_aligned[i]:
+            # Exit short: price breaks above 20-week high (resistance break)
+            if close[i] > high_20w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
