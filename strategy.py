@@ -4,10 +4,11 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
-# Uses Donchian channels for structure, 1d EMA34 for trend alignment (reduces whipsaw)
-# Volume > 1.5x 20-bar average volume confirms breakout strength
+# Uses Donchian channels for price structure, 1d EMA34 for strong trend alignment (reduces whipsaw)
+# Volume > 1.5x 20-bar average volume filters for institutional participation
+# ATR-based stoploss via signal=0 when price retraces to midpoint of Donchian channel
 # Discrete sizing 0.25 to limit fee drag; target 50-150 trades over 4 years
-# Proven pattern: price channel breakouts with volume/trend confirmation work on BTC/ETH in both bull/bear
+# Proven pattern: price channel breakouts with volume/volatility confirmation work on BTC/ETH in both bull/bear
 
 name = "4h_Donchian20_1dEMA34_VolumeConfirm_v1"
 timeframe = "4h"
@@ -32,22 +33,24 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
     # Calculate 4h Donchian channels (20-period)
     high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (high_20 + low_20) / 2.0
     
     # Calculate 1d EMA34 trend filter
     close_1d_series = pd.Series(close_1d)
     ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate volume filter: volume > 1.5x 20-bar average volume
-    avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * avg_volume_20)
+    # Calculate 4h volume filter: volume > 1.5x 20-bar average volume
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma_20)
     
     # Align HTF indicators to 4h timeframe
-    high_20_aligned = align_htf_to_ltf(prices, prices, high_20)  # 4h data is already LTF
-    low_20_aligned = align_htf_to_ltf(prices, prices, low_20)
+    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     volume_filter_aligned = align_htf_to_ltf(prices, df_1d, volume_filter)
     
@@ -73,15 +76,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price retests lower Donchian from above (trend reversal)
-            if close[i] <= low_20_aligned[i]:
+            # Exit long: price retests midpoint of Donchian channel from above (trend weakening)
+            if close[i] <= donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price retests upper Donchian from below (trend reversal)
-            if close[i] >= high_20_aligned[i]:
+            # Exit short: price retests midpoint of Donchian channel from below (trend weakening)
+            if close[i] >= donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
