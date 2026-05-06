@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
-# Long when price breaks above Donchian upper band AND 1d close > 1d EMA34 (uptrend) AND volume > 1.5 * 20-bar avg volume
-# Short when price breaks below Donchian lower band AND 1d close < 1d EMA34 (downtrend) AND volume > 1.5 * 20-bar avg volume
-# Exit when price retraces to the Donchian midpoint (average of upper and lower bands)
+# Hypothesis: 12h Donchian(20) breakout with 1w ADX trend filter and volume confirmation
+# Long when price breaks above upper Donchian channel AND 1w ADX > 25 (strong trend) AND volume > 1.5 * 24-bar avg volume
+# Short when price breaks below lower Donchian channel AND 1w ADX > 25 AND volume > 1.5 * 24-bar avg volume
+# Exit when price retraces to the Donchian midpoint (mean reversion)
 # Uses discrete sizing 0.25 to balance return and fee drag
-# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
-# 1d EMA34 provides strong trend filter for better regime adaptation in both bull and bear markets
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# 1w ADX provides strong trend filter to avoid whipsaws in ranging markets
 # Volume threshold set to 1.5x to reduce false breakouts while maintaining sufficient trade frequency
-# Donchian channels provide structural support/resistance levels that work in ranging and trending markets
 
-name = "6h_Donchian20_1dEMA34_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Donchian20_1wADX25_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,29 +26,51 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian channels for 6h timeframe (based on 20-bar lookback)
+    # Calculate Donchian channels for 12h timeframe (based on previous 20 bars)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_upper + donchian_lower) / 2.0
+    prev_high_20 = high_series.rolling(window=20, min_periods=20).max().shift(1).values
+    prev_low_20 = low_series.rolling(window=20, min_periods=20).min().shift(1).values
+    donchian_upper = prev_high_20
+    donchian_lower = prev_low_20
+    donchian_mid = (prev_high_20 + prev_low_20) / 2.0
     
-    # Get 1d data ONCE before loop for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 1w data ONCE before loop for ADX trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d EMA34
-    close_1d_series = pd.Series(close_1d)
-    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 1w ADX (14-period)
+    # True Range
+    tr1 = pd.Series(high_1w).rolling(2).max().values - pd.Series(low_1w).rolling(2).min().values
+    tr2 = np.abs(pd.Series(high_1w).shift(1).values - pd.Series(close_1w).values)
+    tr3 = np.abs(pd.Series(low_1w).shift(1).values - pd.Series(close_1w).values)
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Align HTF indicators to 6h timeframe (wait for completed HTF bar)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Directional Movement
+    up_move = pd.Series(high_1w).diff().values
+    down_move = -pd.Series(low_1w).diff().values
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Calculate volume confirmation: volume > 1.5 * 20-bar average volume
-    avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * avg_volume_20)
+    # Smoothed DM
+    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr
+    
+    # ADX
+    dx = np.abs(plus_di - minus_di) / (np.abs(plus_di) + np.abs(minus_di) + 1e-10) * 100
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Align HTF indicators to 12h timeframe (wait for completed HTF bar)
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    
+    # Calculate volume confirmation: volume > 1.5 * 24-bar average volume
+    avg_volume_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > (1.5 * avg_volume_24)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -57,7 +78,7 @@ def generate_signals(prices):
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN
         if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(donchian_mid[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_spike[i])):
+            np.isnan(adx_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,12 +86,12 @@ def generate_signals(prices):
         
         if position == 0:
             # Donchian breakout signals with trend and volume filters
-            # Long: Break above upper band AND uptrend AND volume spike
-            if close[i] > donchian_upper[i] and close[i] > ema34_1d_aligned[i] and volume_spike[i]:
+            # Long: Break above upper channel AND strong trend AND volume spike
+            if close[i] > donchian_upper[i] and adx_aligned[i] > 25 and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below lower band AND downtrend AND volume spike
-            elif close[i] < donchian_lower[i] and close[i] < ema34_1d_aligned[i] and volume_spike[i]:
+            # Short: Break below lower channel AND strong trend AND volume spike
+            elif close[i] < donchian_lower[i] and adx_aligned[i] > 25 and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
