@@ -3,81 +3,47 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using weekly Ichimoku cloud with daily Tenkan/Kijun cross and volume confirmation
-# Long when price > weekly cloud AND Tenkan > Kijun (daily) with volume > 1.5x average
-# Short when price < weekly cloud AND Tenkan < Kijun (daily) with volume > 1.5x average
-# Uses weekly Ichimoku for major trend structure, daily TK cross for momentum, volume for confirmation
-# Target: 15-30 trades per year (60-120 over 4 years) with 0.25 position sizing
+# Hypothesis: 12h strategy using 1-week 200-period EMA for trend and 1-day Williams %R for mean-reversion entries
+# Long when price is above weekly EMA200 (bullish trend) and daily Williams %R crosses above -80 (oversold bounce)
+# Short when price is below weekly EMA200 (bearish trend) and daily Williams %R crosses below -20 (overbought rejection)
+# Uses Williams %R for precise entries within trend, targeting 20-40 trades per year (80-160 over 4 years) with 0.25 position sizing
 
-name = "6h_1wIchimoku_1dTKCross_Volume_v1"
-timeframe = "6h"
+name = "12h_1wEMA200_1dWilliamsR_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Calculate weekly Ichimoku components
+    # Calculate weekly EMA200 for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 52:  # Need at least 1 year of weekly data
+    if len(df_1w) < 200:
         return np.zeros(n)
+    close_1w = df_1w['close'].values
+    ema200_1w = pd.Series(close_1w).ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    high_9 = pd.Series(df_1w['high']).rolling(window=9, min_periods=9).max().values
-    low_9 = pd.Series(df_1w['low']).rolling(window=9, min_periods=9).min().values
-    tenkan = (high_9 + low_9) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    high_26 = pd.Series(df_1w['high']).rolling(window=26, min_periods=26).max().values
-    low_26 = pd.Series(df_1w['low']).rolling(window=26, min_periods=26).min().values
-    kijun = (high_26 + low_26) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2)
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    high_52 = pd.Series(df_1w['high']).rolling(window=52, min_periods=52).max().values
-    low_52 = pd.Series(df_1w['low']).rolling(window=52, min_periods=52).min().values
-    senkou_b = ((high_52 + low_52) / 2)
-    
-    # Chikou Span (Lagging Span): Close shifted 26 periods behind
-    chikou = pd.Series(df_1w['close']).shift(26).values
-    
-    # Align Ichimoku components to 6h timeframe
-    tenkan_6h = align_htf_to_ltf(prices, df_1w, tenkan)
-    kijun_6h = align_htf_to_ltf(prices, df_1w, kijun)
-    senkou_a_6h = align_htf_to_ltf(prices, df_1w, senkou_a)
-    senkou_b_6h = align_htf_to_ltf(prices, df_1w, senkou_b)
-    chikou_6h = align_htf_to_ltf(prices, df_1w, chikou)
-    
-    # Calculate daily Tenkan/Kijun cross for momentum
+    # Calculate daily Williams %R (14-period)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 26:
+    if len(df_1d) < 14:
         return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Daily Tenkan-sen
-    high_9d = pd.Series(df_1d['high']).rolling(window=9, min_periods=9).max().values
-    low_9d = pd.Series(df_1d['low']).rolling(window=9, min_periods=9).min().values
-    tenkan_1d = (high_9d + low_9d) / 2
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # avoid division by zero
     
-    # Daily Kijun-sen
-    high_26d = pd.Series(df_1d['high']).rolling(window=26, min_periods=26).max().values
-    low_26d = pd.Series(df_1d['low']).rolling(window=26, min_periods=26).min().values
-    kijun_1d = (high_26d + low_26d) / 2
-    
-    # Align daily TK cross to 6h timeframe
-    tenkan_1d_6h = align_htf_to_ltf(prices, df_1d, tenkan_1d)
-    kijun_1d_6h = align_htf_to_ltf(prices, df_1d, kijun_1d)
-    
-    # Volume confirmation: >1.5x 50-period average
-    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
-    volume_filter = volume > (1.5 * vol_ma_50)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -86,44 +52,38 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(52, n):  # Start after weekly Ichimoku warmup
+    for i in range(200, n):  # Start after weekly EMA200 warmup
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or 
-            np.isnan(senkou_a_6h[i]) or np.isnan(senkou_b_6h[i]) or
-            np.isnan(tenkan_1d_6h[i]) or np.isnan(kijun_1d_6h[i]) or
-            np.isnan(volume_filter[i]) or not session_filter[i]):
+        if (np.isnan(ema200_1w_aligned[i]) or np.isnan(williams_r_aligned[i]) or
+            not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine cloud top and bottom
-        cloud_top = np.maximum(senkou_a_6h[i], senkou_b_6h[i])
-        cloud_bottom = np.minimum(senkou_a_6h[i], senkou_b_6h[i])
-        
         if position == 0:
-            # Long: price above cloud, bullish TK cross (daily), volume confirmation
-            if (close[i] > cloud_top and 
-                tenkan_1d_6h[i] > kijun_1d_6h[i] and 
-                volume_filter[i]):
+            # Long: above weekly EMA200 and Williams %R crosses above -80 (oversold bounce)
+            if (close[i] > ema200_1w_aligned[i] and 
+                williams_r_aligned[i] > -80 and 
+                williams_r_aligned[i-1] <= -80):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below cloud, bearish TK cross (daily), volume confirmation
-            elif (close[i] < cloud_bottom and 
-                  tenkan_1d_6h[i] < kijun_1d_6h[i] and 
-                  volume_filter[i]):
+            # Short: below weekly EMA200 and Williams %R crosses below -20 (overbought rejection)
+            elif (close[i] < ema200_1w_aligned[i] and 
+                  williams_r_aligned[i] < -20 and 
+                  williams_r_aligned[i-1] >= -20):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price falls below cloud or bearish TK cross
-            if close[i] < cloud_bottom or tenkan_1d_6h[i] < kijun_1d_6h[i]:
+            # Exit long: price crosses below weekly EMA200 (trend change)
+            if close[i] < ema200_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price rises above cloud or bullish TK cross
-            if close[i] > cloud_top or tenkan_1d_6h[i] > kijun_1d_6h[i]:
+            # Exit short: price crosses above weekly EMA200 (trend change)
+            if close[i] > ema200_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
