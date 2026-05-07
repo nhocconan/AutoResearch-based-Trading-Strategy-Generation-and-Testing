@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS_v2
-Hypothesis: Camarilla pivot breakout on 12h with 1-day trend filter and volume confirmation.
-Targets 15-25 trades/year to minimize fee drag. Works in bull/bear via trend filter.
+4h_Trend_Reversal_With_Confluence_v1
+Hypothesis: Use 4-hour timeframe with a contrarian mean-reversion signal based on RSI extremes,
+filtered by higher-timeframe trend (1-day EMA) and volume confirmation. Designed to capture
+reversals in both bull and bear markets by entering when momentum is exhausted but the
+underlying trend remains intact. Uses tight conditions to limit trades and avoid fee drag.
 """
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS_v2"
-timeframe = "12h"
+name = "4h_Trend_Reversal_With_Confluence_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,22 +25,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Camarilla levels from previous 12h bar (high, low, close)
-    # R1 = close + (high - low) * 1.12
-    # S1 = close - (high - low) * 1.12
-    # Need previous bar's values, so shift by 1
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = prev_low[0] = prev_close[0] = np.nan  # first bar invalid
+    # RSI(14) for mean-reversion signals
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    rng = prev_high - prev_low
-    R1 = prev_close + rng * 1.12
-    S1 = prev_close - rng * 1.12
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # 1-day trend filter: EMA of daily close
+    # 1-day trend filter: EMA(34) of daily close
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
@@ -51,9 +50,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if any critical value is NaN
-        if (np.isnan(R1[i]) or np.isnan(S1[i]) or np.isnan(ema_1d_aligned[i]) or 
+        if (np.isnan(rsi[i]) or np.isnan(ema_1d_aligned[i]) or 
             np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
@@ -61,24 +60,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: close above R1 AND above 1-day EMA with volume confirmation
-            if close[i] > R1[i] and close[i] > ema_1d_aligned[i] and volume[i] > vol_ma[i]:
+            # Long: RSI oversold (<30), price above 1-day EMA (uptrend filter), volume confirmation
+            if rsi[i] < 30 and close[i] > ema_1d_aligned[i] and volume[i] > vol_ma[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: close below S1 AND below 1-day EMA with volume confirmation
-            elif close[i] < S1[i] and close[i] < ema_1d_aligned[i] and volume[i] > vol_ma[i]:
+            # Short: RSI overbought (>70), price below 1-day EMA (downtrend filter), volume confirmation
+            elif rsi[i] > 70 and close[i] < ema_1d_aligned[i] and volume[i] > vol_ma[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: close crosses below S1 (reversion to mean)
-            if close[i] < S1[i]:
+            # Exit: RSI returns to neutral (50) or trend changes
+            if rsi[i] >= 50 or close[i] < ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: close crosses above R1 (reversion to mean)
-            if close[i] > R1[i]:
+            # Exit: RSI returns to neutral (50) or trend changes
+            if rsi[i] <= 50 or close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
