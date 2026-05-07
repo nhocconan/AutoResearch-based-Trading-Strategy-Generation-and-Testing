@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Volume_Spike_v3"
-timeframe = "4h"
+name = "6h_Ichimoku_Cloud_Filter_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -12,50 +12,80 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla levels and trend filter
+    # Get daily data for Ichimoku and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 52:
         return np.zeros(n)
     
-    # Calculate Camarilla R3 and S3 levels from previous day (wider range for stronger breakouts)
-    high_prev = df_1d['high'].shift(1).values
-    low_prev = df_1d['low'].shift(1).values
-    close_prev = df_1d['close'].shift(1).values
+    # Calculate Ichimoku components on daily data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    r3 = close_prev + 1.1 * (high_prev - low_prev) / 4
-    s3 = close_prev - 1.1 * (high_prev - low_prev) / 4
+    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
+    tenkan_sen = np.full(len(df_1d), np.nan)
+    for i in range(8, len(df_1d)):
+        tenkan_sen[i] = (np.max(high_1d[i-8:i+1]) + np.min(low_1d[i-8:i+1])) / 2
     
-    # Align daily levels to 4h timeframe (with 1-day delay for completed bar)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Kijun-sen (Base Line): (26-period high + low) / 2
+    kijun_sen = np.full(len(df_1d), np.nan)
+    for i in range(25, len(df_1d)):
+        kijun_sen[i] = (np.max(high_1d[i-25:i+1]) + np.min(low_1d[i-25:i+1])) / 2
     
-    # 1d trend filter: EMA34
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    senkou_span_a = np.full(len(df_1d), np.nan)
+    for i in range(len(df_1d)):
+        if not np.isnan(tenkan_sen[i]) and not np.isnan(kijun_sen[i]):
+            senkou_span_a[i] = (tenkan_sen[i] + kijun_sen[i]) / 2
     
-    # Volume filter: current volume > 2.5x 20-period average (stricter to reduce trades)
+    # Senkou Span B (Leading Span B): (52-period high + low) / 2
+    senkou_span_b = np.full(len(df_1d), np.nan)
+    for i in range(51, len(df_1d)):
+        senkou_span_b[i] = (np.max(high_1d[i-51:i+1]) + np.min(low_1d[i-51:i+1])) / 2
+    
+    # Align Ichimoku components to 6h timeframe
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
+    
+    # 1d trend filter: price above/below Kumo (cloud)
+    # Cloud top = max(Senkou Span A, Senkou Span B)
+    # Cloud bottom = min(Senkou Span A, Senkou Span B)
+    cloud_top = np.maximum(senkou_span_a_aligned, senkou_span_b_aligned)
+    cloud_bottom = np.minimum(senkou_span_a_aligned, senkou_span_b_aligned)
+    
+    price_above_cloud = close > cloud_top
+    price_below_cloud = close < cloud_bottom
+    
+    # TK Cross signals
+    tk_cross_up = tenkan_sen_aligned > kijun_sen_aligned
+    tk_cross_down = tenkan_sen_aligned < kijun_sen_aligned
+    
+    # Volume filter: current volume > 1.5x 20-period average
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-20:i])
-    vol_filter = volume > (2.5 * vol_ma_20)
+    vol_filter = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 8  # ~16 hours for 4h to reduce trades
+    cooldown_bars = 6  # ~1.5 days for 6h to reduce trades
     
-    start_idx = max(100, 20, 34)
+    start_idx = max(100, 20, 52)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or 
+        if (np.isnan(tenkan_sen_aligned[i]) or 
+            np.isnan(kijun_sen_aligned[i]) or 
+            np.isnan(cloud_top[i]) or 
+            np.isnan(cloud_bottom[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -67,36 +97,34 @@ def generate_signals(prices):
         
         bars_since_last_trade += 1
         
-        # Determine 1d trend direction
-        trend_up = close > ema_34_1d_aligned[i]
-        trend_down = close < ema_34_1d_aligned[i]
-        
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: Break above R3 in uptrend with strong volume
-            if (close[i] > r3_aligned[i] and 
-                trend_up[i] and 
+            # Long: TK cross up + price above cloud + volume filter
+            if (tk_cross_up[i] and 
+                price_above_cloud[i] and 
                 vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: Break below S3 in downtrend with strong volume
-            elif (close[i] < s3_aligned[i] and 
-                  trend_down[i] and 
+            # Short: TK cross down + price below cloud + volume filter
+            elif (tk_cross_down[i] and 
+                  price_below_cloud[i] and 
                   vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit: Price re-enters Camarilla body (between R3 and S3) or trend change
-            if (close[i] < r3_aligned[i] and close[i] > s3_aligned[i]) or not trend_up[i]:
+            # Exit: TK cross down or price enters cloud
+            if (tk_cross_down[i] or 
+                (close[i] <= cloud_top[i] and close[i] >= cloud_bottom[i])):
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price re-enters Camarilla body or trend change
-            if (close[i] < r3_aligned[i] and close[i] > s3_aligned[i]) or not trend_down[i]:
+            # Exit: TK cross up or price enters cloud
+            if (tk_cross_up[i] or 
+                (close[i] <= cloud_top[i] and close[i] >= cloud_bottom[i])):
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
@@ -105,9 +133,8 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Further increasing the volume threshold to 2.5x average and extending cooldown to 8 bars (16 hours)
-# will reduce trade frequency to target 15-25 trades per year, minimizing fee drag while maintaining
-# the edge of Camarilla R3/S3 breakouts with 1d EMA34 trend confirmation. This should improve
-# generalization to the test period (2025-2026) by focusing only on the strongest institutional breakouts.
-# Position size reduced to 0.25 to manage drawdown during volatile periods. Works in both bull (breakouts above R3)
-# and bear (breakdowns below S3) markets by trading with the higher timeframe trend.
+# Hypothesis: Ichimoku cloud provides dynamic support/resistance that adapts to volatility,
+# while TK cross signals momentum shifts. Using 1d Ichimoku on 6h timeframe filters
+# false signals and captures multi-day trends. Works in bull markets (trend following
+# with cloud support) and bear markets (trend following with cloud resistance).
+# Volume confirmation and cooldown reduce trades to target 50-150 over 4 years.
