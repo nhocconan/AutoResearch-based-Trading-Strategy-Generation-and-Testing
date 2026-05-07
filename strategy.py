@@ -3,16 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h Donchian breakout (trend) and 1d RSI mean reversion (extremes).
-# Long when: price breaks above 4h Donchian upper channel AND 1d RSI < 30 (oversold).
-# Short when: price breaks below 4h Donchian lower channel AND 1d RSI > 70 (overbought).
-# Exit when price crosses back through the Donchian midpoint.
-# Uses 4h for trend direction and structure, 1d for overextension filter.
-# Session filter (08-20 UTC) reduces noise trades. Position size: 0.20.
-# Target: 20-40 trades/year to minimize fee drag and improve generalization.
-
-name = "1h_DonchianBreakout_4hTrend_1dRSI_Extreme"
-timeframe = "1h"
+# Hypothesis: 12-hour price action with 1-day Choppiness Index regime filter.
+# Uses 12h Donchian(20) breakout for entry, filtered by 1d Choppiness Index > 61.8 (ranging market) for mean reversion.
+# Long when price breaks below Donchian Lower (20) in chop regime, short when breaks above Donchian Upper (20) in chop regime.
+# Exit when price returns to Donchian Middle (20-period average of upper/lower).
+# Designed for low frequency (12-25 trades/year) to avoid fee drag in ranging markets.
+# Works in both bull and bear by capturing mean reversion in choppy conditions.
+name = "12h_DonchianChoppiness_MeanReversion"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,93 +22,101 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Load 4h data for Donchian channel (trend structure)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
+    # 12h Donchian channels (20-period)
+    donchian_window = 20
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    middle = np.full(n, np.nan)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    for i in range(donchian_window - 1, n):
+        upper[i] = np.max(high[i - donchian_window + 1:i + 1])
+        lower[i] = np.min(low[i - donchian_window + 1:i + 1])
+        middle[i] = (upper[i] + lower[i]) / 2
     
-    # Donchian channel (20-period) on 4h
-    donchian_high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_mid_20 = (donchian_high_20 + donchian_low_20) / 2.0
-    
-    # Align Donchian levels to 1h
-    donchian_high_20_aligned = align_htf_to_ltf(prices, df_4h, donchian_high_20)
-    donchian_low_20_aligned = align_htf_to_ltf(prices, df_4h, donchian_low_20)
-    donchian_mid_20_aligned = align_htf_to_ltf(prices, df_4h, donchian_mid_20)
-    
-    # Load 1d data for RSI (mean reversion filter)
+    # Load 1d data for Choppiness Index
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # RSI (14-period) on 1d close
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # True Range (TR)
+    tr = np.full(len(close_1d), np.nan)
+    tr[0] = high_1d[0] - low_1d[0]
+    for i in range(1, len(close_1d)):
+        tr[i] = max(
+            high_1d[i] - low_1d[i],
+            abs(high_1d[i] - close_1d[i-1]),
+            abs(low_1d[i] - close_1d[i-1])
+        )
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Average True Range (ATR) - 14 period
+    atr_14 = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 14:
+        atr_14[13] = np.mean(tr[1:15])  # Simple average of first 14 TR values
+        for i in range(14, len(close_1d)):
+            atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_14 = 100 - (100 / (1 + rs))
+    # Choppiness Index (CHOP) - 14 period
+    chop = np.full(len(close_1d), np.nan)
+    chop_period = 14
+    if len(close_1d) >= chop_period + 1:
+        for i in range(chop_period, len(close_1d)):
+            # Sum of ATR over period
+            sum_atr = np.sum(atr_14[i - chop_period + 1:i + 1])
+            # Max high - min low over period
+            max_high = np.max(high_1d[i - chop_period + 1:i + 1])
+            min_low = np.min(low_1d[i - chop_period + 1:i + 1])
+            if sum_atr > 0 and (max_high - min_low) > 0:
+                chop[i] = 100 * np.log10(sum_atr / (max_high - min_low)) / np.log10(chop_period)
     
-    # Align RSI to 1h
-    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
+    # Align Chop to 12h timeframe (needs 2-bar delay for confirmation)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop, additional_delay_bars=2)
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Define chop regime: CHOP > 61.8 = ranging (good for mean reversion)
+    chop_regime = chop_aligned > 61.8
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Sufficient warmup
+    start_idx = max(50, donchian_window)  # Sufficient warmup
     
     for i in range(start_idx, n):
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        if np.isnan(donchian_high_20_aligned[i]) or np.isnan(donchian_low_20_aligned[i]) or \
-           np.isnan(donchian_mid_20_aligned[i]) or np.isnan(rsi_14_aligned[i]):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(middle[i]) or 
+            np.isnan(chop_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above 4h Donchian high AND 1d RSI < 30 (oversold)
-            long_condition = (close[i] > donchian_high_20_aligned[i]) and (rsi_14_aligned[i] < 30)
-            # Short: break below 4h Donchian low AND 1d RSI > 70 (overbought)
-            short_condition = (close[i] < donchian_low_20_aligned[i]) and (rsi_14_aligned[i] > 70)
+            # Enter mean reversion in chop regime
+            # Long when price breaks below lower band
+            long_condition = (close[i] < lower[i]) and chop_regime[i]
+            # Short when price breaks above upper band
+            short_condition = (close[i] > upper[i]) and chop_regime[i]
             
             if long_condition:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
             elif short_condition:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below Donchian midpoint
-            if close[i] < donchian_mid_20_aligned[i]:
+            # Exit long when price returns to middle
+            if close[i] > middle[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above Donchian midpoint
-            if close[i] > donchian_mid_20_aligned[i]:
+            # Exit short when price returns to middle
+            if close[i] < middle[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
