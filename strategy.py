@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-# 6h_ElderRay_BullBearPower_Trend_Filter
-# Hypothesis: Elder Ray Index (Bull Power = High - EMA13, Bear Power = EMA13 - Low) 
-# combined with 12h trend filter (EMA34) to capture momentum in both bull and bear markets.
-# Long when Bull Power > 0 and price above 12h EMA34 (uptrend).
-# Short when Bear Power > 0 and price below 12h EMA34 (downtrend).
-# Uses 13-period EMA for Elder Ray calculation as standard.
-# Designed for low trade frequency (~15-30/year) to minimize fee drag and work in both bull and bear markets.
-# Timeframe: 6h, HTF: 12h for trend filter.
+# 4h_ThreeBarReversal_VolumeFilter_Trend
+# Hypothesis: Three-bar reversal patterns (bullish/bearish) at key levels with volume confirmation and daily trend filter work in both bull and bear markets by capturing institutional buying/selling pressure.
+# Timeframe: 4h, uses 1d trend filter for multi-timeframe alignment.
+# Low trade frequency (~20-30/year) via strict three-bar pattern + volume + trend confluence.
+# Long: Bullish reversal (higher low, higher close) above EMA20 with volume > 1.5x average and daily uptrend.
+# Short: Bearish reversal (lower high, lower close) below EMA20 with volume > 1.5x average and daily downtrend.
+# Exit: Opposite reversal signal or trend failure.
+# Uses volume filter to reduce false signals and trend filter for higher timeframe alignment.
 
-timeframe = "6h"
-name = "6h_ElderRay_BullBearPower_Trend_Filter"
+timeframe = "4h"
+name = "4h_ThreeBarReversal_VolumeFilter_Trend"
 leverage = 1.0
 
 import numpy as np
@@ -24,59 +24,68 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Calculate EMA13 for Elder Ray
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # EMA20 for dynamic support/resistance
+    close_s = pd.Series(close)
+    ema20 = close_s.ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Bull Power = High - EMA13
-    bull_power = high - ema_13
-    # Bear Power = EMA13 - Low
-    bear_power = ema_13 - low
+    # Average volume for spike detection (24-period = 1 day on 4h chart)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) == 0:
+    # Three-bar reversal detection
+    bullish_reversal = np.zeros(n, dtype=bool)
+    bearish_reversal = np.zeros(n, dtype=bool)
+    
+    for i in range(2, n):
+        # Bullish reversal: higher low and higher close than previous bar
+        if low[i] > low[i-1] and close[i] > close[i-1]:
+            bullish_reversal[i] = True
+        # Bearish reversal: lower high and lower close than previous bar
+        if high[i] < high[i-1] and close[i] < close[i-1]:
+            bearish_reversal[i] = True
+    
+    # Get 1d EMA34 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) == 0:
         return np.zeros(n)
     
-    # Calculate 12h EMA34 for trend filter
-    close_12h = df_12h['close'].values
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start from index 13 to ensure we have EMA13
-    start_idx = 13
+    start_idx = max(24, 34)  # Ensure we have volume MA and EMA data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(ema_34_12h_aligned[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
+        if (np.isnan(ema20[i]) or np.isnan(ema_34_aligned[i]) or 
+            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Bull Power positive (bullish momentum) and price above 12h EMA34 (uptrend)
-            if bull_power[i] > 0 and close[i] > ema_34_12h_aligned[i]:
+            # Long: bullish reversal above EMA20 with volume spike and daily uptrend
+            if bullish_reversal[i] and close[i] > ema20[i] and volume[i] > 1.5 * vol_ma[i] and close[i] > ema_34_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power positive (bearish momentum) and price below 12h EMA34 (downtrend)
-            elif bear_power[i] > 0 and close[i] < ema_34_12h_aligned[i]:
+            # Short: bearish reversal below EMA20 with volume spike and daily downtrend
+            elif bearish_reversal[i] and close[i] < ema20[i] and volume[i] > 1.5 * vol_ma[i] and close[i] < ema_34_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Bull Power turns negative OR price breaks below 12h EMA34
-            if bull_power[i] <= 0 or close[i] < ema_34_12h_aligned[i]:
+            # Exit: bearish reversal or trend failure
+            if bearish_reversal[i] or close[i] < ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Bear Power turns negative OR price breaks above 12h EMA34
-            if bear_power[i] <= 0 or close[i] > ema_34_12h_aligned[i]:
+            # Exit: bullish reversal or trend failure
+            if bullish_reversal[i] or close[i] > ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
