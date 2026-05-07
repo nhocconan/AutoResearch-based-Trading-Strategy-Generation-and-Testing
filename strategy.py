@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_KAMA_1dTrend_VolumeSpike_v2"
-timeframe = "4h"
+name = "1d_Camarilla_H4_Trend_Volume_Spike_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,59 +17,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 1d EMA34 trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 1w EMA50 trend filter
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # KAMA calculation
-    er = np.abs(close - np.roll(close, 10)) / (np.sum(np.abs(np.diff(close, n=1)), axis=0) if hasattr(np, 'cumsum') else np.abs(np.diff(close, n=1)).cumsum())
-    er = np.where(np.isnan(er), 0, er)
-    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Calculate Camarilla levels from previous day (using daily OHLC)
+    # Need to shift by 1 to avoid look-ahead
+    prev_close = np.roll(close, 1)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close[0] = np.nan
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
     
-    # Volume filter: current volume > 1.8 * 30-period average
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_ok = volume > (vol_ma * 1.8)
+    # Camarilla R3, S3 levels
+    R3 = prev_close + 1.1 * (prev_high - prev_low) / 6
+    S3 = prev_close - 1.1 * (prev_high - prev_low) / 6
+    
+    # Volume filter: current volume > 2.0 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ok = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(11, 31)  # KAMA needs 10 periods + 1, volume MA needs 30 + 1
+    start_idx = 20  # Need at least 20 for volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(kama[i]):
+        if np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(R3[i]) or np.isnan(S3[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above KAMA + above daily EMA34 + volume spike
-            if close[i] > kama[i] and close[i] > ema_34_1d_aligned[i] and volume_ok[i]:
+            # Long: break above Camarilla R3 + above weekly EMA50 + volume spike
+            if close[i] > R3[i] and close[i] > ema_50_1w_aligned[i] and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA + below daily EMA34 + volume spike
-            elif close[i] < kama[i] and close[i] < ema_34_1d_aligned[i] and volume_ok[i]:
+            # Short: break below Camarilla S3 + below weekly EMA50 + volume spike
+            elif close[i] < S3[i] and close[i] < ema_50_1w_aligned[i] and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: price crosses KAMA in opposite direction
+            # Exit: price returns to Camarilla range or breaks in opposite direction
             if position == 1:
-                if close[i] < kama[i]:
+                if close[i] < S3[i] or close[i] < ema_50_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > kama[i]:
+                if close[i] > R3[i] or close[i] > ema_50_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
