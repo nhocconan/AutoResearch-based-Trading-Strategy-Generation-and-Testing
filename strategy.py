@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 12h_TRIX_VolumeSpike_TrendFilter
-# Hypothesis: 12-hour TRIX momentum oscillator with daily trend filter and volume spike confirmation.
-# TRIX > 0 indicates bullish momentum, TRIX < 0 indicates bearish momentum.
-# Daily trend filter (price > daily EMA50) prevents counter-trend trades.
-# Volume spike (1.5x average volume) confirms momentum.
-# Designed for low trade frequency (<30/year) to minimize fee drag in bear markets.
+# 1H_Camarilla_R3S3_4hTrend_VolumeFilter
+# Hypothesis: 1-hour Camarilla R3/S3 breakout with 4-hour trend filter (price above/below 4h EMA34) and volume spike confirmation.
+# Uses 4h trend to avoid counter-trend trades in both bull and bear markets.
+# Volume spike ensures momentum confirmation. Targets 15-35 trades/year to minimize fee drag.
+# Uses discrete position sizing (0.20).
 
-name = "12h_TRIX_VolumeSpike_TrendFilter"
-timeframe = "12h"
+name = "1H_Camarilla_R3S3_4hTrend_VolumeFilter"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -24,35 +23,41 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:  # Need enough data for EMA50
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 34:  # Need enough data for EMA34
         return np.zeros(n)
     
-    # Calculate daily EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 4h EMA34 for trend filter
+    ema_34_4h = pd.Series(df_4h['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
     
-    # Calculate TRIX (15-period) on 12h data
-    # TRIX = EMA(EMA(EMA(close, 15), 15), 15) - then percentage change
-    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
-    trix = np.full(n, np.nan)
-    trix[14:] = (ema3[14:] - ema3[13:-1]) / ema3[13:-1] * 100  # Percentage change
+    # Calculate Camarilla levels on 1h data (using previous period's high-low-close)
+    # Camarilla: H = high, L = low, C = close
+    # R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
+    lookback = 1
+    camarilla_r3 = np.full(n, np.nan)
+    camarilla_s3 = np.full(n, np.nan)
     
-    # Volume filter: average volume (30-period)
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    for i in range(lookback, n):
+        H = high[i-1]
+        L = low[i-1]
+        C = close[i-1]
+        camarilla_r3[i] = C + (H - L) * 1.1 / 2
+        camarilla_s3[i] = C - (H - L) * 1.1 / 2
+    
+    # Volume filter: current volume > 1.5x average volume (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 15*3)  # Ensure we have TRIX and volume MA data
+    start_idx = max(34, 20)  # Ensure we have EMA and volume MA data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(trix[i]) or np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or
+            np.isnan(ema_34_4h_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,25 +67,29 @@ def generate_signals(prices):
         volume_filter = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long: TRIX crosses above zero + daily uptrend + volume spike
-            if (trix[i] > 0 and trix[i-1] <= 0 and  # Bullish crossover
-                close[i] > ema_50_1d_aligned[i] and   # Daily uptrend filter
+            # Long: Price breaks above Camarilla R3 + 4h uptrend + volume spike
+            if (close[i] > camarilla_r3[i] and 
+                close[i] > ema_34_4h_aligned[i] and   # 4h uptrend filter
                 volume_filter):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
-            # Short: TRIX crosses below zero + daily downtrend + volume spike
-            elif (trix[i] < 0 and trix[i-1] >= 0 and  # Bearish crossover
-                  close[i] < ema_50_1d_aligned[i] and   # Daily downtrend filter
+            # Short: Price breaks below Camarilla S3 + 4h downtrend + volume spike
+            elif (close[i] < camarilla_s3[i] and 
+                  close[i] < ema_34_4h_aligned[i] and   # 4h downtrend filter
                   volume_filter):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         elif position != 0:
-            # Exit: TRIX returns to zero (momentum fade)
-            if (position == 1 and trix[i] < 0) or (position == -1 and trix[i] > 0):
+            # Exit: Price returns to the middle of Camarilla range (H-L)/2 + C
+            camarilla_mid = (camarilla_r3[i] + camarilla_s3[i]) / 2
+            range_width = camarilla_r3[i] - camarilla_s3[i]
+            at_mid = abs(close[i] - camarilla_mid) < range_width * 0.25  # Within 25% of range
+            
+            if at_mid:
                 signals[i] = 0.0
                 position = 0
             else:
                 # Maintain position
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.20 if position == 1 else -0.20
     
     return signals
