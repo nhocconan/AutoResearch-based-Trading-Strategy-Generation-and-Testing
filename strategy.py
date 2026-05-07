@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 12h_Donchian20_Breakout_1dTrend_Volume
-# Hypothesis: On 12h chart, enter long when price breaks above 20-period Donchian high with 1d EMA34 uptrend and volume confirmation,
-# enter short when price breaks below 20-period Donchian low with 1d EMA34 downtrend and volume confirmation.
-# Use Donchian breakout as primary signal, 1d EMA34 for trend filter, volume spike for confirmation.
-# Designed for low trade frequency (~15-30/year) to minimize fee drag and work in trending markets.
-# Works in both bull and bear markets by capturing breakouts with volume and trend filters.
-timeframe = "12h"
-name = "12h_Donchian20_Breakout_1dTrend_Volume"
+# 4h_BollingerBreakout_VolumeATRStop
+# Hypothesis: On 4h chart, enter long when price breaks above Bollinger upper band with volume confirmation,
+# enter short when price breaks below Bollinger lower band with volume confirmation.
+# Use ATR-based stoploss via signal=0 when price closes outside bands.
+# Bollinger Bands adapt to volatility, reducing false breakouts in ranging periods.
+# Works in both bull and bear markets by capturing breakouts with volume filter.
+# Designed for low trade frequency (~20-40/year) to minimize fee drag.
+timeframe = "4h"
+name = "4h_BollingerBreakout_VolumeATRStop"
 leverage = 1.0
 
 import numpy as np
@@ -23,57 +24,54 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian Channel parameters
-    dc_period = 20
+    # Bollinger Bands parameters
+    bb_period = 20
+    bb_std = 2.0
     
-    # Calculate Donchian Channels
-    dc_high = pd.Series(high).rolling(window=dc_period, min_periods=dc_period).max().values
-    dc_low = pd.Series(low).rolling(window=dc_period, min_periods=dc_period).min().values
+    # Calculate SMA of close (middle line)
+    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    
+    # Calculate standard deviation
+    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    
+    # Calculate Bollinger Bands
+    bb_upper = sma + bb_std * std
+    bb_lower = sma - bb_std * std
     
     # Volume spike: current volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Get 1d EMA34 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(dc_period, n):
+    for i in range(bb_period, n):
         # Skip if any critical value is NaN
-        if (np.isnan(dc_high[i]) or np.isnan(dc_low[i]) or 
-            np.isnan(vol_ma[i]) or vol_ma[i] == 0 or
-            np.isnan(ema_34_1d_aligned[i])):
+        if (np.isnan(sma[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
+            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian high + 1d EMA34 uptrend + volume spike
-            if (close[i] > dc_high[i] and 
-                ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and
-                volume[i] > 1.5 * vol_ma[i]):
+            # Long: price breaks above Bollinger upper band + volume spike
+            if close[i] > bb_upper[i] and volume[i] > 1.5 * vol_ma[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low + 1d EMA34 downtrend + volume spike
-            elif (close[i] < dc_low[i] and 
-                  ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and
-                  volume[i] > 1.5 * vol_ma[i]):
+            # Short: price breaks below Bollinger lower band + volume spike
+            elif close[i] < bb_lower[i] and volume[i] > 1.5 * vol_ma[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price breaks below Donchian low (stoploss)
-            if close[i] < dc_low[i]:
+            # Exit: price closes below Bollinger lower band (stoploss)
+            if close[i] < bb_lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price breaks above Donchian high (stoploss)
-            if close[i] > dc_high[i]:
+            # Exit: price closes above Bollinger upper band (stoploss)
+            if close[i] > bb_upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
