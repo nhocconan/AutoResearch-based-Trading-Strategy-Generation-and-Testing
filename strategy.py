@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume_v2"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume_v3"
 timeframe = "12h"
 leverage = 1.0
 
