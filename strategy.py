@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Keltner_Channel_Breakout_Volume_1dTrend"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,18 +23,21 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
-    trend_up = close > ema20_1d_aligned
-    trend_down = close < ema20_1d_aligned
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    trend_up = close > ema34_1d_aligned
+    trend_down = close < ema34_1d_aligned
     
-    # Keltner Channel: EMA(20) +/- ATR(10) * 2
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    tr = np.maximum(high - low, np.absolute(high - np.roll(close, 1)), np.absolute(low - np.roll(close, 1)))
-    tr[0] = high[0] - low[0]
-    atr10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
-    upper = ema20 + 2.0 * atr10
-    lower = ema20 - 2.0 * atr10
+    # Daily Camarilla pivot levels (R3/S3)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_prev = df_1d['close'].shift(1).values
+    close_1d_prev = np.concatenate([[close_1d_prev[0]], close_1d_prev[:-1]])
+    
+    R3 = close_1d_prev + (high_1d - low_1d) * 1.1 / 4
+    S3 = close_1d_prev - (high_1d - low_1d) * 1.1 / 4
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
     # Volume confirmation: spike > 2x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -43,45 +46,45 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 10, 20)  # Wait for EMA, ATR, and volume MA
+    start_idx = max(34, 20)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(ema20_1d_aligned[i]) or np.isnan(upper[i]) or np.isnan(lower[i]):
+        if np.isnan(ema34_1d_aligned[i]) or np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Close breaks above upper Keltner with volume spike and daily uptrend
-            if close[i] > upper[i] and vol_spike[i] and trend_up[i]:
-                signals[i] = 0.25
+            # Long: Close breaks above R3 with volume spike and daily uptrend
+            if close[i] > R3_aligned[i] and vol_spike[i] and trend_up[i]:
+                signals[i] = 0.30
                 position = 1
-            # Short: Close breaks below lower Keltner with volume spike and daily downtrend
-            elif close[i] < lower[i] and vol_spike[i] and trend_down[i]:
-                signals[i] = -0.25
+            # Short: Close breaks below S3 with volume spike and daily downtrend
+            elif close[i] < S3_aligned[i] and vol_spike[i] and trend_down[i]:
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit: Close below lower Keltner or trend turns down
-            if close[i] < lower[i] or not trend_up[i]:
+            # Exit: Close below S3 or trend turns down
+            if close[i] < S3_aligned[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit: Close above upper Keltner or trend turns up
-            if close[i] > upper[i] or not trend_down[i]:
+            # Exit: Close above R3 or trend turns up
+            if close[i] > R3_aligned[i] or not trend_down[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-# Hypothesis: Keltner Channel breakouts on 6h timeframe with daily trend filter and volume spike capture strong institutional moves.
-# Long when price breaks above upper Keltner (EMA20 + 2*ATR10) with volume confirmation in daily uptrend.
-# Short when price breaks below lower Keltner (EMA20 - 2*ATR10) with volume confirmation in daily downtrend.
-# Keltner adapts to volatility via ATR, making it effective in both trending and ranging markets.
+# Hypothesis: Camarilla R3/S3 breakouts on 4h timeframe with daily trend filter and volume spike capture strong institutional moves.
+# Long when price breaks above R3 (strong resistance) with volume confirmation in daily uptrend.
+# Short when price breaks below S3 (strong support) with volume confirmation in daily downtrend.
+# R3/S3 are stronger levels than R1/S1, leading to fewer but higher-quality trades.
 # Volume spike (>2x average) ensures conviction behind the breakout.
-# Designed for 6h timeframe to target 12-37 trades/year, avoiding overtrading.
-# Works in bull markets (breaks above upper in uptrend) and bear markets (breaks below lower in downtrend).
+# Designed for 4h timeframe to target 20-50 trades/year, avoiding overtrading.
+# Works in bull markets (breaks above R3 in uptrend) and bear markets (breaks below S3 in downtrend).
