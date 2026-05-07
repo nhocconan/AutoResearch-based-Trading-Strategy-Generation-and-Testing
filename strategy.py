@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-6H_Elder_Ray_Combined_1W_Trend_v1
-Hypothesis: Combine Elder Ray (bull/bear power) with 1-week trend filter.
-Long when bull power > 0 and bear power < 0 (bullish) and price > 1-week EMA200.
-Short when bear power > 0 and bull power < 0 (bearish) and price < 1-week EMA200.
-Uses 6-period EMA for Elder Ray calculation. Filters trades to only occur in strong weekly trends.
-Designed to work in both bull and bear markets by following the higher timeframe trend.
-Target: 50-150 total trades over 4 years (12-37/year).
+1D_Weekly_Camarilla_R1_S1_Breakout_TrendFilter
+Hypothesis: Use weekly trend (price above/below 20-week EMA) to filter daily breakouts at Camarilla R1/S1 levels.
+Long when price crosses above daily EMA(50) and touches daily R1 in uptrend; 
+Short when price crosses below daily EMA(50) and touches daily S1 in downtrend.
+Volume confirmation: current volume > 1.5x 20-day average volume.
+Designed for low frequency (target 10-30 trades/year) to work in both bull and bear markets by aligning with weekly trend.
 """
-name = "6H_Elder_Ray_Combined_1W_Trend_v1"
-timeframe = "6h"
+name = "1D_Weekly_Camarilla_R1_S1_Breakout_TrendFilter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -24,58 +23,91 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1-week data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get weekly data for trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 20:
         return np.zeros(n)
     
-    # Calculate 1-week EMA200 for trend filter
-    close_1w = pd.Series(df_1w['close'])
-    ema200_1w = close_1w.ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    # Calculate weekly EMA(20) for trend
+    close_weekly = pd.Series(df_weekly['close'])
+    ema_weekly = close_weekly.ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_weekly)
     
-    # Calculate Elder Ray on 6h data
-    # Bull Power = High - EMA(13)
-    # Bear Power = Low - EMA(13)
+    # Calculate daily EMA(50) for entry trigger
     close_series = pd.Series(close)
-    ema13 = close_series.ewm(span=13, adjust=False, min_periods=13).values
+    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Calculate daily Camarilla levels (R1, S1)
+    # Use prior day's OHLC for today's levels (no look-ahead)
+    prior_close = np.roll(close, 1)
+    prior_high = np.roll(high, 1)
+    prior_low = np.roll(low, 1)
+    prior_close[0] = close[0]  # first bar uses current
+    prior_high[0] = high[0]
+    prior_low[0] = low[0]
+    
+    pivot = (prior_high + prior_low + prior_close) / 3
+    range_prior = prior_high - prior_low
+    r1 = pivot + (range_prior * 1.1 / 12)
+    s1 = pivot - (range_prior * 1.1 / 12)
+    
+    # Volume filter: current volume > 1.5 * 20-day average volume
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_avg * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    bars_since_exit = 0  # bars since last exit to prevent overtrading
     
-    start_idx = max(13, 200)  # Ensure EMA13 and EMA200 are ready
+    start_idx = 50  # Ensure sufficient warmup for EMA50
     
     for i in range(start_idx, n):
-        # Skip if 1w EMA200 not ready
-        if np.isnan(ema200_1w_aligned[i]):
+        bars_since_exit += 1
+        
+        # Skip if any data is not ready
+        if (np.isnan(ema_weekly_aligned[i]) or np.isnan(ema_50[i]) or 
+            np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                bars_since_exit = 0
             continue
         
         if position == 0:
-            # Long: Bullish Elder Ray + price above 1w EMA200
-            if bull_power[i] > 0 and bear_power[i] < 0 and close[i] > ema200_1w_aligned[i]:
+            # Minimum 5 days between trades to reduce frequency
+            if bars_since_exit < 5:
+                continue
+                
+            # Determine weekly trend: price above/below weekly EMA20
+            weekly_uptrend = close[i] > ema_weekly_aligned[i]
+            weekly_downtrend = close[i] < ema_weekly_aligned[i]
+            
+            # Long: price crosses above EMA50 and touches R1 in uptrend
+            if (weekly_uptrend and 
+                close[i] > ema_50[i] and close[i-1] <= ema_50[i-1] and 
+                low[i] <= r1[i] and volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bearish Elder Ray + price below 1w EMA200
-            elif bear_power[i] > 0 and bull_power[i] < 0 and close[i] < ema200_1w_aligned[i]:
+                bars_since_exit = 0
+            # Short: price crosses below EMA50 and touches S1 in downtrend
+            elif (weekly_downtrend and 
+                  close[i] < ema_50[i] and close[i-1] >= ema_50[i-1] and 
+                  high[i] >= s1[i] and volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
+                bars_since_exit = 0
         elif position != 0:
-            # Exit: Elder Ray divergence or price crosses 1w EMA200
-            if position == 1:
-                if bull_power[i] <= 0 or bear_power[i] >= 0 or close[i] < ema200_1w_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-            elif position == -1:
-                if bear_power[i] <= 0 or bull_power[i] >= 0 or close[i] > ema200_1w_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
+            # Exit: price returns to opposite EMA50 side
+            if position == 1 and close[i] < ema_50[i]:
+                signals[i] = 0.0
+                position = 0
+                bars_since_exit = 0
+            elif position == -1 and close[i] > ema_50[i]:
+                signals[i] = 0.0
+                position = 0
+                bars_since_exit = 0
             else:
                 # Hold position
                 signals[i] = 0.25 if position == 1 else -0.25
