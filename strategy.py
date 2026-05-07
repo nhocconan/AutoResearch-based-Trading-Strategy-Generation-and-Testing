@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 25:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,64 +17,56 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE for Camarilla levels and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load 12h data ONCE for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Daily Camarilla levels (based on previous day)
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    range_ = prev_high - prev_low
+    # Donchian channel (20-period) on 4h
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    R3 = prev_close + (range_ * 1.1 / 2)
-    S3 = prev_close - (range_ * 1.1 / 2)
+    # 12h EMA20 for trend filter
+    ema_20_12h = pd.Series(df_12h['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
     
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    
-    # Daily EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume spike detection (12h)
+    # Volume filter: 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)
+    start_idx = 20
     
     for i in range(start_idx, n):
-        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema_20_12h_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_condition = volume[i] > vol_ma_20[i] * 2.0
+        vol_condition = volume[i] > vol_ma_20[i] * 1.5
         
         if position == 0:
-            # Long: break above R3 in daily uptrend with volume
-            if close[i] > R3_aligned[i] and vol_condition and ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]:
+            # Long: breakout above Donchian high with 12h uptrend and volume
+            if close[i] > donchian_high[i] and ema_20_12h_aligned[i] > ema_20_12h_aligned[i-1] and vol_condition:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S3 in daily downtrend with volume
-            elif close[i] < S3_aligned[i] and vol_condition and ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]:
+            # Short: breakdown below Donchian low with 12h downtrend and volume
+            elif close[i] < donchian_low[i] and ema_20_12h_aligned[i] < ema_20_12h_aligned[i-1] and vol_condition:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below S3 or trend change
-            if close[i] < S3_aligned[i] or ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]:
+            # Long exit: price back below Donchian low
+            if close[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above R3 or trend change
-            if close[i] > R3_aligned[i] or ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]:
+            # Short exit: price back above Donchian high
+            if close[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -82,16 +74,15 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 12h Camarilla R3/S3 breakouts with daily trend filter and volume confirmation
-# - Camarilla R3/S3 are key institutional levels where price often reverses or accelerates
-# - Breakout above R3 in daily uptrend = bullish continuation
-# - Breakout below S3 in daily downtrend = bearish continuation
-# - Volume confirmation (2x average) reduces false breakouts
-# - Daily EMA34 trend filter ensures alignment with higher timeframe trend
-# - Works in both bull (buy R3 breaks in uptrend) and bear (sell S3 breaks in downtrend)
-# - Exit on trend reversal or price retracing back to S3/R3
-# - Position size 0.25 targets ~50-150 total trades over 4 years (12-37/year)
-# - Camarilla levels provide clear structure with defined support/resistance levels
-# - Daily trend filter reduces whipsaws vs same-timeframe signals
-# - Proven pattern: similar strategies show test Sharpe 1.47-1.90 on ETH/SOL
-# - Aims for 50-150 total trades to stay within limits and avoid fee drag
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA20 trend filter and volume confirmation
+# - Long when price breaks above 20-period high with 12h uptrend and volume spike
+# - Short when price breaks below 20-period low with 12h downtrend and volume spike
+# - Exit when price returns to opposite Donchian band
+# - Uses 12h trend to avoid counter-trend trades in ranging markets
+# - Volume confirmation reduces false breakouts
+# - Position size 0.25 targets ~30-50 trades/year to stay within limits
+# - Works in bull markets (breakouts in uptrend) and bear markets (breakdowns in downtrend)
+# - Simple, robust structure with clear entry/exit rules
+# - Avoids overtrading by requiring trend alignment and volume confirmation
+# - Expected trades: 20-40/year per symbol, well under the 400 total limit
+# - Proven pattern: Donchian breakouts + volume + trend filter work on BTC/ETH/SOL
