@@ -1,6 +1,7 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-name = "4h_Donchian_Breakout_VolumeTrend_v1"
-timeframe = "4h"
+name = "6h_1d_1w_Trend_Pullback_RSI"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,61 +18,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE for Donchian and trend
+    # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Daily Donchian(20): highest high and lowest low of past 20 days
-    high_20 = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Align daily Donchian levels to 4h timeframe
-    donchian_high = align_htf_to_ltf(prices, df_1d, high_20)
-    donchian_low = align_htf_to_ltf(prices, df_1d, low_20)
-    
-    # Daily EMA(50) for trend filter
+    # 1d EMA(50) for trend filter
     ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume spike detection: 6-period average (1.5 days of 4h bars)
-    vol_ma_6 = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
+    # 1w EMA(20) for higher timeframe trend
+    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    
+    # RSI(14) on 6h for pullback entries
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 6)  # Wait for EMA and volume MA
+    start_idx = max(50, 14)  # Wait for EMA and RSI
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_6[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_20_1w_aligned[i]) or 
+            np.isnan(rsi[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above Donchian high with volume and daily uptrend
-            vol_condition = volume[i] > vol_ma_6[i] * 2.0
-            uptrend = ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1]
-            
-            if close[i] > donchian_high[i] and vol_condition and uptrend:
+            # Long: 1d uptrend, 1w uptrend, RSI pullback from overbought
+            if (ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1] and 
+                ema_20_1w_aligned[i] > ema_20_1w_aligned[i-1] and
+                rsi[i] < 40 and rsi[i-1] >= 40):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below Donchian low with volume and daily downtrend
-            elif close[i] < donchian_low[i] and vol_condition and not uptrend:
+            # Short: 1d downtrend, 1w downtrend, RSI pullback from oversold
+            elif (ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1] and 
+                  ema_20_1w_aligned[i] < ema_20_1w_aligned[i-1] and
+                  rsi[i] > 60 and rsi[i-1] <= 60):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below Donchian low or volume drops
-            if close[i] < donchian_low[i] or volume[i] < vol_ma_6[i] * 1.2:
+            # Exit: RSI overbought or trend breaks
+            if rsi[i] > 70 or ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above Donchian high or volume drops
-            if close[i] > donchian_high[i] or volume[i] < vol_ma_6[i] * 1.2:
+            # Exit: RSI oversold or trend breaks
+            if rsi[i] < 30 or ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -79,14 +89,20 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 4h Donchian(20) breakout from daily levels with volume confirmation and daily trend filter
-# - Uses actual daily Donchian channels (20-day high/low) as institutional support/resistance
-# - Breakout above daily Donchian high with volume spike in daily uptrend = long
-# - Breakdown below daily Donchian low with volume spike in daily downtrend = short
-# - Volume spike (2.0x 6-period average) confirms institutional participation
-# - Daily EMA(50) trend filter prevents counter-trend trades
-# - Works in both bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend)
-# - Position size 0.25 targets ~20-50 trades/year to avoid fee drag
-# - Exit when price returns to opposite Donchian band or volume weakens
-# - Uses 4h timeframe for execution while relying on daily structure for signal quality
-# - Aims for 80-200 total trades over 4 years (20-50/year) within profitable range
+# Hypothesis: 6s Trend Pullback RSI
+# - Uses 1d and 1w EMA trends for multi-timeframe alignment
+# - Enters on RSI pullbacks (40 for longs, 60 for shorts) in direction of higher timeframe trend
+# - Works in both bull and bear markets by following the higher timeframe trend
+# - RSI provides mean reversion entries within the trend
+# - Exit when RSI reaches extreme levels or trend breaks
+# - Position size 0.25 limits risk and reduces trade frequency
+# - Target: 50-150 total trades over 4 years (12-37/year) to stay within limits
+# - Novel combination: Multi-timeframe EMA trend + RSI pullback not recently tried on 6h
+# - Avoids overtrading by requiring both timeframes to trend in same direction
+# - Uses proper alignment to prevent look-ahead bias
+# - Conservative entry conditions to minimize false signals
+# - Designed for BTC/ETH with potential applicability to SOL
+# - Weekly trend filter adds robustness against false breaks
+# - RSI thresholds (40/60) selected for timely entries without chasing
+# - Exit conditions prevent giving back too much profit
+# - Simple logic with clear rules for robust performance across regimes
