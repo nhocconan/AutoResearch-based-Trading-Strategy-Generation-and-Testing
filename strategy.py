@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -26,53 +26,54 @@ def generate_signals(prices):
     ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # 1d High/Low for Camarilla levels
+    # Calculate 1d Camarilla pivot levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    range_1d = high_1d - low_1d
     
-    # Calculate Camarilla R3 and S3 levels from previous day
-    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 6
-    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 6
+    # Camarilla levels: R3, S3
+    r3 = close_1d + (range_1d * 1.1 / 4)
+    s3 = close_1d - (range_1d * 1.1 / 4)
     
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # 4h volume spike: > 1.8x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > 1.8 * vol_ma
+    # 12h volume spike: > 1.3x 24-period average (12 days)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_spike = volume > 1.3 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)  # Wait for volume MA and EMA34
+    start_idx = max(24, 34)  # Wait for volume MA and EMA34
     
     for i in range(start_idx, n):
-        if np.isnan(ema34_1d_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]):
+        if np.isnan(ema34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above R3 with uptrend and volume spike
-            if high[i] > camarilla_r3_aligned[i] and close[i] > ema34_1d_aligned[i] and vol_spike[i]:
+            # Long: Price breaks above R3, uptrend (price > EMA34), volume spike
+            if high[i] > r3_aligned[i] and close[i] > ema34_1d_aligned[i] and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S3 with downtrend and volume spike
-            elif low[i] < camarilla_s3_aligned[i] and close[i] < ema34_1d_aligned[i] and vol_spike[i]:
+            # Short: Price breaks below S3, downtrend (price < EMA34), volume spike
+            elif low[i] < s3_aligned[i] and close[i] < ema34_1d_aligned[i] and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Price breaks below S3 or trend reverses
-            if low[i] < camarilla_s3_aligned[i] or close[i] < ema34_1d_aligned[i]:
+            # Exit: Price falls back below R3 or trend turns down
+            if close[i] < r3_aligned[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price breaks above R3 or trend reverses
-            if high[i] > camarilla_r3_aligned[i] or close[i] > ema34_1d_aligned[i]:
+            # Exit: Price rises back above S3 or trend turns up
+            if close[i] > s3_aligned[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -80,10 +81,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
-# Long when price breaks above R3 level, price above 1d EMA34 (uptrend), and volume spike confirms.
-# Short when price breaks below S3 level, price below 1d EMA34 (downtrend), and volume spike confirms.
-# Uses Camarilla levels from daily timeframe for institutional reference points.
-# Volume spike (>1.8x average) ensures conviction. Discrete 0.25 position size limits risk.
-# Works in bull markets (breakouts with trend) and bear markets (breakdowns with trend).
-# Target: 20-50 trades/year to minimize fee drag while capturing institutional moves.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Long when price breaks above Camarilla R3 level during uptrend (price > 1d EMA34) with volume spike.
+# Short when price breaks below Camarilla S3 level during downtrend (price < 1d EMA34) with volume spike.
+# Uses 1d timeframe for trend and pivot calculation to avoid whipsaws, 12h for entry timing.
+# Volume spike (>1.3x average) ensures conviction. Discrete 0.25 position size limits risk.
+# Camarilla levels provide precise support/resistance; breakouts with trend filter capture sustained moves.
+# Works in bull markets (breakouts above R3 in uptrend) and bear markets (breakdowns below S3 in downtrend).
+# Target: 15-30 trades/year to minimize fee drag while capturing significant moves.
