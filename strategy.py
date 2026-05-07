@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_WeeklyPivot_Breakout_TrendVolume_v3"
-timeframe = "1d"
+name = "6h_12h_Financial_Star_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,74 +17,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop for Pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
+    # Calculate 12h Financial Star (modified Williams %R)
+    # Financial Star = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    # Values: 0 = overbought, -100 = oversold
+    period = 14
+    highest_high = pd.Series(df_12h['high']).rolling(window=period, min_periods=period).max().values
+    lowest_low = pd.Series(df_12h['low']).rolling(window=period, min_periods=period).min().values
+    fs_raw = ((highest_high - df_12h['close'].values) / (highest_high - lowest_low)) * -100
+    fs_raw = np.where((highest_high - lowest_low) == 0, -50, fs_raw)  # avoid div by zero
     
-    # Calculate weekly Pivot (standard) from previous week
-    prev_high = df_1w['high'].shift(1).values
-    prev_low = df_1w['low'].shift(1).values
-    prev_close = df_1w['close'].shift(1).values
+    # Align Financial Star to 6h
+    fs_aligned = align_htf_to_ltf(prices, df_12h, fs_raw)
     
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
+    # 12h EMA(50) for trend filter
+    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Weekly Pivot support/resistance levels
-    s1 = pivot - range_hl
-    r1 = pivot + range_hl
-    
-    # Align weekly levels to daily timeframe
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    
-    # Daily EMA(34) for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume spike detection: 20-period average (1 month of daily bars)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume spike detection: 3-period average (1.5 days of 6h bars)
+    vol_ma_3 = pd.Series(volume).rolling(window=3, min_periods=3).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Wait for EMA and volume MA
+    start_idx = max(50, 3)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(fs_aligned[i]) or np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(vol_ma_3[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above S1 with volume and daily uptrend
-            vol_condition = volume[i] > vol_ma_20[i] * 2.0
-            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
+            # Long: Financial Star oversold (< -80) with volume and 12h uptrend
+            vol_condition = volume[i] > vol_ma_3[i] * 2.0
+            uptrend = ema_50_12h_aligned[i] > ema_50_12h_aligned[i-1]
             
-            if close[i] > s1_aligned[i] and vol_condition and uptrend:
+            if fs_aligned[i] < -80 and vol_condition and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below R1 with volume and daily downtrend
-            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
+            # Short: Financial Star overbought (> -20) with volume and 12h downtrend
+            elif fs_aligned[i] > -20 and vol_condition and not uptrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below S1 or volume drops
-            if close[i] < s1_aligned[i] or volume[i] < vol_ma_20[i] * 1.2:
+            # Exit: Financial Star returns to neutral (-50) or volume drops
+            if fs_aligned[i] > -50 or volume[i] < vol_ma_3[i] * 1.3:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above R1 or volume drops
-            if close[i] > r1_aligned[i] or volume[i] < vol_ma_20[i] * 1.2:
+            # Exit: Financial Star returns to neutral (-50) or volume drops
+            if fs_aligned[i] < -50 or volume[i] < vol_ma_3[i] * 1.3:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -92,17 +83,17 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Daily Weekly Pivot S1/R1 breakout with daily trend and volume confirmation
-# - Weekly Pivot S1/R1 act as key support/resistance levels from prior week
-# - Breakout above S1 with volume in daily uptrend = long opportunity
-# - Breakdown below R1 with volume in daily downtrend = short opportunity
-# - Volume spike (2.0x monthly average) confirms institutional participation
-# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
-# - Exit when price returns to S1/R1 or volume weakens
-# - Position size 0.25 targets ~15-30 trades/year, avoiding fee drag
-# - Uses actual weekly Pivot levels (not daily) for better stability
-# - Daily trend filter reduces whipsaws vs using same timeframe
+# Hypothesis: 6s Financial Star (Williams %R variant) with 12h trend and volume confirmation
+# - Financial Star identifies overbought/oversold conditions on 12h timeframe
+# - Long when FS < -80 (deep oversold) with volume spike in 12h uptrend
+# - Short when FS > -20 (deep overbought) with volume spike in 12h downtrend
+# - Volume spike (2.0x average) confirms institutional participation at extremes
+# - Exit when FS returns to neutral (-50) or volume weakens
+# - Works in both bull (buy oversold in uptrend) and bear (sell overbought in downtrend)
+# - Position size 0.25 targets ~15-40 trades/year, avoiding fee drag
+# - Uses 12h Financial Star as novel oscillator (not commonly tried)
+# - 12h trend filter reduces whipsaws vs using same timeframe
 # - Designed to work in BOTH bull and bear markets via trend filter
-# - Volume confirmation reduces false breakouts
-# - Increased volume threshold (2.0x) and longer MA (20) to reduce trade frequency vs previous versions
-# - Aims for 60-120 total trades over 4 years (15-30/year) to stay within limits
+# - Volume confirmation reduces false signals at extremes
+# - Novel combination: Financial Star (12h) + trend (12h) + volume (6h) not recently tried
+# - Aims for 50-150 total trades over 4 years (12-37/year) to stay within limits
