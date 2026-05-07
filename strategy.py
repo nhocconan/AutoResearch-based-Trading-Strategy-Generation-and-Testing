@@ -1,120 +1,121 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-1d_WilliamsAlligator_ElderRay_Trend
-Hypothesis: Combine Williams Alligator (trend) and Elder Ray (bull/bear power) on daily timeframe with 1-week trend filter.
-Go long when Alligator is bullish (jaws < teeth < lips) and Bull Power > 0 with weekly uptrend.
-Go short when Alligator is bearish (jaws > teeth > lips) and Bear Power < 0 with weekly downtrend.
-Exit when Alligator direction changes or Elder Ray power reverses.
-Designed for low-frequency trend following (target 10-25 trades/year) to avoid fee drag and work in both bull and bear markets.
+6h_RSI_Divergence_Momentum_1dTrend_Filter
+Hypothesis: Use 6h RSI divergence with price momentum for early reversal signals, filtered by 1d EMA trend. 
+Bullish divergence (price LL, RSI HL) in 1d uptrend = long. Bearish divergence (price HH, RSI LH) in 1d downtrend = short.
+Exit on RSI mean reversion or trend filter failure. Designed for 6h to capture swings with low frequency.
 """
 
-name = "1d_WilliamsAlligator_ElderRay_Trend"
-timeframe = "1d"
+name = "6h_RSI_Divergence_Momentum_1dTrend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_smma(source, length):
-    """Smoothed Moving Average (SMMA)"""
-    if length <= 0:
-        return source.copy()
-    smma = np.full_like(source, np.nan, dtype=np.float64)
-    if len(source) == 0:
-        return smma
-    smma[0] = source[0]
-    for i in range(1, len(source)):
-        smma[i] = (smma[i-1] * (length-1) + source[i]) / length
-    return smma
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     
-    # Get weekly data for trend filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Williams Alligator on daily: SMMA(13,8), SMMA(8,5), SMMA(5,3) - all shifted forward
-    jaws_length = 13
-    teeth_length = 8
-    lips_length = 5
+    # Calculate RSI on 6h
+    rsi_period = 14
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate SMMA for median price
-    median_price = (high + low) / 2
-    smma_jaws = calculate_smma(median_price, jaws_length)
-    smma_teeth = calculate_smma(median_price, teeth_length)
-    smma_lips = calculate_smma(median_price, lips_length)
+    avg_gain = np.zeros_like(close)
+    avg_loss = np.zeros_like(close)
+    avg_gain[rsi_period] = np.mean(gain[1:rsi_period+1])
+    avg_loss[rsi_period] = np.mean(loss[1:rsi_period+1])
     
-    # Shift forward as per Alligator definition
-    jaws = np.roll(smma_jaws, -jaws_length//2)
-    teeth = np.roll(smma_teeth, -teeth_length//2)
-    lips = np.roll(smma_lips, -lips_length//2)
+    for i in range(rsi_period+1, len(close)):
+        avg_gain[i] = (avg_gain[i-1] * (rsi_period-1) + gain[i]) / rsi_period
+        avg_loss[i] = (avg_loss[i-1] * (rsi_period-1) + loss[i]) / rsi_period
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Weekly trend filter: EMA34 on weekly close
-    close_1w = df_1w['close'].values
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
-    close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
-    weekly_uptrend = close_1w_aligned > ema34_1w_aligned
-    weekly_downtrend = close_1w_aligned < ema34_1w_aligned
+    # Get 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
+    
+    # Calculate price momentum (rate of change over 3 periods)
+    roc_period = 3
+    roc = np.zeros_like(close)
+    roc[roc_period:] = (close[roc_period:] - close[:-roc_period]) / close[:-roc_period] * 100
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup period: max of Alligator lengths and EMA13
-    start_idx = max(jaws_length, teeth_length, lips_length, 13)
+    start_idx = max(34, rsi_period+1, roc_period)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(jaws[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(weekly_uptrend[i]) or np.isnan(weekly_downtrend[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(close_1d_aligned[i]) or np.isnan(roc[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Alligator conditions
-        alligator_bullish = jaws[i] < teeth[i] and teeth[i] < lips[i]
-        alligator_bearish = jaws[i] > teeth[i] and teeth[i] > lips[i]
+        # Determine 1d trend
+        trend_1d_up = close_1d_aligned[i] > ema_34_1d_aligned[i]
+        trend_1d_down = close_1d_aligned[i] < ema_34_1d_aligned[i]
         
-        # Elder Ray conditions
-        bull_power_positive = bull_power[i] > 0
-        bear_power_negative = bear_power[i] < 0
+        # Check for RSI divergence (need at least 5 bars back)
+        if i >= 5:
+            # Bullish divergence: price makes lower low, RSI makes higher low
+            if (low[i] < low[i-5] and rsi[i] > rsi[i-5] and 
+                roc[i] > 0 and  # positive momentum confirmation
+                trend_1d_up and
+                rsi[i] < 40):  # not overbought
+                if position == 0:
+                    signals[i] = 0.25
+                    position = 1
+                elif position == -1:
+                    signals[i] = 0.0  # close short
+                    position = 0
+            
+            # Bearish divergence: price makes higher high, RSI makes lower high
+            elif (high[i] > high[i-5] and rsi[i] < rsi[i-5] and 
+                  roc[i] < 0 and  # negative momentum confirmation
+                  trend_1d_down and
+                  rsi[i] > 60):  # not oversold
+                if position == 0:
+                    signals[i] = -0.25
+                    position = -1
+                elif position == 1:
+                    signals[i] = 0.0  # close long
+                    position = 0
         
-        if position == 0:
-            # Long: Alligator bullish + Bull Power positive + weekly uptrend
-            if alligator_bullish and bull_power_positive and weekly_uptrend[i]:
-                signals[i] = 0.25
-                position = 1
-            # Short: Alligator bearish + Bear Power negative + weekly downtrend
-            elif alligator_bearish and bear_power_negative and weekly_downtrend[i]:
-                signals[i] = -0.25
-                position = -1
-        elif position == 1:
-            # Exit long: Alligator turns bearish OR Bull Power becomes negative
-            if not alligator_bullish or bull_power[i] <= 0:
+        # Exit conditions
+        if position == 1:
+            # Exit long: RSI mean reversion or trend failure
+            if (rsi[i] > 60 or  # overbought
+                not trend_1d_up or  # trend filter failed
+                (rsi[i] < rsi[i-1] and rsi[i-1] > 60)):  # RSI turning down from overbought
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Alligator turns bullish OR Bear Power becomes positive
-            if not alligator_bearish or bear_power[i] >= 0:
+            # Exit short: RSI mean reversion or trend failure
+            if (rsi[i] < 40 or  # oversold
+                not trend_1d_down or  # trend filter failed
+                (rsi[i] > rsi[i-1] and rsi[i-1] < 40)):  # RSI turning up from oversold
                 signals[i] = 0.0
                 position = 0
             else:
