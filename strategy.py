@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_1w_Camarilla_R1S1_Breakout_Trend_Volume_v1"
-timeframe = "1d"
+name = "6h_1d_LiquiditySweep_Reversal"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,69 +17,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate weekly Camarilla pivot levels from previous week
-    prev_high = df_1w['high'].shift(1).values
-    prev_low = df_1w['low'].shift(1).values
-    prev_close = df_1w['close'].shift(1).values
+    # Calculate previous day high and low for liquidity sweep detection
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
+    # Align daily levels to 6h timeframe
+    prev_high_aligned = align_htf_to_ltf(prices, df_1d, prev_high)
+    prev_low_aligned = align_htf_to_ltf(prices, df_1d, prev_low)
+    prev_close_aligned = align_htf_to_ltf(prices, df_1d, prev_close)
     
-    # Camarilla levels
-    s1 = prev_close - (range_hl * 1.08 / 2)
-    r1 = prev_close + (range_hl * 1.08 / 2)
+    # Daily trend filter: EMA(34) on daily close
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Align weekly levels to daily timeframe
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    
-    # Weekly trend filter: EMA(34) on weekly close
-    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Volume spike detection: 5-period average (1 week of daily bars)
-    vol_ma_5 = pd.Series(volume).rolling(window=5, min_periods=5).mean().values
+    # Volume filter: 4-period average (1 day of 6h bars)
+    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 5)  # Wait for EMA and volume MA
+    start_idx = max(34, 4)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(vol_ma_5[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(prev_high_aligned[i]) or 
+            np.isnan(prev_low_aligned[i]) or np.isnan(vol_ma_4[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above S1 with volume and weekly uptrend
-            vol_condition = volume[i] > vol_ma_5[i] * 2.0
-            uptrend = ema_34_1w_aligned[i] > ema_34_1w_aligned[i-1]
+            # Long: price sweeps below previous day low then reverses above it
+            # with volume and in daily uptrend
+            sweep_low = low[i] < prev_low_aligned[i]
+            reclaim = close[i] > prev_low_aligned[i]
+            vol_condition = volume[i] > vol_ma_4[i] * 1.5
+            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
             
-            if close[i] > s1_aligned[i] and vol_condition and uptrend:
+            if sweep_low and reclaim and vol_condition and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below R1 with volume and weekly downtrend
-            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
+            # Short: price sweeps above previous day high then reverses below it
+            # with volume and in daily downtrend
+            elif (high[i] > prev_high_aligned[i] and 
+                  close[i] < prev_high_aligned[i] and 
+                  vol_condition and 
+                  not uptrend):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below S1 or volume drops
-            if close[i] < s1_aligned[i] or volume[i] < vol_ma_5[i] * 1.5:
+            # Exit: price breaks below swing low or volume drops
+            swing_low = low[i] < prev_low_aligned[i]
+            if swing_low or volume[i] < vol_ma_4[i] * 0.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above R1 or volume drops
-            if close[i] > r1_aligned[i] or volume[i] < vol_ma_5[i] * 1.5:
+            # Exit: price breaks above swing high or volume drops
+            swing_high = high[i] > prev_high_aligned[i]
+            if swing_high or volume[i] < vol_ma_4[i] * 0.8:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -87,13 +90,14 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 1d Camarilla S1/R1 breakout with weekly trend and volume confirmation
-# - Weekly Camarilla S1/R1 act as strong support/resistance levels
-# - Breakout above S1 with volume in weekly uptrend = long opportunity
-# - Breakdown below R1 with volume in weekly downtrend = short opportunity
-# - Volume spike (2.0x average) confirms institutional participation
-# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
-# - Exit when price returns to S1/R1 or volume weakens
-# - Position size 0.25 targets ~10-20 trades/year, avoiding fee drag
-# - Uses weekly timeframe for higher reliability and fewer trades
-# - Designed to work in BOTH bull and bear markets via trend filter
+# Hypothesis: 6h liquidity sweep reversal with daily trend and volume confirmation
+# - Looks for price to sweep previous day's high/low (liquidity grab) then reverse
+# - Long when sweeps below prior day low then closes back above it with volume in uptrend
+# - Short when sweeps above prior day high then closes back below it with volume in downtrend
+# - Works in both bull (buy sweeps of lows in uptrend) and bear (sell sweeps of highs in downtrend)
+# - Volume confirmation (1.5x average) filters false breaks
+# - Exit when price breaks the swing point again or volume drops significantly
+# - Position size 0.25 targets ~20-50 trades/year, avoiding fee drag
+# - Uses 6-hour timeframe for better signal quality than lower timeframes
+# - Daily trend filter ensures alignment with higher timeframe momentum
+# - Designed to exploit stop hunts and market maker behavior in crypto markets
