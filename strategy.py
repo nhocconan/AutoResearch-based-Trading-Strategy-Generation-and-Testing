@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3S3_Breakout_WeeklyTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,14 +17,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels
+    # Get 1d data for Camarilla levels and trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
         return np.zeros(n)
     
     # 1d Camarilla R3/S3 levels (stronger breakout levels)
@@ -36,39 +31,39 @@ def generate_signals(prices):
     r3_1d = close_1d + 1.1666 * range_1d * 1.1 / 2
     s3_1d = close_1d - 1.1666 * range_1d * 1.1 / 2
     
-    # Weekly EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align all to 12h timeframe
+    # Align all to 4h timeframe
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume filter: current volume > 2.0 * 20-period average (strict for 12h)
+    # Volume filter: current volume > 2.0 * 20-period average (strict for 4h)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_avg * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 50, 50)
+    start_idx = max(34, 34, 34)
     
     for i in range(start_idx, n):
         # Skip if any data is not ready
         if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_avg[i])):
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R3 + weekly uptrend + volume
-            if close[i] > r3_1d_aligned[i] and close[i] > ema_50_1w_aligned[i] and volume_filter[i]:
+            # Long: price breaks above R3 + daily uptrend + volume
+            if close[i] > r3_1d_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 + weekly downtrend + volume
-            elif close[i] < s3_1d_aligned[i] and close[i] < ema_50_1w_aligned[i] and volume_filter[i]:
+            # Short: price breaks below S3 + daily downtrend + volume
+            elif close[i] < s3_1d_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
