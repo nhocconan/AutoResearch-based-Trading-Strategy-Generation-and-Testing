@@ -1,26 +1,19 @@
 #!/usr/bin/env python3
 """
-12h_KAMA_Direction_With_1wTrend_Filter
-Hypothesis: KAMA trend direction on 12h with 1-week trend filter and volume confirmation.
-Uses KAMA's adaptive smoothing to reduce whipsaw in sideways markets while capturing trends.
-Target: 20-30 trades/year to minimize fee drag. Works in bull/bear via weekly trend filter.
+4h_KAMA_Direction_With_1dTrend_Filter
+Hypothesis: KAMA (Kaufman Adaptive Moving Average) on 4h for trend direction,
+filtered by 1-day EMA to avoid counter-trend trades. Works in bull/bear via
+trend filter, with volatility-based position sizing to manage drawdown.
+Targets 20-40 trades/year to minimize fee drag.
 """
 
-name = "12h_KAMA_Direction_With_1wTrend_Filter"
-timeframe = "12h"
+name = "4h_KAMA_Direction_With_1dTrend_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def calculate_kama(close, er_length=10, fast_sc=2, slow_sc=30):
-    """Calculate Kaufman Adaptive Moving Average"""
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)
-    # For simplicity, we'll compute ER per element in loop later
-    # Return arrays for change and volatility for per-bar calculation
-    return change, volatility
 
 def generate_signals(prices):
     n = len(prices)
@@ -33,78 +26,93 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # KAMA parameters
-    er_length = 10
-    fast_sc = 2
-    slow_sc = 30
+    er_period = 10
+    fast_ema = 2
+    slow_ema = 30
     
-    # Pre-calculate change and volatility for ER
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.zeros(n)
-    for i in range(1, n):
-        volatility[i] = volatility[i-1] + np.abs(close[i] - close[i-1])
-        if i >= er_length:
-            volatility[i] -= np.abs(close[i-er_length] - close[i-er_length-1])
+    # Calculate Efficiency Ratio (ER)
+    change = np.abs(np.diff(close, n=er_period))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # placeholder, will fix in loop
     
-    # Calculate KAMA
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    er = np.zeros(n)
-    sc = np.zeros(n)
-    
-    for i in range(1, n):
-        if volatility[i] > 0:
-            er[i] = change[i] / volatility[i]
+    # Calculate ER properly with loop to avoid future leakage
+    er = np.full(n, np.nan)
+    for i in range(er_period, n):
+        change_val = np.abs(close[i] - close[i-er_period])
+        volatility_val = np.sum(np.abs(np.diff(close[i-er_period:i+1])))
+        if volatility_val > 0:
+            er[i] = change_val / volatility_val
         else:
             er[i] = 0
-        sc[i] = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # 1-week trend filter: EMA of weekly close
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Smoothing constants
+    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
+    
+    # Calculate KAMA
+    kama = np.full(n, np.nan)
+    kama[0] = close[0]
+    for i in range(1, n):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+    
+    # 1-day trend filter: EMA of daily close
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Volume confirmation: current volume > 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volatility filter: ATR-based position sizing
+    atr_period = 14
+    tr = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])))
+    tr = np.insert(tr, 0, high[0] - low[0])
+    atr = np.full(n, np.nan)
+    for i in range(atr_period, n):
+        atr[i] = np.mean(tr[i-atr_period+1:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(max(er_period, atr_period), n):
         # Skip if any critical value is NaN
-        if (np.isnan(kama[i]) or np.isnan(ema_1w_aligned[i]) or 
-            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(kama[i]) or np.isnan(ema_1d_aligned[i]) or 
+            np.isnan(atr[i]) or atr[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Dynamic position size based on volatility (inverse volatility scaling)
+        base_size = 0.25
+        vol_scaling = min(1.0, 0.015 / atr[i])  # target ~1.5% ATR
+        size = base_size * vol_scaling
+        size = min(size, 0.35)  # cap at 35%
+        
         if position == 0:
-            # Long: close above KAMA AND above 1-week EMA with volume confirmation
-            if close[i] > kama[i] and close[i] > ema_1w_aligned[i] and volume[i] > vol_ma[i]:
-                signals[i] = 0.25
+            # Long: price above KAMA AND above 1-day EMA
+            if close[i] > kama[i] and close[i] > ema_1d_aligned[i]:
+                signals[i] = size
                 position = 1
-            # Short: close below KAMA AND below 1-week EMA with volume confirmation
-            elif close[i] < kama[i] and close[i] < ema_1w_aligned[i] and volume[i] > vol_ma[i]:
-                signals[i] = -0.25
+            # Short: price below KAMA AND below 1-day EMA
+            elif close[i] < kama[i] and close[i] < ema_1d_aligned[i]:
+                signals[i] = -size
                 position = -1
         elif position == 1:
-            # Exit: close crosses below KAMA
+            # Exit: price crosses below KAMA
             if close[i] < kama[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = size
         elif position == -1:
-            # Exit: close crosses above KAMA
+            # Exit: price crosses above KAMA
             if close[i] > kama[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -size
     
     return signals
