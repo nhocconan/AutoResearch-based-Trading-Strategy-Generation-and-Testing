@@ -4,6 +4,8 @@
 # Targets 15-37 trades/year via strict entry conditions to minimize fee drag.
 # Works in bull/bear markets by only trading with the daily trend.
 
+#!/usr/bin/env python3
+
 name = "1H_Camarilla_R3S3_1DTrend_VolumeSpike_v5"
 timeframe = "1h"
 leverage = 1.0
