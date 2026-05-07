@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3S3_Breakout_1dTrend_Volume_v2
+12h_Camarilla_R3S3_Breakout_1dTrend_Volume_v3
 Hypothesis: Trade breakouts at Camarilla R3/S3 levels on 12h chart with daily EMA34 trend filter and volume confirmation.
 Breakouts capture strong directional moves while aligning with higher timeframe trend to avoid counter-trend trades.
-Volume spike (>2x 20-period average) confirms institutional participation. Designed for low trade frequency (12-37/year) to minimize fee drag.
+Volume spike (>2x 20-period average) confirms institutional participation. Designed for low trade frequency (12-37/year) to minimize fee drift.
 Works in both bull and bear markets by trading only in direction of daily trend.
 """
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume_v2"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume_v3"
 timeframe = "12h"
 leverage = 1.0
 
