@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_4h_1d_Donchian_Trend_Volume"
-timeframe = "1h"
+name = "6h_Structure_Swing_Retest"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,82 +17,95 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h and 1d data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_4h) < 30 or len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 4h Donchian channels (20 periods)
-    donch_high_4h = pd.Series(df_4h['high']).rolling(window=20, min_periods=20).max().values
-    donch_low_4h = pd.Series(df_4h['low']).rolling(window=20, min_periods=20).min().values
+    # Daily swing points: 5-bar fractals (need 2 bars confirmation each side)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # 1d EMA trend (34 periods)
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate swing highs and lows
+    swing_high = np.full(len(high_1d), np.nan)
+    swing_low = np.full(len(low_1d), np.nan)
     
-    # 1h volume spike detection (24-period average = 1 day)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    for i in range(2, len(high_1d) - 2):
+        if (high_1d[i] > high_1d[i-1] and high_1d[i] > high_1d[i-2] and
+            high_1d[i] > high_1d[i+1] and high_1d[i] > high_1d[i+2]):
+            swing_high[i] = high_1d[i]
+        if (low_1d[i] < low_1d[i-1] and low_1d[i] < low_1d[i-2] and
+            low_1d[i] < low_1d[i+1] and low_1d[i] < low_1d[i+2]):
+            swing_low[i] = low_1d[i]
     
-    # Align HTF indicators to 1h timeframe
-    donch_high_4h_aligned = align_htf_to_ltf(prices, df_4h, donch_high_4h)
-    donch_low_4h_aligned = align_htf_to_ltf(prices, df_4h, donch_low_4h)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Forward fill to get last swing level
+    swing_high_series = pd.Series(swing_high)
+    swing_low_series = pd.Series(swing_low)
+    last_swing_high = swing_high_series.ffill().bfill().values
+    last_swing_low = swing_low_series.ffill().bfill().values
     
-    # Session filter: 8-20 UTC (pre-market to post-US close)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    # Align swing levels to 6h timeframe
+    swing_high_aligned = align_htf_to_ltf(prices, df_1d, last_swing_high, additional_delay_bars=2)
+    swing_low_aligned = align_htf_to_ltf(prices, df_1d, last_swing_low, additional_delay_bars=2)
+    
+    # Daily trend: EMA(50) on close
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume filter: 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0
     
-    start_idx = max(20, 24, 34)  # Wait for all indicators
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
-        # Skip if any indicator is NaN
-        if (np.isnan(donch_high_4h_aligned[i]) or np.isnan(donch_low_4h_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_24[i])):
+        if (np.isnan(swing_high_aligned[i]) or np.isnan(swing_low_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)  # UTC 8-20
-        
         if position == 0:
-            # Long: price breaks above 4h Donchian high with volume and 1d uptrend
-            vol_condition = volume[i] > vol_ma_24[i] * 2.0
-            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
-            
-            if close[i] > donch_high_4h_aligned[i] and vol_condition and uptrend and in_session:
-                signals[i] = 0.20
+            # Long: retest of swing low in uptrend with volume
+            if (close[i] > swing_low_aligned[i] * 1.001 and  # slight penetration
+                ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1] and  # daily uptrend
+                volume[i] > vol_ma_20[i] * 1.5):
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 4h Donchian low with volume and 1d downtrend
-            elif close[i] < donch_low_4h_aligned[i] and vol_condition and not uptrend and in_session:
-                signals[i] = -0.20
+            # Short: retest of swing high in downtrend with volume
+            elif (close[i] < swing_high_aligned[i] * 0.999 and  # slight penetration
+                  ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1] and  # daily downtrend
+                  volume[i] > vol_ma_20[i] * 1.5):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price returns to 4h Donchian low or volume drops
-            if close[i] < donch_low_4h_aligned[i] or volume[i] < vol_ma_24[i] * 1.5:
+            # Exit: trend reversal or failure to hold above swing low
+            if (ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1] or  # trend change
+                close[i] < swing_low_aligned[i] * 0.995):  # break below swing low
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: price returns to 4h Donchian high or volume drops
-            if close[i] > donch_high_4h_aligned[i] or volume[i] < vol_ma_24[i] * 1.5:
+            # Exit: trend reversal or failure to hold below swing high
+            if (ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1] or  # trend change
+                close[i] > swing_high_aligned[i] * 1.005):  # break above swing high
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-# Hypothesis: 1h Donchian breakout with 4h structure and 1d trend filter
-# - 4h Donchian channels (20-period) provide structural support/resistance
-# - Breakout above 4h Donchian high with volume spike in 1d uptrend = long
-# - Breakdown below 4h Donchian low with volume spike in 1d downtrend = short
-# - Volume confirmation (2x average) filters false breakouts
-# - Session filter (8-20 UTC) avoids low-liquidity Asian session
-# - Position size 0.20 targets 15-35 trades/year to avoid fee drag
-# - Works in bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend)
+# Hypothesis: 6s swing retest strategy
+# - Uses daily swing points (5-bar fractals) as key support/resistance levels
+# - Long when price retests and holds above daily swing low in uptrend with volume
+# - Short when price retests and holds below daily swing high in downtrend with volume
+# - Swing points are structural levels that work in both trending and ranging markets
+# - Requires volume confirmation (1.5x average) to avoid false breakouts
+# - Exits on trend reversal or break of the swing level
+# - Targets 15-35 trades/year by requiring confluence of trend, level, and volume
+# - Works in bull markets (buying swing low retests) and bear markets (selling swing high retests)
