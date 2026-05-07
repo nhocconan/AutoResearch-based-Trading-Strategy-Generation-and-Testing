@@ -3,20 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Chaikin Oscillator with 1d EMA34 trend filter and volume confirmation.
-# Chaikin Oscillator = EMA3(ADL) - EMA10(ADL), where ADL = Money Flow Volume cumulative.
-# Long when Chaikin > 0 AND EMA13 rising AND price > 1d EMA34 AND volume > 1.5x 20-period average.
-# Short when Chaikin < 0 AND EMA13 falling AND price < 1d EMA34 AND volume > 1.5x 20-period average.
-# Exit when Chaikin crosses zero or volume filter fails.
-# Designed for 12h timeframe with low trade frequency (target: 15-25/year) to avoid fee drag.
-# Uses 1d EMA34 for trend filter and Chaikin Oscillator for institutional flow confirmation.
-name = "12h_ChaikinOscillator_1dEMA34_VolumeFilter"
-timeframe = "12h"
+# Hypothesis: 6h Ichimoku Cloud breakout with 1d trend filter and volume confirmation.
+# Long when: price > Ichimoku cloud (Senkou Span A & B), Tenkan > Kijun, price > 1d EMA50, volume > 1.5x 20-period average.
+# Short when: price < Ichimoku cloud, Tenkan < Kijun, price < 1d EMA50, volume > 1.5x 20-period average.
+# Exit when price crosses back into cloud or volume filter fails.
+# Ichimoku components: Tenkan (9-period), Kijun (26-period), Senkou Span A/B (26-period, displaced 26 periods).
+# Uses 1d EMA50 for trend filter to avoid counter-trend trades.
+# Volume filter ensures participation and avoids low-conviction moves.
+# Designed for 6h timeframe with moderate trade frequency (target: 15-30/year) to avoid fee drag.
+name = "6h_Ichimoku_1dEMA50_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,36 +25,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Money Flow Volume = ((Close - Low) - (High - Close)) / (High - Low) * Volume
-    # Avoid division by zero
-    hl_range = high - low
-    mf_multiplier = np.where(hl_range != 0, ((close - low) - (high - close)) / hl_range, 0.0)
-    mf_volume = mf_multiplier * volume
+    # Ichimoku components: Tenkan-sen (9-period), Kijun-sen (26-period)
+    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan = (high_9 + low_9) / 2
     
-    # ADL = cumulative sum of Money Flow Volume
-    adl = np.cumsum(mf_volume)
+    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun = (high_26 + low_26) / 2
     
-    # Chaikin Oscillator = EMA3(ADL) - EMA10(ADL)
-    adl_series = pd.Series(adl)
-    ema3_adl = adl_series.ewm(span=3, adjust=False, min_periods=3).mean().values
-    ema10_adl = adl_series.ewm(span=10, adjust=False, min_periods=10).mean().values
-    chaikin = ema3_adl - ema10_adl
+    # Senkou Span A and B (26-period, displaced 26 periods)
+    senkou_a = ((tenkan + kijun) / 2)
+    senkou_b = (pd.Series(high).rolling(window=52, min_periods=52).max().values + 
+                pd.Series(low).rolling(window=52, min_periods=52).min().values) / 2
     
-    # EMA13 for trend and zero-cross confirmation
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema13_rising = ema13[1:] > ema13[:-1]
-    ema13_falling = ema13[1:] < ema13[:-1]
-    ema13_rising = np.concatenate([[False], ema13_rising])
-    ema13_falling = np.concatenate([[False], ema13_falling])
+    # Displace Senkou Span A and B by 26 periods forward
+    senkou_a_leading = np.full_like(senkou_a, np.nan)
+    senkou_b_leading = np.full_like(senkou_b, np.nan)
+    if len(senkou_a) >= 26:
+        senkou_a_leading[26:] = senkou_a[:-26]
+        senkou_b_leading[26:] = senkou_b[:-26]
     
-    # 1d EMA34 for trend filter
+    # 1d EMA50 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -62,21 +62,25 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Sufficient warmup for indicators
+    start_idx = 52 + 26  # Sufficient warmup for Ichimoku (52 for Senkou B, 26 for displacement)
     
     for i in range(start_idx, n):
-        if (np.isnan(chaikin[i]) or np.isnan(ema13[i]) or np.isnan(ema13_rising[i]) or 
-            np.isnan(ema13_falling[i]) or np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or np.isnan(senkou_a_leading[i]) or 
+            np.isnan(senkou_b_leading[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Cloud top and bottom (Senkou Span A and B)
+        cloud_top = np.maximum(senkou_a_leading[i], senkou_b_leading[i])
+        cloud_bottom = np.minimum(senkou_a_leading[i], senkou_b_leading[i])
+        
         if position == 0:
-            # Long conditions: Chaikin > 0, EMA13 rising, price > 1d EMA34, volume filter
-            long_cond = (chaikin[i] > 0) and ema13_rising[i] and (close[i] > ema34_1d_aligned[i]) and volume_filter[i]
-            # Short conditions: Chaikin < 0, EMA13 falling, price < 1d EMA34, volume filter
-            short_cond = (chaikin[i] < 0) and ema13_falling[i] and (close[i] < ema34_1d_aligned[i]) and volume_filter[i]
+            # Long conditions: price > cloud, Tenkan > Kijun, price > 1d EMA50, volume filter
+            long_cond = (close[i] > cloud_top) and (tenkan[i] > kijun[i]) and (close[i] > ema50_1d_aligned[i]) and volume_filter[i]
+            # Short conditions: price < cloud, Tenkan < Kijun, price < 1d EMA50, volume filter
+            short_cond = (close[i] < cloud_bottom) and (tenkan[i] < kijun[i]) and (close[i] < ema50_1d_aligned[i]) and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -85,15 +89,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Chaikin crosses below zero OR volume filter fails
-            if chaikin[i] <= 0 or not volume_filter[i]:
+            # Long exit: price falls below cloud top OR volume filter fails
+            if close[i] < cloud_top or not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Chaikin crosses above zero OR volume filter fails
-            if chaikin[i] >= 0 or not volume_filter[i]:
+            # Short exit: price rises above cloud bottom OR volume filter fails
+            if close[i] > cloud_bottom or not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
