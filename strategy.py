@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_1w_TurtleBreakout"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 150:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,67 +17,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE for Camarilla pivot and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Load weekly data ONCE for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # Camarilla pivot levels from previous day (standard formula)
-    c_high = df_1d['high'].values
-    c_low = df_1d['low'].values
-    c_close = df_1d['close'].values
+    # Weekly EMA10 for trend filter
+    ema_10_1w = pd.Series(df_1w['close'].values).ewm(span=10, adjust=False, min_periods=10).mean().values
+    ema_10_aligned = align_htf_to_ltf(prices, df_1w, ema_10_1w)
     
-    pivot = (c_high + c_low + c_close) / 3
-    range_val = c_high - c_low
-    r1 = pivot + (range_val * 1.1 / 12)
-    s1 = pivot - (range_val * 1.1 / 12)
+    # Daily Donchian channels (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Align pivot levels to 4h timeframe
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
-    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
-    
-    # Daily EMA20 for trend filter
-    ema_20_1d = pd.Series(c_close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h = align_htf_to_ltf(prices, df_1d, ema_20_1d)
-    
-    # Volume spike detection (1.5x 20-period average)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Daily ATR for position sizing and stop (14-period)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)
+    start_idx = max(20, 14)
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or 
-            np.isnan(ema_20_4h[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(ema_10_aligned[i]) or np.isnan(atr_14[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_condition = volume[i] > vol_ma_20[i] * 1.5
-        
         if position == 0:
-            # Long: break above R1 in daily uptrend with volume
-            if close[i] > r1_4h[i] and ema_20_4h[i] > ema_20_4h[i-1] and vol_condition:
+            # Long: break above 20-day high in weekly uptrend
+            if close[i] > high_20[i] and ema_10_aligned[i] > ema_10_aligned[i-1]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 in daily downtrend with volume
-            elif close[i] < s1_4h[i] and ema_20_4h[i] < ema_20_4h[i-1] and vol_condition:
+            # Short: break below 20-day low in weekly downtrend
+            elif close[i] < low_20[i] and ema_10_aligned[i] < ema_10_aligned[i-1]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price returns to pivot or trend reverses
-            if close[i] < pivot_4h[i] or ema_20_4h[i] < ema_20_4h[i-1]:
+            # Exit: price returns to 20-day low or weekly trend reverses
+            if close[i] < low_20[i] or ema_10_aligned[i] < ema_10_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price returns to pivot or trend reverses
-            if close[i] > pivot_4h[i] or ema_20_4h[i] > ema_20_4h[i-1]:
+            # Exit: price returns to 20-day high or weekly trend reverses
+            if close[i] > high_20[i] or ema_10_aligned[i] > ema_10_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -85,13 +77,13 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R1/S1 breakouts with daily trend filter and volume confirmation
-# - Camarilla R1/S1 represent immediate support/resistance levels from previous day
-# - Breakout above R1 in daily uptrend (EMA20 rising) signals bullish continuation
-# - Breakdown below S1 in daily downtrend (EMA20 falling) signals bearish continuation
-# - Volume confirmation (1.5x average) reduces false breakouts
-# - Exit when price returns to pivot point or daily trend reverses
-# - Position size 0.25 targets ~20-40 trades/year to avoid fee drag
-# - Works in both bull (breakouts in uptrend) and bear (breakdowns in downtrend)
-# - Uses 1d timeframe for structure and trend, 4h for execution timing
-# - Tighter entry conditions than R3/S3 variants to reduce trade frequency while maintaining edge
+# Hypothesis: Turtle-style breakout on daily timeframe with weekly trend filter
+# - Enter long when price breaks above 20-day high during weekly uptrend (EMA10 rising)
+# - Enter short when price breaks below 20-day low during weekly downtrend (EMA10 falling)
+# - Exit when price returns to 20-day low/high or weekly trend reverses
+# - Position size 0.25 limits drawdown during adverse moves (e.g., 2022 crash)
+# - Weekly trend filter ensures we only trade in the direction of higher timeframe momentum
+# - Works in bull markets (breakouts in uptrend) and bear markets (breakdowns in downtrend)
+# - Low trade frequency (~10-25/year) minimizes fee drag
+# - Uses actual Donchian breakouts (proven effective) with proper trend alignment
+# - Avoids overtrading by requiring clear weekly trend alignment for entries
