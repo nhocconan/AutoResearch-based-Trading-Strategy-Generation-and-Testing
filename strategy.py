@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
-# 1D_Vortex_Trend_Reversal_Volume
-# Hypothesis: 1d strategy using Vortex Indicator (VI) for trend direction and reversal signals with volume confirmation.
-# Goes long when VI+ crosses above VI- (bullish reversal) with volume > 1.5x average, short when VI- crosses above VI+ (bearish reversal) with volume > 1.5x average.
-# Uses weekly trend filter (weekly EMA50) to only take trades in direction of higher timeframe trend.
-# Exits when opposite Vortex crossover occurs. Designed for low trade frequency (<50/year) to avoid fee drag.
-# Works in both bull and bear markets by aligning with weekly trend.
+# 6H_RSI2_EDGE_1DTrend_Volume
+# Hypothesis: RSI(2) extreme reversals filtered by 1d trend and volume. Uses oversold RSI(2)<10 for long in 1d uptrend, overbought RSI(2)>90 for short in 1d downtrend. Volume confirmation >1.5x average reduces false signals. Works in both bull/bear by trading with higher timeframe trend. Target: 60-120 trades over 4 years.
 
-name = "1D_Vortex_Trend_Reversal_Volume"
-timeframe = "1d"
+name = "6H_RSI2_EDGE_1DTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -19,84 +15,70 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) == 0:
+    # Get 1d data for trend filter and volume context
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) == 0:
         return np.zeros(n)
     
-    # Calculate Vortex Indicator (VI) on daily data
-    # VM+ = |current high - previous low|
-    # VM- = |current low - previous high|
-    vm_plus = np.abs(high - np.roll(low, 1))
-    vm_minus = np.abs(low - np.roll(high, 1))
-    # Set first value to 0 to avoid using future data
-    vm_plus[0] = 0
-    vm_minus[0] = 0
+    # Calculate RSI(2) on 6h close
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
+    avg_loss = loss.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
+    # Calculate 1d EMA34 for trend filter
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Smooth VI components (14-period)
-    n_period = 14
-    vi_plus = pd.Series(vm_plus).rolling(window=n_period, min_periods=n_period).sum().values / \
-              pd.Series(tr).rolling(window=n_period, min_periods=n_period).sum().values
-    vi_minus = pd.Series(vm_minus).rolling(window=n_period, min_periods=n_period).sum().values / \
-               pd.Series(tr).rolling(window=n_period, min_periods=n_period).sum().values
-    
-    # Weekly trend filter: EMA50 on weekly close
-    weekly_close = df_1w['close'].values
-    ema50_1w = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    
-    # Volume confirmation: 1.5x average volume (50-period for stability)
+    # Volume spike detection: 1.5x average volume (50-period for stability)
     vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 50)  # Ensure we have VI, weekly EMA, and volume MA data
+    start_idx = max(2, 34, 50)  # Ensure we have RSI, EMA, and volume data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(vi_plus[i]) or np.isnan(vi_minus[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(rsi_values[i]) or np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: VI+ crosses above VI- (bullish reversal) AND price above weekly EMA50 (uptrend filter) AND volume spike
-            if (vi_plus[i] > vi_minus[i] and vi_plus[i-1] <= vi_minus[i-1] and  # crossover
-                close[i] > ema50_1w_aligned[i] and
+            # Long: RSI(2) oversold (<10), price above 1d EMA34 (uptrend), volume spike (>1.5x)
+            if (rsi_values[i] < 10 and 
+                close[i] > ema34_1d_aligned[i] and 
                 volume[i] > 1.5 * vol_ma[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: VI- crosses above VI+ (bearish reversal) AND price below weekly EMA50 (downtrend filter) AND volume spike
-            elif (vi_minus[i] > vi_plus[i] and vi_minus[i-1] <= vi_plus[i-1] and  # crossover
-                  close[i] < ema50_1w_aligned[i] and
+            # Short: RSI(2) overbought (>90), price below 1d EMA34 (downtrend), volume spike (>1.5x)
+            elif (rsi_values[i] > 90 and 
+                  close[i] < ema34_1d_aligned[i] and 
                   volume[i] > 1.5 * vol_ma[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: VI- crosses above VI+ (bearish reversal)
-            if vi_minus[i] > vi_plus[i] and vi_minus[i-1] <= vi_plus[i-1]:
+            # Exit: RSI(2) returns to neutral (>50) or price breaks below 1d EMA34
+            if rsi_values[i] > 50 or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: VI+ crosses above VI- (bullish reversal)
-            if vi_plus[i] > vi_minus[i] and vi_plus[i-1] <= vi_minus[i-1]:
+            # Exit: RSI(2) returns to neutral (<50) or price breaks above 1d EMA34
+            if rsi_values[i] < 50 or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
