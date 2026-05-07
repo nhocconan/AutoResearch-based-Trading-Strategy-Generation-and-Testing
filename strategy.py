@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_4H_Close_VWAP_Retest_1dTrend_Volume
-Hypothesis: Price returning to and bouncing off the 4-hour VWAP, aligned with 1-day EMA50 trend and volume confirmation, captures high-probability mean-reversion bounces in trending markets. Works in bull (bounces off VWAP in uptrend) and bear (short rejections at VWAP in downtrend). Low-frequency signals via 4h timeframe and confluence of VWAP, trend, and volume.
+4h_RSI_MeanReversion_Stochastic_Exit_1dTrend
+Hypothesis: Combines RSI oversold/overbought conditions with Stochastic exit signals in the direction of the 1-day EMA50 trend. Works in bull markets by buying RSI<30 during uptrends and in bear markets by selling RSI>70 during downtrends. The Stochastic oscillator provides timely exits to avoid whipsaw, and volume confirmation filters low-probability signals. Designed for low-frequency, high-conviction trades on the 4h timeframe.
 """
-name = "4h_4H_Close_VWAP_Retest_1dTrend_Volume"
+name = "4h_RSI_MeanReversion_Stochastic_Exit_1dTrend"
 timeframe = "4h"
 leverage = 1.0
 
@@ -21,25 +21,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 4h VWAP: cumulative (price * volume) / cumulative volume
-    typical_price = (high + low + close) / 3.0
-    pv = typical_price * volume
-    cum_pv = np.nancumsum(pv)
-    cum_vol = np.nancumsum(volume)
-    vwap = np.divide(cum_pv, cum_vol, out=np.full_like(cum_pv, np.nan), where=cum_vol!=0)
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Get 1d data for trend filter
+    # Stochastic(14,3,3)
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
+    k = 100 * (close - lowest_low) / (highest_high - lowest_low + 1e-10)
+    d = pd.Series(k).rolling(window=3, min_periods=3).mean()
+    
+    # 1d EMA50 for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
-    
-    # 1d EMA50 for trend filter
     ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume filter: current volume > 1.5 * 20-period average
+    # Volume filter: current volume > 1.3 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_avg * 1.5)
+    volume_filter = volume > (vol_avg * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -48,31 +54,31 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data is not ready
-        if (np.isnan(vwap[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(rsi[i]) or np.isnan(d[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price crosses above VWAP + 1d uptrend + volume
-            if close[i] > vwap[i] and close[i] > ema_50_1d_aligned[i] and volume_filter[i]:
+            # Long: RSI < 30 (oversold) + 1d uptrend + volume
+            if rsi[i] < 30 and close[i] > ema_50_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price crosses below VWAP + 1d downtrend + volume
-            elif close[i] < vwap[i] and close[i] < ema_50_1d_aligned[i] and volume_filter[i]:
+            # Short: RSI > 70 (overbought) + 1d downtrend + volume
+            elif rsi[i] > 70 and close[i] < ema_50_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: price crosses back through VWAP in opposite direction
+            # Exit using Stochastic: long exits when %D crosses above 80, short exits when %D crosses below 20
             if position == 1:
-                if close[i] < vwap[i]:
+                if d[i] > 80:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > vwap[i]:
+                if d[i] < 20:
                     signals[i] = 0.0
                     position = 0
                 else:
