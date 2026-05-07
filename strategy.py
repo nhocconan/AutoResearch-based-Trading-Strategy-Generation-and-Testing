@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R with 1d trend filter and volume confirmation
-# Williams %R identifies overbought/oversold conditions; combined with 1d EMA trend
-# and volume spikes to capture reversals in both bull and bear markets.
-# Target: 20-50 trades/year per symbol to avoid excessive fee drag.
-name = "4h_WilliamsR_1dTrend_Volume"
-timeframe = "4h"
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d trend filter and volume confirmation.
+# Elder Ray uses EMA13 to measure bull/bear power, capturing institutional buying/selling pressure.
+# Combined with 1d EMA34 trend filter to trade with higher timeframe momentum.
+# Volume spikes confirm institutional participation. Designed for 6-12 trades/year per symbol.
+# Works in both bull and bear markets by following 1d trend direction.
+name = "6h_ElderRay_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,7 +22,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for trend filter
+    # Load 1d data ONCE for trend filter and EMA13 calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -30,23 +31,26 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Williams %R (14-period) on 4h data
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Calculate EMA13 for Elder Ray (using 1d close)
+    ema_13_1d = pd.Series(df_1d['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
     
-    # 4h volume average for spike detection
-    vol_ema_4h = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike = np.where(vol_ema_4h > 0, volume / vol_ema_4h, 1.0) > 1.5
+    # Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high - ema_13_1d_aligned
+    bear_power = low - ema_13_1d_aligned
+    
+    # 6h volume average for spike detection (20-period EMA)
+    vol_ema_6h = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_spike = np.where(vol_ema_6h > 0, volume / vol_ema_6h, 1.0) > 1.8
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Sufficient warmup for Williams %R and EMA
+    start_idx = 100  # Sufficient warmup for EMA calculations
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(vol_spike[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(ema_13_1d_aligned[i]) or 
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -57,10 +61,10 @@ def generate_signals(prices):
         downtrend = close[i] < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Long entry: Williams %R oversold (< -80) with volume spike in uptrend
-            long_condition = (williams_r[i] < -80) and vol_spike[i] and uptrend
-            # Short entry: Williams %R overbought (> -20) with volume spike in downtrend
-            short_condition = (williams_r[i] > -20) and vol_spike[i] and downtrend
+            # Long: Bull Power positive (buying pressure) with volume spike in uptrend
+            long_condition = (bull_power[i] > 0) and vol_spike[i] and uptrend
+            # Short: Bear Power negative (selling pressure) with volume spike in downtrend
+            short_condition = (bear_power[i] < 0) and vol_spike[i] and downtrend
             
             if long_condition:
                 signals[i] = 0.25
@@ -69,15 +73,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Williams %R returns above -50 or trend turns down
-            if (williams_r[i] > -50) or (not uptrend):
+            # Exit: Bull Power turns negative or trend turns down
+            if (bull_power[i] <= 0) or (not uptrend):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Williams %R returns below -50 or trend turns up
-            if (williams_r[i] < -50) or (not downtrend):
+            # Exit: Bear Power turns positive or trend turns up
+            if (bear_power[i] >= 0) or (not downtrend):
                 signals[i] = 0.0
                 position = 0
             else:
