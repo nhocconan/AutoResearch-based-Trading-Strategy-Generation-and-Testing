@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# 1d_KAMA_RSI_Chop_Filter_v4
-# Hypothesis: Daily KAMA trend with RSI mean-reversion and Choppiness index regime filter.
-# KAMA adapts to market noise - effective in both trending and ranging markets.
-# RSI provides mean-reversion signals within the trend context.
-# Choppiness index filters for ranging markets (CHOP > 61.8) where mean reversion works best.
-# Designed for low trade frequency (10-25/year) with high win rate in ranging markets.
+# 1h_RSI_OverboughtOversold_4hTrend_1dVolume
+# Hypothesis: 1-hour RSI mean reversion with 4-hour trend filter and 1-day volume confirmation.
+# Works in bull/bear markets by using RSI extremes only when aligned with higher timeframe trend.
+# Long: RSI < 30 on 1h, price above 4h EMA50 (uptrend), volume > 1.5x 20-day average.
+# Short: RSI > 70 on 1h, price below 4h EMA50 (downtrend), volume > 1.5x 20-day average.
+# Exit: RSI returns to neutral zone (40-60) or opposing extreme triggers reversal.
+# Designed for 15-30 trades/year with controlled risk via trend alignment and volume filter.
 
-name = "1d_KAMA_RSI_Chop_Filter_v4"
-timeframe = "1d"
+name = "1h_RSI_OverboughtOversold_4hTrend_1dVolume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -24,103 +25,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter and chop calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) == 0:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) == 0:
         return np.zeros(n)
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average) on weekly close
-    close_1w = df_1w['close'].values
-    # Efficiency Ratio
-    change = np.abs(np.diff(close_1w, 10))  # 10-period change
-    volatility = np.sum(np.abs(np.diff(close_1w)), axis=1)  # 10-period volatility
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2  # fast=2, slow=30
-    # KAMA calculation
-    kama = np.full_like(close_1w, np.nan)
-    kama[29] = close_1w[29]  # seed
-    for i in range(30, len(close_1w)):
-        kama[i] = kama[i-1] + sc[i] * (close_1w[i] - kama[i-1])
-    kama_1w = kama
+    # Get 1d data for volume filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) == 0:
+        return np.zeros(n)
     
-    # Align KAMA to daily timeframe
-    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
+    # Calculate 4h EMA50 for trend filter
+    close_4h = df_4h['close'].values
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
-    # Calculate RSI(14) on daily close
+    # Calculate 1-day average volume (20-day for stability)
+    volume_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    
+    # Calculate 1-hour RSI (14-period)
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
     rsi = 100 - (100 / (1 + rs))
-    
-    # Calculate Choppiness Index on weekly data
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    # True Range
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.maximum.reduce([tr1, tr2, tr3])
-    tr = np.concatenate([[np.nan], tr])  # align with index
-    # ATR(14)
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    # Highest high and lowest low over 14 periods
-    hh = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
-    # Chop calculation
-    chop = np.where((hh - ll) != 0, 100 * np.log10(np.sum(atr, axis=1) / (hh - ll)) / np.log10(14), 50)
-    chop = np.concatenate([[np.nan] * 13, chop[13:]])  # align with index
-    chop_1w = chop
-    
-    # Align Chop to daily timeframe
-    chop_1w_aligned = align_htf_to_ltf(prices, df_1w, chop_1w)
-    
-    # Volume spike detection: 1.5x average volume (50-period for stability)
-    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 50)  # Ensure we have KAMA, RSI, Chop, and volume MA data
+    start_idx = max(14, 50, 20)  # Ensure we have RSI, EMA50, and volume MA data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(kama_1w_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(chop_1w_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(rsi[i]) or np.isnan(ema50_4h_aligned[i]) or 
+            np.isnan(vol_ma_1d_aligned[i]) or vol_ma_1d_aligned[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price below KAMA (dip in uptrend), RSI oversold, choppy market (mean reversion regime)
-            if (close[i] < kama_1w_aligned[i] and 
-                rsi[i] < 30 and 
-                chop_1w_aligned[i] > 61.8):
-                signals[i] = 0.25
+            # Long: RSI oversold (<30), price above 4h EMA50 (uptrend), volume spike
+            if (rsi[i] < 30 and 
+                close[i] > ema50_4h_aligned[i] and 
+                volume[i] > 1.5 * vol_ma_1d_aligned[i]):
+                signals[i] = 0.20
                 position = 1
-            # Short: price above KAMA (pullback in downtrend), RSI overbought, choppy market
-            elif (close[i] > kama_1w_aligned[i] and 
-                  rsi[i] > 70 and 
-                  chop_1w_aligned[i] > 61.8):
-                signals[i] = -0.25
+            # Short: RSI overbought (>70), price below 4h EMA50 (downtrend), volume spike
+            elif (rsi[i] > 70 and 
+                  close[i] < ema50_4h_aligned[i] and 
+                  volume[i] > 1.5 * vol_ma_1d_aligned[i]):
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit: price crosses above KAMA or RSI overbought
-            if (close[i] > kama_1w_aligned[i] or rsi[i] > 70):
+            # Exit: RSI returns to neutral (>=40) or reverses to overbought
+            if rsi[i] >= 40:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit: price crosses below KAMA or RSI oversold
-            if (close[i] < kama_1w_aligned[i] or rsi[i] < 30):
+            # Exit: RSI returns to neutral (<=60) or reverses to oversold
+            if rsi[i] <= 60:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
