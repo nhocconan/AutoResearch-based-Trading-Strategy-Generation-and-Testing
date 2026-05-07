@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-# 12h_KAMA_1dTrend_Volume
-# Hypothesis: Uses Kaufman Adaptive Moving Average (KAMA) on 1d timeframe to determine trend direction, filtered by 1w volume spike and ADX trend strength. KAMA adapts to market noise, reducing false signals in choppy markets. Volume confirms institutional interest, and ADX ensures we only trade in strong trends. Works in both bull and bear markets by following the higher timeframe trend.
+# 4h_RSI_Trend_Squeeze_Bounce
+# Hypothesis: Combines RSI mean reversion with trend alignment and volatility squeeze to capture high-probability bounces in both bull and bear markets.
+# Uses 1-day RSI (14) for mean reversion signals (oversold/overbought), aligned with 4-hour trend (EMA50) and Bollinger Band squeeze (low volatility) for entry.
+# Exits on RSI mean reversion or trend violation. Designed for low trade frequency (20-40/year) to minimize fee drag while maintaining edge in choppy and trending regimes.
+# Works in bull markets by buying oversold dips in uptrends and in bear markets by selling overbought rallies in downtrends.
 
-name = "12h_KAMA_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_RSI_Trend_Squeeze_Bounce"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -12,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,108 +23,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for KAMA trend and volume calculation
+    # Get 1-day data for RSI and Bollinger Bands
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate KAMA (10, 2, 30) on 1d close
+    # Calculate 1-day RSI (14-period)
     close_1d = df_1d['close'].values
-    er = np.zeros_like(close_1d)
-    for i in range(10, len(close_1d)):
-        change = abs(close_1d[i] - close_1d[i-10])
-        vol_sum = np.sum(np.abs(close_1d[i-9:i+1] - close_1d[i-10:i]))
-        er[i] = change / vol_sum if vol_sum != 0 else 0
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2
-    kama = np.full_like(close_1d, np.nan)
-    kama[9] = close_1d[9]
-    for i in range(10, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Get 1w data for ADX trend strength
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
+    # Wilder's smoothing (equivalent to EMA with alpha=1/14)
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[13] = np.mean(gain[1:14])  # First average of first 14 gains
+    avg_loss[13] = np.mean(loss[1:14])  # First average of first 14 losses
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    for i in range(14, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # Calculate ADX (14-period) on 1w data
-    plus_dm = np.zeros_like(high_1w)
-    minus_dm = np.zeros_like(high_1w)
-    tr = np.zeros_like(high_1w)
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d[:14] = np.nan  # Not enough data for first 14 periods
     
-    for i in range(1, len(high_1w)):
-        plus_dm[i] = max(high_1w[i] - high_1w[i-1], 0) if (high_1w[i] - high_1w[i-1]) > (low_1w[i-1] - low_1w[i]) else 0
-        minus_dm[i] = max(low_1w[i-1] - low_1w[i], 0) if (low_1w[i-1] - low_1w[i]) > (high_1w[i] - high_1w[i-1]) else 0
-        tr[i] = max(high_1w[i] - low_1w[i], abs(high_1w[i] - close_1w[i-1]), abs(low_1w[i] - close_1w[i-1]))
+    # Calculate Bollinger Bands (20, 2) on 1-day
+    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
+    bb_width = (upper_bb - lower_bb) / sma_20  # Normalized width
     
-    atr = np.zeros_like(high_1w)
-    atr[13] = np.mean(tr[1:14])
-    for i in range(14, len(high_1w)):
-        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    # Align 1D indicators to 4h
+    rsi_1d_4h = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    bb_width_4h = align_htf_to_ltf(prices, df_1d, bb_width)
     
-    plus_di = 100 * (np.zeros_like(high_1w))
-    minus_di = 100 * (np.zeros_like(high_1w))
-    for i in range(14, len(high_1w)):
-        plus_di[i] = 100 * (np.mean(plus_dm[i-13:i+1]) / atr[i]) if atr[i] != 0 else 0
-        minus_di[i] = 100 * (np.mean(minus_dm[i-13:i+1]) / atr[i]) if atr[i] != 0 else 0
-    
-    dx = np.zeros_like(high_1w)
-    for i in range(14, len(high_1w)):
-        dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i]) if (plus_di[i] + minus_di[i]) != 0 else 0
-    
-    adx = np.zeros_like(high_1w)
-    adx[27] = np.mean(dx[14:28])
-    for i in range(28, len(high_1w)):
-        adx[i] = (adx[i-1] * 13 + dx[i]) / 14
-    
-    # Align indicators to 12h timeframe
-    kama_12h = align_htf_to_ltf(prices, df_1d, kama)
-    adx_12h = align_htf_to_ltf(prices, df_1w, adx)
-    
-    # Calculate volume spike on 1d (20-period average)
-    volume_1d = df_1d['volume'].values
-    vol_ma_20 = np.zeros_like(volume_1d)
-    for i in range(19, len(volume_1d)):
-        vol_ma_20[i] = np.mean(volume_1d[i-19:i+1])
-    volume_spike = np.zeros_like(volume_1d, dtype=bool)
-    for i in range(19, len(volume_1d)):
-        volume_spike[i] = volume_1d[i] > (2.0 * vol_ma_20[i])
-    volume_spike_12h = align_htf_to_ltf(prices, df_1d, volume_spike)
+    # Calculate 4-hour EMA50 for trend filter
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(50, n):  # Start after EMA50 warmup
         # Skip if any critical value is NaN
-        if (np.isnan(kama_12h[i]) or np.isnan(adx_12h[i]) or 
-            np.isnan(volume_spike_12h[i])):
+        if (np.isnan(rsi_1d_4h[i]) or np.isnan(bb_width_4h[i]) or np.isnan(ema_50[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price above KAMA + ADX > 25 (strong trend) + volume spike
-            if close[i] > kama_12h[i] and adx_12h[i] > 25 and volume_spike_12h[i]:
+            # Long: RSI oversold (<30) + low volatility squeeze (BB width < 0.05) + price above EMA50 (uptrend)
+            if rsi_1d_4h[i] < 30 and bb_width_4h[i] < 0.05 and close[i] > ema_50[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price below KAMA + ADX > 25 (strong trend) + volume spike
-            elif close[i] < kama_12h[i] and adx_12h[i] > 25 and volume_spike_12h[i]:
+            # Short: RSI overbought (>70) + low volatility squeeze (BB width < 0.05) + price below EMA50 (downtrend)
+            elif rsi_1d_4h[i] > 70 and bb_width_4h[i] < 0.05 and close[i] < ema_50[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Price crosses below KAMA or ADX drops below 20 (weakening trend)
-            if close[i] < kama_12h[i] or adx_12h[i] < 20:
+            # Exit: RSI mean reversion (>50) or price breaks below EMA50 (trend failure)
+            if rsi_1d_4h[i] > 50 or close[i] < ema_50[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price crosses above KAMA or ADX drops below 20 (weakening trend)
-            if close[i] > kama_12h[i] or adx_12h[i] < 20:
+            # Exit: RSI mean reversion (<50) or price breaks above EMA50 (trend failure)
+            if rsi_1d_4h[i] < 50 or close[i] > ema_50[i]:
                 signals[i] = 0.0
                 position = 0
             else:
