@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v3"
-timeframe = "4h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume_Spike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtd_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -26,7 +26,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla levels from previous 1d bar
+    # Get previous 1d bar for Camarilla levels
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
     prev_close = df_1d['close'].shift(1).values
@@ -34,17 +34,13 @@ def generate_signals(prices):
     # Calculate Camarilla levels
     range_ = prev_high - prev_low
     R1 = prev_close + range_ * 1.1 / 12
-    R4 = prev_close + range_ * 1.1 / 2
     S1 = prev_close - range_ * 1.1 / 12
-    S4 = prev_close - range_ * 1.1 / 2
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
     
-    # Volume filter: current volume > 2.0x 24-period average (4 days for 4h)
+    # Volume filter: current volume > 2.0x 24-period average (12 days for 12h)
     vol_ma_24 = np.full(n, np.nan)
     for i in range(24, n):
         vol_ma_24[i] = np.mean(volume[i-24:i])
@@ -53,7 +49,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 6  # ~1 day for 4h to reduce trades
+    cooldown_bars = 4  # ~2 days for 12h to reduce trades
     
     start_idx = max(100, 24, 34)
     
@@ -111,9 +107,8 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike.
+# Hypothesis: Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike on 12h timeframe.
 # Long when price breaks above R1 in uptrend with volume confirmation.
 # Short when price breaks below S1 in downtrend with volume confirmation.
-# Uses 4h timeframe for optimal balance of signal quality and trade frequency.
-# Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
+# Uses 12h timeframe to reduce trade frequency and minimize fee drag.
 # Works in bull markets (breakouts in uptrend) and bear markets (breakdowns in downtrend).
