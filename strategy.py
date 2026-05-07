@@ -1,13 +1,6 @@
-# 1h_RSI_Divergence_Trend_Confirmation
-# Hypothesis: 1-hour RSI with bullish/bearish divergence detection combined with 4h trend filter (EMA50) and volume confirmation. 
-# Works in bull markets: RSI bullish divergence during pullbacks in uptrend signals long entries.
-# Works in bear markets: RSI bearish divergence during rallies in downtrend signals short entries.
-# Volume confirmation ensures institutional participation, reducing false signals.
-# Target: 15-35 trades/year per symbol by requiring confluence of RSI divergence, trend alignment, and volume spike.
-
 #!/usr/bin/env python3
-name = "1h_RSI_Divergence_Trend_Confirmation"
-timeframe = "1h"
+name = "6h_Adaptive_Keltner_Breakout_Trend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,91 +17,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h data ONCE before loop for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 4h EMA(50) for trend filter
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate daily ATR(14) for Keltner Channels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate RSI(14) on 1h
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    high_low = high_1d - low_1d
+    high_close = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    low_close = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate volume moving average (20-period)
+    # Calculate daily EMA(34) for trend and midline
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Keltner Channel: midline = EMA(34), upper/lower = EMA(34) ± 2*ATR(14)
+    upper_keltner = ema_34 + 2 * atr_1d
+    lower_keltner = ema_34 - 2 * atr_1d
+    
+    # Align to 6h timeframe
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    upper_keltner_aligned = align_htf_to_ltf(prices, df_1d, upper_keltner)
+    lower_keltner_aligned = align_htf_to_ltf(prices, df_1d, lower_keltner)
+    
+    # Volume spike detection (20-period average on 6h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Volatility filter using ATR ratio to avoid chop
+    high_low_6h = high - low
+    high_close_6h = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
+    low_close_6h = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
+    tr_6h = np.maximum(high_low_6h, np.maximum(high_close_6h, low_close_6h))
+    atr_6h = pd.Series(tr_6h).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for RSI and EMA stabilization
+    start_idx = max(20, 14)  # Wait for volume MA and ATR
     
     for i in range(start_idx, n):
-        if np.isnan(ema_50_4h_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema_34_aligned[i]) or np.isnan(upper_keltner_aligned[i]) or np.isnan(lower_keltner_aligned[i]) or \
+           np.isnan(vol_ma[i]) or np.isnan(atr_6h[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume spike condition (current volume > 1.5x 20-period average)
-        vol_spike = volume[i] > vol_ma[i] * 1.5
-        
-        # Check for RSI divergence (look back 5 periods for swing points)
-        if i >= 5:
-            # Recent price swings
-            recent_high = np.max(high[i-4:i+1])
-            recent_low = np.min(low[i-4:i+1])
-            prev_high = np.max(high[i-9:i-4]) if i >= 9 else recent_high
-            prev_low = np.min(low[i-9:i-4]) if i >= 9 else recent_low
-            
-            # RSI at corresponding points
-            rsi_recent = rsi[i-4:i+1]
-            rsi_prev = rsi[i-9:i-4] if i >= 9 else rsi_recent
-            
-            # Bullish divergence: price makes lower low, RSI makes higher low
-            bull_div = (low[i] < low[i-4]) and (rsi[i] > rsi[i-4]) and (recent_low < prev_low)
-            # Bearish divergence: price makes higher high, RSI makes lower high
-            bear_div = (high[i] > high[i-4]) and (rsi[i] < rsi[i-4]) and (recent_high > prev_high)
-        else:
-            bull_div = bear_div = False
-        
         if position == 0:
-            # Long: RSI bullish divergence, price above 4h EMA50 (uptrend), volume spike
-            if bull_div and close[i] > ema_50_4h_aligned[i] and vol_spike:
-                signals[i] = 0.20
+            # Long: break above upper Keltner with volume and in uptrend
+            vol_condition = volume[i] > vol_ma[i] * 1.5
+            uptrend = close[i] > ema_34_aligned[i]
+            
+            if close[i] > upper_keltner_aligned[i] and vol_condition and uptrend:
+                signals[i] = 0.25
                 position = 1
-            # Short: RSI bearish divergence, price below 4h EMA50 (downtrend), volume spike
-            elif bear_div and close[i] < ema_50_4h_aligned[i] and vol_spike:
-                signals[i] = -0.20
+            # Short: break below lower Keltner with volume and in downtrend
+            elif close[i] < lower_keltner_aligned[i] and vol_condition and not uptrend:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: RSI bearish divergence or price below 4h EMA50
-            if bear_div or close[i] < ema_50_4h_aligned[i]:
+            # Exit: price back below midline or volatility spike
+            if close[i] < ema_34_aligned[i] or atr_6h[i] > np.median(atr_6h[max(0, i-50):i+1]) * 3:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: RSI bullish divergence or price above 4h EMA50
-            if bull_div or close[i] > ema_50_4h_aligned[i]:
+            # Exit: price back above midline or volatility spike
+            if close[i] > ema_34_aligned[i] or atr_6h[i] > np.median(atr_6h[max(0, i-50):i+1]) * 3:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-# RSI divergence with trend filter and volume confirmation strategy.
-# Enters on RSI divergence (bullish for longs, bearish for shorts) only when aligned with 4h trend.
-# Volume spike confirms institutional participation.
-# Exits on opposite divergence or trend violation.
-# Position size 0.20 limits risk while allowing meaningful returns.
-# Designed for 15-35 trades/year to minimize fee drag while capturing meaningful moves.
+# Hypothesis: 6s adaptive Keltner breakout with trend filter and volume confirmation.
+# Uses daily EMA(34) as midline and ATR(14) for dynamic channel width.
+# Breaks above/below Keltner channels with volume indicate institutional interest.
+# Trend filter ensures trades align with daily direction.
+# Volatility filter prevents whipsaws in choppy markets.
+# Works in bull (buy upper breaks in uptrend) and bear (sell lower breaks in downtrend).
+# Position size 0.25 balances risk and keeps trade frequency ~10-25/year.
