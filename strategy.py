@@ -1,7 +1,6 @@
-# Solution
 #!/usr/bin/env python3
-name = "1d_Keltner_RSI_Trend_v1"
-timeframe = "1d"
+name = "6h_Alligator_ElderRay_Trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -10,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,70 +17,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get 12h data for Alligator and Elder Ray
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Weekly EMA20 for trend direction
-    weekly_close = df_1w['close'].values
-    ema_20_1w = pd.Series(weekly_close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Williams Alligator (13,8,5 SMAs)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Daily ATR(14) for Keltner channels
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    jaw = pd.Series(high_12h).rolling(window=13, min_periods=13).mean().values  # Blue line
+    teeth = pd.Series(high_12h).rolling(window=8, min_periods=8).mean().values   # Red line
+    lips = pd.Series(high_12h).rolling(window=5, min_periods=5).mean().values   # Green line
     
-    # Daily EMA20 for Keltner center
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_12h, lips)
     
-    # Keltner channels (2.0 * ATR)
-    upper_keltner = ema_20 + 2.0 * atr
-    lower_keltner = ema_20 - 2.0 * atr
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13 (using 12h close)
+    close_12h = df_12h['close'].values
+    ema13_12h = pd.Series(close_12h).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high_12h - ema13_12h
+    bear_power = low_12h - ema13_12h
+    bull_power_aligned = align_htf_to_ltf(prices, df_12h, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_12h, bear_power)
     
-    # Daily RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Volume filter: current volume > 1.3 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ok = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 14)  # Need 20 for EMA, 14 for ATR/RSI
+    start_idx = max(13, 20)  # Need 13 for Alligator/Elder Ray, 20 for volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(ema_20_1w_aligned[i]) or np.isnan(atr[i]) or np.isnan(rsi[i]):
+        # Skip if any required data is NaN
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(bull_power_aligned[i]) or 
+            np.isnan(bear_power_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above upper Keltner, RSI > 50, weekly uptrend
-            if close[i] > upper_keltner[i] and rsi[i] > 50 and ema_20_1w_aligned[i] > ema_20_1w_aligned[i-1]:
+            # Long: Lips above Teeth above Jaw (bullish alignment) AND Bull Power > 0 AND volume
+            if (lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i] and 
+                bull_power_aligned[i] > 0 and volume_ok[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below lower Keltner, RSI < 50, weekly downtrend
-            elif close[i] < lower_keltner[i] and rsi[i] < 50 and ema_20_1w_aligned[i] < ema_20_1w_aligned[i-1]:
+            # Short: Lips below Teeth below Jaw (bearish alignment) AND Bear Power < 0 AND volume
+            elif (lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i] and 
+                  bear_power_aligned[i] < 0 and volume_ok[i]):
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: price returns to Keltner middle or RSI reverts
+            # Exit conditions
             if position == 1:
-                if close[i] < ema_20[i] or rsi[i] < 50:
+                # Exit long: Alligator alignment breaks down OR Bull Power turns negative
+                if not (lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i]) or bull_power_aligned[i] <= 0:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > ema_20[i] or rsi[i] > 50:
+                # Exit short: Alligator alignment breaks down OR Bear Power turns positive
+                if not (lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i]) or bear_power_aligned[i] >= 0:
                     signals[i] = 0.0
                     position = 0
                 else:
