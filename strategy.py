@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R3_S3_Breakout_1wTrend_Volume_Confirm
-# Hypothesis: Combines weekly trend filter (1w EMA50) with Camarilla R3/S3 breakout
-# on 4h timeframe. Uses volume spike confirmation (2x 50-period average) to filter
-# false breaks. Weekly trend ensures alignment with longer-term momentum, reducing
-# whipsaw in choppy markets. Target: 20-30 trades/year to minimize fee drag.
-# Works in bull/bear by following higher timeframe trend while using tight entry.
+# 1d_WeeklyPivot_RangeBreakout_WeekTrend_Filter
+# Hypothesis: On 1d timeframe, buy when price breaks above weekly pivot R1 with weekly uptrend (EMA50),
+# sell when breaks below S1 with weekly downtrend. Uses volume confirmation to avoid false breaks.
+# Weekly trend filter reduces whipsaw in ranging markets. Target: 15-25 trades/year to minimize fee drag.
+# Works in bull (breaks upward) and bear (breaks downward) via symmetric long/short logic.
 
-name = "4h_Camarilla_R3_S3_Breakout_1wTrend_Volume_Confirm"
-timeframe = "4h"
+name = "1d_WeeklyPivot_RangeBreakout_WeekTrend_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,78 +23,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
+    # Get weekly data for pivot calculation and trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 60:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    # Weekly EMA50 for trend filter
+    
+    # Calculate weekly pivot points (classic formula)
+    pivot = (high_1w + low_1w + close_1w) / 3.0
+    r1 = 2 * pivot - low_1w
+    s1 = 2 * pivot - high_1w
+    
+    # Weekly trend filter: EMA50
     ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_4h = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Get 1d data for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
-        return np.zeros(n)
+    # Align weekly indicators to daily timeframe
+    r1_1d = align_htf_to_ltf(prices, df_1w, r1)
+    s1_1d = align_htf_to_ltf(prices, df_1w, s1)
+    ema_50_1w_1d = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla pivot levels: R3, S3
-    camarilla_range = high_1d - low_1d
-    r3 = close_1d + 1.1 * camarilla_range / 4
-    s3 = close_1d - 1.1 * camarilla_range / 4
-    
-    r3_4h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_4h = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # Volume spike filter on 4h (50-period average)
-    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
-    volume_spike = volume > (2.0 * vol_ma_50)
+    # Volume confirmation: 20-day average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_entry = 0
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any critical value is NaN
-        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or 
-            np.isnan(ema_50_1w_4h[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(r1_1d[i]) or np.isnan(s1_1d[i]) or 
+            np.isnan(ema_50_1w_1d[i]) or np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             continue
         
-        bars_since_entry += 1
-        
         if position == 0:
-            # Long: Price > R3, above weekly EMA50 trend, volume spike
-            if close[i] > r3_4h[i] and close[i] > ema_50_1w_4h[i] and volume_spike[i]:
+            # Long: Price breaks above R1, above weekly EMA50 trend, volume confirmation
+            if close[i] > r1_1d[i] and close[i] > ema_50_1w_1d[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-                bars_since_entry = 0
-            # Short: Price < S3, below weekly EMA50 trend, volume spike
-            elif close[i] < s3_4h[i] and close[i] < ema_50_1w_4h[i] and volume_spike[i]:
+            # Short: Price breaks below S1, below weekly EMA50 trend, volume confirmation
+            elif close[i] < s1_1d[i] and close[i] < ema_50_1w_1d[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
-                bars_since_entry = 0
         elif position == 1:
-            # Exit: price closes below R3 or below weekly trend
-            if close[i] < r3_4h[i] or close[i] < ema_50_1w_4h[i]:
+            # Exit long: price breaks below S1 or weekly trend turns down
+            if close[i] < s1_1d[i] or close[i] < ema_50_1w_1d[i]:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price closes above S3 or above weekly trend
-            if close[i] > s3_4h[i] or close[i] > ema_50_1w_4h[i]:
+            # Exit short: price breaks above R1 or weekly trend turns up
+            if close[i] > r1_1d[i] or close[i] > ema_50_1w_1d[i]:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             else:
                 signals[i] = -0.25
     
