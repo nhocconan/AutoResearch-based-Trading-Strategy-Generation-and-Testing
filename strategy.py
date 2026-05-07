@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_1d_Camarilla_R3S3_Breakout_Trend_Volume"
-timeframe = "4h"
+name = "1d_1w_Camarilla_Pullback_Trend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,69 +17,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # Daily R3 and S3 from previous day (stronger support/resistance)
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Weekly trend: EMA(10) on weekly close
+    ema_10_1w = pd.Series(df_1w['close']).ewm(span=10, adjust=False, min_periods=10).mean().values
+    ema_10_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_10_1w)
     
+    # Daily price action: previous day's high/low/close for Camarilla
+    prev_high = pd.Series(high).shift(1).values
+    prev_low = pd.Series(low).shift(1).values
+    prev_close = pd.Series(close).shift(1).values
+    
+    # Calculate daily Camarilla levels from previous day
     pivot = (prev_high + prev_low + prev_close) / 3
     range_hl = prev_high - prev_low
     
-    # Camarilla R3 and S3 levels
-    s3 = prev_close - (range_hl * 1.26 / 4)
-    r3 = prev_close + (range_hl * 1.26 / 4)
+    s1 = prev_close - (range_hl * 1.08 / 2)
+    r1 = prev_close + (range_hl * 1.08 / 2)
     
-    # Align daily levels to 4h timeframe
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    
-    # Daily trend filter: EMA(34) on daily close
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume spike detection: 6-period average (1.5 days of 4h bars)
-    vol_ma_6 = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
+    # Volume filter: 5-day average volume
+    vol_ma_5 = pd.Series(volume).rolling(window=5, min_periods=5).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Wait for EMA
+    start_idx = max(10, 5)  # Wait for weekly EMA and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or np.isnan(vol_ma_6[i])):
+        if (np.isnan(ema_10_1w_aligned[i]) or np.isnan(s1[i]) or 
+            np.isnan(r1[i]) or np.isnan(vol_ma_5[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above S3 with volume and daily uptrend
-            vol_condition = volume[i] > vol_ma_6[i] * 2.0
-            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
+            # Long: pullback to S1 in weekly uptrend with volume
+            vol_condition = volume[i] > vol_ma_5[i] * 1.5
+            weekly_uptrend = ema_10_1w_aligned[i] > ema_10_1w_aligned[i-1]
             
-            if close[i] > s3_aligned[i] and vol_condition and uptrend:
+            if low[i] <= s1[i] and vol_condition and weekly_uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below R3 with volume and daily downtrend
-            elif close[i] < r3_aligned[i] and vol_condition and not uptrend:
+            # Short: pullback to R1 in weekly downtrend with volume
+            elif high[i] >= r1[i] and vol_condition and not weekly_uptrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below S3 or volume drops significantly
-            if close[i] < s3_aligned[i] or volume[i] < vol_ma_6[i] * 1.3:
+            # Exit: price moves above pivot or volume drops
+            if high[i] > pivot[i] or volume[i] < vol_ma_5[i] * 0.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above R3 or volume drops significantly
-            if close[i] > r3_aligned[i] or volume[i] < vol_ma_6[i] * 1.3:
+            # Exit: price moves below pivot or volume drops
+            if low[i] < pivot[i] or volume[i] < vol_ma_5[i] * 0.8:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -87,12 +83,13 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with daily trend and volume confirmation
-# - Uses stronger R3/S3 levels (not S1/R1) for higher conviction trades
-# - Breakout above S3 with volume in daily uptrend = long opportunity
-# - Breakdown below R3 with volume in daily downtrend = short opportunity
-# - Volume spike (2.0x average) confirms strong institutional participation
-# - Works in both bull (buy S3 breaks in uptrend) and bear (sell R3 breaks in downtrend)
-# - Exit when price returns to S3/R3 or volume weakens
-# - Position size 0.25 targets ~20-40 trades/year to minimize fee drag
-# - R3/S3 levels are less frequently touched but more significant than S1/R1
+# Hypothesis: Daily Camarilla S1/R1 pullback strategy with weekly trend filter
+# - In weekly uptrend: buy pullbacks to daily S1 (support) with volume confirmation
+# - In weekly downtrend: sell pullbacks to daily R1 (resistance) with volume confirmation
+# - Uses actual daily price action (not intraday) for cleaner signals
+# - Weekly EMA(10) filter ensures trading with the higher timeframe trend
+# - Volume spike (1.5x average) confirms institutional interest at pullback
+# - Exit when price returns to daily pivot or volume wanes
+# - Position size 0.25 targets ~15-25 trades/year, minimizing fee drag
+# - Works in both bull (buy S1 pullbacks in uptrend) and bear (sell R1 pullbacks in downtrend) markets
+# - Designed for 1d timeframe to reduce trade frequency and improve generalization
