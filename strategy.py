@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Ehlers Fisher Transform with 1d trend filter and volume confirmation.
-# Fisher Transform highlights turning points with Gaussian probability distribution.
-# Long when Fisher crosses above -1.5 AND price > 1d EMA50 AND volume > 1.5x 20-period average.
-# Short when Fisher crosses below +1.5 AND price < 1d EMA50 AND volume > 1.5x 20-period average.
-# Exit when Fisher crosses back through zero.
-# Designed for 6h timeframe with low trade frequency (target: 10-25/year) to avoid fee drag.
-# Uses 1d EMA50 for trend filter to avoid counter-trend trades.
-# Volume filter ensures participation and avoids low-conviction moves.
-name = "6h_FisherTransform_1dEMA50_VolumeFilter"
-timeframe = "6h"
+# Hypothesis: 12h Williams %R with 1w EMA20 trend filter and volume confirmation.
+# Williams %R measures overbought/oversold levels. Long when %R < -80 (oversold) in uptrend (price > 1w EMA20).
+# Short when %R > -20 (overbought) in downtrend (price < 1w EMA20).
+# Volume filter ensures participation (volume > 1.5x 20-period average).
+# Designed for 12h timeframe with low trade frequency (target: 15-25/year) to avoid fee drag.
+# Uses 1w EMA20 for trend filter to avoid counter-trend trades in strong trends.
+# Williams %R is effective in ranging markets and captures reversals in trends.
+name = "12h_WilliamsR_1wEMA20_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,40 +24,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Ehlers Fisher Transform (9-period)
-    price = (high + low) / 2
-    # Normalize price to [-1, 1] range over 9 periods
-    max_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    min_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    range_val = max_high - min_low
-    # Avoid division by zero
-    range_val = np.where(range_val == 0, 1e-10, range_val)
-    value1 = 2 * ((price - min_low) / range_val - 0.5)
-    value1 = np.clip(value1, -0.999, 0.999)
+    # Williams %R (14 period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when high == low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Smooth with 2-period EMA
-    value2 = np.zeros_like(value1)
-    value2[0] = value1[0]
-    for i in range(1, len(value1)):
-        value2[i] = 0.5 * value1[i] + 0.5 * value2[i-1]
-    
-    # Fisher Transform
-    fish = np.zeros_like(value2)
-    fish[0] = 0.0
-    for i in range(1, len(value2)):
-        fish[i] = 0.5 * np.log((1 + value2[i]) / (1 - value2[i])) + 0.5 * fish[i-1]
-    
-    # EMA50 for trend
-    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # 1d EMA50 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # 1w EMA20 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    close_1w = df_1w['close'].values
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -67,23 +47,20 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Sufficient warmup for indicators
+    start_idx = 20  # Sufficient warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(fish[i]) or np.isnan(ema50[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(volume_filter[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema20_1w_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: Fisher crosses above -1.5, price > 1d EMA50, volume filter
-            fish_cross_up = fish[i] > -1.5 and fish[i-1] <= -1.5
-            long_cond = fish_cross_up and (close[i] > ema50_1d_aligned[i]) and volume_filter[i]
-            # Short conditions: Fisher crosses below +1.5, price < 1d EMA50, volume filter
-            fish_cross_down = fish[i] < 1.5 and fish[i-1] >= 1.5
-            short_cond = fish_cross_down and (close[i] < ema50_1d_aligned[i]) and volume_filter[i]
+            # Long conditions: Williams %R < -80 (oversold), price > 1w EMA20 (uptrend), volume filter
+            long_cond = (williams_r[i] < -80) and (close[i] > ema20_1w_aligned[i]) and volume_filter[i]
+            # Short conditions: Williams %R > -20 (overbought), price < 1w EMA20 (downtrend), volume filter
+            short_cond = (williams_r[i] > -20) and (close[i] < ema20_1w_aligned[i]) and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -92,15 +69,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Fisher crosses below zero
-            if fish[i] < 0 and fish[i-1] >= 0:
+            # Long exit: Williams %R > -20 (overbought) OR price < 1w EMA20 (trend change)
+            if williams_r[i] > -20 or close[i] < ema20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Fisher crosses above zero
-            if fish[i] > 0 and fish[i-1] <= 0:
+            # Short exit: Williams %R < -80 (oversold) OR price > 1w EMA20 (trend change)
+            if williams_r[i] < -80 or close[i] > ema20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
