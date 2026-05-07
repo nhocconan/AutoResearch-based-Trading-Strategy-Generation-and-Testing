@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Bollinger_Squeeze_Momentum_200EMA"
-timeframe = "4h"
+name = "6h_Weekly_Pivot_Donchian_Breakout_With_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,79 +17,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for Bollinger Bands and 200 EMA
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # Daily Bollinger Bands (20, 2.0)
-    close_1d = df_1d['close'].values
-    sma20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma20 + 2.0 * std20
-    lower_bb = sma20 - 2.0 * std20
+    # Calculate weekly pivot point and support/resistance levels
+    # Weekly Pivot Point = (weekly high + weekly low + weekly close) / 3
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Daily 200 EMA for trend filter
-    ema200 = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
+    weekly_range = weekly_high - weekly_low
     
-    # Align daily indicators to 4h timeframe
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
-    ema200_aligned = align_htf_to_ltf(prices, df_1d, ema200)
+    # Weekly support/resistance levels
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    weekly_s1 = 2 * weekly_pivot - weekly_high
+    weekly_r2 = weekly_pivot + weekly_range
+    weekly_s2 = weekly_pivot - weekly_range
+    weekly_r3 = weekly_high + 2 * (weekly_pivot - weekly_low)
+    weekly_s3 = weekly_low - 2 * (weekly_high - weekly_pivot)
     
-    # 4h Bollinger Band width for squeeze detection
-    sma20_4h = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std20_4h = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_bb_4h = sma20_4h + 2.0 * std20_4h
-    lower_bb_4h = sma20_4h - 2.0 * std20_4h
-    bb_width = (upper_bb_4h - lower_bb_4h) / sma20_4h
+    # Align weekly levels to 6h timeframe
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
+    weekly_r2_aligned = align_htf_to_ltf(prices, df_1w, weekly_r2)
+    weekly_s2_aligned = align_htf_to_ltf(prices, df_1w, weekly_s2)
+    weekly_r3_aligned = align_htf_to_ltf(prices, df_1w, weekly_r3)
+    weekly_s3_aligned = align_htf_to_ltf(prices, df_1w, weekly_s3)
     
-    # Bollinger Band width percentile (20-period) for squeeze
-    bb_width_percentile = pd.Series(bb_width).rolling(window=20, min_periods=20).rank(pct=True).values
+    # 6h Donchian channel (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 4h volume confirmation (above 1.5x 20-period average)
-    vol_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > 1.5 * vol_ma_4h
+    # 6h volume filter: > 1.5x 20-period average
+    vol_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > 1.5 * vol_ma_6h
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicators to stabilize
+    start_idx = max(20, 20)  # Wait for Donchian and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or 
-            np.isnan(ema200_aligned[i]) or np.isnan(bb_width_percentile[i])):
+        if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_r1_aligned[i]) or 
+            np.isnan(weekly_s1_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Bollinger Band squeeze: low volatility percentile
-            squeeze_condition = bb_width_percentile[i] < 0.2
-            
-            # Long: Price breaks above upper BB with volume, during squeeze, above daily 200 EMA
-            if (squeeze_condition and close[i] > upper_bb_4h[i] and vol_confirm[i] and 
-                close[i] > ema200_aligned[i]):
+            # Long: Break above weekly R1 with Donchian breakout and volume filter
+            if (close[i] > weekly_r1_aligned[i] and 
+                close[i] > donchian_high[i] and vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below lower BB with volume, during squeeze, below daily 200 EMA
-            elif (squeeze_condition and close[i] < lower_bb_4h[i] and vol_confirm[i] and 
-                  close[i] < ema200_aligned[i]):
+            # Short: Break below weekly S1 with Donchian breakout and volume filter
+            elif (close[i] < weekly_s1_aligned[i] and 
+                  close[i] < donchian_low[i] and vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Price returns to middle BB or volatility expands
-            middle_bb_4h = sma20_4h[i]
-            if close[i] < middle_bb_4h or bb_width_percentile[i] > 0.8:
+            # Exit: Price below weekly pivot or Donchian breakdown
+            if close[i] < weekly_pivot_aligned[i] or close[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price returns to middle BB or volatility expands
-            middle_bb_4h = sma20_4h[i]
-            if close[i] > middle_bb_4h or bb_width_percentile[i] > 0.8:
+            # Exit: Price above weekly pivot or Donchian breakout
+            if close[i] > weekly_pivot_aligned[i] or close[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -97,7 +99,8 @@ def generate_signals(prices):
     
     return signals
 
-# Bollinger squeeze strategy: enters during low volatility breakouts with volume confirmation
-# Uses daily 200 EMA for trend filter and daily Bollinger Bands for dynamic S/R
-# Position size 0.25 limits risk. Target ~20-40 trades/year to minimize fee drag.
-# Exit on return to middle Bollinger Band or volatility expansion.
+# Hypothesis: Weekly pivot points act as strong support/resistance levels that 
+# institutional traders watch. Combining with Donchian breakouts and volume 
+# confirmation creates high-probability trades. Weekly timeframe provides 
+# structural bias that works in both bull and bear markets, while 6s timeframe 
+# allows timely execution. Target: 20-60 trades/year to minimize fee drag.
