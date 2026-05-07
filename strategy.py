@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,11 +17,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d OHLC for Camarilla calculation
+    # 1d EMA34 trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 1:
         return np.zeros(n)
     
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    trend_up = close > ema_34_1d_aligned
+    trend_down = close < ema_34_1d_aligned
+    
+    # Daily OHLC for Camarilla calculation
     daily_high = df_1d['high'].values
     daily_low = df_1d['low'].values
     daily_close = df_1d['close'].values
@@ -30,17 +37,11 @@ def generate_signals(prices):
     camarilla_r1 = daily_close + (daily_high - daily_low) * 1.1 / 12
     camarilla_s1 = daily_close - (daily_high - daily_low) * 1.1 / 12
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # 1d EMA34 trend
-    ema_34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    trend_up = close > ema_34_1d_aligned
-    trend_down = close < ema_34_1d_aligned
-    
-    # Volume filter: current volume > 2.0x 24-period average (12h bars = 12 days)
+    # Volume filter: current volume > 2.0x 24-period average (4h bars = 4 days)
     vol_ma_24 = np.full(n, np.nan)
     for i in range(24, n):
         vol_ma_24[i] = np.mean(volume[i-24:i])
@@ -49,7 +50,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 4  # ~2 days (4*12h) to prevent overtrading
+    cooldown_bars = 6  # ~1 day (6*4h) to prevent overtrading
     
     start_idx = 24  # Volume MA needs 24 bars
     
@@ -107,4 +108,4 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: On 12h timeframe, price breaking above/below Camarilla R1/S1 levels with volume confirmation and 1d EMA34 trend filter captures institutional breakout momentum. Camarilla levels provide mathematically derived support/resistance with institutional relevance. Works in bull markets (breakouts above R1 in 1d uptrend) and bear markets (breakdowns below S1 in 1d downtrend). Target: 50-150 trades over 4 years (12-37/year) to minimize fee drag while capturing significant moves. 1d trend filter ensures alignment with higher timeframe momentum.
+# Hypothesis: On 4h timeframe, price breaking above/below Camarilla R1/S1 levels with volume confirmation and 1d EMA34 trend filter captures institutional breakout momentum. Camarilla levels provide mathematically derived support/resistance with institutional relevance. The 1d EMA34 trend filter ensures alignment with higher timeframe momentum. Works in bull markets (breakouts above R1 in 1d uptrend) and bear markets (breakdowns below S1 in 1d downtrend). Target: 75-200 trades over 4 years (19-50/year) to minimize fee drag while capturing significant moves. Volume filter adds confirmation of institutional participation. Cooldown period prevents overtrading.
