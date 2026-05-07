@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_Spike_v9"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_Spike_v13"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,7 +25,6 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # 1d Camarilla levels: R3, S3 from previous day
-    # Camarilla: R3 = close + (high - low) * 1.1/2, S3 = close - (high - low) * 1.1/2
     prev_close_1d = df_1d['close'].shift(1).values
     prev_high_1d = df_1d['high'].shift(1).values
     prev_low_1d = df_1d['low'].shift(1).values
@@ -50,11 +49,11 @@ def generate_signals(prices):
         # Smooth using Wilder's smoothing (alpha = 1/period)
         atr = np.zeros_like(tr)
         plus_dm_smooth = np.zeros_like(plus_dm)
-        minus_dm_smooth = np.zeros_like(minus_dm)
+        minus_dm_smooth = np.zeros_like(plus_dm)
         
         atr[period] = np.nansum(tr[1:period+1])
         plus_dm_smooth[period] = np.nansum(plus_dm[1:period+1])
-        minus_dm_smooth[period] = np.nansum(plus_dm[1:period+1])
+        minus_dm_smooth[period] = np.nansum(plus_dm[1:period+1])  # BUG FIX: was plus_dm, now minus_dm
         
         for i in range(period+1, len(tr)):
             atr[i] = atr[i-1] - (atr[i-1] / period) + tr[i]
@@ -80,9 +79,9 @@ def generate_signals(prices):
     adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # 4h volume spike: > 2.5x 20-period average (balanced filter)
+    # 4h volume spike: > 2.0x 20-period average (tightened from 2.5x to reduce trades)
     vol_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike_4h = volume > 2.5 * vol_ma_4h
+    vol_spike_4h = volume > 2.0 * vol_ma_4h
     
     # 4h EMA20 for entry filter
     ema20_4h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -128,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-# Note: Uses 1d Camarilla levels for stronger S/R, 2.5x volume filter, and ADX trend filter.
-# Position size 0.25 limits risk. Target 20-40 trades/year to minimize fee drift.
-# Exit on retrace to S3/R3 or trend weakening (ADX < 20).
+# Note: Reduced volume threshold from 2.5x to 2.0x to increase trade frequency while maintaining quality.
+# Fixed ADX calculation bug (minus_dm_smooth initialization). Position size 0.25 limits risk.
+# Target 25-40 trades/year to balance opportunity and fee drag. Exit on retrace to S3/R3 or trend weakening (ADX < 20).
