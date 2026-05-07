@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1wTrend_Volume
-# Hypothesis: 12h chart strategy using weekly pivot-based R1/S1 breakouts filtered by 1w EMA50 trend and volume confirmation (1.5x average volume).
-# Weekly R1/S1 act as strong support/resistance with high probability of reversal or breakout.
-# 1w EMA50 provides trend filter to avoid counter-trend trades. Volume confirms breakout validity.
-# Designed to work in both bull and bear markets by filtering with trend and requiring volume confirmation.
-# Target: 15-30 trades/year per symbol to minimize fee drag while maintaining edge.
+# 4h_VWAP_Reversion_Pullback
+# Hypothesis: 4h mean reversion to VWAP with trend filter and volume confirmation.
+# Strategy buys when price pulls back to VWAP in uptrend with volume confirmation,
+# and sells when price rallies to VWAP in downtrend with volume confirmation.
+# Works in both bull and bear markets by trading pullbacks to VWAP in the direction
+# of the higher timeframe trend. Uses VWAP as dynamic support/resistance.
 
-timeframe = "12h"
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend_Volume"
+timeframe = "4h"
+name = "4h_VWAP_Reversion_Pullback"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,67 +24,65 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot points (R1, S1) and trend filter (EMA50)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) == 0:
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) == 0:
         return np.zeros(n)
     
-    # Calculate weekly EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate daily EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate weekly pivot points: R1, S1
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    pivot_point = (high_1w + low_1w + close_1w) / 3
-    pivot_r1 = 2 * pivot_point - low_1w
-    pivot_s1 = 2 * pivot_point - high_1w
+    # Calculate VWAP for 4h chart (cumulative from session start)
+    typical_price = (high + low + close) / 3.0
+    pv = typical_price * volume
+    cum_pv = np.nancumsum(pv)
+    cum_vol = np.nancumsum(volume)
+    vwap = np.divide(cum_pv, cum_vol, out=np.zeros_like(cum_pv), where=cum_vol!=0)
     
-    pivot_r1_aligned = align_htf_to_ltf(prices, df_1w, pivot_r1)
-    pivot_s1_aligned = align_htf_to_ltf(prices, df_1w, pivot_s1)
-    
-    # Volume spike detection: 1.5x average volume (2-period = 1 day on 12h chart)
-    vol_ma = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
+    # Volume spike detection: 1.5x average volume (6-period = 1 day on 4h chart)
+    vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 2)  # Ensure we have EMA50 and volume MA data
+    start_idx = max(50, 6)  # Ensure we have EMA50 and volume MA data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(pivot_r1_aligned[i]) or 
-            np.isnan(pivot_s1_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(vwap[i]) or 
+            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above weekly R1 with volume, and 1w trend is bullish (price > EMA50)
-            if (high[i] > pivot_r1_aligned[i] and 
-                volume[i] > 1.5 * vol_ma[i] and 
-                close[i] > ema_50_1w_aligned[i]):
+            # Long: price pulls back to VWAP from below in uptrend with volume
+            if (low[i] <= vwap[i] <= high[i] and  # price touches VWAP
+                close[i] > vwap[i] and           # closes above VWAP (bounce)
+                close[i] > ema_50_1d_aligned[i] and  # uptrend filter
+                volume[i] > 1.5 * vol_ma[i]):    # volume confirmation
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly S1 with volume, and 1w trend is bearish (price < EMA50)
-            elif (low[i] < pivot_s1_aligned[i] and 
-                  volume[i] > 1.5 * vol_ma[i] and 
-                  close[i] < ema_50_1w_aligned[i]):
+            # Short: price rallies to VWAP from above in downtrend with volume
+            elif (low[i] <= vwap[i] <= high[i] and  # price touches VWAP
+                  close[i] < vwap[i] and           # closes below VWAP (rejection)
+                  close[i] < ema_50_1d_aligned[i] and  # downtrend filter
+                  volume[i] > 1.5 * vol_ma[i]):    # volume confirmation
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price breaks below weekly S1 (reversal signal)
-            if low[i] < pivot_s1_aligned[i]:
+            # Exit: price closes below VWAP (break of support)
+            if close[i] < vwap[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price breaks above weekly R1 (reversal signal)
-            if high[i] > pivot_r1_aligned[i]:
+            # Exit: price closes above VWAP (break of resistance)
+            if close[i] > vwap[i]:
                 signals[i] = 0.0
                 position = 0
             else:
