@@ -1,7 +1,8 @@
+# 1
 #!/usr/bin/env python3
 
-name = "1d_Camarilla_R3_S3_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "6h_Ichimoku_Kumo_Twist_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -10,7 +11,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,57 +19,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get 1d data for Ichimoku components
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 52:
         return np.zeros(n)
     
-    # Calculate weekly EMA34 for trend filter
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate daily EMA34 for Camarilla calculation (needs previous day close)
-    close_1d = close
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (period9_high + period9_low) / 2
     
-    # Calculate 1-week trend direction (aligned)
-    close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    trend_1w_up = close_1w_aligned > ema_34_1w_aligned
-    trend_1w_down = close_1w_aligned < ema_34_1w_aligned
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (period26_high + period26_low) / 2
     
-    # Calculate Camarilla levels from previous day's range
-    # Camarilla: H4 = C + 1.1*(H-L)/2, L4 = C - 1.1*(H-L)/2
-    # Where C = previous close, H = previous high, L = previous low
-    prev_close = np.roll(close, 1)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close[0] = np.nan
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
     
-    camarilla_h4 = prev_close + 1.1 * (prev_high - prev_low) / 2
-    camarilla_l4 = prev_close - 1.1 * (prev_high - prev_low) / 2
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    senkou_span_b = (period52_high + period52_low) / 2
     
-    # Volume filter: current volume > 1.5x 20-day average
+    # Align all Ichimoku components to 6h timeframe
+    tenkan_sen_6h = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_sen_6h = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    senkou_span_a_6h = align_htf_to_ltf(prices, df_1d, senkou_span_a)
+    senkou_span_b_6h = align_htf_to_ltf(prices, df_1d, senkou_span_b)
+    
+    # Kumo twist: Senkou Span A crosses above/below Senkou Span B
+    # Kumo twist bullish: Senkou Span A > Senkou Span B
+    # Kumo twist bearish: Senkou Span A < Senkou Span B
+    kumo_twist_bullish = senkou_span_a_6h > senkou_span_b_6h
+    kumo_twist_bearish = senkou_span_a_6h < senkou_span_b_6h
+    
+    # TK Cross: Tenkan-sen crosses Kijun-sen
+    tk_cross_bullish = tenkan_sen_6h > kijun_sen_6h
+    tk_cross_bearish = tenkan_sen_6h < kijun_sen_6h
+    
+    # Price relative to Kumo (cloud)
+    price_above_kumo = (close > senkou_span_a_6h) & (close > senkou_span_b_6h)
+    price_below_kumo = (close < senkou_span_a_6h) & (close < senkou_span_b_6h)
+    
+    # Volume filter: current volume > 1.3x 20-period average
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-20:i])
-    vol_filter = volume > (1.5 * vol_ma_20)
+    vol_filter = volume > (1.3 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 3  # ~3 days for daily to reduce trades
+    cooldown_bars = 12  # ~3 days for 6h to reduce trades
     
-    start_idx = max(34, 20)
+    start_idx = max(52, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(camarilla_h4[i]) or 
-            np.isnan(camarilla_l4[i]) or 
-            np.isnan(trend_1w_up[i]) or 
-            np.isnan(trend_1w_down[i]) or 
+        if (np.isnan(tenkan_sen_6h[i]) or 
+            np.isnan(kijun_sen_6h[i]) or 
+            np.isnan(senkou_span_a_6h[i]) or 
+            np.isnan(senkou_span_b_6h[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -81,31 +97,33 @@ def generate_signals(prices):
         bars_since_last_trade += 1
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: Close above H4 with weekly uptrend and volume
-            if (close[i] > camarilla_h4[i] and 
-                trend_1w_up[i] and 
+            # Long: Kumo twist bullish + TK cross bullish + price above Kumo + volume
+            if (kumo_twist_bullish[i] and 
+                tk_cross_bullish[i] and 
+                price_above_kumo[i] and 
                 vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: Close below L4 with weekly downtrend and volume
-            elif (close[i] < camarilla_l4[i] and 
-                  trend_1w_down[i] and 
+            # Short: Kumo twist bearish + TK cross bearish + price below Kumo + volume
+            elif (kumo_twist_bearish[i] and 
+                  tk_cross_bearish[i] and 
+                  price_below_kumo[i] and 
                   vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit: Close below L4 or trend change
-            if (close[i] < camarilla_l4[i]) or not trend_1w_up[i]:
+            # Exit: Kumo twist bearish or TK cross bearish or price drops below Kumo
+            if (not kumo_twist_bullish[i]) or (not tk_cross_bullish[i]) or (not price_above_kumo[i]):
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Close above H4 or trend change
-            if (close[i] > camarilla_h4[i]) or not trend_1w_down[i]:
+            # Exit: Kumo twist bullish or TK cross bullish or price rises above Kumo
+            if (not kumo_twist_bearish[i]) or (not tk_cross_bearish[i]) or (not price_below_kumo[i]):
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
@@ -114,15 +132,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla H4/L4 levels act as strong support/resistance. 
-# Breakout above H4 in weekly uptrend with volume confirms bullish continuation.
-# Breakdown below L4 in weekly downtrend with volume confirms bearish continuation.
-# Weekly EMA34 filter ensures we trade with the higher timeframe trend.
-# Volume confirmation avoids false breakouts. 3-day cooldown reduces trade frequency.
-# Target: 15-25 trades/year. Works in bull markets by buying H4 breakouts in uptrends
-# and in bear markets by selling L4 breakdowns in downtrends. Daily timeframe 
-# provides sufficient signal quality while minimizing noise. Camarilla levels 
-# are mathematically derived pivot points that work well in crypto markets. 
-# Weekly trend filter ensures alignment with major market direction. Volume 
-# confirms institutional participation. This avoids overtrading by requiring 
-# multiple confirmations: price level, trend direction, and volume.
+# Hypothesis: Ichimoku Kumo twist (Senkou Span A/B cross) indicates trend acceleration, 
+# TK cross confirms momentum alignment, and price position relative to cloud filters 
+# for trend strength. This strategy works in both bull and bear markets by capturing 
+# strong trend continuations. The 6h timeframe reduces noise while Kumo twist provides 
+# early trend signals. Volume confirmation avoids false signals, cooldown reduces 
+# trade frequency to ~15-30 trades/year. Kumo twist is a leading indicator of trend 
+# changes, making it effective for catching new trends early in both directions.
