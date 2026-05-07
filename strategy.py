@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_1d_PivotReversal_TrendConfirm_v1"
-timeframe = "6h"
+name = "12h_1w_1d_TriangleBreakout_VolumeTrend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,89 +17,98 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for Pivot and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load weekly data ONCE before loop for trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate daily Pivot (standard) from previous day
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Load daily data ONCE before loop for triangle pattern
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
+    # Weekly EMA(50) for trend filter
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Pivot support/resistance levels
-    s1 = pivot - range_hl
-    r1 = pivot + range_hl
+    # Daily high/low for ascending/descending triangle detection
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
     
-    # Align daily levels to 6h timeframe
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    # Ascending triangle: flat resistance, rising support
+    # Descending triangle: flat support, falling resistance
     
-    # 12h EMA(34) for trend filter (1d equivalent)
-    df_12h = get_htf_data(prices, '12h')
-    ema_34_12h = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # Calculate resistance (recent highs) and support (recent lows) over last 10 days
+    lookback = 10
+    resistance = np.full(len(daily_high), np.nan)
+    support = np.full(len(daily_low), np.nan)
     
-    # Volume spike detection: 4-period average (1 day of 6h bars)
-    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    for i in range(lookback, len(daily_high)):
+        # Resistance: maximum of recent highs
+        resistance[i] = np.max(daily_high[i-lookback:i])
+        # Support: minimum of recent lows
+        support[i] = np.min(daily_low[i-lookback:i])
+    
+    # Align triangle levels to 12h timeframe
+    resistance_aligned = align_htf_to_ltf(prices, df_1d, resistance)
+    support_aligned = align_htf_to_ltf(prices, df_1d, support)
+    
+    # Volume confirmation: volume above 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 4)  # Wait for EMA and volume MA
+    start_idx = max(50, 20)  # Wait for weekly EMA and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(vol_ma_4[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(resistance_aligned[i]) or 
+            np.isnan(support_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price near S1 with bullish momentum in uptrend
-            vol_condition = volume[i] > vol_ma_4[i] * 1.8
-            uptrend = ema_34_12h_aligned[i] > ema_34_12h_aligned[i-1]
-            price_near_s1 = close[i] <= s1_aligned[i] * 1.005  # Within 0.5% of S1
-            price_above_prev_low = close[i] > low[i-1]  # Higher low
+            # Ascending triangle breakout: price breaks above resistance with volume in weekly uptrend
+            vol_condition = volume[i] > vol_ma_20[i] * 2.0
+            weekly_uptrend = ema_50_1w_aligned[i] > ema_50_1w_aligned[i-1]
             
-            if price_near_s1 and vol_condition and uptrend and price_above_prev_low:
-                signals[i] = 0.25
+            if close[i] > resistance_aligned[i] and vol_condition and weekly_uptrend:
+                signals[i] = 0.30
                 position = 1
-            # Short: price near R1 with bearish momentum in downtrend
-            elif close[i] >= r1_aligned[i] * 0.995 and vol_condition and not uptrend and close[i] < high[i-1]:
-                signals[i] = -0.25
+            # Descending triangle breakout: price breaks below support with volume in weekly downtrend
+            elif close[i] < support_aligned[i] and vol_condition and not weekly_uptrend:
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit: price breaks above R1 or momentum fails
-            if close[i] > r1_aligned[i] * 1.005 or volume[i] < vol_ma_4[i] * 1.2:
+            # Exit: price falls back below support or volume drops
+            if close[i] < support_aligned[i] or volume[i] < vol_ma_20[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit: price breaks below S1 or momentum fails
-            if close[i] < s1_aligned[i] * 0.995 or volume[i] < vol_ma_4[i] * 1.2:
+            # Exit: price rises back above resistance or volume drops
+            if close[i] > resistance_aligned[i] or volume[i] < vol_ma_20[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-# Hypothesis: 6h Pivot S1/R1 reversal with 12h trend and volume confirmation
-# - Daily Pivot S1/R1 act as key support/resistance from prior session
-# - Long when price approaches S1 with bullish signals in 12h uptrend
-# - Short when price approaches R1 with bearish signals in 12h downtrend
-# - Volume spike (1.8x average) confirms institutional participation at key levels
-# - Price action filters: higher low for longs, lower high for shorts
-# - Works in both bull (buy S1 bounces in uptrend) and bear (sell R1 bounces in downtrend)
-# - Exit when price breaks opposite level or volume weakens
-# - Position size 0.25 targets ~20-50 trades/year, avoiding fee drag
-# - Uses actual daily Pivot levels for better responsiveness vs weekly
-# - 12h trend filter reduces whipsaws vs same timeframe
-# - Novel: Pivot reversal (not breakout) with momentum confirmation on 6h
+# Hypothesis: 12h triangle pattern breakout with weekly trend and volume confirmation
+# - Ascending triangle (flat resistance, rising support) breaks out upward in weekly uptrend
+# - Descending triangle (flat support, falling resistance) breaks down in weekly downtrend
+# - Volume spike (2x average) confirms institutional participation in breakout
+# - Works in both bull (buy ascending breakouts in uptrend) and bear (sell descending breakdowns in downtrend)
+# - Weekly EMA(50) filter ensures alignment with higher timeframe trend
+# - Exit when price returns to opposite triangle boundary or volume weakens
+# - Position size 0.30 targets ~30-80 trades/year, staying within 12h limits
+# - Triangle patterns represent consolidation before continuation, effective in trending markets
+# - Weekly trend filter avoids counter-trend trades during choppy periods
+# - Volume confirmation reduces false breakouts from low participation
+# - Novel application of triangle patterns on 12h timeframe with weekly trend filter
 # - Aims for 50-150 total trades over 4 years (12-37/year) to stay within limits
+# - Uses actual weekly/daily data from Binance, no resampling or synthetic timestamps
