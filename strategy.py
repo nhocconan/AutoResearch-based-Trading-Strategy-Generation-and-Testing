@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume_v1"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume_v2"
 timeframe = "12h"
 leverage = 1.0
 
@@ -23,12 +23,11 @@ def generate_signals(prices):
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous day
+    # Calculate Camarilla levels from previous day
     prev_close = df_1d['close'].shift(1).values
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
     
-    # Calculate Camarilla levels
     camarilla_R3 = prev_high + 1.1 * (prev_high - prev_low)
     camarilla_S3 = prev_low - 1.1 * (prev_high - prev_low)
     
@@ -40,25 +39,25 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume filter: current volume > 1.8x 30-period average (12h)
-    vol_ma_30 = np.full(n, np.nan)
-    for i in range(30, n):
-        vol_ma_30[i] = np.mean(volume[i-30:i])
-    vol_filter = volume > (1.8 * vol_ma_30)
+    # Volume filter: current volume > 2.0x 24-period average (12h)
+    vol_ma_24 = np.full(n, np.nan)
+    for i in range(24, n):
+        vol_ma_24[i] = np.mean(volume[i-24:i])
+    vol_filter = volume > (2.0 * vol_ma_24)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 6  # ~3 days for 12h
+    cooldown_bars = 8  # ~4 days for 12h
     
-    start_idx = max(35, 40)  # Warmup for daily data
+    start_idx = max(40, 45)  # Warmup for daily data
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(R3_aligned[i]) or 
             np.isnan(S3_aligned[i]) or 
             np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(vol_ma_30[i])):
+            np.isnan(vol_ma_24[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -115,6 +114,6 @@ def generate_signals(prices):
 # Short when price breaks below S3 level with volume spike in daily downtrend.
 # Exits on reversal to S3/R3 levels or trend change.
 # Uses daily Camarilla levels for intraday support/resistance and EMA34 for trend.
-# Volume confirmation filters false breakouts. Cooldown prevents overtrading.
+# Volume confirmation filters false breakouts. Increased cooldown prevents overtrading.
 # Target: 20-40 trades/year to avoid fee drift. Works in bull/bear by capturing
 # significant intraday moves with trend alignment. Daily timeframe reduces noise.
