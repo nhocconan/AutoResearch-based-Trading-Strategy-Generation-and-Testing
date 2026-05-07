@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Spike"
-timeframe = "4h"
+name = "6h_Aroon_Trend_With_D1_Pullback_Entry"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,56 +17,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # 1. Get daily data for trend filter and pullback levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 25:
         return np.zeros(n)
     
-    # 1d EMA50 trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # 14-day Aroon to detect strong trends
+    high_14 = df_1d['high'].rolling(window=14, min_periods=14).max().values
+    low_14 = df_1d['low'].rolling(window=14, min_periods=14).min().values
+    aroon_up = ((14 - (df_1d['high'].rolling(window=14, min_periods=14).apply(lambda x: np.argmax(x)))) / 14 * 100).values
+    aroon_down = ((14 - (df_1d['low'].rolling(window=14, min_periods=14).apply(lambda x: np.argmin(x)))) / 14 * 100).values
     
-    # Get 1d data for Camarilla levels
-    if len(df_1d) < 5:
-        return np.zeros(n)
+    # Aroon crossover signals: strong uptrend when Aroon-Up > 70 and Aroon-Down < 30
+    strong_uptrend = (aroon_up > 70) & (aroon_down < 30)
+    strong_downtrend = (aroon_down > 70) & (aroon_up < 30)
     
-    # Camarilla levels from previous 1d bar
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # 20-period EMA for pullback entry
+    ema_20_1d = pd.Series(df_1d['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate Camarilla levels
-    range_ = prev_high - prev_low
-    R1 = prev_close + range_ * 1.1 / 12
-    R2 = prev_close + range_ * 1.1 / 6
-    R3 = prev_close + range_ * 1.1 / 4
-    S1 = prev_close - range_ * 1.1 / 12
-    S2 = prev_close - range_ * 1.1 / 6
-    S3 = prev_close - range_ * 1.1 / 4
+    # Align Aroon and EMA to 6h timeframe
+    strong_uptrend_aligned = align_htf_to_ltf(prices, df_1d, strong_uptrend)
+    strong_downtrend_aligned = align_htf_to_ltf(prices, df_1d, strong_downtrend)
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
-    # Align Camarilla levels to 4h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    
-    # Volume filter: current volume > 2.0x 24-period average (4 days for 4h)
-    vol_ma_24 = np.full(n, np.nan)
-    for i in range(24, n):
-        vol_ma_24[i] = np.mean(volume[i-24:i])
-    vol_filter = volume > (2.0 * vol_ma_24)
+    # Volume filter: current volume > 1.5x 20-period average (5 days for 6h)
+    vol_ma_20 = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma_20[i] = np.mean(volume[i-20:i])
+    vol_filter = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 12  # ~2 days for 4h to reduce trades
+    cooldown_bars = 4  # ~1 day for 6h to reduce trades
     
-    start_idx = max(100, 24, 50)
+    start_idx = max(100, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(R1_aligned[i]) or 
-            np.isnan(S1_aligned[i]) or 
-            np.isnan(vol_ma_24[i])):
+        if (np.isnan(strong_uptrend_aligned[i]) or 
+            np.isnan(strong_downtrend_aligned[i]) or 
+            np.isnan(ema_20_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,36 +69,38 @@ def generate_signals(prices):
         
         bars_since_last_trade += 1
         
-        # Determine 1d trend direction
-        trend_up = close > ema_50_1d_aligned[i]
-        trend_down = close < ema_50_1d_aligned[i]
+        # Determine trend direction
+        is_uptrend = strong_uptrend_aligned[i]
+        is_downtrend = strong_downtrend_aligned[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: Price breaks above R1 with volume in uptrend
-            if (close[i] > R1_aligned[i] and 
-                trend_up[i] and 
+            # Long: Pullback to EMA20 in strong uptrend with volume
+            if (close[i] <= ema_20_1d_aligned[i] * 1.005 and  # Within 0.5% above EMA
+                close[i] >= ema_20_1d_aligned[i] * 0.995 and  # Within 0.5% below EMA
+                is_uptrend and
                 vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: Price breaks below S1 with volume in downtrend
-            elif (close[i] < S1_aligned[i] and 
-                  trend_down[i] and 
+            # Short: Pullback to EMA20 in strong downtrend with volume
+            elif (close[i] <= ema_20_1d_aligned[i] * 1.005 and
+                  close[i] >= ema_20_1d_aligned[i] * 0.995 and
+                  is_downtrend and
                   vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit: Price falls below S1 or trend changes
-            if close[i] < S1_aligned[i] or not trend_up[i]:
+            # Exit: Trend ends or price moves 2% away from EMA
+            if not is_uptrend or close[i] > ema_20_1d_aligned[i] * 1.02:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price rises above R1 or trend changes
-            if close[i] > R1_aligned[i] or not trend_down[i]:
+            # Exit: Trend ends or price moves 2% away from EMA
+            if not is_downtrend or close[i] < ema_20_1d_aligned[i] * 0.98:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
@@ -115,10 +109,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R1/S1 breakout with 1d EMA50 trend filter and volume spike.
-# Long when price breaks above R1 in uptrend with volume confirmation.
-# Short when price breaks below S1 in downtrend with volume confirmation.
-# Uses 1d trend filter for better alignment with institutional timeframes.
-# Increased cooldown to 12 bars (~2 days) to reduce trade frequency and fee drag.
-# Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
-# Works in bull markets (breakouts in uptrend) and bear markets (breakdowns in downtrend).
+# Hypothesis: Aroon identifies strong daily trends, then we enter on 6h pullbacks to the 20-day EMA.
+# Works in bull markets (buy pullbacks in uptrends) and bear markets (sell rallies in downtrends).
+# The Aroon indicator (period 14) identifies when a strong trend is present (>70 up, <30 down).
+# Entry occurs when price pulls back to the 20-day EMA within a tight band (±0.5%).
+# Volume confirmation ensures institutional participation.
+# Exit when the trend weakens or price moves 2% away from EMA.
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
