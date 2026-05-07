@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_1w_WeeklyKAMA_RSI_Trend"
-timeframe = "1d"
+name = "12h_1d_Camarilla_S1R1_Breakout_VolumeTrend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,73 +17,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Weekly KAMA (Kaufman Adaptive Moving Average)
-    # ER = Efficiency Ratio, SM = Smoothing Constant
-    change = np.abs(df_1w['close'].diff(10).values)
-    volatility = np.abs(df_1w['close'].diff(1)).rolling(window=10, min_periods=10).sum().values
-    er = np.divide(change, volatility, out=np.zeros_like(change), where=volatility!=0)
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    kama = np.zeros_like(df_1w['close'])
-    kama[0] = df_1w['close'].iloc[0]
-    for i in range(1, len(kama)):
-        kama[i] = kama[i-1] + sc[i] * (df_1w['close'].iloc[i] - kama[i-1])
+    # Calculate daily Camarilla pivot levels from previous day
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Weekly RSI(14)
-    delta = df_1w['close'].diff().values
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
     
-    # Align weekly indicators to daily timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1w, kama)
-    rsi_aligned = align_htf_to_ltf(prices, df_1w, rsi)
+    # Camarilla levels
+    s1 = prev_close - (range_hl * 1.08 / 2)
+    r1 = prev_close + (range_hl * 1.08 / 2)
     
-    # Daily volume spike detection: 3-day average
-    vol_ma_3 = pd.Series(volume).rolling(window=3, min_periods=3).mean().values
+    # Align daily levels to 12h timeframe
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    
+    # Daily trend filter: EMA(34) on daily close
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume spike detection: 2-period average (1 day of 12h bars)
+    vol_ma_2 = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Wait for weekly indicators
+    start_idx = max(34, 2)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(vol_ma_3[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(vol_ma_2[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above weekly KAMA, RSI > 50 (bullish), volume spike
-            vol_condition = volume[i] > vol_ma_3[i] * 2.0
-            if close[i] > kama_aligned[i] and rsi_aligned[i] > 50 and vol_condition:
+            # Long: price above S1 with volume and daily uptrend
+            vol_condition = volume[i] > vol_ma_2[i] * 2.0
+            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
+            
+            if close[i] > s1_aligned[i] and vol_condition and uptrend:
                 signals[i] = 0.30
                 position = 1
-            # Short: price below weekly KAMA, RSI < 50 (bearish), volume spike
-            elif close[i] < kama_aligned[i] and rsi_aligned[i] < 50 and vol_condition:
+            # Short: price below R1 with volume and daily downtrend
+            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
                 signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit: price back below KAMA or RSI turns bearish
-            if close[i] < kama_aligned[i] or rsi_aligned[i] < 50:
+            # Exit: price back below S1 or volume drops
+            if close[i] < s1_aligned[i] or volume[i] < vol_ma_2[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.30
         elif position == -1:
-            # Exit: price back above KAMA or RSI turns bullish
-            if close[i] > kama_aligned[i] or rsi_aligned[i] > 50:
+            # Exit: price back above R1 or volume drops
+            if close[i] > r1_aligned[i] or volume[i] < vol_ma_2[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -91,13 +87,13 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 1d KAMA/RSI trend following with weekly trend filter and volume confirmation
-# - Weekly KAMA acts as dynamic trend filter (adapts to market conditions)
-# - Weekly RSI > 50 confirms bullish momentum, < 50 confirms bearish momentum
-# - Daily price position relative to weekly KAMA determines entry direction
-# - Volume spike (2x 3-day average) confirms institutional participation
-# - Works in both bull (buy when price > KAMA in weekly uptrend) and bear (sell when price < KAMA in weekly downtrend)
-# - Exit when price crosses back below/above KAMA or RSI reverses
-# - Position size 0.30 targets ~20-40 trades/year, minimizing fee drag
-# - Weekly timeframe reduces noise and whipsaws compared to lower timeframes
-# - Designed to capture major trends while avoiding choppy markets via RSI filter
+# Hypothesis: 12h Camarilla S1/R1 breakout with daily trend and volume confirmation
+# - Daily Camarilla S1/R1 act as strong support/resistance levels
+# - Breakout above S1 with volume in daily uptrend = long opportunity
+# - Breakdown below R1 with volume in daily downtrend = short opportunity
+# - Volume spike (2x average) confirms institutional participation
+# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
+# - Exit when price returns to S1/R1 or volume weakens
+# - Position size 0.30 targets ~20-40 trades/year, avoiding fee drag
+# - Uses 12h timeframe to reduce noise while capturing multi-day moves
+# - Designed to work in BOTH bull and bear markets via trend filter
