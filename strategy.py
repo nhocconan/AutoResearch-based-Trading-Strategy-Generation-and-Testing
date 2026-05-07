@@ -3,14 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian channel breakout with 1-day trend filter (EMA50) and volume spike confirmation.
-# Long when: Close > Donchian upper band (20) AND EMA50(1d) rising AND volume > 1.8 * EMA20(volume).
-# Short when: Close < Donchian lower band (20) AND EMA50(1d) falling AND volume > 1.8 * EMA20(volume).
-# Exit when price crosses back below/above the 20-period EMA.
-# Donchian provides clear breakout levels; EMA50 filters trend direction; volume spike confirms momentum.
+# Hypothesis: 4-hour Choppiness Index regime filter + 1-day RSI mean reversion + volume spike.
+# Long when: CHOP(14) > 61.8 (range), RSI(14) < 30 (oversold), volume > 1.5 * volume EMA(20).
+# Short when: CHOP(14) > 61.8 (range), RSI(14) > 70 (overbought), volume > 1.5 * volume EMA(20).
+# Exit when RSI crosses back above 50 (long) or below 50 (short).
+# Choppiness Index identifies ranging markets where mean reversion works.
+# RSI provides overbought/oversold signals in ranging conditions.
+# Volume spike confirms genuine reversal interest.
 # Designed for low trade frequency (target: 20-40/year) to minimize fee drag and improve generalization.
-# Works in bull markets via upward breakouts and in bear markets via downward breakouts.
-name = "4h_DonchianBreakout_1dEMA50_VolumeSpike"
+# Works in bull markets via buying oversold dips in range and in bear markets via selling overbought rallies in range.
+name = "4h_Choppiness_RSI_MeanReversion_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,33 +26,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Choppiness Index: measures market volatility vs directional movement
+    # CHOP > 61.8 = ranging market (good for mean reversion)
+    # CHOP < 38.2 = trending market (avoid mean reversion)
+    def calculate_choppiness(high, low, close, window=14):
+        atr = np.zeros(len(close))
+        tr = np.zeros(len(close))
+        tr[0] = high[0] - low[0]
+        for i in range(1, len(close)):
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        # Smooth ATR using Wilder's smoothing (equivalent to EMA with alpha=1/window)
+        atr[window-1] = np.mean(tr[0:window])
+        for i in range(window, len(close)):
+            atr[i] = (atr[i-1] * (window-1) + tr[i]) / window
+        
+        # Calculate highest high and lowest low over window
+        highest_high = np.zeros(len(close))
+        lowest_low = np.zeros(len(close))
+        for i in range(window-1, len(close)):
+            highest_high[i] = np.max(high[i-window+1:i+1])
+            lowest_low[i] = np.min(low[i-window+1:i+1])
+        
+        # Avoid division by zero
+        range_hl = highest_high - lowest_low
+        range_hl[range_hl == 0] = 1e-10
+        
+        chop = np.zeros(len(close))
+        chop[:window-1] = np.nan
+        for i in range(window-1, len(close)):
+            if atr[i] > 0 and range_hl[i] > 0:
+                chop[i] = 100 * np.log10(sum(atr[i-window+1:i+1]) / range_hl[i]) / np.log10(window)
+            else:
+                chop[i] = 50.0  # neutral when undefined
+        return chop
     
-    # EMA20 for exit
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    chop = calculate_choppiness(high, low, close, 14)
     
-    # Load 1-day data for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # RSI(14): momentum oscillator
+    def calculate_rsi(close, window=14):
+        delta = np.diff(close)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.zeros(len(close))
+        avg_loss = np.zeros(len(close))
+        avg_gain[window] = np.mean(gain[0:window])
+        avg_loss[window] = np.mean(loss[0:window])
+        
+        for i in range(window+1, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (window-1) + gain[i-1]) / window
+            avg_loss[i] = (avg_loss[i-1] * (window-1) + loss[i-1]) / window
+        
+        rs = np.zeros(len(close))
+        rs[:] = np.nan
+        for i in range(window, len(close)):
+            if avg_loss[i] != 0:
+                rs[i] = avg_gain[i] / avg_loss[i]
+            else:
+                rs[i] = 100  # when no loss, RSI=100
+        
+        rsi = 100 - (100 / (1 + rs))
+        rsi[:window] = np.nan
+        return rsi
     
-    close_1d = df_1d['close'].values
-    # EMA50 on 1d close
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    # Rising if current > previous, falling if current < previous
-    ema_50_rising = np.zeros_like(ema_50_1d, dtype=bool)
-    ema_50_falling = np.zeros_like(ema_50_1d, dtype=bool)
-    ema_50_rising[1:] = ema_50_1d[1:] > ema_50_1d[:-1]
-    ema_50_falling[1:] = ema_50_1d[1:] < ema_50_1d[:-1]
+    rsi = calculate_rsi(close, 14)
     
-    ema_50_rising_aligned = align_htf_to_ltf(prices, df_1d, ema_50_rising)
-    ema_50_falling_aligned = align_htf_to_ltf(prices, df_1d, ema_50_falling)
-    
-    # Volume confirmation: current volume > 1.8 * 20-period EMA of volume
+    # Volume confirmation: current volume > 1.5 * volume EMA(20)
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ema_20)
+    volume_spike = volume > (1.5 * vol_ema_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -58,18 +101,17 @@ def generate_signals(prices):
     start_idx = 50  # Sufficient warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(ema_20[i]) or 
-            np.isnan(ema_50_rising_aligned[i]) or np.isnan(ema_50_falling_aligned[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(chop[i]) or np.isnan(rsi[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Close > Donchian upper band AND EMA50(1d) rising AND volume spike
-            long_condition = (close[i] > donchian_high[i]) and ema_50_rising_aligned[i] and volume_spike[i]
-            # Short: Close < Donchian lower band AND EMA50(1d) falling AND volume spike
-            short_condition = (close[i] < donchian_low[i]) and ema_50_falling_aligned[i] and volume_spike[i]
+            # Long: Chop > 61.8 (range), RSI < 30 (oversold), volume spike
+            long_condition = (chop[i] > 61.8) and (rsi[i] < 30) and volume_spike[i]
+            # Short: Chop > 61.8 (range), RSI > 70 (overbought), volume spike
+            short_condition = (chop[i] > 61.8) and (rsi[i] > 70) and volume_spike[i]
             
             if long_condition:
                 signals[i] = 0.25
@@ -78,15 +120,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Close < EMA20
-            if close[i] < ema_20[i]:
+            # Exit: RSI crosses back above 50 (mean reversion complete)
+            if rsi[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Close > EMA20
-            if close[i] > ema_20[i]:
+            # Exit: RSI crosses back below 50 (mean reversion complete)
+            if rsi[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
