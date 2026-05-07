@@ -1,104 +1,153 @@
 #!/usr/bin/env python3
-# 4H_KAMA_1WTrend_AdaptiveSizing
-# Hypothesis: 4h strategy using weekly KAMA direction with adaptive position sizing based on volatility regime.
-# Uses weekly KAMA trend to filter direction, 4h RSI for momentum confirmation, and volatility-adjusted sizing.
-# Designed to work in both bull and bear markets by aligning with higher timeframe trend and reducing exposure in high volatility.
-# Target: 4h timeframe with weekly HTF for trend filter.
+# 12h_WMA_Cross_ADX_Trend
+# Hypothesis: 12h strategy using weighted moving average cross (WMA10/30) with ADX trend filter and volume confirmation.
+# Enters long when WMA10 crosses above WMA30, ADX > 25 (trending), and volume > 1.5x average.
+# Enters short when WMA10 crosses below WMA30, ADX > 25 (trending), and volume > 1.5x average.
+# Uses 1d timeframe for ADX calculation to avoid whipsaw in ranging markets.
+# Designed for low trade frequency (~20-40 trades/year) to minimize fee drag while capturing trending moves.
+# Works in both bull and bear markets by only trading when ADX confirms strong trend.
 
-name = "4H_KAMA_1WTrend_AdaptiveSizing"
-timeframe = "4h"
+name = "12h_WMA_Cross_ADX_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def wma(array, period):
+    """Calculate Weighted Moving Average"""
+    if len(array) < period:
+        return np.full_like(array, np.nan, dtype=float)
+    weights = np.arange(1, period + 1)
+    return np.convolve(array, weights[::-1], mode='valid') / weights.sum()
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for KAMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) == 0:
+    # Get 1d data for ADX calculation (trend filter)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) == 0:
         return np.zeros(n)
     
-    # Calculate weekly KAMA (ER=10, fast=2, slow=30)
-    close_1w = df_1w['close'].values
-    change = np.abs(np.diff(close_1w, prepend=close_1w[0]))
-    volatility = np.sum(np.abs(np.diff(close_1w)), axis=0)  # placeholder for true ER calculation
-    # Simplified: use price change vs total movement for ER
-    er = np.zeros_like(close_1w)
-    for i in range(1, len(close_1w)):
-        if i >= 10:
-            price_change = np.abs(close_1w[i] - close_1w[i-10])
-            total_change = np.sum(np.abs(np.diff(close_1w[i-10:i+1])))
-            if total_change > 0:
-                er[i] = price_change / total_change
-            else:
-                er[i] = 0
-        else:
-            er[i] = 0
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # smoothing constant
-    kama = np.zeros_like(close_1w)
-    kama[0] = close_1w[0]
-    for i in range(1, len(close_1w)):
-        kama[i] = kama[i-1] + sc[i] * (close_1w[i] - kama[i-1])
+    # Calculate WMA10 and WMA30 on 12h close prices
+    wma10 = np.full(n, np.nan)
+    wma30 = np.full(n, np.nan)
     
-    # Align KAMA to 4h timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1w, kama)
+    # Calculate WMA10
+    if n >= 10:
+        wma10_vals = wma(close, 10)
+        wma10[9:] = wma10_vals
     
-    # 4h RSI for momentum confirmation (14-period)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate WMA30
+    if n >= 30:
+        wma30_vals = wma(close, 30)
+        wma30[29:] = wma30_vals
     
-    # 4h ATR for volatility regime (14-period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
+    # Calculate ADX components on 1d data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    tr = np.concatenate([[np.nan], tr])  # First value is NaN
     
-    # Volatility regime: normalize ATR by 50-period MA
-    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-    vol_regime = atr / atr_ma  # >1 = high volatility, <1 = low volatility
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
+    
+    # Smooth TR, DM+, DM- using Wilder's smoothing (14-period)
+    def wilder_smooth(arr, period):
+        result = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nansum(arr[1:period])  # Skip first NaN
+        # Subsequent values: smoothed = prev_smoothed - (prev_smoothed/period) + current
+        for i in range(period, len(arr)):
+            if not np.isnan(result[i-1]) and not np.isnan(arr[i]):
+                result[i] = result[i-1] - (result[i-1]/period) + arr[i]
+        return result
+    
+    atr = wilder_smooth(tr, 14)
+    dm_plus_smooth = wilder_smooth(dm_plus, 14)
+    dm_minus_smooth = wilder_smooth(dm_minus, 14)
+    
+    # Directional Indicators
+    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
+    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilder_smooth(dx, 14)
+    
+    # Align 1d ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Volume spike detection: 1.5x average volume (30-period for stability)
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     
     signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(14, 50)  # RSI and volatility regime lookback
+    start_idx = max(30, 30)  # WMA30 and volume MA
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(vol_regime[i]) or atr_ma[i] == 0):
-            signals[i] = 0.0
+        if (np.isnan(wma10[i]) or np.isnan(wma30[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
             continue
         
-        # Adaptive sizing: reduce exposure in high volatility
-        base_size = 0.25
-        vol_multiplier = np.clip(1.0 / vol_regime[i], 0.5, 1.5)  # inverse vol weighting
-        size = base_size * vol_multiplier
+        # WMA cross signals
+        wma10_prev = wma10[i-1] if i > 0 else np.nan
+        wma30_prev = wma30[i-1] if i > 0 else np.nan
+        wma10_cross_above = (wma10[i] > wma30[i]) and (wma10_prev <= wma30_prev)
+        wma10_cross_below = (wma10[i] < wma30[i]) and (wma10_prev >= wma30_prev)
         
-        # Long: price above weekly KAMA (uptrend), RSI > 50 (bullish momentum)
-        if close[i] > kama_aligned[i] and rsi[i] > 50:
-            signals[i] = size
-        # Short: price below weekly KAMA (downtrend), RSI < 50 (bearish momentum)
-        elif close[i] < kama_aligned[i] and rsi[i] < 50:
-            signals[i] = -size
-        else:
-            signals[i] = 0.0
+        if position == 0:
+            # Long: WMA10 crosses above WMA30, ADX > 25 (trending), volume spike (>1.5x)
+            if (wma10_cross_above and 
+                adx_aligned[i] > 25 and 
+                volume[i] > 1.5 * vol_ma[i]):
+                signals[i] = 0.25
+                position = 1
+            # Short: WMA10 crosses below WMA30, ADX > 25 (trending), volume spike (>1.5x)
+            elif (wma10_cross_below and 
+                  adx_aligned[i] > 25 and 
+                  volume[i] > 1.5 * vol_ma[i]):
+                signals[i] = -0.25
+                position = -1
+        elif position == 1:
+            # Exit: WMA10 crosses below WMA30 (trend reversal)
+            if wma10_cross_below:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        elif position == -1:
+            # Exit: WMA10 crosses above WMA30 (trend reversal)
+            if wma10_cross_above:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
