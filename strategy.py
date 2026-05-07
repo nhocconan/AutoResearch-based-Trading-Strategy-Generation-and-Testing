@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_VolatilityBreakout_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,76 +17,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for trend and volatility
+    # Load daily data ONCE before loop for Camarilla and trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Daily ATR(14) for volatility breakout
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.max([high_1d[0] - low_1d[0], tr2[0], tr3[0]]) if len(tr2) > 0 else high_1d[0] - low_1d[0]], tr])
-    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate daily Camarilla pivot levels from previous day
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Daily EMA(50) for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
     
-    # Align daily indicators to 6h timeframe
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Camarilla levels
+    s1 = prev_close - (range_hl * 1.1 / 12)
+    r1 = prev_close + (range_hl * 1.1 / 12)
     
-    # 6h Bollinger Bands for volatility expansion
-    bb_window = 20
-    bb_std = 2.0
-    sma_20 = pd.Series(close).rolling(window=bb_window, min_periods=bb_window).mean().values
-    bb_std_dev = pd.Series(close).rolling(window=bb_window, min_periods=bb_window).std().values
-    upper_bb = sma_20 + bb_std * bb_std_dev
-    lower_bb = sma_20 - bb_std * bb_std_dev
+    # Align daily levels to 4h timeframe
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     
-    # Volume spike detection: 24-period average (4 days of 6h bars)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Daily EMA(34) for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume spike detection: 6-period average (1 day of 4h bars)
+    vol_ma_6 = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(bb_window, 50, 24)  # Wait for indicators
+    start_idx = max(34, 6)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(sma_20[i]) or np.isnan(vol_ma_24[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(vol_ma_6[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Volatility breakout conditions
-            bb_width = upper_bb[i] - lower_bb[i]
-            vol_expansion = bb_width > np.nanmean(bb_width[max(0, i-48):i]) * 1.5 if i >= 48 else False
-            vol_condition = volume[i] > vol_ma_24[i] * 2.0
+            # Long: price above S1 with volume and daily uptrend
+            vol_condition = volume[i] > vol_ma_6[i] * 2.0
+            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
             
-            # Long: price breaks above upper BB with volatility expansion and daily uptrend
-            if close[i] > upper_bb[i] and vol_expansion and vol_condition and ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1]:
+            if close[i] > s1_aligned[i] and vol_condition and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower BB with volatility expansion and daily downtrend
-            elif close[i] < lower_bb[i] and vol_expansion and vol_condition and ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1]:
+            # Short: price below R1 with volume and daily downtrend
+            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price returns to middle BB or volatility contracts
-            if close[i] < sma_20[i] or bb_width < np.nanmean(bb_width[max(0, i-48):i]) * 0.8 if i >= 48 else False:
+            # Exit: price back below S1 or volume drops
+            if close[i] < s1_aligned[i] or volume[i] < vol_ma_6[i] * 1.3:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price returns to middle BB or volatility contracts
-            if close[i] > sma_20[i] or bb_width < np.nanmean(bb_width[max(0, i-48):i]) * 0.8 if i >= 48 else False:
+            # Exit: price back above R1 or volume drops
+            if close[i] > r1_aligned[i] or volume[i] < vol_ma_6[i] * 1.3:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -94,20 +87,17 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 6h volatility breakout with daily trend and volume confirmation
-# - Uses daily ATR(14) and EMA(50) for trend/volatility context
-# - 6h Bollinger Bands breakout with volatility expansion (BB width > 1.5x 48-bar average)
-# - Requires volume spike (2x 24-bar average) for institutional confirmation
-# - Long when price breaks above upper BB in daily uptrend with volume
-# - Short when price breaks below lower BB in daily downtrend with volume
-# - Exits when price returns to middle BB or volatility contracts
-# - Works in both bull (breakouts in uptrend) and bear (breakdowns in downtrend)
-# - Volatility filter avoids ranging markets, targets explosive moves
-# - Position size 0.25 targets ~30-80 trades/year to avoid fee drag
-# - Novel combination: volatility breakout (6h) + daily trend + volume confirmation
-# - Avoids saturated BBands strategies by adding volatility expansion filter
-# - Uses actual daily data via mtf_data for proper alignment (no look-ahead)
-# - Designed for 6h timeframe to balance trade frequency and signal quality
-# - Target: 50-150 total trades over 4 years (12-37/year) for BTC/ETH/USDT pairs
-# - Daily trend filter reduces whipsaws vs pure Bollinger breakout
-# - Volume confirmation reduces false breakouts in low liquidity periods
+# Hypothesis: 4h Camarilla R1/S1 breakout with 1d trend and volume confirmation
+# - Camarilla R1/S1 from prior day act as key intraday support/resistance
+# - Breakout above S1 with volume in daily uptrend = long opportunity
+# - Breakdown below R1 with volume in daily downtrend = short opportunity
+# - Volume spike (2.0x average) confirms institutional participation
+# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
+# - Exit when price returns to S1/R1 or volume weakens
+# - Position size 0.25 targets ~25-40 trades/year, avoiding fee drag
+# - Uses actual daily Camarilla levels for intraday precision
+# - Daily trend filter reduces whipsaws vs using same timeframe
+# - Designed to work in BOTH bull and bear markets via trend filter
+# - Volume confirmation reduces false breakouts
+# - Based on top-performing Camarilla patterns with stricter volume filter (2.0x) to reduce trades
+# - Aims for 80-160 total trades over 4 years (20-40/year) to stay within limits
