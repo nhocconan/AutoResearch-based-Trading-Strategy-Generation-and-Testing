@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume_Spike"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,18 +17,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d trend filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # 12h trend filter (HTF)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    trend_up = close > ema34_1d_aligned
-    trend_down = close < ema34_1d_aligned
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    trend_up = close > ema50_12h_aligned
+    trend_down = close < ema50_12h_aligned
     
     # Daily Camarilla pivot levels (R3/S3)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d_prev = df_1d['close'].shift(1).values
@@ -46,23 +50,23 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Wait for EMA and volume MA
+    start_idx = max(50, 20)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(ema34_1d_aligned[i]) or np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]):
+        if np.isnan(ema50_12h_aligned[i]) or np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Close breaks above R3 with volume spike and 1d uptrend
+            # Long: Close breaks above R3 with volume spike and 12h uptrend
             if close[i] > R3_aligned[i] and vol_spike[i] and trend_up[i]:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
-            # Short: Close breaks below S3 with volume spike and 1d downtrend
+            # Short: Close breaks below S3 with volume spike and 12h downtrend
             elif close[i] < S3_aligned[i] and vol_spike[i] and trend_down[i]:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Exit: Close below S3 or trend turns down
@@ -70,21 +74,21 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
             # Exit: Close above R3 or trend turns up
             if close[i] > R3_aligned[i] or not trend_down[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-# Hypothesis: Camarilla R3/S3 breakouts with 1d trend filter and volume spike capture strong institutional moves.
-# Long when price breaks above R3 (strong resistance) with volume confirmation in 1d uptrend.
-# Short when price breaks below S3 (strong support) with volume confirmation in 1d downtrend.
+# Hypothesis: Camarilla R3/S3 breakouts with 12h trend filter and volume spike capture strong institutional moves.
+# Long when price breaks above R3 (strong resistance) with volume confirmation in 12h uptrend.
+# Short when price breaks below S3 (strong support) with volume confirmation in 12h downtrend.
 # R3/S3 are stronger levels than R1/S1, leading to fewer but higher-quality trades.
 # Volume spike (>2x average) ensures conviction behind the breakout.
-# Designed for 12h timeframe to target 12-37 trades/year, avoiding overtrading.
+# Designed for 4h timeframe to target 20-50 trades/year, avoiding overtrading.
 # Works in bull markets (breaks above R3 in uptrend) and bear markets (breaks below S3 in downtrend).
