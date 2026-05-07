@@ -3,17 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Chop Index regime filter + 12h Donchian breakout + volume confirmation.
-# Chop Index > 61.8 = ranging market (mean revert at Donchian bands)
-# Chop Index < 38.2 = trending market (breakout follow)
-# Long when Chop < 38.2 AND price breaks above 12h Donchian(20) upper band AND volume > 1.5x 20-period average
-# Short when Chop < 38.2 AND price breaks below 12h Donchian(20) lower band AND volume > 1.5x 20-period average
-# Exit when Chop > 61.8 (range) OR price reverts to Donchian midpoint
-# Designed for 4h timeframe with low trade frequency (target: 20-50/year) to avoid fee drag.
-# Uses Chop Index to avoid whipsaws in ranging markets and Donchian for clear breakout signals.
+# Hypothesis: 1h Camarilla pivot point breakout with 4h trend filter and volume confirmation.
+# Long when price breaks above Camarilla R3 (4h) AND 4h close > 4h EMA50 (uptrend) AND volume > 1.5x 20-period average.
+# Short when price breaks below Camarilla S3 (4h) AND 4h close < 4h EMA50 (downtrend) AND volume > 1.5x 20-period average.
+# Exit when price returns to Camarilla Pivot (4h) OR trend reverses (4h close crosses EMA50).
+# Designed for 1h timeframe with moderate trade frequency (target: 15-35/year) to avoid fee drag.
+# Uses 4h Camarilla levels for structure and 4h EMA50 for trend filter to avoid counter-trend trades.
 # Volume filter ensures participation and avoids low-conviction moves.
-name = "4h_Chop_Donchian_Breakout_12hVol"
-timeframe = "4h"
+name = "1h_Camarilla_R3S3_Breakout_4hEMA50_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,40 +24,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Chop Index (14-period)
-    def true_range(h, l, c_prev):
-        return np.maximum(h - l, np.maximum(np.abs(h - c_prev), np.abs(l - c_prev)))
-    
-    tr = np.zeros_like(close)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = true_range(high[i], low[i], close[i-1])
-    
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    
-    chop = np.where(
-        (highest_high - lowest_low) > 0,
-        100 * np.log10(atr14.sum() / (highest_high - lowest_low)) / np.log10(14),
-        50
-    )
-    
-    # 12h Donchian(20) channels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # 4h data for Camarilla levels and EMA50 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Calculate Camarilla levels for each 4h bar
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    donch_h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donch_l = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    donch_m = (donch_h + donch_l) / 2
+    # Camarilla formula: Range = high - low
+    # R3 = close + 1.1 * (high - low) / 2
+    # S3 = close - 1.1 * (high - low) / 2
+    # Pivot = (high + low + close) / 3
+    rng_4h = high_4h - low_4h
+    r3_4h = close_4h + 1.1 * rng_4h / 2.0
+    s3_4h = close_4h - 1.1 * rng_4h / 2.0
+    pivot_4h = (high_4h + low_4h + close_4h) / 3.0
     
-    donch_h_aligned = align_htf_to_ltf(prices, df_12h, donch_h)
-    donch_l_aligned = align_htf_to_ltf(prices, df_12h, donch_l)
-    donch_m_aligned = align_htf_to_ltf(prices, df_12h, donch_m)
+    # Align Camarilla levels to 1h
+    r3_4h_aligned = align_htf_to_ltf(prices, df_4h, r3_4h)
+    s3_4h_aligned = align_htf_to_ltf(prices, df_4h, s3_4h)
+    pivot_4h_aligned = align_htf_to_ltf(prices, df_4h, pivot_4h)
+    
+    # 4h EMA50 for trend filter
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -71,38 +62,39 @@ def generate_signals(prices):
     start_idx = 50  # Sufficient warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(chop[i]) or np.isnan(donch_h_aligned[i]) or np.isnan(donch_l_aligned[i]) or 
-            np.isnan(donch_m_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(r3_4h_aligned[i]) or np.isnan(s3_4h_aligned[i]) or 
+            np.isnan(pivot_4h_aligned[i]) or np.isnan(ema50_4h_aligned[i]) or 
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: Chop < 38.2 (trending) AND price breaks above Donchian upper AND volume filter
-            long_cond = (chop[i] < 38.2) and (close[i] > donch_h_aligned[i]) and volume_filter[i]
-            # Short conditions: Chop < 38.2 (trending) AND price breaks below Donchian lower AND volume filter
-            short_cond = (chop[i] < 38.2) and (close[i] < donch_l_aligned[i]) and volume_filter[i]
+            # Long conditions: price breaks above R3, 4h uptrend, volume filter
+            long_cond = (close[i] > r3_4h_aligned[i]) and (close_4h[-1] > ema50_4h[-1] if len(close_4h) > 0 else False) and volume_filter[i]
+            # Short conditions: price breaks below S3, 4h downtrend, volume filter
+            short_cond = (close[i] < s3_4h_aligned[i]) and (close_4h[-1] < ema50_4h[-1] if len(close_4h) > 0 else False) and volume_filter[i]
             
             if long_cond:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             elif short_cond:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Long exit: Chop > 61.8 (range) OR price returns to Donchian midpoint
-            if chop[i] > 61.8 or close[i] < donch_m_aligned[i]:
+            # Long exit: price returns to pivot OR 4h trend reverses
+            if close[i] <= pivot_4h_aligned[i] or close_4h[-1] < ema50_4h[-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: Chop > 61.8 (range) OR price returns to Donchian midpoint
-            if chop[i] > 61.8 or close[i] > donch_m_aligned[i]:
+            # Short exit: price returns to pivot OR 4h trend reverses
+            if close[i] >= pivot_4h_aligned[i] or close_4h[-1] > ema50_4h[-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
