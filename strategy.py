@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Keltner_Channel_Trend_1dVWAP"
-timeframe = "4h"
+name = "12h_TRIX_Pivot_Refill_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,59 +17,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
+    # Load daily data ONCE before loop for weekly pivot and TRIX
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Keltner Channel (20, 2) on 4h timeframe
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    atr = pd.Series(high - low).rolling(window=20, min_periods=20).mean().values
-    upper_keltner = ema_20 + 2 * atr
-    lower_keltner = ema_20 - 2 * atr
+    # Weekly pivot points using Monday open, Friday close approximation
+    # Calculate weekly high/low/close from daily data using 5-day windows
+    week_high = pd.Series(high).rolling(window=5, min_periods=5).max().values
+    week_low = pd.Series(low).rolling(window=5, min_periods=5).min().values
+    week_close = pd.Series(close).rolling(window=5, min_periods=5).mean().values
     
-    # Daily VWAP (volume-weighted average price)
-    vwap_1d = (df_1d['close'] * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
-    vwap_1d_values = vwap_1d.values
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d_values)
+    # Pivot levels
+    pp = (week_high + week_low + week_close) / 3
+    r1 = 2 * pp - week_low
+    s1 = 2 * pp - week_high
     
-    # Trend filter: 4h EMA(50) slope
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_slope = ema_50 - np.roll(ema_50, 1)
-    ema_50_slope[0] = 0
+    # TRIX on daily close (12-period EMA triple)
+    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
+    trix = 100 * (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1)
+    trix[0] = 0  # first value undefined
+    
+    # Volume spike detection: 20-period average (10 days of 12h bars)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Align all indicators to 12h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 50)
+    start_idx = max(12, 20, 5)  # Wait for all indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_20[i]) or np.isnan(atr[i]) or 
-            np.isnan(vwap_1d_aligned[i]) or np.isnan(ema_50_slope[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(trix_aligned[i]) or
+            np.isnan(vol_ma_20_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above upper Keltner + price > daily VWAP + upward EMA slope
-            if close[i] > upper_keltner[i] and close[i] > vwap_1d_aligned[i] and ema_50_slope[i] > 0:
+            # Long: price above S1 with TRIX positive and volume spike
+            vol_condition = volume[i] > vol_ma_20_aligned[i] * 1.8
+            if close[i] > s1_aligned[i] and trix_aligned[i] > 0 and vol_condition:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below lower Keltner + price < daily VWAP + downward EMA slope
-            elif close[i] < lower_keltner[i] and close[i] < vwap_1d_aligned[i] and ema_50_slope[i] < 0:
+            # Short: price below R1 with TRIX negative and volume spike
+            elif close[i] < r1_aligned[i] and trix_aligned[i] < 0 and vol_condition:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below lower Keltner or below daily VWAP
-            if close[i] < lower_keltner[i] or close[i] < vwap_1d_aligned[i]:
+            # Exit: price back below pivot or TRIX turns negative
+            if close[i] < pp_aligned[i] or trix_aligned[i] < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above upper Keltner or above daily VWAP
-            if close[i] > upper_keltner[i] or close[i] > vwap_1d_aligned[i]:
+            # Exit: price back above pivot or TRIX turns positive
+            if close[i] > pp_aligned[i] or trix_aligned[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -77,12 +91,16 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 4h Keltner Channel breakout with daily VWAP filter and trend confirmation
-# - Keltner Channel (20,2) defines dynamic volatility-based support/resistance
-# - Breakout above upper band with price above daily VWAP in uptrend = long signal
-# - Breakdown below lower band with price below daily VWAP in downtrend = short signal
-# - Daily VWAP acts as institutional reference point, effective in both bull/bear markets
-# - EMA(50) slope ensures trades align with intermediate-term trend
-# - Exit when price returns to lower/upper Keltner or crosses daily VWAP
-# - Position size 0.25 targets ~30-50 trades/year, minimizing fee drag
-# - Combines volatility breakout, volume-weighted price, and trend for robustness
+# Hypothesis: TRIX + Weekly Pivot with volume confirmation for 12h timeframe
+# - TRIX (triple EMA crossover) filters momentum direction
+# - Weekly pivot S1/R1 act as dynamic support/resistance levels
+# - Long when price breaks above S1 with TRIX>0 and volume spike
+# - Short when price breaks below R1 with TRIX<0 and volume spike
+# - Exit when price returns to weekly pivot or TRIX reverses
+# - Works in bull/bear: TRIX filters false breakouts, pivot provides structure
+# - Volume confirmation ensures institutional participation
+# - Position size 0.25 targets 15-35 trades/year, avoiding fee drag
+# - Weekly pivot from daily data provides weekly structure without look-ahead
+# - TRIX calculated on daily close with proper alignment avoids look-ahead
+# - Max 2 conditions for entry reduces overtrading risk
+# - Designed for BTC/ETH primary focus with applicability to SOL
