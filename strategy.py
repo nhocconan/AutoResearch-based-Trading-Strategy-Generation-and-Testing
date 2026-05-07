@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 1d_WeeklyTrend_DailyBreakout_Volume
-# Hypothesis: Daily chart strategy using weekly trend filter with daily price breakouts and volume confirmation.
-# Uses weekly EMA to determine trend direction, then looks for breakouts of daily high/low with volume confirmation.
-# Designed to work in both bull and bear markets by only taking trades in the direction of the weekly trend.
-# Target: 10-25 trades/year per symbol to minimize fee drag while maintaining edge.
+# 6h_TRIX_RSI_Trend_1dVolFilter
+# Hypothesis: 6h chart strategy combining TRIX (momentum) and RSI (mean reversion) with 1d trend filter and volume confirmation.
+# TRIX crossing zero signals momentum shifts; RSI <30 or >70 identifies overextended conditions for reversal trades.
+# 1d EMA50 filters trend direction to avoid counter-trend trades. Volume >1.5x average confirms momentum validity.
+# Designed for low-frequency trading (12-30 trades/year) to minimize fee drag while capturing swings in both bull and bear markets.
 
-name = "1d_WeeklyTrend_DailyBreakout_Volume"
-timeframe = "1d"
+timeframe = "6h"
+name = "6h_TRIX_RSI_Trend_1dVolFilter"
 leverage = 1.0
 
 import numpy as np
@@ -18,68 +18,80 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) == 0:
+    # Get 1d data for trend filter (EMA50) and volume reference
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) == 0:
         return np.zeros(n)
     
-    # Calculate weekly EMA21 for trend filter
-    close_1w = df_1w['close'].values
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Daily high/low for breakout levels (using previous day's values)
-    daily_high = np.maximum.accumulate(high)
-    daily_low = np.minimum.accumulate(low)
+    # Calculate TRIX (15,9,9) on 6h close
+    # TRIX = EMA(EMA(EMA(close, 15), 9), 9) then percent change
+    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema2 = pd.Series(ema1).ewm(span=9, adjust=False, min_periods=9).mean().values
+    ema3 = pd.Series(ema2).ewm(span=9, adjust=False, min_periods=9).mean().values
+    trix_raw = pd.Series(ema3).pct_change() * 100  # percentage
+    trix = trix_raw.fillna(0).values
     
-    # Volume spike detection: 2x average volume (20-period = ~1 month on daily)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate RSI(14) on 6h close
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = (100 - (100 / (1 + rs))).fillna(50).values
+    
+    # Volume spike detection: 1.5x average volume (4-period = 1 day on 6h chart)
+    vol_ma = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # Ensure we have enough data for weekly EMA and volume MA
+    start_idx = max(30, 15)  # Ensure we have TRIX/RSI/volume MA data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(ema_21_1w_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(trix[i]) or np.isnan(rsi[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine weekly trend: price above/below weekly EMA21
-        weekly_uptrend = close[i] > ema_21_1w_aligned[i]
-        weekly_downtrend = close[i] < ema_21_1w_aligned[i]
-        
         if position == 0:
-            # Long: price breaks above previous day's high with volume, in weekly uptrend
-            if (high[i] > daily_high[i-1] and 
-                volume[i] > 2.0 * vol_ma[i] and 
-                weekly_uptrend):
+            # Long: TRIX crosses above zero (bullish momentum) AND RSI < 30 (oversold) AND volume confirmation AND 1d trend bullish
+            if (trix[i] > 0 and trix[i-1] <= 0 and  # zero-cross up
+                rsi[i] < 30 and 
+                volume[i] > 1.5 * vol_ma[i] and 
+                close[i] > ema_50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below previous day's low with volume, in weekly downtrend
-            elif (low[i] < daily_low[i-1] and 
-                  volume[i] > 2.0 * vol_ma[i] and 
-                  weekly_downtrend):
+            # Short: TRIX crosses below zero (bearish momentum) AND RSI > 70 (overbought) AND volume confirmation AND 1d trend bearish
+            elif (trix[i] < 0 and trix[i-1] >= 0 and  # zero-cross down
+                  rsi[i] > 70 and 
+                  volume[i] > 1.5 * vol_ma[i] and 
+                  close[i] < ema_50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price breaks below previous day's low (reversal signal)
-            if low[i] < daily_low[i-1]:
+            # Exit: TRIX turns negative (momentum loss) OR RSI > 70 (overbought)
+            if trix[i] < 0 or rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price breaks above previous day's high (reversal signal)
-            if high[i] > daily_high[i-1]:
+            # Exit: TRIX turns positive (momentum loss) OR RSI < 30 (oversold)
+            if trix[i] > 0 or rsi[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
