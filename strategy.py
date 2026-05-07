@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_KAMA_RSI_Trend_Volume_Filter"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,91 +17,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for KAMA and RSI
+    # Load 1d data ONCE before loop for trend filter and Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate KAMA on daily close
-    close_1d = df_1d['close'].values
-    er = np.zeros_like(close_1d)
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.sum(np.abs(np.diff(close_1d, prepend=close_1d[0])), axis=0)  # This needs fixing
-    # Let's recalculate properly
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.zeros_like(close_1d)
-    for i in range(1, len(close_1d)):
-        volatility[i] = volatility[i-1] + np.abs(close_1d[i] - close_1d[i-1])
-    volatility = np.maximum(volatility, 1e-10)  # avoid division by zero
-    er = change / volatility
-    er[0] = 0  # first value
+    # 1d EMA(34) for trend filter
+    ema_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Calculate RSI on daily close
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Camarilla R3 and S3 levels
+    r3 = prev_close + (prev_high - prev_low) * 1.1 / 2
+    s3 = prev_close - (prev_high - prev_low) * 1.1 / 2
     
-    # Align KAMA and RSI to 4h
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # Align 1d levels to 12h
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Load 1h data for volume filter (more responsive than 4h volume)
-    df_1h = get_htf_data(prices, '1h')
-    if len(df_1h) < 20:
-        return np.zeros(n)
-    
-    # Volume MA on 1h data
-    vol_1h = df_1h['volume'].values
-    vol_ma_1h = pd.Series(vol_1h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1h_aligned = align_htf_to_ltf(prices, df_1h, vol_ma_1h)
-    
-    # Current 4h volume
-    vol_4h = volume
+    # Volume filter: > 1.3x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > 1.3 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Warmup period
+    start_idx = 50  # Wait for EMA(34) and volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or np.isnan(vol_ma_1h_aligned[i]):
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume filter: current 4h volume > 1.5x 1h volume MA
-        vol_filter = vol_4h[i] > 1.5 * vol_ma_1h_aligned[i]
-        
         if position == 0:
-            # Long: Price > KAMA, RSI > 50, volume filter
-            if close[i] > kama_aligned[i] and rsi_aligned[i] > 50 and vol_filter:
+            # Long: Break above R3 with 1d uptrend and volume
+            if (close[i] > r3_aligned[i] and close[i] > ema_1d_aligned[i] and vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price < KAMA, RSI < 50, volume filter
-            elif close[i] < kama_aligned[i] and rsi_aligned[i] < 50 and vol_filter:
+            # Short: Break below S3 with 1d downtrend and volume
+            elif (close[i] < s3_aligned[i] and close[i] < ema_1d_aligned[i] and vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Price < KAMA or RSI < 40
-            if close[i] < kama_aligned[i] or rsi_aligned[i] < 40:
+            # Exit: Close below S3 or trend change
+            if close[i] < s3_aligned[i] or close[i] < ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price > KAMA or RSI > 60
-            if close[i] > kama_aligned[i] or rsi_aligned[i] > 60:
+            # Exit: Close above R3 or trend change
+            if close[i] > r3_aligned[i] or close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -109,8 +81,8 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 4h strategy using daily KAMA for trend direction and daily RSI for momentum,
-# filtered by 1h volume spikes to avoid low-activity periods. KAMA adapts to market noise,
-# providing better trend detection than traditional MA in volatile crypto markets.
-# RSI filters avoid overextended moves. Volume confirmation ensures trades occur
-# during active participation. Position size 0.25 limits drawdown. Target: 20-40 trades/year.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA(34) trend filter and volume confirmation.
+# Uses daily timeframe for trend direction and pivot levels, reducing noise and false breakouts.
+# Volume confirmation ensures trades occur during active market participation.
+# Position size 0.25 limits drawdown while targeting 15-25 trades/year to avoid fee drag.
+# Designed to work in both bull and bear markets by following the daily trend.
