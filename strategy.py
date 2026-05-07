@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_1d_1w_Camarilla_R1S1_Breakout_TrendVolume_v1"
-timeframe = "4h"
+name = "1d_1w_PivotBreakout_TrendVolume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,44 +17,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for Camarilla and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
-    
     # Load weekly data ONCE before loop for trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate daily Camarilla R1/S1 from previous day
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
-    
-    range_hl = prev_high - prev_low
-    cam_r1 = prev_close + (range_hl * 1.1 / 12)  # Resistance 1
-    cam_s1 = prev_close - (range_hl * 1.1 / 12)  # Support 1
-    
-    # Align daily Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, cam_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, cam_s1)
-    
-    # Weekly EMA(34) for trend filter
+    # Calculate weekly EMA(34) for trend filter
     ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Volume spike detection: 4-period average (1 day of 4h bars)
-    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    # Calculate daily Pivot (standard) from previous day
+    prev_high = high  # will be shifted in calculation
+    prev_low = low
+    prev_close = close
+    
+    # Calculate daily pivot points using previous day's OHLC
+    # We need to shift the series by 1 to get previous day's values
+    prev_high_shift = np.roll(high, 1)
+    prev_low_shift = np.roll(low, 1)
+    prev_close_shift = np.roll(close, 1)
+    # Set first value to NaN as there is no previous day
+    prev_high_shift[0] = np.nan
+    prev_low_shift[0] = np.nan
+    prev_close_shift[0] = np.nan
+    
+    pivot = (prev_high_shift + prev_low_shift + prev_close_shift) / 3
+    range_hl = prev_high_shift - prev_low_shift
+    
+    # Pivot support/resistance levels
+    s1 = pivot - range_hl  # Support 1
+    r1 = pivot + range_hl  # Resistance 1
+    
+    # Volume spike detection: 20-day average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 4)  # Wait for EMA and volume MA
+    start_idx = max(34, 20)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(vol_ma_4[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(s1[i]) or 
+            np.isnan(r1[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,26 +66,26 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: price above S1 with volume and weekly uptrend
-            vol_condition = volume[i] > vol_ma_4[i] * 1.8
+            vol_condition = volume[i] > vol_ma_20[i] * 2.0
             uptrend = ema_34_1w_aligned[i] > ema_34_1w_aligned[i-1]
             
-            if close[i] > s1_aligned[i] and vol_condition and uptrend:
+            if close[i] > s1[i] and vol_condition and uptrend:
                 signals[i] = 0.25
                 position = 1
             # Short: price below R1 with volume and weekly downtrend
-            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
+            elif close[i] < r1[i] and vol_condition and not uptrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Exit: price back below S1 or volume drops
-            if close[i] < s1_aligned[i] or volume[i] < vol_ma_4[i] * 1.2:
+            if close[i] < s1[i] or volume[i] < vol_ma_20[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Exit: price back above R1 or volume drops
-            if close[i] > r1_aligned[i] or volume[i] < vol_ma_4[i] * 1.2:
+            if close[i] > r1[i] or volume[i] < vol_ma_20[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -89,18 +93,17 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 4h Camarilla R1/S1 breakout with weekly trend and volume confirmation
-# - Daily Camarilla R1/S1 act as key support/resistance levels from prior session
+# Hypothesis: Daily Pivot S1/R1 breakout with weekly trend and volume confirmation
+# - Daily Pivot S1/R1 act as key support/resistance levels from prior session
 # - Breakout above S1 with volume in weekly uptrend = long opportunity
 # - Breakdown below R1 with volume in weekly downtrend = short opportunity
-# - Volume spike (1.8x average) confirms institutional participation
-# - Weekly trend filter reduces whipsaws vs using same timeframe
+# - Volume spike (2.0x average) confirms institutional participation
+# - Weekly trend filter reduces whipsaws and aligns with higher timeframe momentum
 # - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
 # - Exit when price returns to S1/R1 or volume weakens
-# - Position size 0.25 targets ~20-50 trades/year, avoiding fee drag
-# - Uses actual daily Camarilla levels (not weekly) for better responsiveness
-# - Weekly EMA trend filter reduces whipsaws vs using same timeframe
-# - Designed to work in BOTH bull and bear markets via trend filter
+# - Position size 0.25 targets ~10-25 trades/year, avoiding fee drag
+# - Uses actual daily Pivot levels for responsiveness
+# - Weekly trend filter (EMA34) provides multi-timeframe alignment
 # - Volume confirmation reduces false breakouts
-# - Novel combination: Camarilla (1d) + trend (1w) + volume (4h) not recently tried on 4h
-# - Aims for 50-150 total trades over 4 years (12-37/year) to stay within limits
+# - Designed for BTC/ETH with focus on quality over quantity
+# - Aims for 40-100 total trades over 4 years (10-25/year) to stay within limits
