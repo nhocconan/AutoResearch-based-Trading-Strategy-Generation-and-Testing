@@ -1,13 +1,13 @@
-# USDC/USDT Exchange Rate Monitoring Strategy
-# Hypothesis: USDC/USDT is a stablecoin pair that should maintain a tight 1:1 peg.
-# Deviations from parity indicate market stress or arbitrage opportunities.
-# This strategy monitors the USDC/USDT price on Binance and takes small positions
-# when the price deviates significantly from 1.0, expecting mean reversion.
-# Works in both bull and bear markets as it's based on mean reversion of a stable peg.
-# Very low frequency - only triggers during significant de-pegging events.
+# 6h_Ichimoku_Trend_Filter_v1
+# Hypothesis: Uses Ichimoku Cloud on daily timeframe for trend direction and momentum,
+# combined with Tenkan-Kijun cross on 6h for entry timing. The Ichimoku system provides
+# clear support/resistance levels and trend strength, making it effective in both
+# bull and bear markets. Tenkan-Kijun cross provides timely entries while cloud filter
+# reduces false signals during sideways periods. Targets 15-35 trades/year to minimize
+# fee drag while capturing strong trends.
 
-name = "USDC_USDT_Peg_Monitor"
-timeframe = "4h"
+name = "6h_Ichimoku_Trend_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -20,81 +20,97 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Calculate deviation from 1.0 peg
-    peg_deviation = close - 1.0
-    
-    # Calculate rolling statistics for z-score (20-period window)
-    peg_mean = pd.Series(peg_deviation).rolling(window=20, min_periods=20).mean().values
-    peg_std = pd.Series(peg_deviation).rolling(window=20, min_periods=20).std().values
-    
-    # Calculate z-score of peg deviation
-    z_score = np.zeros_like(peg_deviation)
-    for i in range(len(z_score)):
-        if peg_std[i] > 0:
-            z_score[i] = (peg_deviation[i] - peg_mean[i]) / peg_std[i]
-        else:
-            z_score[i] = 0
-    
-    # Get 1-day data for additional confirmation (market stress indicator)
+    # Get daily data for Ichimoku calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 52:
         return np.zeros(n)
     
-    # Daily volatility as market stress indicator
-    daily_returns = np.abs(np.diff(df_1d['close'].values) / df_1d['close'].values[:-1])
-    daily_vol = pd.Series(daily_returns).rolling(window=10, min_periods=10).mean().values
-    daily_vol_aligned = align_htf_to_ltf(prices, df_1d, daily_vol)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Volume confirmation - unusually high volume during de-pegging
-    volume_ma = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
+    # Calculate Ichimoku components (standard parameters: 9, 26, 52)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period_tenkan = 9
+    max_high_9 = pd.Series(high_1d).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
+    min_low_9 = pd.Series(low_1d).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
+    tenkan = (max_high_9 + min_low_9) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period_kijun = 26
+    max_high_26 = pd.Series(high_1d).rolling(window=period_kijun, min_periods=period_kijun).max().values
+    min_low_26 = pd.Series(low_1d).rolling(window=period_kijun, min_periods=period_kijun).min().values
+    kijun = (max_high_26 + min_low_26) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period_senkou_b = 52
+    max_high_52 = pd.Series(high_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
+    min_low_52 = pd.Series(low_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
+    senkou_b = (max_high_52 + min_low_52) / 2
+    
+    # Align Ichimoku components to 6h timeframe
+    tenkan_6h = align_htf_to_ltf(prices, df_1d, tenkan)
+    kijun_6h = align_htf_to_ltf(prices, df_1d, kijun)
+    senkou_a_6h = align_htf_to_ltf(prices, df_1d, senkou_a)
+    senkou_b_6h = align_htf_to_ltf(prices, df_1d, senkou_b)
+    
+    # 6h Tenkan-Kijun cross for entry timing
+    tenkan_6h_series = pd.Series(tenkan_6h)
+    kijun_6h_series = pd.Series(kijun_6h)
+    tk_cross = tenkan_6h_series - kijun_6h_series
+    tk_cross_prev = tk_cross.shift(1)
+    
+    # Volume confirmation: volume > 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long (USDC undervalued), -1: short (USDC overvalued)
+    position = 0  # 0: flat, 1: long, -1: short
     
-    # Only trade during significant market stress to avoid noise
-    volatility_threshold = 0.02  # 2% daily volatility threshold
-    
-    for i in range(20, n):
+    for i in range(52, n):
         # Skip if any critical value is NaN
-        if (np.isnan(z_score[i]) or np.isnan(daily_vol_aligned[i]) or 
-            np.isnan(volume_ma[i]) or volume_ma[i] == 0):
+        if (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or 
+            np.isnan(senkou_a_6h[i]) or np.isnan(senkou_b_6h[i]) or
+            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Only trade when market volatility is elevated (stress conditions)
-        if daily_vol_aligned[i] < volatility_threshold:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
+        # Determine cloud top and bottom
+        cloud_top = max(senkou_a_6h[i], senkou_b_6h[i])
+        cloud_bottom = min(senkou_a_6h[i], senkou_b_6h[i])
         
         if position == 0:
-            # Long: USDC significantly undervalued (z-score < -2) with volume confirmation
-            if z_score[i] < -2.0 and prices['volume'].values[i] > volume_ma[i]:
-                signals[i] = 0.25  # 25% position
+            # Long: Tenkan crosses above Kijun AND price above cloud
+            if (tk_cross.iloc[i] > 0 and tk_cross_prev.iloc[i] <= 0 and 
+                close[i] > cloud_top and volume[i] > vol_ma[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: USDC significantly overvalued (z-score > 2) with volume confirmation
-            elif z_score[i] > 2.0 and prices['volume'].values[i] > volume_ma[i]:
-                signals[i] = -0.25  # 25% position
+            # Short: Tenkan crosses below Kijun AND price below cloud
+            elif (tk_cross.iloc[i] < 0 and tk_cross_prev.iloc[i] >= 0 and 
+                  close[i] < cloud_bottom and volume[i] > vol_ma[i]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: USDC returns to peg (z-score > -0.5)
-            if z_score[i] > -0.5:
+            # Exit: Tenkan crosses below Kijun OR price falls below cloud
+            if (tk_cross.iloc[i] < 0 and tk_cross_prev.iloc[i] >= 0) or close[i] < cloud_bottom:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: USDC returns to peg (z-score < 0.5)
-            if z_score[i] < 0.5:
+            # Exit: Tenkan crosses above Kijun OR price rises above cloud
+            if (tk_cross.iloc[i] > 0 and tk_cross_prev.iloc[i] <= 0) or close[i] > cloud_top:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
-
-#!/usr/bin/env python3
