@@ -1,17 +1,14 @@
-# NOTE: This strategy is designed to meet the 12h timeframe requirement and aims for 50-150 trades over 4 years.
-# It uses a combination of 12h Donchian breakout, 1d trend filter (EMA), and volume confirmation.
-# The strategy is designed to work in both bull and bear markets by using trend filters and volume confirmation.
-
 #!/usr/bin/env python3
 """
-12h_Donchian_Breakout_1dTrend_Volume_v1
-Hypothesis: Uses 12-hour Donchian channel breakouts for entry, filtered by 1-day EMA trend and volume confirmation.
-This strategy aims to capture medium-term trends while minimizing false signals through trend and volume filters.
-Target: 50-150 trades over 4 years (12-37/year) to minimize fee drag.
+1h_4h_1d_Structure_Filter_v1
+Hypothesis: Combines 4h Donchian breakout for trend direction with 1d volume confirmation
+and 1h momentum filter to avoid whipsaws. Uses timeframe hierarchy: 4h/1d for signal direction,
+1h only for entry timing. Targets 15-35 trades/year to minimize fee drag while capturing
+trend moves in both bull and bear markets through structured breakouts.
 """
 
-name = "12h_Donchian_Breakout_1dTrend_Volume_v1"
-timeframe = "12h"
+name = "1h_4h_1d_Structure_Filter_v1"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -28,58 +25,89 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 12-period Donchian channels (highest high and lowest low)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=12, min_periods=12).max().values
-    donchian_low = low_series.rolling(window=12, min_periods=12).min().values
+    # 4h Donchian channels (20-period) for trend direction
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
     
-    # 1-day trend filter: EMA of daily close
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    
+    # 1d volume confirmation: volume > 20-period average
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    volume_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Volume confirmation: current volume > 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 1h momentum filter: RSI(14) to avoid overextended entries
+    close_series = pd.Series(close)
+    delta = close_series.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(12, n):
+    for i in range(20, n):
         # Skip if any critical value is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(rsi[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        if position == 0:
-            # Long: price breaks above Donchian high AND above 1-day EMA with volume confirmation
-            if close[i] > donchian_high[i] and close[i] > ema_1d_aligned[i] and volume[i] > vol_ma[i]:
-                signals[i] = 0.25
+        # Session filter: only trade 08-20 UTC
+        hour = hours[i]
+        in_session = 8 <= hour <= 20
+        
+        if position == 0 and in_session:
+            # Long: price breaks above 4h Donchian high with volume confirmation and RSI not overbought
+            if (close[i] > donchian_high_aligned[i] and 
+                volume[i] > vol_ma_1d_aligned[i] and 
+                rsi[i] < 70):
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below Donchian low AND below 1-day EMA with volume confirmation
-            elif close[i] < donchian_low[i] and close[i] < ema_1d_aligned[i] and volume[i] > vol_ma[i]:
-                signals[i] = -0.25
+            # Short: price breaks below 4h Donchian low with volume confirmation and RSI not oversold
+            elif (close[i] < donchian_low_aligned[i] and 
+                  volume[i] > vol_ma_1d_aligned[i] and 
+                  rsi[i] > 30):
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit: price falls below Donchian low OR below 1-day EMA
-            if close[i] < donchian_low[i] or close[i] < ema_1d_aligned[i]:
+            # Exit: price breaks below 4h Donchian low OR RSI becomes oversold
+            if close[i] < donchian_low_aligned[i] or rsi[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit: price rises above Donchian high OR above 1-day EMA
-            if close[i] > donchian_high[i] or close[i] > ema_1d_aligned[i]:
+            # Exit: price breaks above 4h Donchian high OR RSI becomes overbought
+            if close[i] > donchian_high_aligned[i] or rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
+        else:
+            # Outside session: maintain position or stay flat
+            if position == 0:
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.20 if position == 1 else -0.20
     
     return signals
