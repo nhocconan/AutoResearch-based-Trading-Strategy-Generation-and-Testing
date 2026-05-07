@@ -1,12 +1,12 @@
-#!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: 12h chart strategy using Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume confirmation.
-# Designed to capture major breakouts with strong trend alignment and institutional volume.
-# Target: 12-37 trades/year per symbol to minimize fee decay while maintaining edge in both bull and bear markets.
-# Uses 12h primary timeframe with 1d trend filter for higher reliability and lower trade frequency.
+# 6h_Keltner_Channel_Breakout_Momentum_And_Trend_Filter
+# Hypothesis: Combines Keltner Channel breakouts with momentum (RSI) and trend (ADX) filters on 6h timeframe.
+# Uses daily trend filter (EMA50) and weekly momentum filter (RSI) to avoid false breakouts.
+# Designed to work in both bull and bear markets by requiring trend alignment and momentum confirmation.
+# Target: 15-30 trades/year per symbol to minimize fee drag while maintaining edge.
+# Risk control: Exit on opposite Keltner band touch or trend failure.
 
-timeframe = "12h"
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "6h"
+name = "6h_Keltner_Channel_Breakout_Momentum_And_Trend_Filter"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -28,61 +28,93 @@ def generate_signals(prices):
     if len(df_1d) == 0:
         return np.zeros(n)
     
-    # Calculate EMA34 on 1d closes for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate EMA50 on 1d closes for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Get daily data for Camarilla levels
-    d_high = df_1d['high'].values
-    d_low = df_1d['low'].values
-    d_close = df_1d['close'].values
+    # Get 1w data for RSI momentum filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) == 0:
+        return np.zeros(n)
     
-    camarilla_r1 = d_close + 1.1 * (d_high - d_low) / 12
-    camarilla_s1 = d_close - 1.1 * (d_high - d_low) / 12
+    # Calculate RSI(14) on 1w closes for momentum filter
+    delta = pd.Series(df_1w['close'].values).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_14_1w = 100 - (100 / (1 + rs))
+    rsi_14_1w = rsi_14_1w.fillna(50).values  # Fill NaN with neutral 50
+    rsi_14_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_14_1w)
     
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Calculate Keltner Channels on 6h: 20-period EMA, ATR(10) multiplier 2.0
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Volume spike detection: 2x average volume (2-period = 1 day on 12h chart)
-    vol_ma = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
+    # True Range calculation
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = high[0] - low[0]  # First bar
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    
+    kelly_upper = ema_20 + 2.0 * atr_10
+    kelly_lower = ema_20 - 2.0 * atr_10
+    
+    # RSI(14) on 6h for momentum confirmation
+    delta_6h = pd.Series(close).diff()
+    gain_6h = delta_6h.clip(lower=0)
+    loss_6h = -delta_6h.clip(upper=0)
+    avg_gain_6h = gain_6h.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss_6h = loss_6h.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs_6h = avg_gain_6h / avg_loss_6h
+    rsi_14_6h = 100 - (100 / (1 + rs_6h))
+    rsi_14_6h = rsi_14_6h.fillna(50).values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 2)  # Ensure we have EMA and volume MA data
+    start_idx = max(50, 20, 10, 14)  # Ensure we have all indicators
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(rsi_14_1w_aligned[i]) or
+            np.isnan(kelly_upper[i]) or np.isnan(kelly_lower[i]) or np.isnan(rsi_14_6h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: close > R1 with volume spike and price above 1d EMA34
-            if (close[i] > camarilla_r1_aligned[i] and 
-                volume[i] > 2.0 * vol_ma[i] and 
-                close[i] > ema_34_1d_aligned[i]):
+            # Long: break above upper Keltner with RSI > 50 (bullish momentum),
+            # price above 1d EMA50 (uptrend), and weekly RSI > 50 (bullish momentum)
+            if (close[i] > kelly_upper[i] and 
+                rsi_14_6h[i] > 50 and 
+                close[i] > ema_50_1d_aligned[i] and 
+                rsi_14_1w_aligned[i] > 50):
                 signals[i] = 0.25
                 position = 1
-            # Short: close < S1 with volume spike and price below 1d EMA34
-            elif (close[i] < camarilla_s1_aligned[i] and 
-                  volume[i] > 2.0 * vol_ma[i] and 
-                  close[i] < ema_34_1d_aligned[i]):
+            # Short: break below lower Keltner with RSI < 50 (bearish momentum),
+            # price below 1d EMA50 (downtrend), and weekly RSI < 50 (bearish momentum)
+            elif (close[i] < kelly_lower[i] and 
+                  rsi_14_6h[i] < 50 and 
+                  close[i] < ema_50_1d_aligned[i] and 
+                  rsi_14_1w_aligned[i] < 50):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: touch S1 (opposite level) or trend failure (price below 1d EMA34)
-            if close[i] < camarilla_s1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            # Exit: touch lower Keltner band or trend failure (price below 1d EMA50)
+            if close[i] < kelly_lower[i] or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: touch R1 (opposite level) or trend failure (price above 1d EMA34)
-            if close[i] > camarilla_r1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            # Exit: touch upper Keltner band or trend failure (price above 1d EMA50)
+            if close[i] > kelly_upper[i] or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
