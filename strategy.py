@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeConfirm"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,59 +26,52 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 12h Camarilla pivot levels (based on previous 12h bar)
-    # R3 = close + (high - low) * 1.1
-    # S3 = close - (high - low) * 1.1
-    # Note: using previous bar's high/low/close to avoid look-ahead
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
+    # Calculate Camarilla pivot levels from previous day
+    high_prev = np.concatenate([[np.nan], high[:-1]])
+    low_prev = np.concatenate([[np.nan], low[:-1]])
+    close_prev = np.concatenate([[np.nan], close[:-1]])
     
-    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1
-    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1
+    # Camarilla formulas for R1 and S1
+    R1 = close_prev + 1.1 * (high_prev - low_prev) / 12
+    S1 = close_prev - 1.1 * (high_prev - low_prev) / 12
     
-    # 12h volume spike (24-period average, 2 days)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # 4h volume spike (20-period average)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Wait for EMA and volume MA
+    start_idx = 34  # Wait for EMA and enough data
     
     for i in range(start_idx, n):
-        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_24[i]):
+        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(R1[i]) or np.isnan(S1[i]) or np.isnan(vol_ma_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above Camarilla R3 with volume and 1d uptrend
-            vol_condition = volume[i] > vol_ma_24[i] * 1.5
+            # Long: break above R1 with volume and 1d uptrend
+            vol_condition = volume[i] > vol_ma_20[i] * 1.8
             uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
             
-            if close[i] > camarilla_r3[i] and vol_condition and uptrend:
+            if close[i] > R1[i] and vol_condition and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below Camarilla S3 with volume and 1d downtrend
-            elif close[i] < camarilla_s3[i] and vol_condition and not uptrend:
+            # Short: break below S1 with volume and 1d downtrend
+            elif close[i] < S1[i] and vol_condition and not uptrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below Camarilla midpoint or volume drops
-            camarilla_mid = (camarilla_r3[i] + camarilla_s3[i]) / 2
-            if close[i] < camarilla_mid or volume[i] < vol_ma_24[i] * 1.2:
+            # Exit: price back below S1 or volume drops
+            if close[i] < S1[i] or volume[i] < vol_ma_20[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above Camarilla midpoint or volume drops
-            camarilla_mid = (camarilla_r3[i] + camarilla_s3[i]) / 2
-            if close[i] > camarilla_mid or volume[i] < vol_ma_24[i] * 1.2:
+            # Exit: price back above R1 or volume drops
+            if close[i] > R1[i] or volume[i] < vol_ma_20[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -86,13 +79,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA trend filter and volume confirmation
-# - Camarilla levels identify key support/resistance from previous period
-# - 1d EMA(34) ensures alignment with daily trend
-# - Volume spike (1.5x average) confirms breakout strength
-# - Works in bull (buy R3 breakouts in uptrend) and bear (sell S3 breakdowns in downtrend)
-# - Position size 0.25 targets 15-25 trades/year, avoiding fee drag
-# - Exit at Camarilla midpoint provides logical profit target
-# - Designed for 12h timeframe to reduce trade frequency and fee drag
-# - Uses proper look-ahead avoidance with previous bar data for Camarilla calculation
-# - Complies with MTF rules: 1d data loaded once, aligned with delay
+# Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA trend filter and volume confirmation
+# - Camarilla R1/S1 levels act as intraday support/resistance derived from prior day's range
+# - Breakouts above R1 or below S1 with volume capture momentum after range periods
+# - 1d EMA(34) ensures alignment with higher timeframe trend (works in bull/bear markets)
+# - Volume spike (1.8x average) confirms institutional participation
+# - Position size 0.25 targets 20-40 trades/year, avoiding fee drag
+# - Exit when price returns to opposite S1/R1 level or volume wanes provides logical stop/reversal
