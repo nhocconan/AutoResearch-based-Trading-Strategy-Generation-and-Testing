@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_ElderRay_BullPower_BearPower_1dTrend"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -28,24 +28,57 @@ def generate_signals(prices):
     trend_up = close > ema34_1d_aligned
     trend_down = close < ema34_1d_aligned
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Camarilla levels from previous 1d (high, low, close)
+    # Calculate for each 12h bar using previous completed 1d
+    prev_1d_high = np.full(n, np.nan)
+    prev_1d_low = np.full(n, np.nan)
+    prev_1d_close = np.full(n, np.nan)
+    
+    # Get previous completed 1d values for each 12h bar
+    for i in range(n):
+        # Find the index of the previous completed 1d bar
+        # Since we're using 12h timeframe, we need to look back at least 2 bars for 1d
+        if i >= 2:
+            # Use the 1d data aligned to 12h timeframe
+            prev_1d_high[i] = df_1d['high'].values[i//2] if i//2 < len(df_1d) else np.nan
+            prev_1d_low[i] = df_1d['low'].values[i//2] if i//2 < len(df_1d) else np.nan
+            prev_1d_close[i] = df_1d['close'].values[i//2] if i//2 < len(df_1d) else np.nan
+    
+    # Calculate Camarilla levels R3, S3, R4, S4
+    camarilla_r3 = np.full(n, np.nan)
+    camarilla_s3 = np.full(n, np.nan)
+    camarilla_r4 = np.full(n, np.nan)
+    camarilla_s4 = np.full(n, np.nan)
+    
+    for i in range(n):
+        if not (np.isnan(prev_1d_high[i]) or np.isnan(prev_1d_low[i]) or np.isnan(prev_1d_close[i])):
+            H = prev_1d_high[i]
+            L = prev_1d_low[i]
+            C = prev_1d_close[i]
+            camarilla_r3[i] = C + (H - L) * 1.1 / 4
+            camarilla_s3[i] = C - (H - L) * 1.1 / 4
+            camarilla_r4[i] = C + (H - L) * 1.1 / 2
+            camarilla_s4[i] = C - (H - L) * 1.1 / 2
+    
+    # Volume spike detection (20-period average)
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 3  # ~18 hours
+    cooldown_bars = 4  # ~48 hours
     
-    start_idx = 13  # Ensure EMA13 calculation is valid
+    start_idx = 20  # Ensure volume MA is valid
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or 
-            np.isnan(ema13[i])):
+            np.isnan(camarilla_r3[i]) or 
+            np.isnan(camarilla_s3[i]) or 
+            np.isnan(camarilla_r4[i]) or 
+            np.isnan(camarilla_s4[i]) or 
+            np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -57,27 +90,27 @@ def generate_signals(prices):
         bars_since_last_trade += 1
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: Bull Power > 0 AND 1d uptrend
-            if bull_power[i] > 0 and trend_up[i]:
+            # Long: Close above R3 with volume spike AND 1d uptrend
+            if close[i] > camarilla_r3[i] and volume_spike[i] and trend_up[i]:
                 signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: Bear Power < 0 AND 1d downtrend
-            elif bear_power[i] < 0 and trend_down[i]:
+            # Short: Close below S3 with volume spike AND 1d downtrend
+            elif close[i] < camarilla_s3[i] and volume_spike[i] and trend_down[i]:
                 signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit: Bull Power <= 0 OR trend turns down
-            if bull_power[i] <= 0 or not trend_up[i]:
+            # Exit: Close below S3 OR trend turns down
+            if close[i] < camarilla_s3[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Bear Power >= 0 OR trend turns up
-            if bear_power[i] >= 0 or not trend_down[i]:
+            # Exit: Close above R3 OR trend turns up
+            if close[i] > camarilla_r3[i] or not trend_down[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
@@ -86,7 +119,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Elder Ray (Bull Power/Bear Power) with 1d trend filter captures institutional buying/selling pressure
-# in 6h timeframe. Long when Bull Power > 0 (buying pressure) in 1d uptrend, short when Bear Power < 0 (selling pressure) in 1d downtrend.
-# EMA13 provides responsive trend measurement for power calculations. Cooldown of 3 bars limits trades to ~20-50 per year.
-# Position size 0.25 manages risk. Works in bull markets (captures buying pressure continuations) and bear markets (captures selling pressure).
+# Hypothesis: Camarilla R3/S3 levels act as strong support/resistance in 12h timeframe.
+# Breakouts above R3 or below S3 with volume confirmation and aligned with 1d trend
+# capture significant moves. The Camarilla formula uses previous day's range to
+# calculate levels that often act as turning points. Volume spike confirms
+# institutional participation. Trend filter ensures we trade with the higher
+# timeframe momentum. Cooldown of 4 bars (~48h) limits trades to ~15-30 per year.
+# Position size 0.25 manages risk in volatile crypto markets. Works in both
+# bull and bear markets by following the 1d trend direction.
