@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Donchian20_Breakout_WeeklyPivotDirection_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,28 +17,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly trend filter: price above/below weekly EMA50
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    trend_up = close > ema50_1w_aligned
-    trend_down = close < ema50_1w_aligned
-    
-    # Daily Donchian(20) breakout levels
+    # 1d trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    trend_up = close > ema34_1d_aligned
+    trend_down = close < ema34_1d_aligned
+    
+    # Daily Camarilla pivot levels (R3/S3)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    close_1d_prev = df_1d['close'].shift(1).values
+    close_1d_prev = np.concatenate([[close_1d_prev[0]], close_1d_prev[:-1]])
+    
+    R3 = close_1d_prev + (high_1d - low_1d) * 1.1 / 4
+    S3 = close_1d_prev - (high_1d - low_1d) * 1.1 / 4
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
     # Volume confirmation: spike > 2x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -47,45 +46,45 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Wait for weekly EMA and Donchian
+    start_idx = max(50, 20)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(ema50_1w_aligned[i]) or np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]):
+        if np.isnan(ema34_1d_aligned[i]) or np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above Donchian high with volume spike and weekly uptrend
-            if close[i] > donchian_high_aligned[i] and vol_spike[i] and trend_up[i]:
-                signals[i] = 0.25
+            # Long: Close breaks above R3 with volume spike and 1d uptrend
+            if close[i] > R3_aligned[i] and vol_spike[i] and trend_up[i]:
+                signals[i] = 0.30
                 position = 1
-            # Short: Price breaks below Donchian low with volume spike and weekly downtrend
-            elif close[i] < donchian_low_aligned[i] and vol_spike[i] and trend_down[i]:
-                signals[i] = -0.25
+            # Short: Close breaks below S3 with volume spike and 1d downtrend
+            elif close[i] < S3_aligned[i] and vol_spike[i] and trend_down[i]:
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit: Price breaks below Donchian low or weekly trend turns down
-            if close[i] < donchian_low_aligned[i] or not trend_up[i]:
+            # Exit: Close below S3 or trend turns down
+            if close[i] < S3_aligned[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit: Price breaks above Donchian high or weekly trend turns up
-            if close[i] > donchian_high_aligned[i] or not trend_down[i]:
+            # Exit: Close above R3 or trend turns up
+            if close[i] > R3_aligned[i] or not trend_down[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-# Hypothesis: Donchian(20) breakouts on daily chart with weekly trend filter and volume spike capture strong institutional moves.
-# Long when price breaks above 20-day high with volume confirmation in weekly uptrend.
-# Short when price breaks below 20-day low with volume confirmation in weekly downtrend.
-# Weekly trend filter ensures we only trade with the higher timeframe trend, reducing whipsaws.
+# Hypothesis: Camarilla R3/S3 breakouts with 1d trend filter and volume spike capture strong institutional moves.
+# Long when price breaks above R3 (strong resistance) with volume confirmation in 1d uptrend.
+# Short when price breaks below S3 (strong support) with volume confirmation in 1d downtrend.
+# R3/S3 are stronger levels than R1/S1, leading to fewer but higher-quality trades.
 # Volume spike (>2x average) ensures conviction behind the breakout.
-# Designed for 6h timeframe to target 15-35 trades/year, avoiding overtrading.
-# Works in bull markets (breaks above Donchian high in uptrend) and bear markets (breaks below Donchian low in downtrend).
+# Designed for 12h timeframe to target 12-37 trades/year, avoiding overtrading.
+# Works in bull markets (breaks above R3 in uptrend) and bear markets (breaks below S3 in downtrend).
