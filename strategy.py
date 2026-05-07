@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_LinearRegressionBreakout_12hTrend
-Hypothesis: Price crossing above/below the 60-period linear regression channel with 12h trend filter and volume confirmation captures momentum moves while reducing false signals. Linear regression adapts to trend direction, and the channel acts as dynamic support/resistance. 12h trend filter ensures alignment with higher timeframe momentum. Volume confirmation adds conviction. Low frequency via 6h timeframe and strict entry criteria.
-Target: 50-150 total trades over 4 years.
+4h_WilliamsVIX_Fix_Trend
+Hypothesis: Williams VIX Fix identifies volatility spikes and mean reversion opportunities. 
+Combined with 1d trend filter and volume confirmation, it captures reversals in both bull and bear markets.
+The VIX Fix works by measuring how close the low is to the highest high over a period - 
+in volatile markets, this spikes, signaling potential reversals. Using it as a contrarian 
+signal with trend alignment reduces whipsaws. Target: 50-150 total trades over 4 years.
 """
-name = "6h_LinearRegressionBreakout_12hTrend"
-timeframe = "6h"
+name = "4h_WilliamsVIX_Fix_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,85 +25,60 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Linear Regression Channel (60-period)
-    period = 60
-    # Calculate linear regression slope and intercept using least squares
-    # For each point, we need sum of x, y, x^2, xy over the window
-    # Since x is just 0,1,2,...,period-1, we can precompute sums
-    sum_x = period * (period - 1) / 2
-    sum_x2 = (period - 1) * period * (2 * period - 1) / 6
+    # Williams VIX Fix (22-period)
+    # Measures put/call buying pressure - high values indicate fear
+    highest_high = pd.Series(high).rolling(window=22, min_periods=22).max().values
+    vix_fix = ((highest_high - low) / highest_high) * 100
     
-    # Initialize arrays
-    slope = np.full(n, np.nan)
-    intercept = np.full(n, np.nan)
+    # VIX Fix signal: high values = fear = potential long opportunity
+    # We'll use it inversely for mean reversion - when VIX Fix is high, consider long
+    vix_fix_threshold = 60  # Empirical threshold for fear
     
-    # Calculate using rolling window
-    for i in range(period - 1, n):
-        y_window = close[i - period + 1:i + 1]
-        sum_y = np.sum(y_window)
-        sum_xy = np.sum(y_window * np.arange(period))
-        
-        # Calculate slope and intercept
-        slope[i] = (period * sum_xy - sum_x * sum_y) / (period * sum_x2 - sum_x * sum_x)
-        intercept[i] = (sum_y - slope[i] * sum_x) / period
-    
-    # Calculate LR value at current point (end of window)
-    lr_value = intercept + slope * (period - 1)
-    
-    # Calculate standard deviation of residuals for channel width
-    residuals = close - lr_value
-    std_dev = pd.Series(residuals).rolling(window=period, min_periods=period).std().values
-    
-    # Upper and lower channel (1 standard deviation)
-    upper_channel = lr_value + std_dev
-    lower_channel = lr_value - std_dev
-    
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume filter: current volume > 1.5 * 20-period average
+    # Volume filter: current volume > 1.3 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_avg * 1.5)
+    volume_filter = volume > (vol_avg * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, period - 1)  # Need enough data for LR
+    start_idx = 100  # Need enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any data is not ready
-        if (np.isnan(lr_value[i]) or np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(vix_fix[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price crosses above upper channel + 12h uptrend + volume
-            if close[i] > upper_channel[i] and close[i] > ema_50_12h_aligned[i] and volume_filter[i]:
+            # Long: VIX Fix > threshold (fear) + price below 1d EMA (oversold in downtrend) + volume
+            if vix_fix[i] > vix_fix_threshold and close[i] < ema_50_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price crosses below lower channel + 12h downtrend + volume
-            elif close[i] < lower_channel[i] and close[i] < ema_50_12h_aligned[i] and volume_filter[i]:
+            # Short: VIX Fix < threshold (low fear/complacency) + price above 1d EMA (overbought in uptrend) + volume
+            elif vix_fix[i] < (vix_fix_threshold - 20) and close[i] > ema_50_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: price returns to linear regression value (mean reversion to trend)
+            # Exit: VIX Fix returns to neutral levels or trend reversal
             if position == 1:
-                if close[i] <= lr_value[i]:
+                if vix_fix[i] < (vix_fix_threshold - 10) or close[i] >= ema_50_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] >= lr_value[i]:
+                if vix_fix[i] > (vix_fix_threshold - 20) or close[i] <= ema_50_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
