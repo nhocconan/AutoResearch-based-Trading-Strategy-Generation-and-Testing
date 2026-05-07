@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_ElderRay_1dTrend_Volume"
-timeframe = "6h"
+name = "1d_KAMA_RSI_ChopFilter_WeeklyTrend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,64 +17,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE for Elder Ray and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 28:
+    # Load weekly data ONCE for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # EMA13 for Elder Ray (13-period EMA)
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # KAMA calculation
+    close_s = pd.Series(close)
+    change = close_s.diff(10).abs()
+    volatility = close_s.diff().abs().rolling(window=10, min_periods=10).sum()
+    er = change / volatility.replace(0, 1e-10)
+    sc = (er * (0.66 - 0.06) + 0.06) ** 2
+    kama = [close[0]]
+    for i in range(1, len(close)):
+        kama.append(kama[-1] + sc[i] * (close[i] - kama[-1]))
+    kama = np.array(kama)
     
-    # Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # RSI calculation
+    delta = close_s.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
-    # Daily EMA28 for trend filter (28-period EMA)
-    ema28_1d = pd.Series(df_1d['close']).ewm(span=28, adjust=False, min_periods=28).mean().values
-    ema28_1d_aligned = align_htf_to_ltf(prices, df_1d, ema28_1d)
+    # Weekly EMA34 for trend filter
+    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Volume spike detection (2x 20-period average)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Bollinger Bands for chop regime (width percentile)
+    sma_20 = close_s.rolling(window=20, min_periods=20).mean().values
+    std_20 = close_s.rolling(window=20, min_periods=20).std().values
+    bb_width = (std_20 * 2) / sma_20
+    bb_width_pct = pd.Series(bb_width).rolling(window=50, min_periods=20).rank(pct=True).values * 100
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 28)
+    start_idx = max(50, 34)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema28_1d_aligned[i]) or np.isnan(ema13[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(bb_width_pct[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: daily EMA28 slope
-        trend_up = ema28_1d_aligned[i] > ema28_1d_aligned[i-1]
-        trend_down = ema28_1d_aligned[i] < ema28_1d_aligned[i-1]
-        
-        # Volume condition
-        vol_spike = volume[i] > vol_ma_20[i] * 2.0
+        kama_up = kama[i] > kama[i-1]
+        kama_down = kama[i] < kama[i-1]
+        rsi_oversold = rsi[i] < 30
+        rsi_overbought = rsi[i] > 70
+        chop_condition = bb_width_pct[i] > 50  # Choppy market when width > median
         
         if position == 0:
-            # Long: Bull Power > 0 (buying pressure) + uptrend + volume spike
-            if bull_power[i] > 0 and trend_up and vol_spike:
+            # Long: KAMA up in weekly uptrend, RSI oversold, choppy market (mean reversion)
+            if kama_up and ema_34_1w_aligned[i] > ema_34_1w_aligned[i-1] and rsi_oversold and chop_condition:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 (selling pressure) + downtrend + volume spike
-            elif bear_power[i] < 0 and trend_down and vol_spike:
+            # Short: KAMA down in weekly downtrend, RSI overbought, choppy market
+            elif kama_down and ema_34_1w_aligned[i] < ema_34_1w_aligned[i-1] and rsi_overbought and chop_condition:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Bull Power turns negative or trend changes
-            if bull_power[i] <= 0 or not trend_up:
+            # Exit: KAMA down or RSI overbought
+            if not kama_up or rsi[i] > 60:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Bear Power turns positive or trend changes
-            if bear_power[i] >= 0 or not trend_down:
+            # Exit: KAMA up or RSI oversold
+            if not kama_down or rsi[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -82,17 +98,15 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 6h Elder Ray with daily trend filter and volume confirmation
-# - Elder Ray (Bull Power = High - EMA13, Bear Power = Low - EMA13) measures buying/selling pressure
-# - Long when Bull Power > 0 (buyers in control) + daily uptrend + volume spike
-# - Short when Bear Power < 0 (sellers in control) + daily downtrend + volume spike
-# - Daily EMA28 trend filter ensures alignment with higher timeframe trend
-# - Volume spike (2x average) confirms institutional participation
-# - Works in both bull (buying power in uptrend) and bear (selling power in downtrend)
-# - Exit when power shifts or trend changes
+# Hypothesis: 1d KAMA trend + RSI mean reversion + chop regime filter with weekly trend
+# - KAMA adapts to market noise, providing reliable trend direction
+# - RSI extremes (oversold/overbought) provide mean reversion entries in choppy markets
+# - Bollinger width percentile > 50 identifies choppy/range regimes suitable for mean reversion
+# - Weekly EMA34 trend filter ensures alignment with higher timeframe trend
+# - Works in bull markets: KAMA up + weekly uptrend + RSI oversold dips
+# - Works in bear markets: KAMA down + weekly downtrend + RSI overbought bounces
+# - Chop regime filter avoids trending markets where mean reversion fails
 # - Position size 0.25 targets ~20-60 trades/year to avoid fee drag
-# - Novel for 6m: Elder Ray not recently tried on 6h timeframe with 1d trend filter
-# - Aims for 50-120 total trades over 4 years (12-30/year) to stay within limits
-# - Elder Ray provides clear bull/bear power signals with zero lag when combined with EMA13
-# - Daily trend filter reduces whipsaws vs same-timeframe signals
-# - Volume confirmation reduces false signals during low-participation moves
+# - Combines trend following (KAMA) with mean reversion (RSI) in appropriate regimes
+# - Weekly trend filter reduces whipsaws vs same-timeframe signals
+# - Proven components: KAMA (from 1.31 Sharpe), RSI, chop regime, weekly trend filter
