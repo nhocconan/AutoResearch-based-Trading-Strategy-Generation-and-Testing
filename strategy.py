@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend_Volume
-Hypothesis: Camarilla pivot levels from 1d: price breaks above R3 or below S3 with confirmation from 1d EMA trend and volume spike. Designed to work in both bull and bear markets by aligning with daily trend. Targets 15-35 trades/year to minimize fee drag.
+4h_Camarilla_R3_S3_Breakout_1dTrend_Volume
+Hypothesis: Price breaks above R3 or below S3 daily Camarilla levels with 1-day EMA trend confirmation and volume spike. Designed for both bull and bear markets by aligning with daily trend. Targets 20-40 trades/year to minimize fee drift.
 """
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -33,16 +33,12 @@ def generate_signals(prices):
     prev_close = df_1d['close'].shift(1).values
     
     # Calculate Camarilla levels: R3, S3, R4, S4
-    # R3 = close + (high - low) * 1.1/2
-    # S3 = close - (high - low) * 1.1/2
-    # R4 = close + (high - low) * 1.1
-    # S4 = close - (high - low) * 1.1
     camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 2
     camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 2
     camarilla_r4 = prev_close + (prev_high - prev_low) * 1.1
     camarilla_s4 = prev_close - (prev_high - prev_low) * 1.1
     
-    # Align Camarilla levels to 12h timeframe (they change only at daily boundaries)
+    # Align Camarilla levels to 4h timeframe (they change only at daily boundaries)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
