@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 6H_TRIX_VolumeSpike_TrendFilter
-# Hypothesis: TRIX (triple exponential average) momentum on 6h with 12h trend filter and volume spike confirmation.
-# TRIX filters noise and identifies momentum shifts; 12h trend ensures alignment with higher timeframe direction.
-# Volume spike confirms institutional participation. Designed for low trade frequency (15-30/year) to minimize fee drag.
-# Works in bull/bear by following 12h trend direction only.
+# 4H_Donchian20_1DTrend_Filter_VolumeSpike
+# Hypothesis: 4-hour Donchian(20) breakout with daily trend filter (price > daily EMA34) and volume spike confirmation.
+# Uses daily trend to avoid counter-trend trades in both bull and bear markets.
+# Volume spike ensures momentum confirmation. Targets 20-40 trades/year to minimize fee drag.
+# Uses discrete position sizing (0.25).
 
-name = "6H_TRIX_VolumeSpike_TrendFilter"
-timeframe = "6h"
+name = "4H_Donchian20_1DTrend_Filter_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -18,65 +18,77 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:  # Need enough data for EMA34
         return np.zeros(n)
     
-    # Calculate EMA34 on 12h close for trend filter
-    ema_34_12h = pd.Series(df_12h['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # Calculate daily EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate TRIX (15,9,9) on 6h close
-    # TRIX = EMA(EMA(EMA(close, 15), 9), 9) - 1, then % change
-    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=9, adjust=False, min_periods=9).mean().values
-    ema3 = pd.Series(ema2).ewm(span=9, adjust=False, min_periods=9).mean().values
-    trix_raw = ema3
-    # Calculate % change: (current - previous) / previous * 100
-    trix = np.zeros_like(trix_raw)
-    trix[1:] = (trix_raw[1:] - trix_raw[:-1]) / trix_raw[:-1] * 100
-    # First value remains 0 (no previous)
+    # Calculate Donchian channels (20-period) on 4h data
+    lookback = 20
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
     
-    # Volume filter: volume > 2.0x 20-period average
+    for i in range(lookback, n):
+        donchian_high[i] = np.max(high[i-lookback:i])
+        donchian_low[i] = np.min(low[i-lookback:i])
+    
+    # Volume filter: current volume > 2.0x average volume (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Volatility filter: avoid low volatility periods (ATR < 0.3% of price)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    vol_filter = atr > 0.003 * close  # ATR > 0.3% of price
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(15+9+9, 20, 34)  # TRIX needs 33 bars, vol MA needs 20, EMA34 needs 34
+    start_idx = max(20, 20)  # Ensure we have Donchian and volume MA data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(trix[i]) or np.isnan(ema_34_12h_aligned[i]) or 
-            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0 or
+            np.isnan(vol_filter[i]) or not vol_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume spike filter
+        # Volume filter: spike confirmation (2.0x average volume)
         volume_filter = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long: TRIX turns up (>0) + 12h uptrend (price > EMA34) + volume spike
-            if (trix[i] > 0 and 
-                close[i] > ema_34_12h_aligned[i] and   # 12h uptrend filter
+            # Long: Price breaks above Donchian high + daily uptrend + volume spike
+            if (close[i] > donchian_high[i] and 
+                close[i] > ema_34_1d_aligned[i] and   # Daily uptrend filter
                 volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX turns down (<0) + 12h downtrend (price < EMA34) + volume spike
-            elif (trix[i] < 0 and 
-                  close[i] < ema_34_12h_aligned[i] and   # 12h downtrend filter
+            # Short: Price breaks below Donchian low + daily downtrend + volume spike
+            elif (close[i] < donchian_low[i] and 
+                  close[i] < ema_34_1d_aligned[i] and   # Daily downtrend filter
                   volume_filter):
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: TRIX crosses zero (momentum shift)
-            if (position == 1 and trix[i] < 0) or (position == -1 and trix[i] > 0):
+            # Exit: Price returns to the middle of Donchian channel (mean reversion)
+            donchian_mid = (donchian_high[i] + donchian_low[i]) / 2
+            at_mid = abs(close[i] - donchian_mid) < (donchian_high[i] - donchian_low[i]) * 0.25  # Within 25% of range
+            
+            if at_mid:
                 signals[i] = 0.0
                 position = 0
             else:
