@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_1d_PivotBreakout_TrendVolume_v1"
-timeframe = "12h"
+name = "4h_12h_PivotBreakout_VolumeTrend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,9 +17,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for Pivot and trend
+    # Load daily data ONCE for Pivot levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    # Load 12h data ONCE for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
     # Calculate daily Pivot (standard) from previous day
@@ -34,48 +39,52 @@ def generate_signals(prices):
     s1 = pivot - range_hl
     r1 = pivot + range_hl
     
-    # Align daily levels to 12h timeframe
+    # Align daily levels to 4h timeframe
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     
-    # Volume spike detection: 4-period average (2 days of 12h bars)
-    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    # 12h EMA(34) for trend filter
+    ema_34_12h = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    
+    # Volume spike detection: 2-period average (1 day of 4h bars)
+    vol_ma_2 = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(4, 4)  # Wait for volume MA
+    start_idx = max(34, 2)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(s1_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(vol_ma_4[i])):
+        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(vol_ma_2[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above S1 with volume and price > previous close (momentum)
-            vol_condition = volume[i] > vol_ma_4[i] * 2.0
-            momentum = close[i] > close[i-1]
+            # Long: price above S1 with volume and 12h uptrend
+            vol_condition = volume[i] > vol_ma_2[i] * 1.8
+            uptrend = ema_34_12h_aligned[i] > ema_34_12h_aligned[i-1]
             
-            if close[i] > s1_aligned[i] and vol_condition and momentum:
+            if close[i] > s1_aligned[i] and vol_condition and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below R1 with volume and price < previous close (momentum)
-            elif close[i] < r1_aligned[i] and vol_condition and not momentum:
+            # Short: price below R1 with volume and 12h downtrend
+            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Exit: price back below S1 or volume drops
-            if close[i] < s1_aligned[i] or volume[i] < vol_ma_4[i] * 1.5:
+            if close[i] < s1_aligned[i] or volume[i] < vol_ma_2[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Exit: price back above R1 or volume drops
-            if close[i] > r1_aligned[i] or volume[i] < vol_ma_4[i] * 1.5:
+            if close[i] > r1_aligned[i] or volume[i] < vol_ma_2[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -83,18 +92,17 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 12h Pivot S1/R1 breakout with volume confirmation and momentum
+# Hypothesis: 4h Pivot S1/R1 breakout with 12h trend and volume confirmation
 # - Daily Pivot S1/R1 act as key support/resistance levels from prior session
-# - Breakout above S1 with volume in upward momentum = long opportunity
-# - Breakdown below R1 with volume in downward momentum = short opportunity
-# - Volume spike (2.0x average) confirms institutional participation
-# - Momentum filter (price > previous close) reduces false breakouts
+# - Breakout above S1 with volume in 12h uptrend = long opportunity
+# - Breakdown below R1 with volume in 12h downtrend = short opportunity
+# - Volume spike (1.8x average) confirms institutional participation
 # - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
 # - Exit when price returns to S1/R1 or volume weakens
 # - Position size 0.25 targets ~20-50 trades/year, avoiding fee drag
 # - Uses actual daily Pivot levels (not weekly) for better responsiveness
-# - 12h timeframe reduces noise vs lower timeframes
+# - 12h trend filter reduces whipsaws vs using same timeframe
+# - Designed to work in BOTH bull and bear markets via trend filter
 # - Volume confirmation reduces false breakouts
-# - Momentum filter adds confluence without excessive complexity
+# - Novel combination: Pivot (1d) + trend (12h) + volume (4h) not recently tried on 4h
 # - Aims for 50-150 total trades over 4 years (12-37/year) to stay within limits
-# - Focus on BTC/ETH as primary targets (avoiding SOL-only bias)
