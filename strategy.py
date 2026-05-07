@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4H_Camarilla_Pivot_R3_S3_Breakout_1DTrend_Volume_Spike
-# Hypothesis: Uses Camarilla pivot levels (R3, S3) from daily timeframe for breakout entries,
-# confirmed by 1-day EMA34 trend and volume spike. Works in both bull and bear markets by
+# 12H_Camarilla_R3S3_1DTrend_Volume_Spike_v2
+# Hypothesis: Uses daily Camarilla pivot levels (R3, S3) for breakout entries on 12h timeframe,
+# confirmed by daily EMA34 trend and volume spike. Designed for lower trade frequency
+# (target: 15-30 trades/year) to minimize fee drag. Works in both bull and bear markets by
 # only taking long breaks above R3 in uptrend and short breaks below S3 in downtrend.
-# Target: 20-50 trades per year with size 0.25 to avoid fee drag.
 
-name = "4H_Camarilla_Pivot_R3_S3_Breakout_1DTrend_Volume_Spike"
-timeframe = "4h"
+name = "12H_Camarilla_R3S3_1DTrend_Volume_Spike_v2"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -41,18 +41,18 @@ def generate_signals(prices):
     # 1-day EMA34 for trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align Camarilla levels and EMA to 4h timeframe
+    # Align Camarilla levels and EMA to 12h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume filter: current volume > 2.0x average volume (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume filter: current volume > 2.5x average volume (30-period) for stricter confirmation
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure we have volume MA data
+    start_idx = 30  # Ensure we have volume MA data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
@@ -64,7 +64,7 @@ def generate_signals(prices):
             continue
         
         # Volume filter: spike confirmation
-        volume_filter = volume[i] > 2.0 * vol_ma[i]
+        volume_filter = volume[i] > 2.5 * vol_ma[i]
         
         if position == 0:
             # Long: Price breaks above R3 + Uptrend (price > EMA34) + volume spike
