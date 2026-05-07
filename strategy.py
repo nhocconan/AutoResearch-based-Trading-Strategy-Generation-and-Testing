@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_1wCrossover_1dVolumeFilter_v1
-Hypothesis: Uses weekly EMA crossover for primary trend direction, confirmed by
-daily volume expansion, on 12h timeframe. Targets 15-25 trades/year to minimize
-fee drag. Works in bull markets via trend continuation and in bear markets via
-mean-reversion bounces off the weekly EMA with volume confirmation.
+1d_WeeklyTrend_Pullback_v2
+Hypothesis: Uses 1-week trend filter (price above/below weekly SMA) combined with 
+1-day pullback to daily EMA on volume expansion for entries. Designed for low 
+trade frequency (<25/year) to minimize fee drag while capturing trend continuation 
+moves in both bull and bear markets. Weekly trend provides strong directional bias,
+daily pullback offers precise entry with volume confirmation.
 """
 
-name = "12h_1wCrossover_1dVolumeFilter_v1"
-timeframe = "12h"
+name = "1d_WeeklyTrend_Pullback_v2"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -21,64 +22,56 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly EMA crossover (fast=21, slow=55)
+    # 1-week trend filter: SMA of weekly close
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 55:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
     close_1w = df_1w['close'].values
-    ema_fast = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_slow = pd.Series(close_1w).ewm(span=55, adjust=False, min_periods=55).mean().values
+    sma_1w = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
+    sma_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_1w)
     
-    # Weekly trend: 1 if fast > slow, -1 if fast < slow
-    weekly_trend = np.where(ema_fast > ema_slow, 1, -1)
-    weekly_trend_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend)
+    # Daily EMA for pullback entries
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Daily volume confirmation: current day volume > 20-day average
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    volume_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Volume confirmation: current volume > 20-day average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(55, n):
+    for i in range(20, n):
         # Skip if any critical value is NaN
-        if (np.isnan(weekly_trend_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i]) or vol_ma_1d_aligned[i] == 0):
+        if (np.isnan(sma_1w_aligned[i]) or np.isnan(ema_20[i]) or 
+            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Get current day's volume (aligned to 12h)
-        vol_today = vol_ma_1d_aligned[i]
-        
         if position == 0:
-            # Enter long: weekly uptrend AND above-average volume
-            if weekly_trend_aligned[i] == 1 and volume[i] > vol_today:
+            # Long: weekly uptrend (price > weekly SMA) + pullback to daily EMA with volume
+            if close[i] > sma_1w_aligned[i] and close[i] <= ema_20[i] and volume[i] > vol_ma[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: weekly downtrend AND above-average volume
-            elif weekly_trend_aligned[i] == -1 and volume[i] > vol_today:
+            # Short: weekly downtrend (price < weekly SMA) + pullback to daily EMA with volume
+            elif close[i] < sma_1w_aligned[i] and close[i] >= ema_20[i] and volume[i] > vol_ma[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: weekly trend turns down
-            if weekly_trend_aligned[i] == -1:
+            # Exit: weekly trend breaks or reversal signal
+            if close[i] < sma_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: weekly trend turns up
-            if weekly_trend_aligned[i] == 1:
+            # Exit: weekly trend breaks or reversal signal
+            if close[i] > sma_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
