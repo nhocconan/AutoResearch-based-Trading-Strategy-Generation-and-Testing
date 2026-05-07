@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 6H_ElderRay_Alligator_TrendFilter
-# Hypothesis: Combines Elder Ray (Bull/Bear Power) with Williams Alligator for trend confirmation on 6h timeframe.
-# Elder Ray measures bull/bear power via EMA(13) divergence; Alligator (SMAs 13,8,5) filters trend direction.
-# Works in both bull and bear markets by only taking trades in direction of Alligator alignment.
-# Target: 50-150 total trades over 4 years (12-37/year) with size 0.25.
+# 4H_Camarilla_Pivot_R3_S3_Breakout_1DTrend_Volume_Spike
+# Hypothesis: Uses Camarilla pivot levels (R3, S3) from daily timeframe for breakout entries,
+# confirmed by 1-day EMA34 trend and volume spike. Works in both bull and bear markets by
+# only taking long breaks above R3 in uptrend and short breaks below S3 in downtrend.
+# Target: 20-50 trades per year with size 0.25 to avoid fee drag.
 
-name = "6H_ElderRay_Alligator_TrendFilter"
-timeframe = "6h"
+name = "4H_Camarilla_Pivot_R3_S3_Breakout_1DTrend_Volume_Spike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,34 +23,30 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Elder Ray and Alligator calculation
+    # Get 1d data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate EMA13 for Elder Ray (Bull/Bear Power)
-    close_1d = df_1d['close'].values
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    # Calculate daily OHLC for Camarilla pivots
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    bull_power_1d = high_1d - ema13_1d
-    bear_power_1d = low_1d - ema13_1d
+    close_1d = df_1d['close'].values
     
-    # Williams Alligator: Jaw (13), Teeth (8), Lips (5) SMAs
-    jaw_1d = pd.Series(close_1d).rolling(window=13, min_periods=13).mean().values
-    teeth_1d = pd.Series(close_1d).rolling(window=8, min_periods=8).mean().values
-    lips_1d = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().values
+    # Camarilla levels: R3 = close + (high - low) * 1.1/4, S3 = close - (high - low) * 1.1/4
+    rng = high_1d - low_1d
+    camarilla_r3 = close_1d + rng * 1.1 / 4
+    camarilla_s3 = close_1d - rng * 1.1 / 4
     
-    # Align indicators to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips_1d)
+    # 1-day EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Volume filter: current volume > 1.5x average volume (20-period)
+    # Align Camarilla levels and EMA to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Volume filter: current volume > 2.0x average volume (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -60,46 +56,39 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
-            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema34_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Volume filter: spike confirmation
-        volume_filter = volume[i] > 1.5 * vol_ma[i]
-        
-        # Alligator trend filter: 
-        # Uptrend: Lips > Teeth > Jaw (all aligned upward)
-        # Downtrend: Lips < Teeth < Jaw (all aligned downward)
-        alligator_up = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]
-        alligator_down = lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaw_aligned[i]
+        volume_filter = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long: Bull Power positive + Alligator uptrend + volume filter
-            if (bull_power_aligned[i] > 0 and 
-                alligator_up and
+            # Long: Price breaks above R3 + Uptrend (price > EMA34) + volume spike
+            if (close[i] > r3_aligned[i] and 
+                close[i] > ema34_aligned[i] and
                 volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power negative + Alligator downtrend + volume filter
-            elif (bear_power_aligned[i] < 0 and 
-                  alligator_down and
+            # Short: Price breaks below S3 + Downtrend (price < EMA34) + volume spike
+            elif (close[i] < s3_aligned[i] and 
+                  close[i] < ema34_aligned[i] and
                   volume_filter):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Bull Power turns negative or Alligator loses alignment
-            if bull_power_aligned[i] <= 0 or not (lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i]):
+            # Exit: Price falls back below R3 or trend turns down
+            if close[i] < r3_aligned[i] or close[i] < ema34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Bear Power turns positive or Alligator loses alignment
-            if bear_power_aligned[i] >= 0 or not (lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i]):
+            # Exit: Price rises back above S3 or trend turns up
+            if close[i] > s3_aligned[i] or close[i] > ema34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
