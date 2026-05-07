@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_KAMA_Direction_RSI_1dChop_Filter"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_v3"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,114 +19,76 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    # Calculate KAMA on daily close
-    # Efficiency ratio (ER)
-    change = np.abs(np.diff(df_1d['close'], prepend=df_1d['close'].iloc[0]))
-    volatility = np.abs(np.diff(df_1d['close']))
-    er = change / (volatility.rolling(window=10, min_periods=10).sum().values + 1e-10)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    # KAMA calculation
-    kama = np.zeros_like(df_1d['close'])
-    kama[0] = df_1d['close'].iloc[0]
-    for i in range(1, len(df_1d)):
-        kama[i] = kama[i-1] + sc[i] * (df_1d['close'].iloc[i] - kama[i-1])
+    # Calculate daily Camarilla pivot levels
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Calculate RSI(14) on daily close
-    delta = np.diff(df_1d['close'], prepend=df_1d['close'].iloc[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_val = prev_high - prev_low
     
-    # Calculate Choppiness Index (CHOP) on daily data
-    atr = np.zeros(len(df_1d))
-    tr1 = np.abs(np.diff(df_1d['high'], prepend=df_1d['high'].iloc[0]))
-    tr2 = np.abs(np.diff(df_1d['low'], prepend=df_1d['low'].iloc[0]))
-    tr3 = np.abs(df_1d['high'] - df_1d['low'].shift(1).fillna(df_1d['low'].iloc[0]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    r1 = pivot + (range_val * 1.1 / 12)
+    s1 = pivot - (range_val * 1.1 / 12)
     
-    max_high = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10((atr * 14) / (max_high - min_low + 1e-10)) / np.log10(14)
+    # Calculate daily EMA(34) for trend filter
+    ema_34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align indicators to 12h timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Align daily Camarilla levels and EMA to 4h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    
+    # Volume spike detection (20-period average on 4h)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Wait for indicators to stabilize
+    start_idx = 20  # Wait for volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or np.isnan(chop_aligned[i]):
+        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Chop filter: only trade when market is trending (CHOP < 38.2) or ranging (CHOP > 61.8)
-        # In trending markets, follow KAMA direction
-        # In ranging markets, mean revert at RSI extremes
-        if chop_aligned[i] < 38.2:  # Trending market
-            if position == 0:
-                if close[i] > kama_aligned[i] and rsi_aligned[i] > 50:
-                    signals[i] = 0.25
-                    position = 1
-                elif close[i] < kama_aligned[i] and rsi_aligned[i] < 50:
-                    signals[i] = -0.25
-                    position = -1
-            elif position == 1:
-                if close[i] < kama_aligned[i] or rsi_aligned[i] < 40:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-            elif position == -1:
-                if close[i] > kama_aligned[i] or rsi_aligned[i] > 60:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
-        elif chop_aligned[i] > 61.8:  # Ranging market
-            if position == 0:
-                if rsi_aligned[i] < 30 and close[i] > kama_aligned[i]:
-                    signals[i] = 0.25
-                    position = 1
-                elif rsi_aligned[i] > 70 and close[i] < kama_aligned[i]:
-                    signals[i] = -0.25
-                    position = -1
-            elif position == 1:
-                if rsi_aligned[i] > 50 or close[i] < kama_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-            elif position == -1:
-                if rsi_aligned[i] < 50 or close[i] > kama_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
-        else:  # Neutral chop zone - no trading
-            if position != 0:
+        if position == 0:
+            # Long: break above daily R1 with volume and in uptrend
+            vol_condition = volume[i] > vol_ma[i] * 2.0
+            uptrend = close[i] > ema_34_aligned[i]
+            
+            if close[i] > r1_aligned[i] and vol_condition and uptrend:
+                signals[i] = 0.25
+                position = 1
+            # Short: break below daily S1 with volume and in downtrend
+            elif close[i] < s1_aligned[i] and vol_condition and not uptrend:
+                signals[i] = -0.25
+                position = -1
+        elif position == 1:
+            # Exit: price back below daily pivot or volume drops
+            if close[i] < pivot_aligned[i] or volume[i] < vol_ma[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
+            else:
+                signals[i] = 0.25
+        elif position == -1:
+            # Exit: price back above daily pivot or volume drops
+            if close[i] > pivot_aligned[i] or volume[i] < vol_ma[i] * 1.5:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
 
-# Hypothesis: KAMA direction + RSI + Chop regime filter on 12h timeframe
-# KAMA adapts to market efficiency - follows price closely in trends, stays flat in ranges
-# Chop regime filter identifies market state: <38.2 = trending, >61.8 = ranging
-# In trending markets: follow KAMA direction with RSI confirmation (avoid false breaks)
-# In ranging markets: mean revert at RSI extremes (30/70) with KAMA as dynamic support/resistance
-# Works in both bull (follow trend) and bear (mean revert in ranges) markets
-# Position size 0.25 limits risk while maintaining sufficient trade frequency (~20-40/year)
+# Hypothesis: 4h Camarilla R1/S1 breakout with volume confirmation and daily EMA(34) trend filter.
+# Uses actual daily Camarilla pivot levels (R1/S1) from prior day's OHLC.
+# Breaks above R1 or below S1 with 2x volume indicate institutional interest.
+# Daily EMA(34) ensures trades align with daily trend direction.
+# Works in bull (buy R1 breaks in uptrend) and bear (sell S1 breaks in downtrend).
+# Position size 0.25 balances risk and keeps trade frequency ~20-40/year.
