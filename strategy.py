@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 12h_Donchian20_1dTrend_VolumeConfirm
-# Hypothesis: Donchian(20) breakouts on 12h timeframe with 1d EMA50 trend filter and volume confirmation
-# capture institutional moves while avoiding false breakouts. Works in bull markets via long breakouts
-# above upper band and in bear markets via short breakdowns below lower band. Volume filter ensures
-# breakouts have conviction, trend filter avoids counter-trend trades. Target: 12-37 trades per year
-# (~50-150 over 4 years) with position size 0.25.
+# 4h_RangeBreakout_1dTrend_VolumeFilter
+# Hypothesis: Range-bound markets (low volatility) followed by breakouts with volume and trend confirmation
+# capture institutional moves. Uses 4h Bollinger Bands to detect range (low BB width), then breaks
+# above upper BB or below lower BB with volume > 2x average and 1d EMA50 trend filter.
+# Works in bull markets via long breakouts and bear via short breakdowns. Target: 25-40 trades/year.
 
-name = "12h_Donchian20_1dTrend_VolumeConfirm"
-timeframe = "12h"
+name = "4h_RangeBreakout_1dTrend_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -29,65 +28,63 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 20-period Donchian channels on 12h data
-    # Upper band: highest high of last 20 periods
-    # Lower band: lowest low of last 20 periods
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # 4h Bollinger Bands (20, 2) for range detection
+    close_series = pd.Series(close)
+    bb_mid = close_series.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_series.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_mid + 2 * bb_std
+    bb_lower = bb_mid - 2 * bb_std
+    bb_width = bb_upper - bb_lower
+    
+    # Range condition: BB width < 20th percentile (tight range)
+    bb_width_series = pd.Series(bb_width)
+    bb_width_p20 = bb_width_series.rolling(window=50, min_periods=50).quantile(0.20).values
+    range_condition = bb_width < bb_width_p20
     
     # 1d EMA50 for trend filter
     ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume ratio: current volume / 20-period average volume
+    # Volume filter: volume > 2x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.where(vol_ma > 0, volume / vol_ma, 1.0)
+    vol_filter = volume > (2 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need 20 periods for Donchian and volume MA
+    start_idx = 50  # Need 50 periods for BB width percentile
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(bb_width[i]) or np.isnan(bb_width_p20[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Breakout conditions: price breaks above upper band or below lower band
-        breakout_up = close[i] > donchian_high[i]
-        breakout_down = close[i] < donchian_low[i]
-        
-        # Volume confirmation: volume > 1.3x average
-        volume_confirm = vol_ratio[i] > 1.3
-        
-        # Trend filter from 1d EMA50
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Breakout conditions
+        breakout_up = close[i] > bb_upper[i]
+        breakout_down = close[i] < bb_lower[i]
         
         if position == 0:
-            # Long: upward breakout above upper band + volume + uptrend
-            if breakout_up and volume_confirm and uptrend:
+            # Enter long: range breakout up + volume + uptrend
+            if range_condition[i] and breakout_up and vol_filter[i] and (close[i] > ema_50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: downward breakout below lower band + volume + downtrend
-            elif breakout_down and volume_confirm and downtrend:
+            # Enter short: range breakout down + volume + downtrend
+            elif range_condition[i] and breakout_down and vol_filter[i] and (close[i] < ema_50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price breaks back below lower band (failed breakout) or trend reversal
-            if close[i] < donchian_low[i] or not uptrend:
+            # Exit: price returns to middle band or trend reversal
+            if close[i] < bb_mid[i] or (close[i] < ema_50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price breaks back above upper band (failed breakdown) or trend reversal
-            if close[i] > donchian_high[i] or not downtrend:
+            # Exit: price returns to middle band or trend reversal
+            if close[i] > bb_mid[i] or (close[i] > ema_50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
