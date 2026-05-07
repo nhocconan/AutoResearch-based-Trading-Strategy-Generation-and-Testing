@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_RSI_Trend_Filter_40_60"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,49 +17,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    # 1w trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    # 1d EMA21 trend
-    ema_21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_21_1d)
-    trend_up = close > ema_21_1d_aligned
-    trend_down = close < ema_21_1d_aligned
+    close_1w = df_1w['close'].values
+    # 1w EMA34 trend
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    trend_up = close > ema_34_1w_aligned
+    trend_down = close < ema_34_1w_aligned
     
-    # 4h RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    avg_gain[0] = gain[0]
-    avg_loss[0] = loss[0]
-    for i in range(1, n):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate Camarilla pivot levels from previous day
+    high_prev = np.roll(high, 1)
+    low_prev = np.roll(low, 1)
+    close_prev = np.roll(close, 1)
+    high_prev[0] = np.nan
+    low_prev[0] = np.nan
+    close_prev[0] = np.nan
     
-    # Volume spike: current volume > 1.5x 20-period average
+    camarilla_high = high_prev + (low_prev - close_prev) * 1.1 / 12
+    camarilla_low = close_prev - (high_prev - low_prev) * 1.1 / 12
+    
+    # R3 and S3 levels
+    camarilla_r3 = camarilla_high + 4 * (camarilla_high - camarilla_low)
+    camarilla_s3 = camarilla_low - 4 * (camarilla_high - camarilla_low)
+    
+    # Volume spike: current volume > 2.0x 20-period average (~10 days)
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-20:i])
-    vol_spike = volume > (1.5 * vol_ma_20)
+    vol_spike = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 3  # ~12 hours (3*4h)
+    cooldown_bars = 4  # ~2 days (4*12h) to reduce trade frequency
     
-    start_idx = max(14, 20)
+    start_idx = max(1, 20)  # Ensure enough data for Camarilla and volume
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_21_1d_aligned[i]) or 
-            np.isnan(rsi[i]) or 
-            np.isnan(vol_ma_20[i])):
+        # Skip if any data not ready
+        if (np.isnan(camarilla_r3[i]) or 
+            np.isnan(camarilla_s3[i]) or 
+            np.isnan(ema_34_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,28 +72,36 @@ def generate_signals(prices):
         
         bars_since_last_trade += 1
         
+        # Determine trend direction
+        trending_up = trend_up[i]
+        trending_down = trend_down[i]
+        
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: RSI < 40 in 1d uptrend with volume spike
-            if rsi[i] < 40 and trend_up[i] and vol_spike[i]:
+            # Long: Price breaks above Camarilla R3 with volume spike in 1w uptrend
+            if (close[i] > camarilla_r3[i] and 
+                trending_up and 
+                vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: RSI > 60 in 1d downtrend with volume spike
-            elif rsi[i] > 60 and trend_down[i] and vol_spike[i]:
+            # Short: Price breaks below Camarilla S3 with volume spike in 1w downtrend
+            elif (close[i] < camarilla_s3[i] and 
+                  trending_down and 
+                  vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit: RSI > 50 or 1d trend changes to down
-            if rsi[i] > 50 or not trend_up[i]:
+            # Exit: Price falls back below Camarilla S3 or 1w trend changes to down
+            if close[i] < camarilla_s3[i] or not trending_up:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: RSI < 50 or 1d trend changes to up
-            if rsi[i] < 50 or not trend_down[i]:
+            # Exit: Price rises back above Camarilla R3 or 1w trend changes to up
+            if close[i] > camarilla_r3[i] or not trending_down:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
@@ -100,4 +110,4 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: On 4h timeframe, buying when RSI < 40 (oversold) in 1d uptrend with volume confirmation and selling when RSI > 60 (overbought) in 1d downtrend with volume confirmation captures mean reversion within the trend. This works in bull markets (buying dips in uptrend) and bear markets (selling rallies in downtrend). The 1d EMA21 filter ensures alignment with higher timeframe momentum. Volume spike (1.5x 20-period average) confirms institutional participation. Cooldown period (3 bars = 12 hours) prevents overtrading. Target: 40-100 total trades over 4 years (10-25/year) to minimize fee drag. Uses discrete position sizing (0.25) to balance risk and reward while reducing fee churn. RSI thresholds (40/60) are less extreme than traditional (30/70) to increase signal frequency while maintaining edge in trending markets. This strategy focuses on RSI mean reversion with trend and volume filters, which has shown robustness across market regimes.
+# Hypothesis: On 12h timeframe, price breaking above/below Camarilla R3/S3 levels with volume spike confirmation and 1-week EMA34 trend filter captures institutional breakout momentum. Camarilla levels represent key intraday support/resistance derived from previous day's price action, reducing false breakouts. 1w trend filter ensures alignment with higher timeframe momentum, improving performance in both bull and bear markets. Volume spike filter (2.0x 20-period average) confirms institutional participation. Cooldown period prevents overtrading. Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag. Uses discrete position sizing (0.25) to balance risk and reward while reducing fee churn. This strategy focuses on proven Camarilla breakout with volume/trend confluence, which has shown strong performance in DB. Using 1w trend instead of 1d trend provides stronger trend filter for 12h timeframe, reducing whipsaws and improving generalization.
