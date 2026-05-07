@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-# 1h_Choppiness_Trend_Filter
-# Hypothesis: Use 4h trend direction (EMA21) and 1d choppiness regime to filter entries. Only trade in trending markets (CHOP < 38.2) in direction of 4h EMA21. Enter on 1h pullbacks to EMA21 with volume confirmation. Avoids whipsaws in ranging markets. Works in bull/bear by adapting to regime. Targets 20-40 trades/year.
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: Breakouts of daily Camarilla pivot levels (R1/S1) with 1-day trend filter (price > 1d EMA34) and volume confirmation.
+# Works in both bull and bear markets: daily pivots provide key levels that hold across regimes, 1d EMA34 ensures
+# alignment with longer-term trend, volume confirms breakout strength. Targets 15-35 trades/year on 12h timeframe.
 
-name = "1h_Choppiness_Trend_Filter"
-timeframe = "1h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -20,86 +22,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 21:
-        return np.zeros(n)
-    
-    # Get 1d data for choppiness regime
+    # Get 1d data for Camarilla pivot points and trend filter (HTF as specified)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 4h EMA21 for trend direction
-    ema_21_4h = pd.Series(df_4h['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 1d Choppiness Index (CHOP)
-    atr_1d = []
-    tr1 = np.maximum(df_1d['high'].values[1:], df_1d['close'].values[:-1]) - np.minimum(df_1d['low'].values[1:], df_1d['close'].values[:-1])
-    tr2 = np.abs(df_1d['high'].values[1:] - df_1d['close'].values[:-1])
-    tr3 = np.abs(df_1d['low'].values[1:] - df_1d['close'].values[:-1])
-    tr = np.concatenate([[np.max([df_1d['high'].values[0] - df_1d['low'].values[0], 0])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate daily Camarilla pivot points
+    # R1 = Close + 1.1 * (High - Low) / 12
+    # S1 = Close - 1.1 * (High - Low) / 12
+    r1 = close_1d + (1.1 * (high_1d - low_1d) / 12)
+    s1 = close_1d - (1.1 * (high_1d - low_1d) / 12)
     
-    # Prevent division by zero
-    atr_1d_safe = np.where(atr_1d == 0, 1e-10, atr_1d)
-    sum_high_low_14 = pd.Series(df_1d['high'].values - df_1d['low'].values).rolling(window=14, min_periods=14).sum().values
-    chop = 100 * np.log10(sum_high_low_14 / (atr_1d_safe * 14)) / np.log10(14)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # 1h EMA21 for entry timing
-    ema_21_1h = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Align all indicators to 12h timeframe
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
+    ema_34_1d_12h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume spike filter (20-period)
+    # Volume spike filter on 12h (20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma_20)
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    volume_spike = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    bars_since_entry = 0
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any critical value is NaN
-        if (np.isnan(ema_21_4h_aligned[i]) or np.isnan(chop_aligned[i]) or 
-            np.isnan(ema_21_1h[i]) or np.isnan(volume_spike[i]) or np.isnan(in_session[i])):
+        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or 
+            np.isnan(ema_34_1d_12h[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
             continue
         
-        # Only trade in trending regime (CHOP < 38.2) and during session
-        if chop_aligned[i] < 38.2 and in_session[i]:
-            if position == 0:
-                # Long: price pulls back to EMA21 in uptrend with volume
-                if close[i] > ema_21_1h[i] and close[i] > ema_21_4h_aligned[i] and volume_spike[i]:
-                    signals[i] = 0.20
-                    position = 1
-                # Short: price pulls back to EMA21 in downtrend with volume
-                elif close[i] < ema_21_1h[i] and close[i] < ema_21_4h_aligned[i] and volume_spike[i]:
-                    signals[i] = -0.20
-                    position = -1
-            elif position == 1:
-                # Exit: trend change or chop increases
-                if close[i] < ema_21_1h[i] or chop_aligned[i] >= 38.2:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.20
-            elif position == -1:
-                # Exit: trend change or chop increases
-                if close[i] > ema_21_1h[i] or chop_aligned[i] >= 38.2:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.20
-        else:
-            # Range regime or outside session: flatten
-            if position != 0:
+        bars_since_entry += 1
+        
+        if position == 0:
+            # Long: Price > daily R1, above 1d EMA34 trend, volume spike
+            if close[i] > r1_12h[i] and close[i] > ema_34_1d_12h[i] and volume_spike[i]:
+                signals[i] = 0.25
+                position = 1
+                bars_since_entry = 0
+            # Short: Price < daily S1, below 1d EMA34 trend, volume spike
+            elif close[i] < s1_12h[i] and close[i] < ema_34_1d_12h[i] and volume_spike[i]:
+                signals[i] = -0.25
+                position = -1
+                bars_since_entry = 0
+        elif position == 1:
+            # Exit: price breaks below daily R1 or below 1d EMA34
+            if close[i] < r1_12h[i] or close[i] < ema_34_1d_12h[i]:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
+            else:
+                signals[i] = 0.25
+        elif position == -1:
+            # Exit: price breaks above daily S1 or above 1d EMA34
+            if close[i] > s1_12h[i] or close[i] > ema_34_1d_12h[i]:
+                signals[i] = 0.0
+                position = 0
+                bars_since_entry = 0
+            else:
+                signals[i] = -0.25
     
     return signals
