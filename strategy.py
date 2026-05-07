@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3S3_1dTrend_Volume
-Hypothesis: On 6h timeframe, buy when price breaks above Camarilla R3 level with daily uptrend (close > EMA34) and volume confirmation; sell when breaks below S3 level with daily downtrend (close < EMA34) and volume confirmation. Uses daily EMA34 for trend filter to avoid whipsaws and volume spike for confirmation. Designed for 6h timeframe with expected 50-150 trades over 4 years to minimize fee drag while capturing trends in both bull and bear markets.
+4h_Camarilla_R3S3_1dTrend_Volume
+Hypothesis: On 4h timeframe, buy when price breaks above Camarilla R3 level with daily uptrend (close > EMA34) and volume confirmation; sell when breaks below S3 level with daily downtrend (close < EMA34) and volume confirmation. Uses daily EMA34 for trend filter to avoid whipsaws and volume spike for confirmation. Designed for 4h timeframe with expected 75-200 trades over 4 years to minimize fee drag while capturing trends in both bull and bear markets.
 """
-name = "6h_Camarilla_R3S3_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -44,7 +44,7 @@ def generate_signals(prices):
     camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 2
     camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 2
     
-    # Align Camarilla levels to 6h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_daily, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_daily, camarilla_s3)
     
