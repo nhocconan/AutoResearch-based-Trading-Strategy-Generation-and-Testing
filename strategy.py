@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_HeikinAshi_BullBearPower_1dTrend"
-timeframe = "6h"
+name = "4h_Camilla_R1S1_Breakout_1dTrend_Volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -18,33 +18,38 @@ def generate_signals(prices):
     open_price = prices['open'].values
     volume = prices['volume'].values
     
-    # Calculate Heikin Ashi close for current bar (only needs current bar data)
-    ha_close = (open_price + high + low + close) / 4
-    
-    # Get 1d data for Bull/Bear Power and trend filter
+    # Get 1d data for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 26:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d EMA13 for trend filter
+    # Calculate 1d EMA34 for trend filter
     close_1d = df_1d['close'].values
-    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 1d EMA26 for Bull/Bear Power
-    ema_26_1d = pd.Series(close_1d).ewm(span=26, adjust=False, min_periods=26).mean().values
-    ema_26_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_26_1d)
+    # Calculate 1d volume for volume spike filter
+    vol_1d = df_1d['volume'].values
+    vol_ma20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
     
-    # Calculate Bull Power (high - EMA26) and Bear Power (EMA26 - low)
-    # Use 1d high/low for power calculation
+    # Calculate 4h Camarilla pivot levels from previous 1d
+    # Classic Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # We'll use daily high/low/close to calculate R1 and S1
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    bull_power_1d = high_1d - ema_26_1d
-    bear_power_1d = ema_26_1d - low_1d
+    close_1d = df_1d['close'].values
     
-    # Align Bull/Bear Power to 6t timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    # Calculate pivot levels for each day
+    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
+    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    
+    # Align to 4h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # Calculate 4h volume for volume confirmation
+    vol_ma20_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -53,40 +58,39 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data is not ready
-        if (np.isnan(ema_13_1d_aligned[i]) or 
-            np.isnan(bull_power_aligned[i]) or 
-            np.isnan(bear_power_aligned[i]) or
-            np.isnan(ha_close[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(vol_ma20_1d_aligned[i]) or 
+            np.isnan(vol_ma20_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: HA close up, Bull Power positive, price above EMA13 (uptrend)
-            if (ha_close[i] > open_price[i] and 
-                bull_power_aligned[i] > 0 and 
-                close[i] > ema_13_1d_aligned[i]):
+            # Long: price breaks above Camarilla R1, uptrend (price > EMA34), volume spike
+            if (close[i] > camarilla_r1_aligned[i] and 
+                close[i] > ema_34_1d_aligned[i] and 
+                volume[i] > vol_ma20_4h[i] * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: HA close down, Bear Power positive, price below EMA13 (downtrend)
-            elif (ha_close[i] < open_price[i] and 
-                  bear_power_aligned[i] > 0 and 
-                  close[i] < ema_13_1d_aligned[i]):
+            # Short: price breaks below Camarilla S1, downtrend (price < EMA34), volume spike
+            elif (close[i] < camarilla_s1_aligned[i] and 
+                  close[i] < ema_34_1d_aligned[i] and 
+                  volume[i] > vol_ma20_4h[i] * 1.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: HA close down OR price crosses below EMA13
-            if (ha_close[i] < open_price[i] or 
-                close[i] < ema_13_1d_aligned[i]):
+            # Exit long: price crosses below Camarilla S1 or trend changes
+            if close[i] < camarilla_s1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: HA close up OR price crosses above EMA13
-            if (ha_close[i] > open_price[i] or 
-                close[i] > ema_13_1d_aligned[i]):
+            # Exit short: price crosses above Camarilla R1 or trend changes
+            if close[i] > camarilla_r1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
