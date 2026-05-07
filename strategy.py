@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_Camarilla_R3S3_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "12h_1d_Camarilla_R3S3_Breakout_1wTrend_Volume_v2"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -36,7 +36,7 @@ def generate_signals(prices):
     r3_1d = high_1d + 2.0 * (pivot_1d - low_1d)
     s3_1d = low_1d - 2.0 * (high_1d - pivot_1d)
     
-    # Align Camarilla levels to 1d timeframe
+    # Align Camarilla levels to 12h timeframe
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
@@ -50,51 +50,63 @@ def generate_signals(prices):
     ema_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # 1d volume filter: > 1.5x 20-period average
-    vol_ma_1d = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > 1.5 * vol_ma_1d
+    # 12h volume filter: > 1.8x 30-period average (more selective)
+    vol_ma_12h = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    vol_filter = volume > 1.8 * vol_ma_12h
+    
+    # ATR for volatility filter
+    high_low = high - low
+    high_close = np.abs(high - np.roll(close, 1))
+    low_close = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    tr[0] = high_low[0]  # first bar
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    vol_regime = atr > pd.Series(atr).rolling(window=50, min_periods=50).mean().values  # high vol regime
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # Wait for indicators
+    start_idx = max(30, 30)  # Wait for indicators
     
     for i in range(start_idx, n):
         if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
-            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma_1d[i])):
+            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma_12h[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Close > R3 with weekly uptrend and volume
-            if (close[i] > r3_1d_aligned[i] and close[i] > ema_1w_aligned[i] and vol_filter[i]):
-                signals[i] = 0.30
+            # Long: Close > R3 with weekly uptrend, volume, and high volatility
+            if (close[i] > r3_1d_aligned[i] and close[i] > ema_1w_aligned[i] and 
+                vol_filter[i] and vol_regime[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: Close < S3 with weekly downtrend and volume
-            elif (close[i] < s3_1d_aligned[i] and close[i] < ema_1w_aligned[i] and vol_filter[i]):
-                signals[i] = -0.30
+            # Short: Close < S3 with weekly downtrend, volume, and high volatility
+            elif (close[i] < s3_1d_aligned[i] and close[i] < ema_1w_aligned[i] and 
+                  vol_filter[i] and vol_regime[i]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Close < EMA_1w (trend change) or close < S3 (mean reversion)
-            if close[i] < ema_1w_aligned[i] or close[i] < s3_1d_aligned[i]:
+            # Exit: Close < EMA_1w (trend change) or volatility drops
+            if close[i] < ema_1w_aligned[i] or not vol_regime[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: Close > EMA_1w (trend change) or close > R3 (mean reversion)
-            if close[i] > ema_1w_aligned[i] or close[i] > r3_1d_aligned[i]:
+            # Exit: Close > EMA_1w (trend change) or volatility drops
+            if close[i] > ema_1w_aligned[i] or not vol_regime[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-# Hypothesis: 1d Camarilla R3/S3 breakout with 1w EMA trend filter and volume confirmation.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA trend filter, volume confirmation, and volatility regime filter.
 # Camarilla levels identify key support/resistance from daily price action.
 # Breakout above R3 in uptrend (price > 20 EMA) or below S3 in downtrend captures momentum.
-# Volume filter ensures institutional participation. Works in both bull and bear markets.
-# Target: 10-25 trades/year to minimize fee drag. Position size 0.30 balances risk/reward.
+# Volume filter ensures institutional participation (>1.8x 30-period average).
+# Volatility regime filter ensures trades only in high volatility periods (reduces whipsaw).
+# Target: 20-40 trades/year to minimize fee drag. Position size 0.25 limits risk.
