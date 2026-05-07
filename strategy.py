@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Camarilla pivot breakout with 1-day trend filter and volume confirmation.
-# Long when: Close breaks above Camarilla R3 (1d) AND 1-day EMA(34) rising AND volume > 1.5x 20-period average
-# Short when: Close breaks below Camarilla S3 (1d) AND 1-day EMA(34) falling AND volume > 1.5x 20-period average
-# Exit when price re-enters between Camarilla R3 and S3 levels.
-# Designed for 4h timeframe with low trade frequency (target: 20-50/year) to avoid fee drag.
-# Uses 1-day Camarilla levels for structure, 1-day EMA for trend, and volume for confirmation.
-# Works in bull markets via R3 breakouts in uptrend, in bear markets via S3 breakdowns in downtrend.
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeConfirm"
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d chop regime filter.
+# Long when: price breaks above Donchian(20) high AND volume > 1.5x volume MA(20) AND 1d chop > 61.8 (range)
+# Short when: price breaks below Donchian(20) low AND volume > 1.5x volume MA(20) AND 1d chop > 61.8
+# Exit when price crosses Donchian(20) midline.
+# Designed for 4h timeframe with low trade frequency (target: 20-40/year) to avoid fee drag.
+# Uses 4h for price action, volume for confirmation, and 1d chop to avoid trending markets where breakouts fail.
+# Works in bull markets via breakouts in uptrend, in bear markets via breakdowns in downtrend.
+# Chop filter avoids false breakouts in strong trends and focuses on range-bound breakout/mean reversion.
+name = "4h_Donchian20_Volume_ChopFilter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,57 +25,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-day Camarilla levels (using previous day's OHLC)
+    # Donchian(20) channels
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
+    
+    # Volume confirmation: volume > 1.5x volume MA(20)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * vol_ma)
+    
+    # 1d Chop index for regime filter (higher = more range-bound)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for each 1-day bar
-    # R4 = C + (H-L)*1.1/2, R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4, S4 = C - (H-L)*1.1/2
-    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
-    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Align Camarilla levels to 4h timeframe (using previous day's levels)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Highest high and lowest low over 14 days
+    hh_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     
-    # 1-day EMA(34) for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_rising = np.zeros_like(ema_34_1d, dtype=bool)
-    ema_34_falling = np.zeros_like(ema_34_1d, dtype=bool)
-    ema_34_rising[1:] = ema_34_1d[1:] > ema_34_1d[:-1]
-    ema_34_falling[1:] = ema_34_1d[1:] < ema_34_1d[:-1]
+    # Chop index: 100 * log10(sum(TR14) / (HH14 - LL14)) / log10(14)
+    atr_sum = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
+    denominator = hh_1d - ll_1d
+    chop = np.where(denominator > 0, 100 * np.log10(atr_sum / denominator) / np.log10(14), 50)
+    chop[denominator <= 0] = 50  # avoid division by zero or negative
     
-    ema_34_rising_aligned = align_htf_to_ltf(prices, df_1d, ema_34_rising)
-    ema_34_falling_aligned = align_htf_to_ltf(prices, df_1d, ema_34_falling)
+    chop_range = chop > 61.8  # range-bound regime
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (vol_ma_20 * 1.5)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_range)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Sufficient warmup for volume MA
+    start_idx = 40  # Sufficient warmup for Donchian(20) and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema_34_rising_aligned[i]) or np.isnan(ema_34_falling_aligned[i]) or 
-            np.isnan(volume_confirm[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(volume_confirm[i]) or np.isnan(chop_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Close breaks above Camarilla R3 AND 1d EMA34 rising AND volume confirmation
-            long_condition = (close[i] > camarilla_r3_aligned[i]) and ema_34_rising_aligned[i] and volume_confirm[i]
-            # Short: Close breaks below Camarilla S3 AND 1d EMA34 falling AND volume confirmation
-            short_condition = (close[i] < camarilla_s3_aligned[i]) and ema_34_falling_aligned[i] and volume_confirm[i]
+            # Long: break above Donchian high + volume confirm + chop range
+            long_condition = (close[i] > donchian_high[i]) and volume_confirm[i] and chop_aligned[i]
+            # Short: break below Donchian low + volume confirm + chop range
+            short_condition = (close[i] < donchian_low[i]) and volume_confirm[i] and chop_aligned[i]
             
             if long_condition:
                 signals[i] = 0.25
@@ -83,15 +93,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Price re-enters below Camarilla R3 (or above S3 for symmetry)
-            if close[i] < camarilla_r3_aligned[i]:
+            # Exit: cross below Donchian midline
+            if close[i] < donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price re-enters above Camarilla S3 (or below R3 for symmetry)
-            if close[i] > camarilla_s3_aligned[i]:
+            # Exit: cross above Donchian midline
+            if close[i] > donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
