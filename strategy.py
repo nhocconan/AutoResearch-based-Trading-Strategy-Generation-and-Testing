@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_WeeklyPivot_Trend_Direction_VolumeFilter"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,64 +17,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend and pivot
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for trend and Camarilla pivot
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 26:
         return np.zeros(n)
     
-    # Weekly EMA20 trend filter
-    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # 1d EMA26 trend filter
+    ema_26_1d = pd.Series(df_1d['close']).ewm(span=26, adjust=False, min_periods=26).mean().values
+    ema_26_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_26_1d)
     
-    # Weekly pivot from previous week (P, R1, S1)
-    prev_week_high = df_1w['high'].shift(1).values
-    prev_week_low = df_1w['low'].shift(1).values
-    prev_week_close = df_1w['close'].shift(1).values
+    # 1d data for Camarilla pivot (R3, S3) from previous day
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    pivot = (prev_week_high + prev_week_low + prev_week_close) / 3
-    range_hl = prev_week_high - prev_week_low
-    r1 = pivot + (range_hl * 1.0)   # R1 level
-    s1 = pivot - (range_hl * 1.0)   # S1 level
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
+    r3 = pivot + (range_hl * 1.1 / 4)   # R3 level
+    s3 = pivot - (range_hl * 1.1 / 4)   # S3 level
     
-    # Align weekly pivot levels to 6h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    # Align Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Volume filter: current volume > 1.5 * 30-period average
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_ok = volume > (vol_ma * 1.5)
+    # Volume filter: current volume > 2.0 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ok = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Wait for volume MA and EMA20
+    start_idx = 26  # Wait for EMA26 and volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(ema_26_1d_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above R1 + above weekly EMA20 + volume spike
-            if close[i] > r1_aligned[i] and close[i] > ema_20_1w_aligned[i] and volume_ok[i]:
+            # Long: break above R3 + above 1d EMA26 + volume spike
+            if close[i] > r3_aligned[i] and close[i] > ema_26_1d_aligned[i] and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 + below weekly EMA20 + volume spike
-            elif close[i] < s1_aligned[i] and close[i] < ema_20_1w_aligned[i] and volume_ok[i]:
+            # Short: break below S3 + below 1d EMA26 + volume spike
+            elif close[i] < s3_aligned[i] and close[i] < ema_26_1d_aligned[i] and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: price returns to opposite weekly pivot level or breaks in opposite direction
+            # Exit: price returns to opposite Camarilla level or breaks in opposite direction
             if position == 1:
-                if close[i] < s1_aligned[i] or close[i] < ema_20_1w_aligned[i]:
+                if close[i] < s3_aligned[i] or close[i] < ema_26_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > r1_aligned[i] or close[i] > ema_20_1w_aligned[i]:
+                if close[i] > r3_aligned[i] or close[i] > ema_26_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
