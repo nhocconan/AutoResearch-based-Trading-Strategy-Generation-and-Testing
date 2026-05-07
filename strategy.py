@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 6h_WeeklyPivot_DonchianBreakout
-# Hypothesis: 6-hour Donchian(20) breakout with weekly pivot bias and volume confirmation
-# Weekly pivot provides long-term bias (from weekly high/low/close) to filter breakout direction
-# Works in bull markets via breakout momentum with upward bias and in bear via short breakdowns with downward bias
-# Volume filter reduces false breakouts. Target: 50-150 total trades over 4 years with position size 0.25
+# 4h_KAMA_RSI_Trend
+# Hypothesis: KAMA identifies the trend direction while RSI measures momentum strength
+# Works in bull markets via strong up-trends and in bear markets via strong down-trends
+# RSI filters out weak momentum to reduce false signals
+# Target: 15-30 trades per year (~60-120 over 4 years) with position size 0.25
 
-name = "6h_WeeklyPivot_DonchianBreakout"
-timeframe = "6h"
+name = "4h_KAMA_RSI_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,80 +23,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE for pivot bias
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
+    # KAMA parameters
+    er_length = 10
+    fast_ema = 2
+    slow_ema = 30
+    
+    # Calculate ER (Efficiency Ratio)
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # placeholder, will compute properly below
+    # Recalculate volatility properly
+    volatility = np.zeros_like(close)
+    for i in range(1, len(close)):
+        volatility[i] = volatility[i-1] + np.abs(close[i] - close[i-1])
+    # Use rolling window for volatility sum
+    volatility_sum = pd.Series(np.abs(np.diff(close, prepend=close[0]))).rolling(window=er_length, min_periods=1).sum().values
+    price_change = np.abs(np.diff(close, prepend=close[0]))
+    er = np.where(volatility_sum > 0, price_change / volatility_sum, 0)
+    
+    # Smoothing constants
+    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
+    
+    # KAMA calculation
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # RSI calculation
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Load 1d data for trend confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly pivot points (using prior week's OHLC)
-    # Pivot = (H + L + C)/3
-    # Support 1 = 2*P - H
-    # Resistance 1 = 2*P - L
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
-    
-    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    r1 = 2 * pivot - weekly_high
-    s1 = 2 * pivot - weekly_low
-    
-    # Bias: above pivot = bullish bias, below pivot = bearish bias
-    weekly_bias = pivot  # Using pivot as bias reference
-    
-    # Align weekly bias to 6h timeframe (wait for weekly close)
-    weekly_bias_aligned = align_htf_to_ltf(prices, df_1w, weekly_bias)
-    
-    # Donchian channels (20-period)
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume ratio: current volume / 20-period average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.where(vol_ma > 0, volume / vol_ma, 1.0)
+    # 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need 20 periods for Donchian
+    start_idx = max(14, er_length)  # Need enough data for RSI and KAMA
     
     for i in range(start_idx, n):
-        if (np.isnan(weekly_bias_aligned[i]) or np.isnan(high_max[i]) or 
-            np.isnan(low_min[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or 
+            np.isnan(ema_50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Breakout conditions
-        breakout_up = close[i] > high_max[i-1]  # Break above previous period's high
-        breakout_down = close[i] < low_min[i-1]  # Break below previous period's low
+        # Trend conditions
+        price_above_kama = close[i] > kama[i]
+        price_below_kama = close[i] < kama[i]
+        price_above_ema = close[i] > ema_50_1d_aligned[i]
+        price_below_ema = close[i] < ema_50_1d_aligned[i]
         
-        # Volume confirmation: volume > 1.5x average
-        volume_confirm = vol_ratio[i] > 1.5
-        
-        # Weekly pivot bias: price above/below weekly pivot
-        price_above_pivot = close[i] > weekly_bias_aligned[i]
-        price_below_pivot = close[i] < weekly_bias_aligned[i]
+        # RSI momentum filter
+        strong_momentum = (rsi[i] > 60) or (rsi[i] < 40)
         
         if position == 0:
-            # Long: upward breakout + volume + price above weekly pivot
-            if breakout_up and volume_confirm and price_above_pivot:
+            # Long: price above KAMA and EMA with strong upward momentum
+            if price_above_kama and price_above_ema and rsi[i] > 60:
                 signals[i] = 0.25
                 position = 1
-            # Short: downward breakout + volume + price below weekly pivot
-            elif breakout_down and volume_confirm and price_below_pivot:
+            # Short: price below KAMA and EMA with strong downward momentum
+            elif price_below_kama and price_below_ema and rsi[i] < 40:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price breaks below Donchian low or crosses below weekly pivot
-            if close[i] < low_min[i-1] or not price_above_pivot:
+            # Exit: price crosses below KAMA or trend reversal
+            if close[i] < kama[i] or not price_above_ema:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price breaks above Donchian high or crosses above weekly pivot
-            if close[i] > high_max[i-1] or not price_below_pivot:
+            # Exit: price crosses above KAMA or trend reversal
+            if close[i] > kama[i] or not price_below_ema:
                 signals[i] = 0.0
                 position = 0
             else:
