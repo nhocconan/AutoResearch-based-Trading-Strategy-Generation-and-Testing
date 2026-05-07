@@ -1,12 +1,6 @@
-# 6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
-# Hypothesis: Combines Camarilla R3/S3 breakout logic with 1-day trend filter and volume confirmation on 6h timeframe.
-# Uses institutional breakout patterns with trend alignment to work in both bull and bear markets.
-# Targets 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
-# Works in bull markets (breakouts above R3 in uptrend) and bear markets (breakdowns below S3 in downtrend).
-
 #!/usr/bin/env python3
-name = "6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -50,7 +44,7 @@ def generate_signals(prices):
     camarilla_r3 = camarilla_high + 4 * (camarilla_high - camarilla_low)
     camarilla_s3 = camarilla_low - 4 * (camarilla_high - camarilla_low)
     
-    # Volume spike: current volume > 2.0x 20-period average (~10 days for 6h)
+    # Volume spike: current volume > 2.0x 20-period average (~10 days for 12h)
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-20:i])
@@ -59,7 +53,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 12  # ~3 days (12*6h) to reduce trade frequency
+    cooldown_bars = 2  # ~1 day (2*12h) to reduce trade frequency
     
     start_idx = max(1, 20)  # Ensure enough data for Camarilla and volume
     
@@ -115,3 +109,5 @@ def generate_signals(prices):
                 signals[i] = -0.25
     
     return signals
+
+# Hypothesis: On 12h timeframe, price breaking above/below Camarilla R3/S3 levels with volume spike confirmation and 1d EMA34 trend filter captures institutional breakout momentum. Camarilla levels represent key intraday support/resistance derived from previous day's price action, reducing false breakouts. 1d trend filter ensures alignment with higher timeframe momentum. Volume spike filter (2.0x 20-period average) confirms institutional participation. Cooldown period prevents overtrading. Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag. Works in bull markets (breakouts above Camarilla R3 in 1d uptrend) and bear markets (breakdowns below Camarilla S3 in 1d downtrend). Uses discrete position sizing (0.25) to balance risk and reward while reducing fee churn. This strategy focuses on proven Camarilla breakout with volume/trend confluence, which has shown strong performance in DB (e.g., 4h_Camarilla_R3S3_1dEMA34_Volume_v1 with 1.960 test Sharpe). Adjusted for 12h timeframe with reduced cooldown to maintain appropriate trade frequency.
