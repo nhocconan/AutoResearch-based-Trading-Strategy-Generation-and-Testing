@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_Stochastic_Trend_Filter"
-timeframe = "1h"
+name = "6h_WeeklyPivot_RangeBreakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,94 +17,103 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h trend filter (HTF)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Weekly pivot points from 1w data (calculated from previous week)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
-    trend_up = close > ema50_4h_aligned
-    trend_down = close < ema50_4h_aligned
+    # Calculate pivot points: (H + L + C) / 3
+    # Use previous week's data (already complete) - no lookahead
+    prev_week_high = df_1w['high'].values
+    prev_week_low = df_1w['low'].values
+    prev_week_close = df_1w['close'].values
     
-    # Stochastic Oscillator (14,3,3)
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    # Pivot point and support/resistance levels
+    pivot = (prev_week_high + prev_week_low + prev_week_close) / 3.0
+    r1 = 2 * pivot - prev_week_low
+    s1 = 2 * pivot - prev_week_high
+    r2 = pivot + (prev_week_high - prev_week_low)
+    s2 = pivot - (prev_week_high - prev_week_low)
+    r3 = prev_week_high + 2 * (pivot - prev_week_low)
+    s3 = prev_week_low - 2 * (prev_week_high - pivot)
     
-    # Avoid division by zero
-    denominator = highest_high - lowest_low
-    k_percent = np.where(denominator != 0, ((close - lowest_low) / denominator) * 100, 50)
+    # Align to 6t timeframe (values change only when new week starts)
+    pivot_6h = align_htf_to_ltf(prices, df_1w, pivot)
+    r3_6h = align_htf_to_ltf(prices, df_1w, r3)
+    s3_6h = align_htf_to_ltf(prices, df_1w, s3)
     
-    # %D line (3-period SMA of %K)
-    d_percent = pd.Series(k_percent).rolling(window=3, min_periods=3).mean().values
+    # Daily trend filter (1d EMA34)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
     
-    # Stochastic signals: %K crosses above/below %D
-    stoch_cross_up = (k_percent > d_percent) & (np.roll(k_percent, 1) <= np.roll(d_percent, 1))
-    stoch_cross_down = (k_percent < d_percent) & (np.roll(k_percent, 1) >= np.roll(d_percent, 1))
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    trend_up = close > ema34_1d_aligned
+    trend_down = close < ema34_1d_aligned
     
-    # Volume filter: volume above 20-period average
+    # Volume confirmation: current volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > vol_ma
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    vol_ok = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    bars_since_last_trade = 0
+    cooldown_bars = 3  # ~18 hours
     
-    # Start after all indicators are valid
-    start_idx = max(14, 20, 50)  # Stochastic, volume, trend
+    start_idx = max(20, 1)  # Ensure volume MA and pivot data are valid
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema50_4h_aligned[i]) or 
-            np.isnan(k_percent[i]) or 
-            np.isnan(d_percent[i]) or 
+        if (np.isnan(pivot_6h[i]) or 
+            np.isnan(r3_6h[i]) or 
+            np.isnan(s3_6h[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or 
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                bars_since_last_trade = 0
+            else:
+                bars_since_last_trade += 1
             continue
         
-        if position == 0:
-            # Long: Stochastic bullish cross in oversold (<20) + 4h uptrend + volume + session
-            if (stoch_cross_up[i] and 
-                k_percent[i] < 20 and 
-                trend_up[i] and 
-                volume_filter[i] and 
-                session_filter[i]):
-                signals[i] = 0.20
+        bars_since_last_trade += 1
+        
+        if position == 0 and bars_since_last_trade >= cooldown_bars:
+            # Long: break above weekly R3 with volume in uptrend
+            if close[i] > r3_6h[i] and vol_ok[i] and trend_up[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: Stochastic bearish cross in overbought (>80) + 4h downtrend + volume + session
-            elif (stoch_cross_down[i] and 
-                  k_percent[i] > 80 and 
-                  trend_down[i] and 
-                  volume_filter[i] and 
-                  session_filter[i]):
-                signals[i] = -0.20
+                bars_since_last_trade = 0
+            # Short: break below weekly S3 with volume in downtrend
+            elif close[i] < s3_6h[i] and vol_ok[i] and trend_down[i]:
+                signals[i] = -0.25
                 position = -1
+                bars_since_last_trade = 0
         elif position == 1:
-            # Exit: Stochastic bearish cross OR trend turns down
-            if stoch_cross_down[i] or not trend_up[i]:
+            # Exit: price returns below pivot OR trend turns down
+            if close[i] < pivot_6h[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
+                bars_since_last_trade = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: Stochastic bullish cross OR trend turns up
-            if stoch_cross_up[i] or not trend_down[i]:
+            # Exit: price returns above pivot OR trend turns up
+            if close[i] > pivot_6h[i] or not trend_down[i]:
                 signals[i] = 0.0
                 position = 0
+                bars_since_last_trade = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-# Hypothesis: Stochastic oscillator identifies momentum reversals in overbought/oversold conditions.
-# Combined with 4h EMA50 trend filter, volume confirmation, and active session filter (08-20 UTC)
-# to avoid low-liquidity periods. Long when %K crosses above %D below 20 in uptrend,
-# short when %K crosses below %D above 80 in downtrend. Position size 0.20 limits risk.
-# Designed for 1h timeframe with ~20-40 trades/year to minimize fee drag.
-# Works in bull markets (captures pullbacks in uptrend) and bear markets (captures bounces in downtrend).
+# Hypothesis: Weekly pivot points act as significant support/resistance levels.
+# Breaking above R3 or below S3 with volume confirmation indicates strong momentum.
+# The 1d EMA34 filter ensures we only trade in the direction of the daily trend,
+# avoiding counter-trend whipsaws. This strategy captures breakouts from weekly
+# ranges while using volume to confirm institutional participation. Works in both
+# bull and bear markets by following the daily trend direction. Target: 15-35 trades/year.
