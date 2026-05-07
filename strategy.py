@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 6h_KAMA_Trend_Filter
-# Hypothesis: Kaufman Adaptive Moving Average (KAMA) on 1d timeframe provides adaptive trend
-# detection that reduces whipsaw in volatile markets. Combined with 6h price position relative
-# to KAMA and volume confirmation, this should capture trends while avoiding false signals
-# in ranging markets. KAMA adapts to market noise, making it effective in both bull and bear
-# regimes. Targets 15-30 trades/year to minimize fee drag.
+# 4h_ADX_Trend_With_Volume_Confirmation
+# Hypothesis: Trend-following strategy using ADX(14) from daily timeframe to identify strong trends,
+# combined with 4h EMA50 for direction and volume confirmation to reduce false signals.
+# Designed to work in both bull and bear markets by only taking trades when trend strength (ADX > 25)
+# is present. Targets 20-40 trades/year to avoid excessive fee churn.
 
-name = "6h_KAMA_Trend_Filter"
-timeframe = "6h"
+name = "4h_ADX_Trend_With_Volume_Confirmation"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,80 +23,108 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for KAMA calculation
+    # Get daily data for ADX calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Kaufman Adaptive Moving Average (KAMA)
-    # Parameters: ER period=10, Fast EMA=2, Slow EMA=30
-    er_period = 10
-    fast_ema = 2
-    slow_ema = 30
+    # Calculate True Range (TR)
+    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Efficiency Ratio
-    change = np.abs(np.diff(close_1d))
-    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0) if len(change) > 0 else np.array([0])
-    # Correct volatility calculation: sum of absolute changes over er_period window
-    volatility = np.array([np.sum(np.abs(np.diff(close_1d[max(0, i-er_period+1):i+1]))) 
-                          for i in range(len(close_1d))])
-    er = np.zeros_like(close_1d)
-    for i in range(er_period, len(close_1d)):
-        if volatility[i] > 0:
-            er[i] = np.abs(close_1d[i] - close_1d[i-er_period]) / volatility[i]
-        else:
-            er[i] = 0
+    # Calculate Directional Movement (+DM and -DM)
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
     
-    # Smoothing constants
-    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
+    # Smooth TR, +DM, -DM over 14 periods (Wilder's smoothing)
+    n_1d = len(high_1d)
+    atr = np.zeros(n_1d)
+    dm_plus_smooth = np.zeros(n_1d)
+    dm_minus_smooth = np.zeros(n_1d)
     
-    # KAMA calculation
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # Initial values (simple average of first 14 periods)
+    if n_1d >= 14:
+        atr[13] = np.sum(tr[:14])
+        dm_plus_smooth[13] = np.sum(dm_plus[:14])
+        dm_minus_smooth[13] = np.sum(dm_minus[:14])
+        
+        # Wilder's smoothing for subsequent periods
+        for i in range(14, n_1d):
+            atr[i] = atr[i-1] - (atr[i-1] / 14) + tr[i]
+            dm_plus_smooth[i] = dm_plus_smooth[i-1] - (dm_plus_smooth[i-1] / 14) + dm_plus[i]
+            dm_minus_smooth[i] = dm_minus_smooth[i-1] - (dm_minus_smooth[i-1] / 14) + dm_minus[i]
     
-    # Align KAMA to 6h timeframe
-    kama_6h = align_htf_to_ltf(prices, df_1d, kama)
+    # Calculate Directional Indicators (+DI and -DI)
+    plus_di = np.zeros(n_1d)
+    minus_di = np.zeros(n_1d)
+    for i in range(14, n_1d):
+        if atr[i] > 0:
+            plus_di[i] = 100 * (dm_plus_smooth[i] / atr[i])
+            minus_di[i] = 100 * (dm_minus_smooth[i] / atr[i])
     
-    # Volume confirmation: volume > 30-period average
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Calculate DX and ADX
+    dx = np.zeros(n_1d)
+    for i in range(14, n_1d):
+        di_sum = plus_di[i] + minus_di[i]
+        if di_sum > 0:
+            dx[i] = 100 * np.abs(plus_di[i] - minus_di[i]) / di_sum
+    
+    adx = np.zeros(n_1d)
+    if n_1d >= 28:  # Need 14 periods for DX smoothing
+        adx[27] = np.sum(dx[14:28])  # First ADX is average of first 14 DX values
+        for i in range(28, n_1d):
+            adx[i] = (adx[i-1] * 13 + dx[i]) / 14  # Wilder's smoothing
+    
+    # Align ADX to 4h timeframe
+    adx_4h = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # 4h EMA50 for trend direction
+    ema_50_4h = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Volume confirmation: volume > 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Skip if any critical value is NaN
-        if (np.isnan(kama_6h[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(adx_4h[i]) or np.isnan(ema_50_4h[i]) or 
+            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Volume confirmation
-            vol_ok = volume[i] > vol_ma[i]
-            
-            # Long: price above KAMA + volume confirmation
-            if close[i] > kama_6h[i] and vol_ok:
-                signals[i] = 0.25
-                position = 1
-            # Short: price below KAMA + volume confirmation
-            elif close[i] < kama_6h[i] and vol_ok:
-                signals[i] = -0.25
-                position = -1
+            # Enter only when trend is strong (ADX > 25) and volume confirms
+            if adx_4h[i] > 25 and volume[i] > vol_ma[i]:
+                # Long: strong trend + price above EMA50
+                if close[i] > ema_50_4h[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # Short: strong trend + price below EMA50
+                elif close[i] < ema_50_4h[i]:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Exit: price crosses below KAMA
-            if close[i] < kama_6h[i]:
+            # Exit: trend weakens or price crosses below EMA50
+            if adx_4h[i] < 25 or close[i] < ema_50_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price crosses above KAMA
-            if close[i] > kama_6h[i]:
+            # Exit: trend weakens or price crosses above EMA50
+            if adx_4h[i] < 25 or close[i] > ema_50_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
