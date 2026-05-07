@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_Weekly_Channel_Breakout_With_Volume_Filter"
-timeframe = "1d"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,54 +17,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Weekly Donchian channels (20-week period)
-    high_1w = pd.Series(df_1w['high']).rolling(window=20, min_periods=20).max().values
-    low_1w = pd.Series(df_1w['low']).rolling(window=20, min_periods=20).min().values
+    # 1d Camarilla pivot levels: R3, S3
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    range_1d = high_1d - low_1d
+    R3 = close_1d + (range_1d * 1.1 / 4)
+    S3 = close_1d - (range_1d * 1.1 / 4)
     
-    # Align to daily - weekly signals available after weekly bar close
-    high_1w_aligned = align_htf_to_ltf(prices, df_1w, high_1w)
-    low_1w_aligned = align_htf_to_ltf(prices, df_1w, low_1w)
+    # Align to 12h timeframe (wait for daily close)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
-    # Daily volume filter: volume > 1.5x 20-day average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > 1.5 * vol_ma
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # 12h volume spike: > 1.5x 24-period average (12 days)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_spike = volume > 1.5 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Wait for Donchian channels
+    start_idx = max(24, 34)  # Wait for volume MA and EMA34
     
     for i in range(start_idx, n):
-        if np.isnan(high_1w_aligned[i]) or np.isnan(low_1w_aligned[i]):
+        if np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or np.isnan(ema34_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Break above weekly high with volume confirmation
-            if close[i] > high_1w_aligned[i] and vol_filter[i]:
+            # Long: Break above R3 with uptrend and volume spike
+            if close[i] > R3_aligned[i] and close[i] > ema34_1d_aligned[i] and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below weekly low with volume confirmation
-            elif close[i] < low_1w_aligned[i] and vol_filter[i]:
+            # Short: Break below S3 with downtrend and volume spike
+            elif close[i] < S3_aligned[i] and close[i] < ema34_1d_aligned[i] and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Price breaks below weekly low
-            if close[i] < low_1w_aligned[i]:
+            # Exit: Close below S3 or trend reversal
+            if close[i] < S3_aligned[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price breaks above weekly high
-            if close[i] > high_1w_aligned[i]:
+            # Exit: Close above R3 or trend reversal
+            if close[i] > R3_aligned[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -72,10 +80,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Weekly Donchian breakout with volume confirmation on daily timeframe.
-# Long when price breaks above 20-week high with above-average volume.
-# Short when price breaks below 20-week low with above-average volume.
-# Uses weekly timeframe for structure to avoid whipsaws, daily for execution.
-# Volume filter ensures breakout conviction. Position size 0.25 limits risk.
-# Works in trending markets (breakouts) and avoids choppy periods.
-# Target: 10-25 trades/year to minimize fee decay while capturing major moves.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Long when price breaks above R3 (strong resistance) in uptrend (price > EMA34) with volume spike.
+# Short when price breaks below S3 (strong support) in downtrend (price < EMA34) with volume spike.
+# Uses 1d timeframe for Camarilla levels and trend to avoid whipsaws, 12h for execution.
+# Volume spike (>1.5x average) ensures conviction. Discrete 0.25 position size limits risk.
+# Works in bull markets (breakouts in uptrend) and bear markets (breakdowns in downtrend).
+# Target: 15-30 trades/year to minimize fee decay while capturing strong moves.
