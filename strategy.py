@@ -1,11 +1,11 @@
-#!/usr/bin/env python3
-"""
-4h_TRIX_VolumeSpike_TrendFilter_v1
-Hypothesis: Use TRIX momentum on 1d timeframe combined with volume spike and price position relative to TRIX signal line to capture trend reversals in both bull and bear markets. Entry when TRIX crosses above/below signal line with volume confirmation, exit on opposite cross. Designed for fewer trades (<50/year) with strong edge in ranging and trending conditions.
-"""
+# 6H_WEEKLYPIVOT_CAMARILLA_TREND_REVERSAL
+# Hypothesis: In 6h timeframe, combine weekly pivot points with daily Camarilla levels for trend reversal signals.
+# Uses weekly pivot as trend filter and daily Camarilla R3/S3 for reversal entries, reducing trades while capturing
+# major reversals in both bull and bear markets. Target: 50-150 total trades over 4 years.
+# Weekly pivot provides higher timeframe context; daily Camarilla provides precise entry/exit levels.
 
-name = "4h_TRIX_VolumeSpike_TrendFilter_v1"
-timeframe = "4h"
+name = "6H_WEEKLYPIVOT_CAMARILLA_TREND_REVERSAL"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,73 +22,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for TRIX calculation
+    # Get daily data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
+    # Get weekly data for pivot points
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # Calculate daily Camarilla levels (using prior day's OHLC)
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
     daily_close = df_1d['close'].values
     
-    # Calculate TRIX: triple EMA of ROC
-    # ROC = (close - close.shift(1)) / close.shift(1)
-    roc = np.diff(daily_close, prepend=daily_close[0]) / np.where(daily_close == 0, 1e-10, daily_close)
-    roc[0] = 0  # first ROC is zero
+    camarilla_range = daily_high - daily_low
+    r3 = daily_close + (camarilla_range * 1.1 / 4)  # R3 level
+    s3 = daily_close - (camarilla_ratio * 1.1 / 4)  # S3 level
     
-    # Triple EMA of ROC
-    ema1 = pd.Series(roc).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
-    trix = ema3 * 100  # scale for readability
+    # Calculate weekly pivot points (using prior week's OHLC)
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Signal line: EMA of TRIX
-    signal_line = pd.Series(trix).ewm(span=9, adjust=False, min_periods=9).mean().values
+    pivot_point = (weekly_high + weekly_low + weekly_close) / 3
+    r1 = 2 * pivot_point - weekly_low
+    s1 = 2 * pivot_point - weekly_high
     
-    # Align TRIX and signal line to 4h timeframe (with 1-day delay for completed bar)
-    trix_aligned = align_htf_to_ltf(prices, df_1d, trix, additional_delay_bars=1)
-    signal_aligned = align_htf_to_ltf(prices, df_1d, signal_line, additional_delay_bars=1)
+    # Align indicators to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3, additional_delay_bars=1)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3, additional_delay_bars=1)
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_point)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
     
-    # Get 4h volume for confirmation
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.divide(volume, vol_ma20, out=np.zeros_like(volume), where=vol_ma20!=0)
+    # Weekly trend filter (price relative to weekly pivot)
+    weekly_close_aligned = align_htf_to_ltf(prices, df_1w, weekly_close)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Warmup
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(trix_aligned[i]) or 
-            np.isnan(signal_aligned[i]) or 
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(weekly_close_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Determine weekly trend
+        weekly_trend_up = weekly_close_aligned[i] > pivot_aligned[i]
+        weekly_trend_down = weekly_close_aligned[i] < pivot_aligned[i]
+        
         if position == 0:
-            # Long entry: TRIX crosses above signal line with volume spike
-            if (trix_aligned[i] > signal_aligned[i] and 
-                trix_aligned[i-1] <= signal_aligned[i-1] and 
-                vol_ratio[i] > 3.0):  # Volume spike threshold
+            # Long reversal: price drops to S3 in weekly uptrend
+            if (weekly_trend_up and close[i] <= s3_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: TRIX crosses below signal line with volume spike
-            elif (trix_aligned[i] < signal_aligned[i] and 
-                  trix_aligned[i-1] >= signal_aligned[i-1] and 
-                  vol_ratio[i] > 3.0):  # Volume spike threshold
+            # Short reversal: price rises to R3 in weekly downtrend
+            elif (weekly_trend_down and close[i] >= r3_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: TRIX crosses below signal line
-            if trix_aligned[i] < signal_aligned[i] and trix_aligned[i-1] >= signal_aligned[i-1]:
+            # Exit long: price reaches weekly R1 or reverses below pivot
+            if close[i] >= r1_aligned[i] or weekly_close_aligned[i] < pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: TRIX crosses above signal line
-            if trix_aligned[i] > signal_aligned[i] and trix_aligned[i-1] <= signal_aligned[i-1]:
+            # Exit short: price reaches weekly S1 or reverses above pivot
+            if close[i] <= s1_aligned[i] or weekly_close_aligned[i] > pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
