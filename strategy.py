@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-1h_Funding_Rate_Contrarian_4hTrend_Filter
-Hypothesis: Funding rate extremes indicate short-term sentiment extremes. 
-Contrarian entries (short when funding > 0.03%, long when funding < -0.03%) 
-work when aligned with 4h trend (EMA50). 
-Funding mean-reverts quickly, providing edge in ranging/volatile markets.
-4h trend filter ensures we don't fight the medium-term direction.
-Session filter (08-20 UTC) reduces noise. Target 15-30 trades/year.
+6H_Ichimoku_Kijun_Tenkan_Cross_1D_Cloud_Filter
+Hypothesis: Use Ichimoku Cloud on 1D for trend direction and support/resistance, with TK cross on 6H for entry timing. 
+The cloud acts as dynamic support/resistance and trend filter, reducing false signals in sideways markets. 
+TK cross provides timely entries within the trend. Works in bull markets (buy when price above cloud + TK cross up) 
+and bear markets (sell when price below cloud + TK cross down). Targets 12-37 trades/year on 6H timeframe.
 """
-name = "1h_Funding_Rate_Contrarian_4hTrend_Filter"
-timeframe = "1h"
+name = "6H_Ichimoku_Kijun_Tenkan_Cross_1D_Cloud_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -21,85 +19,90 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load funding rate data (8h intervals)
-    funding_path = "/mnt/raid0_ssd_nvme/data/processed/funding/binance_funding_rate_8h.parquet"
-    try:
-        funding_df = pd.read_parquet(funding_path)
-        funding_series = funding_df.set_index('timestamp')['funding_rate']
-    except Exception:
-        funding_series = pd.Series(index=prices.index, data=0.0)
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # Align funding rate to 1h (forward fill from 8h data)
-    funding_aligned = pd.Series(index=prices.index, data=0.0, dtype=float)
-    funding_ts = funding_series.index
-    funding_vals = funding_series.values
-    if len(funding_ts) > 0:
-        funding_aligned.values[:] = np.interp(
-            prices.index.view('int64'),
-            funding_ts.view('int64'),
-            funding_vals,
-            left=funding_vals[0] if len(funding_vals) > 0 else 0.0,
-            right=funding_vals[-1] if len(funding_vals) > 0 else 0.0
-        )
-    
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1D data for Ichimoku calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 52:
         return np.zeros(n)
     
-    # Calculate 4h EMA50 for trend
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Calculate Ichimoku components
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    senkou_b = (period52_high + period52_low) / 2
+    
+    # Align Ichimoku components to 6H timeframe
+    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan)
+    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun)
+    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a)
+    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Warmup for EMA50
+    start_idx = 52  # Ensure sufficient warmup for Ichimoku
     
     for i in range(start_idx, n):
-        # Skip if outside session
-        if not in_session[i]:
+        # Skip if any data is not ready
+        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
+            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Skip if data not ready
-        if np.isnan(ema_50_4h_aligned[i]):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        funding = funding_aligned.iloc[i] if hasattr(funding_aligned, 'iloc') else funding_aligned[i]
+        # Determine cloud boundaries
+        upper_cloud = np.maximum(senkou_a_aligned[i], senkou_b_aligned[i])
+        lower_cloud = np.minimum(senkou_a_aligned[i], senkou_b_aligned[i])
         
         if position == 0:
-            # Long: funding extremely negative (< -0.03%) AND price above 4h EMA50 (uptrend)
-            if funding < -0.0003 and prices['close'].iloc[i] > ema_50_4h_aligned[i]:
-                signals[i] = 0.20
+            # Long: price above cloud + TK cross bullish (Tenkan crosses above Kijun)
+            if (close[i] > upper_cloud and 
+                tenkan_aligned[i] > kijun_aligned[i] and 
+                tenkan_aligned[i-1] <= kijun_aligned[i-1]):
+                signals[i] = 0.25
                 position = 1
-            # Short: funding extremely positive (> 0.03%) AND price below 4h EMA50 (downtrend)
-            elif funding > 0.0003 and prices['close'].iloc[i] < ema_50_4h_aligned[i]:
-                signals[i] = -0.20
+            # Short: price below cloud + TK cross bearish (Tenkan crosses below Kijun)
+            elif (close[i] < lower_cloud and 
+                  tenkan_aligned[i] < kijun_aligned[i] and 
+                  tenkan_aligned[i-1] >= kijun_aligned[i-1]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: funding returns to neutral OR price crosses below EMA50
-            if funding > -0.0001 or prices['close'].iloc[i] < ema_50_4h_aligned[i]:
+            # Exit long: price crosses below cloud OR TK cross bearish
+            if (close[i] < lower_cloud or 
+                (tenkan_aligned[i] < kijun_aligned[i] and tenkan_aligned[i-1] >= kijun_aligned[i-1])):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: funding returns to neutral OR price crosses above EMA50
-            if funding < 0.0001 or prices['close'].iloc[i] > ema_50_4h_aligned[i]:
+            # Exit short: price crosses above cloud OR TK cross bullish
+            if (close[i] > upper_cloud or 
+                (tenkan_aligned[i] > kijun_aligned[i] and tenkan_aligned[i-1] <= kijun_aligned[i-1])):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
