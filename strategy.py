@@ -1,13 +1,13 @@
-#!/usr/bin/env python3
-"""
-1h_RSI_Momentum_4hTrend_Filter_v1
-Hypothesis: Use RSI(14) momentum on 1h for entry timing, filtered by 4h EMA(50) trend direction.
-Long when 1h RSI crosses above 50 and 4h EMA(50) is rising; short when RSI crosses below 50 and 4h EMA(50) is falling.
-Add volume confirmation (volume > 1.5x 20-period average) and session filter (08-20 UTC) to reduce noise.
-Target: 15-37 trades/year (60-150 total over 4 years) by using 4h trend for direction and 1h only for timing.
-"""
-name = "1h_RSI_Momentum_4hTrend_Filter_v1"
-timeframe = "1h"
+# 6H_Weekly_Pivot_Trend_Confirmation_v1
+# Hypothesis: Use 1-week pivot point direction (bullish/bearish bias) as trend filter and 6h price action for entry.
+# Long when price is above weekly pivot AND breaks above 6h high of prior 3 periods with volume confirmation.
+# Short when price is below weekly pivot AND breaks below 6h low of prior 3 periods with volume confirmation.
+# Weekly pivot provides structural bias to avoid counter-trend trades in both bull and bear markets.
+# Volume confirmation ensures momentum behind breakouts.
+# Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing (0.25) to minimize fee churn.
+
+name = "6H_Weekly_Pivot_Trend_Confirmation_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,35 +24,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Pre-calculate session filter (08-20 UTC)
-    hours = prices.index.hour  # already datetime64[ms], .hour works
-    session_filter = (hours >= 8) & (hours <= 20)
-    
-    # Get 4h data for EMA trend
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 10:
+    # Get 1w data for weekly pivot (trend filter)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    # Calculate 4h EMA(50)
-    close_4h = pd.Series(df_4h['close'])
-    ema_4h = close_4h.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Calculate weekly pivot points (using prior week's OHLC)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    # Weekly pivot = (H + L + C) / 3
+    pivot_1w = (high_1w + low_1w + close_1w) / 3
+    # Align to 6t timeframe (wait for weekly close)
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
     
-    # Calculate 4h EMA slope (rising/falling)
-    ema_slope = np.zeros_like(ema_4h_aligned)
-    ema_slope[1:] = ema_4h_aligned[1:] - ema_4h_aligned[:-1]
-    # Rising when slope > 0, falling when slope < 0
+    # 6h price action: highest high and lowest low of prior 3 periods
+    # Use rolling window of 3 for recent swing points
+    high_roll = pd.Series(high).rolling(window=3, min_periods=3).max().values
+    low_roll = pd.Series(low).rolling(window=3, min_periods=3).min().values
     
-    # Calculate 1h RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Volume filter: current volume > 1.5 * 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_avg * 1.5)
     
@@ -60,13 +51,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_exit = 0  # bars since last exit to prevent overtrading
     
-    start_idx = max(20, 14)  # Ensure sufficient warmup for RSI and volume
+    start_idx = max(20, 3)  # Ensure sufficient warmup for volume avg and roll
     
     for i in range(start_idx, n):
         bars_since_exit += 1
         
         # Skip if any data is not ready
-        if (np.isnan(ema_4h_aligned[i]) or np.isnan(ema_slope[i]) or np.isnan(rsi[i]) or 
+        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
             np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -74,43 +65,37 @@ def generate_signals(prices):
                 bars_since_exit = 0
             continue
         
-        # Apply session filter
-        if not session_filter[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-                bars_since_exit = 0
-            continue
-        
         if position == 0:
-            # Minimum 6 bars between trades to reduce frequency (6h on 1h TF)
+            # Minimum 6 bars between trades (~1.5 days on 6h TF) to reduce frequency
             if bars_since_exit < 6:
                 continue
                 
-            # Long: RSI crosses above 50 and 4h EMA rising
-            if (rsi[i] > 50 and rsi[i-1] <= 50 and 
-                ema_slope[i] > 0 and volume_filter[i]):
-                signals[i] = 0.20
+            # Long: price above weekly pivot AND breaks above 6h high of prior 3 periods
+            if (close[i] > pivot_1w_aligned[i] and 
+                high[i] > high_roll[i-1] and 
+                volume_filter[i]):
+                signals[i] = 0.25
                 position = 1
                 bars_since_exit = 0
-            # Short: RSI crosses below 50 and 4h EMA falling
-            elif (rsi[i] < 50 and rsi[i-1] >= 50 and 
-                  ema_slope[i] < 0 and volume_filter[i]):
-                signals[i] = -0.20
+            # Short: price below weekly pivot AND breaks below 6h low of prior 3 periods
+            elif (close[i] < pivot_1w_aligned[i] and 
+                  low[i] < low_roll[i-1] and 
+                  volume_filter[i]):
+                signals[i] = -0.25
                 position = -1
                 bars_since_exit = 0
         elif position != 0:
-            # Exit: RSI returns to opposite side of 50
-            if position == 1 and rsi[i] < 50:
+            # Exit: price returns to opposite side of weekly pivot
+            if position == 1 and close[i] < pivot_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_exit = 0
-            elif position == -1 and rsi[i] > 50:
+            elif position == -1 and close[i] > pivot_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_exit = 0
             else:
                 # Hold position
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
