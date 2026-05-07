@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v2"
+name = "4h_4R_3S_Breakout_1dTrend_VolumeSpike_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,19 +23,19 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels (R1, S1) from previous day's OHLC
-    # R1 = close + 0.11 * (high - low)
-    # S1 = close - 0.11 * (high - low)
+    # Calculate Camarilla pivot levels (R4, S3) from previous day's OHLC
+    # R4 = close + 0.55 * (high - low)
+    # S3 = close - 0.40 * (high - low)
     prev_close = df_1d['close'].values
     prev_high = df_1d['high'].values
     prev_low = df_1d['low'].values
     
-    r1 = prev_close + 0.11 * (prev_high - prev_low)
-    s1 = prev_close - 0.11 * (prev_high - prev_low)
+    r4 = prev_close + 0.55 * (prev_high - prev_low)
+    s3 = prev_close - 0.40 * (prev_high - prev_low)
     
     # Align Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
     # Daily EMA34 for trend filter
     ema_34_1d = pd.Series(prev_close).ewm(span=34, adjust=False, min_periods=34).mean().values
@@ -56,8 +56,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
+        if (np.isnan(r4_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or 
             np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
@@ -76,31 +76,31 @@ def generate_signals(prices):
         trend_1d_down = close_1d_aligned[i] < ema_34_1d_aligned[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: price breaks above R1 in daily uptrend with volume spike
-            if (close[i] > r1_aligned[i] and 
+            # Long: price breaks above R4 in daily uptrend with volume spike
+            if (close[i] > r4_aligned[i] and 
                 trend_1d_up and 
                 vol_filter[i]):
                 signals[i] = 0.30
                 position = 1
                 bars_since_last_trade = 0
-            # Short: price breaks below S1 in daily downtrend with volume spike
-            elif (close[i] < s1_aligned[i] and 
+            # Short: price breaks below S3 in daily downtrend with volume spike
+            elif (close[i] < s3_aligned[i] and 
                   trend_1d_down and 
                   vol_filter[i]):
                 signals[i] = -0.30
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit: price closes below R1 OR trend change
-            if (close[i] < r1_aligned[i]) or not trend_1d_up:
+            # Exit: price closes below R4 OR trend change
+            if (close[i] < r4_aligned[i]) or not trend_1d_up:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
                 signals[i] = 0.30
         elif position == -1:
-            # Exit: price closes above S1 OR trend change
-            if (close[i] > s1_aligned[i]) or not trend_1d_down:
+            # Exit: price closes above S3 OR trend change
+            if (close[i] > s3_aligned[i]) or not trend_1d_down:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
@@ -109,9 +109,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R1/S1 levels act as strong support/resistance on daily timeframe.
-# Long when price breaks above R1 in daily uptrend with volume confirmation.
-# Short when price breaks below S1 in daily downtrend with volume confirmation.
+# Hypothesis: Camarilla R4/S3 levels act as strong support/resistance on daily timeframe.
+# Long when price breaks above R4 in daily uptrend with volume confirmation.
+# Short when price breaks below S3 in daily downtrend with volume confirmation.
 # Daily EMA34 filter ensures we trade with the higher timeframe trend.
 # Volume spike confirms institutional participation. Cooldown prevents overtrading.
 # Effective in both bull (captures breakouts) and bear (avoids counter-trend trades).
