@@ -1,18 +1,16 @@
-# 12h_Camarilla_R3S3_Volume_Chop
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d volume spike and Choppiness filter.
-# Long when price breaks above 12h Camarilla R3 level AND 1d volume spike AND Choppiness < 38.2 (trending).
-# Short when price breaks below 12h S3 level AND 1d volume spike AND Choppiness < 38.2.
-# Uses daily volume spike for momentum confirmation and Choppiness to avoid ranging markets.
-# Designed for fewer trades (target: 15-25/year) to reduce fee drag and improve generalization.
-# Works in both bull and bear markets by following 12h price action with volatility filter.
-# 12h timeframe reduces trade frequency, Choppiness filter avoids false breakouts in ranges.
-name = "12h_Camarilla_R3S3_Volume_Chop"
-timeframe = "12h"
+# 4h Donchian Breakout with Volume Confirmation and ADX Trend Filter
+# Designed for 4h timeframe with daily volume confirmation and trend strength filter
+# Target: 20-40 trades per year to minimize fee drag while capturing strong trends
+# Works in bull markets via breakouts and bear markets via short breakdowns
+# Uses volume surge to confirm institutional interest and ADX to avoid choppy markets
+
+name = "4h_Donchian20_Volume_ADX_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,74 +18,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for volume spike and Choppiness
+    # Load 1d data for volume confirmation and ADX
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 1d volume spike: current volume > 2.0 * 20-period EMA
+    # Daily volume spike: current volume > 1.5 * 20-period EMA
     vol_ema_20 = pd.Series(df_1d['volume']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike_1d = np.where(vol_ema_20 > 0, df_1d['volume'].values / vol_ema_20, 1.0) > 2.0
+    vol_spike_1d = np.where(vol_ema_20 > 0, df_1d['volume'].values / vol_ema_20, 1.0) > 1.5
     vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
     
-    # 1d Choppiness Index (14-period)
+    # Daily ADX for trend strength (14-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    atr_list = []
-    for i in range(len(close_1d)):
-        if i == 0:
-            tr = high_1d[0] - low_1d[0]
-        else:
-            tr = max(high_1d[i] - low_1d[i], abs(high_1d[i] - close_1d[i-1]), abs(low_1d[i] - close_1d[i-1]))
-        atr_list.append(tr)
-    atr_1d = np.array(atr_list)
-    atr_ma_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).mean().values
+    # True Range calculation
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2[0] = 0  # First element has no previous close
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    chop_1d = 100 * np.log10(atr_ma_14 / (highest_high_14 - lowest_low_14)) / np.log10(14)
-    chop_1d = np.where((highest_high_14 - lowest_low_14) > 0, chop_1d, 50.0)  # avoid division by zero
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    # Smooth TR and DM
+    tr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_plus_14 = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_minus_14 = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Load 12h data for Camarilla levels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # DI and DX
+    di_plus = 100 * dm_plus_14 / tr_14
+    di_minus = 100 * dm_minus_14 / tr_14
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    dx = np.where((di_plus + di_minus) > 0, dx, 0)
+    
+    # ADX
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Load 4h data for Donchian channels
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    # Previous 12h OHLC for Camarilla calculation
-    prev_close_12h = df_12h['close'].shift(1).values
-    prev_high_12h = df_12h['high'].shift(1).values
-    prev_low_12h = df_12h['low'].shift(1).values
+    # Donchian channels (20-period)
+    high_20 = pd.Series(df_4h['high']).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(df_4h['low']).rolling(window=20, min_periods=20).min().values
     
-    # Camarilla levels: R3/S3
-    range_12h = prev_high_12h - prev_low_12h
-    camarilla_r3 = prev_close_12h + range_12h * 1.1 / 4
-    camarilla_s3 = prev_close_12h - range_12h * 1.1 / 4
+    donchian_high = high_20
+    donchian_low = low_20
     
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s3)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Sufficient warmup for calculations
+    start_idx = 40  # Sufficient warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(vol_spike_1d_aligned[i]) or np.isnan(chop_1d_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(vol_spike_1d_aligned[i]) or np.isnan(adx_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long condition: break above R3, volume spike, trending market (Chop < 38.2)
-            long_condition = (close[i] > camarilla_r3_aligned[i]) and vol_spike_1d_aligned[i] and (chop_1d_aligned[i] < 38.2)
-            # Short condition: break below S3, volume spike, trending market (Chop < 38.2)
-            short_condition = (close[i] < camarilla_s3_aligned[i]) and vol_spike_1d_aligned[i] and (chop_1d_aligned[i] < 38.2)
+            # Long: break above Donchian high + volume surge + strong trend (ADX > 25)
+            long_condition = (close[i] > donchian_high_aligned[i]) and vol_spike_1d_aligned[i] and (adx_aligned[i] > 25)
+            # Short: break below Donchian low + volume surge + strong trend (ADX > 25)
+            short_condition = (close[i] < donchian_low_aligned[i]) and vol_spike_1d_aligned[i] and (adx_aligned[i] > 25)
             
             if long_condition:
                 signals[i] = 0.25
@@ -96,15 +105,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price breaks below S3 or Choppiness turns to ranging (Chop > 61.8)
-            if (close[i] < camarilla_s3_aligned[i]) or (chop_1d_aligned[i] > 61.8):
+            # Exit: break below Donchian low or trend weakens (ADX < 20)
+            if (close[i] < donchian_low_aligned[i]) or (adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price breaks above R3 or Choppiness turns to ranging (Chop > 61.8)
-            if (close[i] > camarilla_r3_aligned[i]) or (chop_1d_aligned[i] > 61.8):
+            # Exit: break above Donchian high or trend weakens (ADX < 20)
+            if (close[i] > donchian_high_aligned[i]) or (adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
