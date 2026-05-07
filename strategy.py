@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-# 4H_Camarilla_R3S3_1DTrend_Volume_Signal_v6
-# Hypothesis: Further tighten the proven Camarilla R3/S3 breakout strategy by increasing the volume confirmation threshold to 3.0x and requiring the volume to be above a 200-period moving average for additional filtering. This aims to reduce trade frequency to 15-25 trades/year per symbol while maintaining high-probability breakouts in both bull and bear markets. Uses 4h timeframe with 1d HTF for levels and trend.
+# 6H_Camarilla_R3S3_1DTrend_Volume_Signal_v5
+# Hypothesis: Adapt proven 4H Camarilla R3/S3 breakout + volume + trend to 6H timeframe to reduce trade frequency and improve signal quality in both bull and bear markets.
+# Target: 20-40 trades/year per symbol. Position size: 0.25.
 
-name = "4H_Camarilla_R3S3_1DTrend_Volume_Signal_v6"
-timeframe = "4h"
+name = "6H_Camarilla_R3S3_1DTrend_Volume_Signal_v5"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -12,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -35,7 +36,7 @@ def generate_signals(prices):
     r3_1d = close_1d + 1.1 * hl_range / 2
     s3_1d = close_1d - 1.1 * hl_range / 2
     
-    # Align all levels to 4h timeframe (use previous daily period's levels)
+    # Align all levels to 6h timeframe (use previous daily period's levels)
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
@@ -43,13 +44,13 @@ def generate_signals(prices):
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume spike detection: 3.0x average volume (200-period for stability)
-    vol_ma = pd.Series(volume).rolling(window=200, min_periods=200).mean().values
+    # Volume spike detection: 2.0x average volume (20-period for responsiveness)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(200, 34)  # Ensure we have volume MA and EMA34 data
+    start_idx = max(20, 34)  # Ensure we have volume MA and EMA34 data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
@@ -61,16 +62,16 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above daily R3, price above daily EMA34 (uptrend), volume spike (>3.0x)
+            # Long: price breaks above daily R3, price above daily EMA34 (uptrend), volume spike (>2.0x)
             if (close[i] > r3_1d_aligned[i] and 
                 close[i] > ema34_1d_aligned[i] and 
-                volume[i] > 3.0 * vol_ma[i]):
+                volume[i] > 2.0 * vol_ma[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below daily S3, price below daily EMA34 (downtrend), volume spike (>3.0x)
+            # Short: price breaks below daily S3, price below daily EMA34 (downtrend), volume spike (>2.0x)
             elif (close[i] < s3_1d_aligned[i] and 
                   close[i] < ema34_1d_aligned[i] and 
-                  volume[i] > 3.0 * vol_ma[i]):
+                  volume[i] > 2.0 * vol_ma[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
