@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3S3_Breakout_1dTrend_VolumeS
-Hypothesis: Camarilla R3/S3 breakouts on 12h with daily trend filter and volume confirmation work in both bull and bear markets by capturing strong momentum moves while avoiding chop. Target: 10-30 trades/year.
+6h_Chaikin_Money_Flow_Riverbank
+Hypothesis: Chaikin Money Flow (CMF) combined with Riverbank EMA crossover identifies accumulation/distribution phases with trend confirmation. Works in bull/bear markets by detecting institutional flow direction while avoiding whipsaws. Target: 12-30 trades/year.
 """
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeS"
-timeframe = "12h"
+name = "6h_Chaikin_Money_Flow_Riverbank"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,65 +21,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    # Get 12h data for CMF calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 25:
         return np.zeros(n)
     
-    # 1d Camarilla R3/S3 levels (stronger breakout levels)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Chaikin Money Flow (21-period) on 12h data
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    range_1d = high_1d - low_1d
-    r3_1d = close_1d + 1.1666 * range_1d * 1.1 / 2
-    s3_1d = close_1d - 1.1666 * range_1d * 1.1 / 2
+    # Money Flow Multiplier
+    mfm = np.where((high_12h - low_12h) != 0, 
+                   ((close_12h - low_12h) - (high_12h - close_12h)) / (high_12h - low_12h), 
+                   0)
+    # Money Flow Volume
+    mfv = mfm * volume_12h
+    # CMF: 21-period sum of MFV / 21-period sum of volume
+    mfv_sum = pd.Series(mfv).rolling(window=21, min_periods=21).sum().values
+    vol_sum = pd.Series(volume_12h).rolling(window=21, min_periods=21).sum().values
+    cmf_12h = np.where(vol_sum != 0, mfv_sum / vol_sum, 0)
     
-    # 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Align CMF to 6h timeframe
+    cmf_12h_aligned = align_htf_to_ltf(prices, df_12h, cmf_12h)
     
-    # Align all to 12h timeframe
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Riverbank EMA crossover on 6h: EMA(9) and EMA(20)
+    ema_9 = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Volume filter: current volume > 1.5 * 20-period average
+    # Volume filter: current volume > 1.3 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_avg * 1.5)
+    volume_filter = volume > (vol_avg * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)
+    start_idx = max(21, 20)
     
     for i in range(start_idx, n):
         # Skip if any data is not ready
-        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(cmf_12h_aligned[i]) or np.isnan(ema_9[i]) or 
+            np.isnan(ema_20[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R3 + daily uptrend + volume
-            if close[i] > r3_1d_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_filter[i]:
+            # Long: CMF > 0.05 (accumulation) + EMA9 > EMA20 (uptrend) + volume
+            if cmf_12h_aligned[i] > 0.05 and ema_9[i] > ema_20[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 + daily downtrend + volume
-            elif close[i] < s3_1d_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_filter[i]:
+            # Short: CMF < -0.05 (distribution) + EMA9 < EMA20 (downtrend) + volume
+            elif cmf_12h_aligned[i] < -0.05 and ema_9[i] < ema_20[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: price crosses back through the opposite S3/R3 level
+            # Exit: CMF crosses back to neutral zone or EMA cross reverses
             if position == 1:
-                if close[i] < s3_1d_aligned[i]:
+                if cmf_12h_aligned[i] < 0 or ema_9[i] < ema_20[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > r3_1d_aligned[i]:
+                if cmf_12h_aligned[i] > 0 or ema_9[i] > ema_20[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
