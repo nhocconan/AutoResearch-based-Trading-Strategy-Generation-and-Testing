@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v2"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,22 +17,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter (EMA50)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 1w data for trend filter (EMA50)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Get 1d data for Camarilla levels (R1, S1) and volume filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    # Camarilla: R1 = close + (high - low) * 1.1 / 12, S1 = close - (high - low) * 1.1 / 12
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla: R1 = close + (high - low) * 1.1 / 12, S1 = close - (high - low) * 1.1 / 12
     r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
     s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
     
@@ -52,7 +56,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data is not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or 
+        if (np.isnan(ema_50_1w_aligned[i]) or 
             np.isnan(r1_aligned[i]) or 
             np.isnan(s1_aligned[i]) or 
             np.isnan(volume_filter_aligned[i])):
@@ -62,28 +66,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price above 1d EMA50 (uptrend), 4h close above daily R1, volume confirmation
-            if (close[i] > ema_50_1d_aligned[i] and 
+            # Long: price above 1w EMA50 (uptrend), 12h close above daily R1, volume confirmation
+            if (close[i] > ema_50_1w_aligned[i] and 
                 close[i] > r1_aligned[i] and 
                 volume_filter_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below 1d EMA50 (downtrend), 4h close below daily S1, volume confirmation
-            elif (close[i] < ema_50_1d_aligned[i] and 
+            # Short: price below 1w EMA50 (downtrend), 12h close below daily S1, volume confirmation
+            elif (close[i] < ema_50_1w_aligned[i] and 
                   close[i] < s1_aligned[i] and 
                   volume_filter_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below 1d EMA50 (trend change)
-            if close[i] < ema_50_1d_aligned[i]:
+            # Exit long: price crosses below 1w EMA50 (trend change)
+            if close[i] < ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above 1d EMA50 (trend change)
-            if close[i] > ema_50_1d_aligned[i]:
+            # Exit short: price crosses above 1w EMA50 (trend change)
+            if close[i] > ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
