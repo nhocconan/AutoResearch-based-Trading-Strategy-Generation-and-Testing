@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
-# 1d_KAMA_Trend_With_RSI_Filter
-# Hypothesis: KAMA adapts to market noise, providing reliable trend direction in both bull and bear markets.
-# Combined with RSI for momentum confirmation and volatility filter to avoid whipsaws.
-# Timeframe: 1d, uses weekly trend filter for multi-timeframe alignment.
-# Low trade frequency (~10-20/year) via strict KAMA trend + RSI momentum + volatility filter.
-# Long: KAMA rising, RSI > 50, and volatility below median (calm market).
-# Short: KAMA falling, RSI < 50, and volatility below median.
-# Exit: Opposite KAMA direction or volatility spike.
+# 12h_Trix_VolumeSpike_TrendFilter
+# Hypothesis: TRIX (triple exponential moving average) with volume spike and daily trend filter captures momentum shifts in both bull and bear markets.
+# Timeframe: 12h, uses 1d trend filter for multi-timeframe alignment.
+# Low trade frequency (~15-30/year) via strict TRIX zero-cross + volume + trend confluence.
+# Long: TRIX crosses above 0 with volume > 1.8x average and daily uptrend (close > EMA34).
+# Short: TRIX crosses below 0 with volume > 1.8x average and daily downtrend (close < EMA34).
+# Exit: Opposite TRIX cross or trend failure.
+
+timeframe = "12h"
+name = "12h_Trix_VolumeSpike_TrendFilter"
+leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-name = "1d_KAMA_Trend_With_RSI_Filter"
-timeframe = "1d"
-leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,122 +21,69 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
-    # KAMA (Kaufman Adaptive Moving Average) - adapts to market noise
-    def calculate_kama(close, period=10, fast=2, slow=30):
-        # Direction
-        change = np.abs(np.diff(close, n=period))
-        # Volatility
-        volatility = np.sum(np.abs(np.diff(close)), axis=1)
-        # Avoid division by zero
-        volatility = np.where(volatility == 0, 1, volatility)
-        # Efficiency Ratio
-        er = np.divide(change, volatility, out=np.zeros_like(change, dtype=float), where=volatility!=0)
-        # Smoothing Constants
-        sc = np.power(er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1), 2)
-        # Initialize KAMA
-        kama = np.full_like(close, np.nan, dtype=float)
-        kama[period] = close[period]
-        # Calculate KAMA
-        for i in range(period+1, len(close)):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        return kama
+    # TRIX calculation: triple EMA of log returns
+    # TRIX = (EMA3 of log(close) - previous) / previous * 100
+    log_close = np.log(close)
     
-    # Calculate KAMA
-    kama = calculate_kama(close, period=10, fast=2, slow=30)
+    # First EMA
+    ema1 = pd.Series(log_close).ewm(span=15, adjust=False, min_periods=15).mean().values
+    # Second EMA
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    # Third EMA
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
     
-    # RSI for momentum confirmation
-    def calculate_rsi(close, period=14):
-        delta = np.diff(close)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        avg_gain = np.zeros_like(close)
-        avg_loss = np.zeros_like(close)
-        avg_gain[period] = np.mean(gain[:period])
-        avg_loss[period] = np.mean(loss[:period])
-        for i in range(period+1, len(close)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
-        rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
+    # TRIX: percentage change of triple EMA
+    trix = np.zeros_like(ema3)
+    trix[1:] = (ema3[1:] - ema3[:-1]) / ema3[:-1] * 100
     
-    rsi = calculate_rsi(close, period=14)
-    
-    # Volatility filter: ATR-based, use median to avoid whipsaws in high volatility
-    def calculate_atr(high, low, close, period=14):
-        tr1 = np.abs(high[1:] - low[1:])
-        tr2 = np.abs(high[1:] - close[:-1])
-        tr3 = np.abs(low[1:] - close[:-1])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        atr = np.zeros_like(close)
-        atr[period] = np.mean(tr[:period])
-        for i in range(period+1, len(close)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i-1]) / period
-        return atr
-    
-    atr = calculate_atr(high, low, close, period=14)
-    # Use median ATR over long period for volatility filter
-    vol_median = np.zeros_like(close)
-    for i in range(len(close)):
-        if i >= 50:
-            vol_median[i] = np.median(atr[max(0, i-49):i+1])
-        else:
-            vol_median[i] = np.mean(atr[max(0, i):i+1]) if np.any(~np.isnan(atr[max(0, i):i+1])) else 0
-    
-    # Weekly trend filter for multi-timeframe alignment
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) == 0:
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) == 0:
         return np.zeros(n)
     
-    weekly_close = df_1w['close'].values
-    # Weekly EMA34 for trend filter
-    ema_34_1w = pd.Series(weekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Daily trend filter: EMA34
+    d_close = df_1d['close'].values
+    ema_34_1d = pd.Series(d_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume spike detection: 1.8x average volume (12-period = 6 days on 12h chart)
+    vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure we have enough data for indicators
+    start_idx = max(15, 12)  # Ensure we have TRIX and volume MA data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(vol_median[i]) or vol_median[i] == 0):
+        if (np.isnan(trix[i]) or np.isnan(trix[i-1]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # KAMA direction: rising if current > previous, falling if current < previous
-        kama_rising = kama[i] > kama[i-1]
-        kama_falling = kama[i] < kama[i-1]
-        
-        # Volatility filter: only trade when volatility is below median (calm market)
-        low_volatility = atr[i] < vol_median[i]
-        
         if position == 0:
-            # Long: KAMA rising, RSI > 50, low volatility, and weekly uptrend
-            if kama_rising and rsi[i] > 50 and low_volatility and close[i] > ema_34_1w_aligned[i]:
+            # Long: TRIX crosses above 0 with volume spike and daily uptrend
+            if trix[i] > 0 and trix[i-1] <= 0 and volume[i] > 1.8 * vol_ma[i] and close[i] > ema_34_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA falling, RSI < 50, low volatility, and weekly downtrend
-            elif kama_falling and rsi[i] < 50 and low_volatility and close[i] < ema_34_1w_aligned[i]:
+            # Short: TRIX crosses below 0 with volume spike and daily downtrend
+            elif trix[i] < 0 and trix[i-1] >= 0 and volume[i] > 1.8 * vol_ma[i] and close[i] < ema_34_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: KAMA falling or volatility spike
-            if not kama_rising or not low_volatility:
+            # Exit: TRIX crosses below 0 or trend failure
+            if trix[i] < 0 and trix[i-1] >= 0 or close[i] < ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: KAMA rising or volatility spike
-            if not kama_falling or not low_volatility:
+            # Exit: TRIX crosses above 0 or trend failure
+            if trix[i] > 0 and trix[i-1] <= 0 or close[i] > ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
