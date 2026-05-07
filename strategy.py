@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 6h_Engulfing_1dTrend_Volume
-# Hypothesis: Uses daily bullish/bearish engulfing candles to signal trend direction, combined with 6-hour price action and volume confirmation.
-# Engulfing candles on the daily chart indicate strong institutional sentiment. We only take trades in the direction of the daily engulfing candle,
-# entering on 6-hour breakouts of the engulfing candle's body with volume confirmation. This filters noise and aligns with higher timeframe momentum.
-# Works in both bull and bear markets by following the daily trend. Target: 15-30 trades/year per symbol to minimize fee drag.
+# 12h_Pivot_Reversal_Strategy
+# Hypothesis: Uses daily pivot points (PP, R1, S1) and 1-day trend to capture reversals at key levels.
+# In bull markets, buy at S1 with bullish trend; in bear markets, sell at R1 with bearish trend.
+# The pivot points act as support/resistance, and the 1-day trend filter ensures we trade with the higher timeframe momentum.
+# Volume confirmation reduces false breakouts. Target: 15-25 trades/year per symbol to stay within trade limits.
 
-timeframe = "6h"
-name = "6h_Engulfing_1dTrend_Volume"
+timeframe = "12h"
+name = "12h_Pivot_Reversal_Strategy"
 leverage = 1.0
 
 import numpy as np
@@ -23,65 +23,69 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for engulfing candle detection
+    # Get daily data for pivot points and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) == 0:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    open_1d = df_1d['open'].values
     close_1d = df_1d['close'].values
     
-    # Bullish engulfing: current day closes above prior day's open AND opens below prior day's close
-    bullish_engulf = (close_1d > open_1d) & (open_1d < close_1d) & (close_1d > open_1d) & (open_1d < close_1d)
-    bullish_engulf = (close_1d > open_1d.shift(1)) & (open_1d < close_1d.shift(1))
-    # Bearish engulfing: current day closes below prior day's open AND opens above prior day's close
-    bearish_engulf = (close_1d < open_1d.shift(1)) & (open_1d > close_1d.shift(1))
+    # Calculate daily pivot points: PP = (H+L+C)/3, R1 = 2*PP - L, S1 = 2*PP - H
+    pivot_point = (high_1d + low_1d + close_1d) / 3
+    r1 = 2 * pivot_point - low_1d
+    s1 = 2 * pivot_point - high_1d
     
-    # Align engulfing signals to 6h timeframe (use the engulfing candle's signal for the entire day)
-    bullish_engulf_aligned = align_htf_to_ltf(prices, df_1d, bullish_engulf.astype(float))
-    bearish_engulf_aligned = align_htf_to_ltf(prices, df_1d, bearish_engulf.astype(float))
+    # Align pivot points to 12h timeframe (use previous day's levels)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pivot_point)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # 6-hour moving average for dynamic support/resistance (20-period = ~5 days)
-    ma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    # 1-day EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume confirmation: 1.5x average volume (6-period = 1 day on 6h chart)
-    vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
+    # Volume spike detection: 1.5x average volume (24-period = 2 days on 12h chart)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 6)  # Ensure we have MA and volume data
+    start_idx = max(50, 24)  # Ensure we have EMA50 and volume MA data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(bullish_engulf_aligned[i]) or np.isnan(bearish_engulf_aligned[i]) or 
-            np.isnan(ma_20[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: daily bullish engulfing + price above 6h MA + volume confirmation
-            if bullish_engulf_aligned[i] > 0.5 and close[i] > ma_20[i] and volume[i] > 1.5 * vol_ma[i]:
+            # Long: price crosses above S1 with volume, and 1d trend is bullish (close > EMA50)
+            if (close[i] > s1_aligned[i] and 
+                volume[i] > 1.5 * vol_ma[i] and 
+                close[i] > ema_50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: daily bearish engulfing + price below 6h MA + volume confirmation
-            elif bearish_engulf_aligned[i] > 0.5 and close[i] < ma_20[i] and volume[i] > 1.5 * vol_ma[i]:
+            # Short: price crosses below R1 with volume, and 1d trend is bearish (close < EMA50)
+            elif (close[i] < r1_aligned[i] and 
+                  volume[i] > 1.5 * vol_ma[i] and 
+                  close[i] < ema_50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price crosses below 6h MA (trend reversal)
-            if close[i] < ma_20[i]:
+            # Exit: price crosses below pivot point (mean reversion to pivot)
+            if close[i] < pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price crosses above 6h MA (trend reversal)
-            if close[i] > ma_20[i]:
+            # Exit: price crosses above pivot point (mean reversion to pivot)
+            if close[i] > pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
