@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_1dSupertrend_1wTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -19,72 +19,53 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    # Calculate daily Supertrend (10, 3.0)
+    # Calculate daily Camarilla levels from previous day
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # ATR calculation
-    high_low = high_1d - low_1d
-    high_close = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
-    low_close = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
-    tr_1d = np.maximum(high_low, np.maximum(high_close, low_close))
-    atr_1d = pd.Series(tr_1d).rolling(window=10, min_periods=10).mean().values
+    # Use previous day's data for current day's levels
+    prev_high = high_1d[:-1]
+    prev_low = low_1d[:-1]
+    prev_close = close_1d[:-1]
     
-    # Supertrend upper and lower bands
-    hl2_1d = (high_1d + low_1d) / 2
-    upper_band_1d = hl2_1d + 3.0 * atr_1d
-    lower_band_1d = hl2_1d - 3.0 * atr_1d
+    if len(prev_high) < 1:
+        return np.zeros(n)
     
-    # Initialize Supertrend
-    supertrend_1d = np.full(len(close_1d), np.nan)
-    direction_1d = np.full(len(close_1d), 1)  # 1 for uptrend, -1 for downtrend
+    range_val = prev_high - prev_low
+    r3 = prev_close + 1.1 * range_val * 1.1 / 4
+    s3 = prev_close - 1.1 * range_val * 1.1 / 4
+    r4 = prev_close + 1.1 * range_val * 1.1 / 2
+    s4 = prev_close - 1.1 * range_val * 1.1 / 2
     
-    for i in range(10, len(close_1d)):
-        if np.isnan(atr_1d[i]) or np.isnan(upper_band_1d[i]) or np.isnan(lower_band_1d[i]):
-            continue
-        
-        if i == 10:
-            supertrend_1d[i] = lower_band_1d[i]
-            direction_1d[i] = 1
-        else:
-            if close_1d[i] > upper_band_1d[i-1]:
-                direction_1d[i] = 1
-            elif close_1d[i] < lower_band_1d[i-1]:
-                direction_1d[i] = -1
-            else:
-                direction_1d[i] = direction_1d[i-1]
-                if direction_1d[i] == 1 and lower_band_1d[i] < supertrend_1d[i-1]:
-                    lower_band_1d[i] = supertrend_1d[i-1]
-                if direction_1d[i] == -1 and upper_band_1d[i] > supertrend_1d[i-1]:
-                    upper_band_1d[i] = supertrend_1d[i-1]
-            
-            if direction_1d[i] == 1:
-                supertrend_1d[i] = lower_band_1d[i]
-            else:
-                supertrend_1d[i] = upper_band_1d[i]
+    # Create arrays for each day (shifted by one)
+    r3_per_day = np.full(len(df_1d), np.nan)
+    s3_per_day = np.full(len(df_1d), np.nan)
+    r4_per_day = np.full(len(df_1d), np.nan)
+    s4_per_day = np.full(len(df_1d), np.nan)
     
-    # Align daily Supertrend to 12h
-    supertrend_1d_aligned = align_htf_to_ltf(prices, df_1d, supertrend_1d)
-    direction_1d_aligned = align_htf_to_ltf(prices, df_1d, direction_1d)
+    r3_per_day[1:] = r3
+    s3_per_day[1:] = s3
+    r4_per_day[1:] = r4
+    s4_per_day[1:] = s4
     
-    # Calculate weekly trend (EMA 34)
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Align to 4h timeframe (only complete daily levels available)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_per_day)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_per_day)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4_per_day)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4_per_day)
     
-    # Volume spike detection (20-period average on 12h)
+    # Calculate daily EMA(34) for trend filter
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    
+    # Volume spike detection (20-period average on 4h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ATR for volatility filter (14-period on 12h)
+    # ATR for volatility filter (14-period)
     high_low = high - low
     high_close = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
     low_close = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
@@ -94,45 +75,48 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 14, 34)  # Wait for volume MA, ATR, and weekly EMA
+    start_idx = max(20, 14)  # Wait for volume MA and ATR
     
     for i in range(start_idx, n):
-        if np.isnan(supertrend_1d_aligned[i]) or np.isnan(direction_1d_aligned[i]) or \
-           np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i]):
+        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(r4_aligned[i]) or \
+           np.isnan(s4_aligned[i]) or np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price > Supertrend (bullish), above weekly EMA34, volume spike
-            if (close[i] > supertrend_1d_aligned[i] and 
-                direction_1d_aligned[i] == 1 and 
-                close[i] > ema_34_1w_aligned[i] and 
-                volume[i] > vol_ma[i] * 1.5):
+            # Long: price > R3, above daily EMA34, volume spike, volatility not extreme
+            vol_condition = volume[i] > vol_ma[i] * 1.5
+            vol_not_extreme = atr[i] < np.median(atr[max(0, i-50):i+1]) * 3
+            
+            if (close[i] > r3_aligned[i] and 
+                close[i] > ema_34_aligned[i] and 
+                vol_condition and 
+                vol_not_extreme):
                 signals[i] = 0.25
                 position = 1
-            # Short: price < Supertrend (bearish), below weekly EMA34, volume spike
-            elif (close[i] < supertrend_1d_aligned[i] and 
-                  direction_1d_aligned[i] == -1 and 
-                  close[i] < ema_34_1w_aligned[i] and 
-                  volume[i] > vol_ma[i] * 1.5):
+            # Short: price < S3, below daily EMA34, volume spike, volatility not extreme
+            elif (close[i] < s3_aligned[i] and 
+                  close[i] < ema_34_aligned[i] and 
+                  vol_condition and 
+                  vol_not_extreme):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price < Supertrend or below weekly EMA34
-            if (close[i] < supertrend_1d_aligned[i] or 
-                direction_1d_aligned[i] == -1 or
-                close[i] < ema_34_1w_aligned[i]):
+            # Exit: price < S3 or below EMA34 or volatility spike
+            if (close[i] < s3_aligned[i] or 
+                close[i] < ema_34_aligned[i] or
+                atr[i] > np.median(atr[max(0, i-50):i+1]) * 4):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price > Supertrend or above weekly EMA34
-            if (close[i] > supertrend_1d_aligned[i] or 
-                direction_1d_aligned[i] == 1 or
-                close[i] > ema_34_1w_aligned[i]):
+            # Exit: price > R3 or above EMA34 or volatility spike
+            if (close[i] > r3_aligned[i] or 
+                close[i] > ema_34_aligned[i] or
+                atr[i] > np.median(atr[max(0, i-50):i+1]) * 4):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -140,10 +124,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 12h Supertrend with weekly trend filter and volume confirmation.
-# Uses daily Supertrend (10, 3.0) for trend direction and entry signals.
-# Weekly EMA(34) ensures we only trade in the direction of the higher timeframe trend.
+# Hypothesis: 4h Camarilla R3/S3 breakout with daily EMA34 trend filter, volume confirmation, and volatility filter.
+# Camarilla R3/S3 levels identify key intraday support/resistance from previous day's range.
+# Breakout above R3 with volume suggests bullish momentum; breakdown below S3 suggests bearish.
+# Daily EMA(34) filter ensures we only trade in the direction of the daily trend.
 # Volume confirmation ensures institutional participation.
-# Works in bull markets (buy when daily Supertrend flips bullish in weekly uptrend) 
-# and bear markets (sell when daily Supertrend flips bearish in weekly downtrend).
-# Position size 0.25 balances risk and keeps trade frequency moderate (~15-25 trades/year).
+# Volatility filter avoids whipsaws during extreme volatility spikes.
+# Works in bull markets (buy breakouts above R3 in uptrend) and bear markets (sell breakdowns below S3 in downtrend).
+# Position size 0.25 balances risk and keeps trade frequency manageable (~15-30 trades/year).
