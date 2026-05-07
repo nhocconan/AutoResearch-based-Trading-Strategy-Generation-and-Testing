@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3S3_Breakout_1dTrend_VolumeS
-Hypothesis: Camarilla R3/S3 breakouts on 6h with daily trend filter and volume confirmation capture strong momentum moves while avoiding chop. Works in both bull and bear markets by targeting high-probability breakouts with strong volume. Target: 12-37 trades/year.
+12h_Camarilla_R3S3_Breakout_1dTrend_VolumeS
+Hypothesis: Camarilla R3/S3 breakouts on 12h with daily trend filter and volume confirmation capture strong momentum moves while avoiding chop. Works in both bull and bear markets by targeting high-probability breakouts with strong volume. Target: 12-37 trades/year.
 """
-name = "6h_Camarilla_R3S3_Breakout_1dTrend_VolumeS"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeS"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -38,7 +38,7 @@ def generate_signals(prices):
     # 1d EMA34 for trend filter
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align all to 6h timeframe
+    # Align all to 12h timeframe
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
