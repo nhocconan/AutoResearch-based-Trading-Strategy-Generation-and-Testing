@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -31,7 +31,7 @@ def generate_signals(prices):
     camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 2
     camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 2
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
@@ -39,7 +39,7 @@ def generate_signals(prices):
     ema_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Volume confirmation: current volume > 2.0 * 20-period average (on 4h)
+    # Volume confirmation: current volume > 2.0 * 20-period average (on 12h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -59,13 +59,13 @@ def generate_signals(prices):
             if (close[i] > camarilla_r3_aligned[i] and 
                 close[i] > ema_1d_aligned[i] and 
                 volume[i] > 2.0 * vol_ma[i]):
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             # Short: price breaks below S3 with 1d downtrend and volume spike
             elif (close[i] < camarilla_s3_aligned[i] and 
                   close[i] < ema_1d_aligned[i] and 
                   volume[i] > 2.0 * vol_ma[i]):
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
             # Exit: price crosses below R3 or drops below 1d EMA
@@ -73,13 +73,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
             # Exit: price crosses above S3 or rises above 1d EMA
             if close[i] > camarilla_s3_aligned[i] or close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
