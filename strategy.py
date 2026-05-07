@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,67 +17,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d trend filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    close_1d = df_1d['close'].values
-    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
-    trend_up = close > ema20_1d_aligned
-    trend_down = close < ema20_1d_aligned
-    
-    # 12h Camarilla pivot levels (R1/S1)
+    # 12h trend filter (HTF)
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h_prev = df_12h['close'].shift(1).values
-    close_12h_prev = np.concatenate([[close_12h_prev[0]], close_12h_prev[:-1]])
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    trend_up = close > ema50_12h_aligned
+    trend_down = close < ema50_12h_aligned
     
-    R1 = close_12h_prev + (high_12h - low_12h) * 1.1 / 12
-    S1 = close_12h_prev - (high_12h - low_12h) * 1.1 / 12
-    R1_aligned = align_htf_to_ltf(prices, df_12h, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_12h, S1)
+    # Daily Camarilla pivot levels (R3/S3)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Volume confirmation: spike > 1.5x 20-period average
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_prev = df_1d['close'].shift(1).values
+    close_1d_prev = np.concatenate([[close_1d_prev[0]], close_1d_prev[:-1]])
+    
+    R3 = close_1d_prev + (high_1d - low_1d) * 1.1 / 4
+    S3 = close_1d_prev - (high_1d - low_1d) * 1.1 / 4
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    
+    # Volume confirmation: spike > 2x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > 1.5 * vol_ma
+    vol_spike = volume > 2.0 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)  # Wait for EMA and volume MA
+    start_idx = max(50, 20)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(ema20_1d_aligned[i]) or np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]):
+        if np.isnan(ema50_12h_aligned[i]) or np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Close breaks above R1 with volume spike and 1d uptrend
-            if close[i] > R1_aligned[i] and vol_spike[i] and trend_up[i]:
+            # Long: Close breaks above R3 with volume spike and 12h uptrend
+            if close[i] > R3_aligned[i] and vol_spike[i] and trend_up[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close breaks below S1 with volume spike and 1d downtrend
-            elif close[i] < S1_aligned[i] and vol_spike[i] and trend_down[i]:
+            # Short: Close breaks below S3 with volume spike and 12h downtrend
+            elif close[i] < S3_aligned[i] and vol_spike[i] and trend_down[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Close below S1 or trend turns down
-            if close[i] < S1_aligned[i] or not trend_up[i]:
+            # Exit: Close below S3 or trend turns down
+            if close[i] < S3_aligned[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Close above R1 or trend turns up
-            if close[i] > R1_aligned[i] or not trend_down[i]:
+            # Exit: Close above R3 or trend turns up
+            if close[i] > R3_aligned[i] or not trend_down[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -85,10 +85,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R1/S1 breakouts on 12h with 1d trend filter and volume capture institutional moves.
-# Long when price breaks above R1 (minor resistance) with volume confirmation in 1d uptrend.
-# Short when price breaks below S1 (minor support) with volume confirmation in 1d downtrend.
-# R1/S1 levels provide more frequent but still high-quality breaks compared to R3/S3.
-# Volume spike (>1.5x average) ensures conviction behind the breakout.
-# Designed for 12h timeframe to target 50-150 total trades over 4 years (12-37/year).
-# Works in bull markets (breaks above R1 in uptrend) and bear markets (breaks below S1 in downtrend).
+# Hypothesis: Camarilla R3/S3 breakouts with 12h trend filter and volume spike capture strong institutional moves.
+# Long when price breaks above R3 (strong resistance) with volume confirmation in 12h uptrend.
+# Short when price breaks below S3 (strong support) with volume confirmation in 12h downtrend.
+# R3/S3 are stronger levels than R1/S1, leading to fewer but higher-quality trades.
+# Volume spike (>2x average) ensures conviction behind the breakout.
+# Designed for 4h timeframe to target 20-50 trades/year, avoiding overtrading.
+# Works in bull markets (breaks above R3 in uptrend) and bear markets (breaks below S3 in downtrend).
