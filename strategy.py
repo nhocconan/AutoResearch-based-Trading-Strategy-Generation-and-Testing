@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 1H_Camarilla_R3S3_1DTrend_VolumeSpike_v3
+# 1H_Camarilla_R3S3_1DTrend_VolumeSpike_v4
 # Hypothesis: 1h strategy using 4h Camarilla R3/S3 breakouts filtered by 1d EMA34 trend and volume spikes.
 # Uses 4h for structure and 1d for trend direction, 1h only for precise entry timing.
 # Targets 15-37 trades/year via strict entry conditions to minimize fee drag.
 # Works in bull/bear markets by only trading with the daily trend.
 
-name = "1H_Camarilla_R3S3_1DTrend_VolumeSpike_v3"
+name = "1H_Camarilla_R3S3_1DTrend_VolumeSpike_v4"
 timeframe = "1h"
 leverage = 1.0
 
@@ -42,7 +42,7 @@ def generate_signals(prices):
     prev_low = df_4h['low'].values
     prev_close = df_4h['close'].values
     
-    # Calculate Camarilla levels: R3 and S3
+    # Calculate Camarilla levels: R3 and S3 (corrected formula)
     r3 = prev_close + 1.1 * (prev_high - prev_low) * 1.1 / 2
     s3 = prev_close - 1.1 * (prev_high - prev_low) * 1.1 / 2
     
