@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R3S3_1dTrend_Volume_Signal
-# Hypothesis: 12h strategy using daily Camarilla R3/S3 levels with daily trend filter (EMA34) and volume confirmation (>2.0x 30-period average).
-# Enters long when price breaks above daily R3, close > daily EMA34 (uptrend), and volume > 2.0x average.
-# Enters short when price breaks below daily S3, close < daily EMA34 (downtrend), and volume > 2.0x average.
-# Exits when price returns to opposite S3/R3 level.
-# Designed for low trade frequency (~15-30/year) to minimize fee drift and work in both bull/bear via trend filter.
-# Uses 12h timeframe to reduce whipsaw and focus on multi-day moves.
+# 4H_Camarilla_R3S3_1DTrend_Volume_Signal_v3
+# Hypothesis: Refine the proven Camarilla R3/S3 breakout strategy by tightening volume confirmation to 2.0x (from 1.8x) and adding a 50-period volume moving average filter to reduce false signals and lower trade frequency. This aims to maintain the edge while reducing overtrading risks seen in similar strategies. Uses 4h timeframe with 1d HTF for levels and trend. Target: 20-40 trades/year per symbol to stay well under the 400 trade limit.
 
-name = "12h_Camarilla_R3S3_1dTrend_Volume_Signal"
-timeframe = "12h"
+name = "4H_Camarilla_R3S3_1DTrend_Volume_Signal_v3"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -40,7 +35,7 @@ def generate_signals(prices):
     r3_1d = close_1d + 1.1 * hl_range / 2
     s3_1d = close_1d - 1.1 * hl_range / 2
     
-    # Align all levels to 12h timeframe (use previous daily period's levels)
+    # Align all levels to 4h timeframe (use previous daily period's levels)
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
@@ -48,13 +43,13 @@ def generate_signals(prices):
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume spike detection: 2.0x average volume (30-period for stability)
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Volume spike detection: 2.0x average volume (50-period for stability)
+    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 34)  # Ensure we have volume MA and EMA34 data
+    start_idx = max(50, 34)  # Ensure we have volume MA and EMA34 data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
