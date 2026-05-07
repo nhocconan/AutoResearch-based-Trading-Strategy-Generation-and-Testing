@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_1D_Donchian_Breakout_Volume_Trend"
-timeframe = "12h"
+name = "1d_Supertrend_WeeklyTrend_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,60 +17,100 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for trend, channel, and volume
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load weekly data ONCE for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # Donchian channel (20 periods) on 1d
-    donchian_high = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # Supertrend parameters
+    atr_period = 10
+    atr_multiplier = 3.0
     
-    # 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # 1d volume average (20 periods) for confirmation
-    vol_ma_20_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    # Calculate ATR using Wilder's smoothing (RMA)
+    atr = np.zeros(n)
+    atr[atr_period-1] = np.mean(tr[:atr_period])
+    for i in range(atr_period, n):
+        atr[i] = (atr[i-1] * (atr_period - 1) + tr[i]) / atr_period
+    
+    # Calculate basic upper and lower bands
+    hl_avg = (high + low) / 2
+    upper_band = hl_avg + atr_multiplier * atr
+    lower_band = hl_avg - atr_multiplier * atr
+    
+    # Initialize Supertrend
+    supertrend = np.zeros(n)
+    direction = np.ones(n)  # 1 for uptrend, -1 for downtrend
+    
+    # Set initial values
+    supertrend[atr_period-1] = upper_band[atr_period-1]
+    direction[atr_period-1] = 1
+    
+    # Calculate Supertrend
+    for i in range(atr_period, n):
+        if close[i] > supertrend[i-1]:
+            direction[i] = 1
+        elif close[i] < supertrend[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+        
+        if direction[i] == 1 and direction[i-1] == -1:
+            supertrend[i] = lower_band[i]
+        elif direction[i] == -1 and direction[i-1] == 1:
+            supertrend[i] = upper_band[i]
+        elif direction[i] == 1:
+            supertrend[i] = max(lower_band[i], supertrend[i-1])
+        else:
+            supertrend[i] = min(upper_band[i], supertrend[i-1])
+    
+    # Weekly EMA for trend filter
+    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    
+    # Volume filter: volume above 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for EMA34
+    start_idx = max(atr_period, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i])):
+        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_ma_20[i]) or 
+            np.isnan(supertrend[i]) or np.isnan(direction[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current 12h volume > 1.5x 1d average volume
-        vol_condition = volume[i] > vol_ma_20_1d_aligned[i] * 1.5
+        # Volume condition
+        vol_condition = volume[i] > vol_ma_20[i] * 1.5
         
         if position == 0:
-            # Long: break above 1d Donchian high in uptrend (close > EMA34)
-            if close[i] > donchian_high_aligned[i] and ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and vol_condition:
+            # Long: Supertrend uptrend, above Supertrend, weekly uptrend, volume confirmation
+            if direction[i] == 1 and close[i] > supertrend[i] and ema_20_1w_aligned[i] > ema_20_1w_aligned[i-1] and vol_condition:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below 1d Donchian low in downtrend (close < EMA34)
-            elif close[i] < donchian_low_aligned[i] and ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and vol_condition:
+            # Short: Supertrend downtrend, below Supertrend, weekly downtrend, volume confirmation
+            elif direction[i] == -1 and close[i] < supertrend[i] and ema_20_1w_aligned[i] < ema_20_1w_aligned[i-1] and vol_condition:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price retouches 1d Donchian low or trend reverses
-            if close[i] <= donchian_low_aligned[i] or ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]:
+            # Exit: Supertrend turns down or weekly trend changes
+            if direction[i] == -1 or ema_20_1w_aligned[i] < ema_20_1w_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price retouches 1d Donchian high or trend reverses
-            if close[i] >= donchian_high_aligned[i] or ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]:
+            # Exit: Supertrend turns up or weekly trend changes
+            if direction[i] == 1 or ema_20_1w_aligned[i] > ema_20_1w_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -78,16 +118,16 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 12h Donchian breakout with 1d trend filter and volume confirmation
-# - Uses 1d Donchian channels (20-period high/low) as structural support/resistance
-# - Enters long when 12h price breaks above 1d Donchian high in 1d uptrend (EMA34 rising)
-# - Enters short when 12h price breaks below 1d Donchian low in 1d downtrend (EMA34 falling)
-# - Requires volume confirmation (1.5x 1d average volume) to filter false breakouts
-# - Exits when price returns to opposite Donchian band or trend reverses
-# - Works in bull markets (breakouts in uptrend) and bear markets (breakdowns in downtrend)
-# - Position size 0.25 balances return and risk (max 25% drawdown per position)
-# - Targets 50-150 trades over 4 years (12-37/year) to minimize fee drag
-# - 1d timeframe for signals reduces noise vs lower timeframes
-# - Volume confirmation and trend filter increase signal quality
-# - Donchian breakouts capture momentum after consolidation periods
-# - Simple, robust logic with minimal overfitting risk
+# Hypothesis: 1d Supertrend with weekly trend filter and volume confirmation
+# - Supertrend (ATR=10, multiplier=3) identifies trend direction and dynamic support/resistance
+# - Weekly EMA20 trend filter ensures alignment with higher timeframe trend
+# - Volume confirmation (1.5x average) reduces false signals
+# - Long when: Supertrend uptrend, price above Supertrend, weekly uptrend, volume spike
+# - Short when: Supertrend downtrend, price below Supertrend, weekly downtrend, volume spike
+# - Exit when Supertrend reverses or weekly trend changes
+# - Works in both bull and bear markets by following the trend on multiple timeframes
+# - Position size 0.25 targets ~20-50 trades/year to minimize fee drag
+# - Supertrend provides clear trend signals with built-in volatility adaptation
+# - Weekly filter reduces whipsaws vs single timeframe signals
+# - Aims for 80-200 total trades over 4 years (20-50/year) to stay within limits
+# - Combines proven trend following with multi-timeframe confirmation for robustness
