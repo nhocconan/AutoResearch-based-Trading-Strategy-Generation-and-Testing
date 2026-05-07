@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-1h_TrendFollowing_With_4H1D_Filter_v1
-Hypothesis: Combines 4h trend direction (EMA crossover) with 1d trend filter and volume confirmation on 1h timeframe.
-Trades only during active session (08-20 UTC) to reduce noise. Uses EMA(13/34) on 4h for trend direction,
-EMA(50) on 1d for long-term bias, and volume spike (>1.5x average) for entry confirmation on 1h.
-Designed for 15-25 trades/year to minimize fee drift while capturing medium-term trends.
+6h_RobustRange_Breakout_v1
+Hypothesis: Breakouts from Bollinger Bands with volume confirmation and regime filter (ADX < 25 for ranging markets).
+Trades breakouts in ranging conditions to capture mean-reversion failures, avoiding trending markets where false breakouts are common.
+Uses weekly trend filter to only trade in direction of higher timeframe trend.
+Target: 20-40 trades/year to minimize fee drag while maintaining edge in ranging markets.
 """
 
-name = "1h_TrendFollowing_With_4H1D_Filter_v1"
-timeframe = "1h"
+name = "6h_RobustRange_Breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -25,78 +25,115 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Pre-compute hour filter for session (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    # Bollinger Bands (20, 2)
+    bb_period = 20
+    bb_std = 2
+    ma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    bb_stddev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper = ma + bb_std * bb_stddev
+    lower = ma - bb_std * bb_stddev
     
-    # 4h EMA crossover for trend direction (fast=13, slow=34)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 34:
+    # Weekly trend filter: EMA of weekly close
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    ema_4h_fast = pd.Series(close_4h).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema_4h_slow = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_4h_fast_aligned = align_htf_to_ltf(prices, df_4h, ema_4h_fast)
-    ema_4h_slow_aligned = align_htf_to_ltf(prices, df_4h, ema_4h_slow)
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # 1d EMA for long-term trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # ADX for regime filter (14-period)
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
+        
+        for i in range(1, len(high)):
+            plus_dm[i] = max(0, high[i] - high[i-1])
+            minus_dm[i] = max(0, low[i-1] - low[i])
+            if plus_dm[i] < minus_dm[i]:
+                plus_dm[i] = 0
+            if minus_dm[i] < plus_dm[i]:
+                minus_dm[i] = 0
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        # Smooth using Wilder's smoothing (alpha = 1/period)
+        atr = np.zeros_like(tr)
+        plus_di = np.zeros_like(tr)
+        minus_di = np.zeros_like(tr)
+        
+        if len(tr) >= period:
+            atr[period-1] = np.mean(tr[:period])
+            plus_dm_sum = np.sum(plus_dm[:period])
+            minus_dm_sum = np.sum(minus_dm[:period])
+            
+            for i in range(period, len(tr)):
+                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+                plus_di[i] = 100 * (plus_dm_sum / atr[i]) if atr[i] != 0 else 0
+                minus_di[i] = 100 * (minus_dm_sum / atr[i]) if atr[i] != 0 else 0
+                plus_dm_sum = plus_dm_sum - plus_dm[i-period+1] + plus_dm[i]
+                minus_dm_sum = minus_dm_sum - minus_dm[i-period+1] + minus_dm[i]
+        
+        dx = np.zeros_like(tr)
+        for i in range(len(tr)):
+            if plus_di[i] + minus_di[i] != 0:
+                dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
+        
+        adx = np.zeros_like(dx)
+        if len(dx) >= period:
+            adx[2*period-2] = np.mean(dx[period-1:2*period-1])
+            for i in range(2*period-1, len(dx)):
+                adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
     
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    adx = calculate_adx(high, low, close, 14)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(34, n):  # Start after 4h slow EMA warmup
+    for i in range(bb_period, n):
         # Skip if any critical value is NaN
-        if (np.isnan(ema_4h_fast_aligned[i]) or np.isnan(ema_4h_slow_aligned[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(ma[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or 
+            np.isnan(ema_1w_aligned[i]) or np.isnan(adx[i]) or 
+            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Session filter: only trade between 08:00-20:00 UTC
-        hour = hours[i]
-        in_session = 8 <= hour <= 20
+        # Regime filter: only trade in ranging markets (ADX < 25)
+        if adx[i] >= 25:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
         
         if position == 0:
-            # Long conditions: 4h fast EMA above slow EMA, price above 1d EMA, volume spike, in session
-            if (ema_4h_fast_aligned[i] > ema_4h_slow_aligned[i] and 
-                close[i] > ema_1d_aligned[i] and 
-                volume[i] > 1.5 * vol_ma[i] and 
-                in_session):
-                signals[i] = 0.20
+            # Long: break above upper Bollinger Band with volume confirmation and weekly uptrend
+            if close[i] > upper[i] and volume[i] > vol_ma[i] and close[i] > ema_1w_aligned[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short conditions: 4h fast EMA below slow EMA, price below 1d EMA, volume spike, in session
-            elif (ema_4h_fast_aligned[i] < ema_4h_slow_aligned[i] and 
-                  close[i] < ema_1d_aligned[i] and 
-                  volume[i] > 1.5 * vol_ma[i] and 
-                  in_session):
-                signals[i] = -0.20
+            # Short: break below lower Bollinger Band with volume confirmation and weekly downtrend
+            elif close[i] < lower[i] and volume[i] > vol_ma[i] and close[i] < ema_1w_aligned[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: 4h EMA crossover reverses OR price crosses below 1d EMA
-            if (ema_4h_fast_aligned[i] < ema_4h_slow_aligned[i] or 
-                close[i] < ema_1d_aligned[i]):
+            # Exit: price returns to middle band or weekly trend changes
+            if close[i] < ma[i] or close[i] < ema_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: 4h EMA crossover reverses OR price crosses above 1d EMA
-            if (ema_4h_fast_aligned[i] > ema_4h_slow_aligned[i] or 
-                close[i] > ema_1d_aligned[i]):
+            # Exit: price returns to middle band or weekly trend changes
+            if close[i] > ma[i] or close[i] > ema_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
