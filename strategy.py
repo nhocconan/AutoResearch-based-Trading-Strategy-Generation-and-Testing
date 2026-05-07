@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-name = "4h_Donchian_Breakout_VolumeTrend_v2"
-timeframe = "4h"
+name = "12h_Donchian_Breakout_TrendVolume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,27 +19,27 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily EMA(50) for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Calculate Donchian(20) on 4h data
+    # Donchian channel (20-period) on 12h price data
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume spike detection: 4-period average (1 day of 4h bars)
+    # 1-day EMA(34) for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume spike detection: 4-period average (2 days of 12h bars)
     vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20, 4)  # Wait for EMA, Donchian, and volume MA
+    start_idx = max(34, 20, 4)  # Wait for EMA, Donchian, and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(donchian_high[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(donchian_high[i]) or 
             np.isnan(donchian_low[i]) or np.isnan(vol_ma_4[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -47,41 +47,44 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian high with volume and daily uptrend
-            vol_condition = volume[i] > vol_ma_4[i] * 2.0
-            uptrend = ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1]
+            # Long: break above Donchian high with volume and daily uptrend
+            vol_condition = volume[i] > vol_ma_4[i] * 1.8
+            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
             
             if close[i] > donchian_high[i] and vol_condition and uptrend:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low with volume and daily downtrend
+            # Short: break below Donchian low with volume and daily downtrend
             elif close[i] < donchian_low[i] and vol_condition and not uptrend:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price returns to Donchian low or volume drops
+            # Exit: price back below Donchian low or volume drops
             if close[i] < donchian_low[i] or volume[i] < vol_ma_4[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: price returns to Donchian high or volume drops
+            # Exit: price back above Donchian high or volume drops
             if close[i] > donchian_high[i] or volume[i] < vol_ma_4[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-# Hypothesis: 4h Donchian(20) breakout with daily trend filter and volume confirmation
-# - Donchian(20) breakout captures momentum in both bull and bear markets
-# - Daily EMA(50) filter ensures trades align with higher timeframe trend
-# - Volume spike (2.0x average) confirms institutional participation and reduces false breakouts
-# - Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend)
-# - Exit when price returns to opposite Donchian band or volume weakens
-# - Position size 0.30 targets ~25-40 trades/year, avoiding fee drag
-# - Uses daily trend filter for multi-timeframe alignment (4h + 1d)
-# - Volume confirmation reduces false signals from low-liquidity breakouts
-# - Designed for BTC/ETH/USD pairs with focus on avoiding overtrading (<400 total 4h trades)
+# Hypothesis: 12h Donchian breakout with daily trend and volume confirmation
+# - Donchian channel (20-period) identifies breakout points from price consolidation
+# - Breakout above upper band with volume in daily uptrend = long opportunity
+# - Breakdown below lower band with volume in daily downtrend = short opportunity
+# - Volume spike (1.8x average) confirms institutional participation
+# - Daily EMA(34) trend filter ensures trades align with higher timeframe trend
+# - Works in both bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend)
+# - Exit when price returns to Donchian low/high or volume weakens
+# - Position size 0.25 targets ~20-50 trades/year, avoiding fee drag
+# - Uses actual 12h price data for Donchian calculation (no resampling)
+# - Designed to work on BTC, ETH, and SOL with balanced performance
+# - Avoids overtrading by requiring multiple confluence factors (breakout + volume + trend)
+# - Target: 50-150 total trades over 4 years (12-37/year) within limits
