@@ -1,11 +1,11 @@
-#!/usr/bin/env python3
-# 4h_Donchian_20_Trend_Volume_200MA
-# Hypothesis: 4h Donchian(20) breakout with 200-period moving average trend filter and volume confirmation.
-# Works in bull markets via breakout momentum and in bear markets via mean-reversion when price rejects the band.
-# Volume confirms breakout strength, reducing false signals. Targets 20-50 trades per year on 4h timeframe.
+# 12h_VolumeWeighted_Momentum
+# Hypothesis: Capture momentum in 12h candles using volume-weighted price action (VWAP deviation) with 1d trend filter.
+# Works in both bull and bear markets: VWAP deviation identifies overextended moves ready to revert,
+# while 1d trend filter ensures trades align with higher timeframe momentum. Volume confirmation
+# filters out low-conviction moves. Targets 12-30 trades/year on 12h timeframe.
 
-name = "4h_Donchian_20_Trend_Volume_200MA"
-timeframe = "4h"
+name = "12h_VolumeWeighted_Momentum"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -22,47 +22,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 200-period MA for trend filter (using 4h data)
-    ma_200 = pd.Series(close).rolling(window=200, min_periods=200).mean().values
+    # Get 1d data for trend filter (HTF as specified)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Donchian channels (20-period) - calculated on 4h data
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    close_1d = df_1d['close'].values
     
-    # Volume spike filter (20-period average)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Calculate VWAP deviation on 12h
+    typical_price = (high + low + close) / 3.0
+    vwap_num = np.cumsum(typical_price * volume)
+    vwap_den = np.cumsum(volume)
+    vwap = vwap_num / vwap_den
+    vwap_deviation = (close - vwap) / vwap  # Percentage deviation from VWAP
+    
+    # Align 1d EMA34 to 12h timeframe
+    ema_34_1d_12h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume spike filter on 12h (20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)
+    volume_spike = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(200, n):
+    for i in range(50, n):
         # Skip if any critical value is NaN
-        if np.isnan(ma_200[i]) or np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or np.isnan(volume_spike[i]):
+        if (np.isnan(vwap_deviation[i]) or np.isnan(ema_34_1d_12h[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above upper Donchian band, above 200 MA, volume spike
-            if close[i] > high_roll[i] and close[i] > ma_200[i] and volume_spike[i]:
+            # Long: Price below VWAP (oversold), above 1d EMA34 trend, volume spike
+            if vwap_deviation[i] < -0.015 and close[i] > ema_34_1d_12h[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below lower Donchian band, below 200 MA, volume spike
-            elif close[i] < low_roll[i] and close[i] < ma_200[i] and volume_spike[i]:
+            # Short: Price above VWAP (overbought), below 1d EMA34 trend, volume spike
+            elif vwap_deviation[i] > 0.015 and close[i] < ema_34_1d_12h[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Price breaks below lower Donchian band or below 200 MA
-            if close[i] < low_roll[i] or close[i] < ma_200[i]:
+            # Exit: price returns to VWAP or breaks below 1d EMA34
+            if vwap_deviation[i] > -0.005 or close[i] < ema_34_1d_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price breaks above upper Donchian band or above 200 MA
-            if close[i] > high_roll[i] or close[i] > ma_200[i]:
+            # Exit: price returns to VWAP or breaks above 1d EMA34
+            if vwap_deviation[i] < 0.005 or close[i] > ema_34_1d_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
