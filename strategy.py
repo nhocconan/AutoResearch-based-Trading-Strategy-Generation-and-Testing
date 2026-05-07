@@ -1,3 +1,5 @@
+# Hypothesis: 12h Camarilla R3/S3 breakout with daily trend and volume spike. Uses proven Camarilla pivot breakout logic with daily EMA trend filter and volume confirmation. Focuses on high-probability breakouts in trending markets with volume validation to reduce false signals. Designed for moderate trade frequency (~15-25/year) to minimize fee drag while capturing significant moves in both bull and bear markets.
+
 #!/usr/bin/env python3
 
 name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
