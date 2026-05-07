@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 4h_1dCamarilla_R1S1_Breakout_1dTrend_Volume
-# Hypothesis: Camarilla R1/S1 breakouts on 4h with 1d trend filter (EMA34) and volume confirmation
+# 12h_1dCamarilla_R1S1_Breakout_1dTrend_Volume
+# Hypothesis: Camarilla R1/S1 breakouts on 12h with 1d trend filter (EMA34) and volume confirmation
 # capture institutional pivot reversals with trend alignment. Works in bull/bear by filtering
-# counter-trend breaks. Low trade frequency (~20-30/year) minimizes fee drag.
+# counter-trend breaks. Low trade frequency (~15-30/year) minimizes fee drift.
 
-name = "4h_1dCamarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_1dCamarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -43,23 +43,23 @@ def generate_signals(prices):
     volume_1d = df_1d['volume'].values
     vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align all indicators to 4h timeframe
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
-    ema_34_4h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    vol_ma_20_4h = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    # Align all indicators to 12h timeframe
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
+    ema_34_12h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    vol_ma_20_12h = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
-    # Calculate volume spike on 4h timeframe
-    vol_ma_20_4h_calc = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma_20_4h_calc)
+    # Calculate volume spike on 12h timeframe
+    vol_ma_20_12h_calc = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma_20_12h_calc)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if any critical value is NaN
-        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or 
-            np.isnan(ema_34_4h[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or 
+            np.isnan(ema_34_12h[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,23 +67,23 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: price breaks above R1 with uptrend and volume
-            if close[i] > r1_4h[i] and close[i] > ema_34_4h[i] and volume_spike[i]:
+            if close[i] > r1_12h[i] and close[i] > ema_34_12h[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
             # Short: price breaks below S1 with downtrend and volume
-            elif close[i] < s1_4h[i] and close[i] < ema_34_4h[i] and volume_spike[i]:
+            elif close[i] < s1_12h[i] and close[i] < ema_34_12h[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Exit: price closes below EMA34 (trend change)
-            if close[i] < ema_34_4h[i]:
+            if close[i] < ema_34_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Exit: price closes above EMA34 (trend change)
-            if close[i] > ema_34_4h[i]:
+            if close[i] > ema_34_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
