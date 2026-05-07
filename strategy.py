@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-6H_Donchian20_WeeklyTrend_VolumeConfirm
-Hypothesis: 6h breakouts of 20-period Donchian channels with weekly trend filter (price > weekly SMA50) and volume confirmation. 
-Weekly trend filter avoids counter-trend trades in strong trends, while volume confirmation ensures breakout validity.
-Works in bull markets via breakout continuation and in bear markets via short breakdowns with trend alignment.
-Targets 12-30 trades/year to stay within fee-efficient range for 6h timeframe.
+1D_R1S1_Breakout_1WTrend_Volume
+Hypothesis: Daily price breaks above/below weekly-derived R1/S1 levels with weekly EMA34 trend confirmation and volume spike.
+Works in bull/bear markets: R1/S1 breakouts capture strong moves while avoiding minor retracements.
+EMA34 filter ensures alignment with weekly trend, volume confirmation validates breakout strength.
+Targets 7-25 trades/year to minimize fee drag on 1d timeframe.
 """
-name = "6H_Donchian20_WeeklyTrend_VolumeConfirm"
-timeframe = "6h"
+name = "1D_R1S1_Breakout_1WTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,57 +24,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
+    # Get weekly data for Camarilla levels, EMA trend, and volume average
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate weekly SMA50 for trend filter
+    # Calculate weekly Camarilla levels (R1, S1)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    sma_50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
-    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
+    pivot = (high_1w + low_1w + close_1w) / 3
+    range_1w = high_1w - low_1w
+    r1 = pivot + (range_1w * 1.1 / 6)  # R1 level
+    s1 = pivot - (range_1w * 1.1 / 6)  # S1 level
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
     
-    # Calculate 6h Donchian channels (20-period)
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate weekly EMA34 for trend direction
+    close_1w_series = pd.Series(df_1w['close'])
+    ema_34 = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34)
     
-    # Volume filter: current 6h volume > 1.8 x 20-period average volume
+    # Volume filter: current 1d volume > 1.5 x 20-period average volume
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_avg * 1.8)
+    volume_filter = volume > (vol_avg * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    bars_since_exit = 0  # bars since last exit to prevent overtrading
     
-    start_idx = max(50, 20)  # Ensure sufficient warmup for all indicators
+    start_idx = max(34, 20)  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
+        bars_since_exit += 1
+        
         # Skip if any data is not ready
-        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
-            np.isnan(sma_50_1w_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                bars_since_exit = 0
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian upper with weekly uptrend and volume spike
-            if (close[i] > high_max[i] and close[i-1] <= high_max[i-1] and 
-                close[i] > sma_50_1w_aligned[i] and volume_filter[i]):
+            # Minimum 20 bars between trades (20 days on 1d TF) to reduce frequency
+            if bars_since_exit < 20:
+                continue
+                
+            # Long: price breaks above R1 with EMA34 uptrend and volume spike
+            if (close[i] > r1_aligned[i] and close[i-1] <= r1_aligned[i-1] and 
+                close[i] > ema_34_aligned[i] and volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower with weekly downtrend and volume spike
-            elif (close[i] < low_min[i] and close[i-1] >= low_min[i-1] and 
-                  close[i] < sma_50_1w_aligned[i] and volume_filter[i]):
+                bars_since_exit = 0
+            # Short: price breaks below S1 with EMA34 downtrend and volume spike
+            elif (close[i] < s1_aligned[i] and close[i-1] >= s1_aligned[i-1] and 
+                  close[i] < ema_34_aligned[i] and volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
+                bars_since_exit = 0
         elif position != 0:
-            # Exit: price returns to opposite Donchian level (mean reversion within channel)
-            if position == 1 and close[i] < low_min[i]:
+            # Exit: price returns to opposite EMA34 side (trend reversal)
+            if position == 1 and close[i] < ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and close[i] > high_max[i]:
+                bars_since_exit = 0
+            elif position == -1 and close[i] > ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
+                bars_since_exit = 0
             else:
                 # Hold position
                 signals[i] = 0.25 if position == 1 else -0.25
