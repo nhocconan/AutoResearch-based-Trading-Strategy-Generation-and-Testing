@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Donchian20_Breakout_1dEMA34_Trend_Volume"
-timeframe = "4h"
+name = "6h_MultiTF_Momentum_Aligned_1dTrend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,41 +17,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for trend filter and momentum
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d EMA34 trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 1d EMA50 trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Donchian channels from 4h data (20-period)
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
+    # 1d RSI(14) momentum
+    delta = np.diff(df_1d['close'].values)
+    up = np.where(delta > 0, delta, 0)
+    down = np.where(delta < 0, -delta, 0)
+    roll_up = pd.Series(up).ewm(alpha=1/14, adjust=False).values
+    roll_down = pd.Series(down).ewm(alpha=1/14, adjust=False).values
+    rs = roll_up / (roll_down + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Volume filter: current volume > 1.5x 20-period average (for 4h)
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma_20[i] = np.mean(volume[i-20:i])
-    vol_filter = volume > (1.5 * vol_ma_20)
+    # 6h Bollinger Bands for mean reversion in ranging markets
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    bb_upper = sma_20 + 2 * std_20
+    bb_lower = sma_20 - 2 * std_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 3  # ~6 hours for 4h to reduce trades
+    cooldown_bars = 2  # ~12 hours for 6h to reduce trades
     
-    start_idx = max(100, 20, 34)
+    start_idx = max(100, 50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(sma_20[i]) or 
+            np.isnan(std_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,36 +65,48 @@ def generate_signals(prices):
         
         bars_since_last_trade += 1
         
-        # Determine 1d trend direction
-        trend_up = close > ema_34_1d_aligned[i]
-        trend_down = close < ema_34_1d_aligned[i]
+        # Determine 1d trend direction and momentum
+        trend_up = close[i] > ema_50_1d_aligned[i]
+        trend_down = close[i] < ema_50_1d_aligned[i]
+        rsi = rsi_1d_aligned[i]
+        
+        # Determine market regime: trending vs ranging
+        bb_width = (bb_upper[i] - bb_lower[i]) / sma_20[i] if sma_20[i] > 0 else 0
+        is_trending = bb_width > 0.03  # >3% width indicates trending
+        is_ranging = bb_width <= 0.03  # <=3% width indicates ranging
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: Price breaks above Donchian high with volume in uptrend
-            if (close[i] > donchian_high[i] and 
-                trend_up[i] and 
-                vol_filter[i]):
-                signals[i] = 0.25
-                position = 1
-                bars_since_last_trade = 0
-            # Short: Price breaks below Donchian low with volume in downtrend
-            elif (close[i] < donchian_low[i] and 
-                  trend_down[i] and 
-                  vol_filter[i]):
-                signals[i] = -0.25
-                position = -1
-                bars_since_last_trade = 0
+            if is_trending:
+                # Trending regime: follow 1d trend with momentum confirmation
+                if trend_up and rsi > 50 and rsi < 70:
+                    signals[i] = 0.25
+                    position = 1
+                    bars_since_last_trade = 0
+                elif trend_down and rsi < 50 and rsi > 30:
+                    signals[i] = -0.25
+                    position = -1
+                    bars_since_last_trade = 0
+            else:
+                # Ranging regime: mean reversion at Bollinger Bands
+                if close[i] <= bb_lower[i] and rsi < 40:
+                    signals[i] = 0.25
+                    position = 1
+                    bars_since_last_trade = 0
+                elif close[i] >= bb_upper[i] and rsi > 60:
+                    signals[i] = -0.25
+                    position = -1
+                    bars_since_last_trade = 0
         elif position == 1:
-            # Exit: Price falls below Donchian low or trend changes
-            if close[i] < donchian_low[i] or not trend_up[i]:
+            # Exit: trend reversal or overbought conditions
+            if not trend_up or rsi >= 70 or close[i] >= bb_upper[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price rises above Donchian high or trend changes
-            if close[i] > donchian_high[i] or not trend_down[i]:
+            # Exit: trend reversal or oversold conditions
+            if not trend_down or rsi <= 30 or close[i] <= bb_lower[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
@@ -100,10 +115,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation on 4h timeframe.
-# Long when price breaks above Donchian high in uptrend with volume confirmation.
-# Short when price breaks below Donchian low in downtrend with volume confirmation.
-# Uses 4h timeframe to balance trade frequency and capture meaningful trends.
-# Target: 75-200 total trades over 4 years (19-50/year) as per experiment guidelines.
-# Works in bull markets (breakouts in uptrend) and bear markets (breakdowns in downtrend).
-# Based on top-performing pattern from DB: Donchian breakout + volume + trend filter.
+# Hypothesis: 6s strategy combining 1d EMA50 trend filter with RSI momentum and 6h Bollinger Bands.
+# In trending markets (BB width > 3%): follow 1d trend with RSI confirmation (avoid extremes).
+# In ranging markets (BB width <= 3%): mean revert at Bollinger Bands with RSI filtering.
+# Uses 6h timeframe to balance trade frequency and capture multi-timeframe alignment.
+# Designed to work in both bull and bear markets by adapting to regime conditions.
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
