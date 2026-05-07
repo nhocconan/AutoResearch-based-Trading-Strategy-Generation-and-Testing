@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Volume_Spike_v4"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -30,7 +30,7 @@ def generate_signals(prices):
     r3 = close_prev + 1.1 * (high_prev - low_prev) / 4
     s3 = close_prev - 1.1 * (high_prev - low_prev) / 4
     
-    # Align daily levels to 12h timeframe (with 1-day delay for completed bar)
+    # Align daily levels to 4h timeframe (with 1-day delay for completed bar)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
@@ -47,7 +47,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 8  # ~4 days for 12h to reduce trades
+    cooldown_bars = 8  # ~16 hours for 4h to reduce trades
     
     start_idx = max(100, 20, 34)
     
@@ -105,10 +105,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Using 12h timeframe with Camarilla R3/S3 breakouts, 1d EMA34 trend filter, and volume confirmation
+# Hypothesis: Further increasing the volume threshold to 2.5x average and extending cooldown to 8 bars (16 hours)
 # will reduce trade frequency to target 15-25 trades per year, minimizing fee drag while maintaining
-# the edge of Camarilla breakouts with higher timeframe trend confirmation. The 12h timeframe naturally
-# reduces noise and whipsaws compared to lower timeframes, making it suitable for both bull and bear markets.
-# Position size of 0.25 manages drawdown during volatile periods. Cooldown of 8 bars (4 days) prevents
-# overtrading and focuses on the strongest institutional breakouts. Works in both bull (breakouts above R3)
+# the edge of Camarilla R3/S3 breakouts with 1d EMA34 trend confirmation. This should improve
+# generalization to the test period (2025-2026) by focusing only on the strongest institutional breakouts.
+# Position size reduced to 0.25 to manage drawdown during volatile periods. Works in both bull (breakouts above R3)
 # and bear (breakdowns below S3) markets by trading with the higher timeframe trend.
