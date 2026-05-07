@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_RSI_Trend_Filter_With_Volume_Confirmation"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -18,37 +18,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Camarilla levels
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
+    # Calculate 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate Camarilla levels from previous 1d bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_prev = close_1d[:-1]
-    high_1d_prev = high_1d[:-1]
-    low_1d_prev = low_1d[:-1]
-    high_1d_prev = np.concatenate([[np.nan], high_1d_prev])
-    low_1d_prev = np.concatenate([[np.nan], low_1d_prev])
-    close_1d_prev = np.concatenate([[np.nan], close_1d])
+    # Calculate RSI(14) on 4h closes
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.full_like(close, np.nan)
+    avg_loss = np.full_like(close, np.nan)
+    avg_gain[14] = np.mean(gain[1:15])
+    avg_loss[14] = np.mean(loss[1:15])
+    for i in range(15, n):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # R1 = close + 1.1*(high-low)/12
-    # S1 = close - 1.1*(high-low)/12
-    high_low = high_1d_prev - low_1d_prev
-    r1 = close_1d_prev + 1.1 * high_low / 12
-    s1 = close_1d_prev - 1.1 * high_low / 12
+    # Align 1d EMA50 to 4h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align 1d indicators to 12h timeframe
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Volume filter: current volume > 1.5x 20-period average (12h)
+    # Volume filter: current volume > 1.5x 20-period average (4h)
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-20:i])
@@ -57,15 +53,14 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 8  # ~4 days for 12h to reduce trades
+    cooldown_bars = 6  # ~1 day for 4h to reduce trades
     
-    start_idx = max(34, 20)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or 
+        if (np.isnan(rsi[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -78,43 +73,36 @@ def generate_signals(prices):
         bars_since_last_trade += 1
         
         # Determine 1d trend direction
-        trend_1d_up = close_1d[-1] > ema_34_1d[-1] if i == n-1 else close_1d[i] > ema_34_1d[i]
-        trend_1d_down = close_1d[-1] < ema_34_1d[-1] if i == n-1 else close_1d[i] < ema_34_1d[i]
-        # Fix: use aligned values for trend
-        trend_1d_up = not np.isnan(ema_34_1d_aligned[i]) and not np.isnan(close_1d[-1]) and close_1d[-1] > ema_34_1d[-1] if i >= len(close_1d)-1 else not np.isnan(ema_34_1d_aligned[i]) and close_1d[i] > ema_34_1d[i]
-        trend_1d_down = not np.isnan(ema_34_1d_aligned[i]) and close_1d[i] < ema_34_1d[i]
-        
-        # Simplify: use the aligned close and ema for trend
         close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
-        trend_1d_up = close_1d_aligned[i] > ema_34_1d_aligned[i]
-        trend_1d_down = close_1d_aligned[i] < ema_34_1d_aligned[i]
+        trend_1d_up = close_1d_aligned[i] > ema_50_1d_aligned[i]
+        trend_1d_down = close_1d_aligned[i] < ema_50_1d_aligned[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: break above R1 with volume in 1d uptrend
-            if (close[i] > r1_aligned[i] and 
+            # Long: RSI > 50 with volume in 1d uptrend
+            if (rsi[i] > 50 and 
                 trend_1d_up and 
                 vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: break below S1 with volume in 1d downtrend
-            elif (close[i] < s1_aligned[i] and 
+            # Short: RSI < 50 with volume in 1d downtrend
+            elif (rsi[i] < 50 and 
                   trend_1d_down and 
                   vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit: close back below S1 or trend change
-            if (close[i] < s1_aligned[i]) or not trend_1d_up:
+            # Exit: RSI < 50 or trend change
+            if (rsi[i] < 50) or not trend_1d_up:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: close back above R1 or trend change
-            if (close[i] > r1_aligned[i]) or not trend_1d_down:
+            # Exit: RSI > 50 or trend change
+            if (rsi[i] > 50) or not trend_1d_down:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
@@ -123,11 +111,4 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume confirmation on 12h timeframe.
-# Long when price breaks above R1 with volume spike in 1d uptrend.
-# Short when price breaks below S1 with volume spike in 1d downtrend.
-# Exits when price returns to S1/R1 or trend changes.
-# Uses 12h timeframe to reduce trade frequency (target: 12-37 trades/year).
-# Volume confirmation avoids false breakouts. Cooldown (4 days) further reduces trades.
-# Works in bull markets by catching breakouts in uptrends and in bear markets by shorting breakdowns in downtrends.
-# 1d trend filter ensures alignment with higher timeframe momentum.
+# Hypothesis: RSI(14) > 50 indicates bullish momentum, < 50 bearish. Combined with 1d EMA50 trend filter and volume confirmation, this strategy captures trends in both bull and bear markets. Volume confirmation avoids false signals, cooldown reduces trade frequency. Target: 20-40 trades/year. Works in bull markets by riding uptrends and in bear markets by shorting downtrends. 4h timeframe balances signal quality and trade frequency. RSI provides momentum confirmation while EMA50 establishes the trend direction. Volume ensures participation. This avoids overtrading by requiring multiple confirmations.
