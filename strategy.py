@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R with 12h trend filter and volume confirmation.
-# Uses Williams %R(14) on 4h for overbought/oversold signals, filtered by 12h EMA trend direction.
-# Volume spike confirmation ensures momentum behind moves. Designed to work in both bull and bear markets
-# by only taking trades in the direction of the 12h trend. Target: 20-50 trades/year per symbol.
-name = "4h_WilliamsR_12hTrend_Volume"
-timeframe = "4h"
+# Hypothesis: 1h EMA21 pullback with 4h trend filter and volume confirmation.
+# Uses 4h EMA50 for trend direction, 1h EMA21 for entry timing, and volume spike for confirmation.
+# Works in both bull and bear by only taking long in 4h uptrend and short in 4h downtrend.
+# Target: 30-60 trades/year per symbol to avoid excessive fee drag.
+name = "1h_EMA21_Pullback_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,69 +21,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # Load 4h data ONCE for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # 12h trend filter: 34-period EMA on close
-    ema_34_12h = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # 4h trend filter: 50-period EMA on close
+    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Williams %R on 4h: (Highest High - Close) / (Highest High - Lowest Low) * -100
-    period = 14
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    williams_r = np.where((highest_high - lowest_low) != 0, 
-                          -100 * (highest_high - close) / (highest_high - lowest_low), 
-                          -50)
+    # 1h EMA21 for pullback entry
+    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # 4h volume average for spike detection
+    # Volume spike detection (20-period EMA)
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     vol_spike = np.where(vol_ema > 0, volume / vol_ema, 1.0) > 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, period)  # Sufficient warmup
+    start_idx = 50  # Sufficient warmup for EMA and trend
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(williams_r[i]) or 
+        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(ema_21[i]) or 
             np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: price above/below 12h EMA34
-        uptrend = close[i] > ema_34_12h_aligned[i]
-        downtrend = close[i] < ema_34_12h_aligned[i]
+        # Trend filter: price above/below 4h EMA50
+        uptrend = close[i] > ema_50_4h_aligned[i]
+        downtrend = close[i] < ema_50_4h_aligned[i]
         
         if position == 0:
-            # Long: Williams %R oversold (< -80) with volume spike in uptrend
-            long_condition = (williams_r[i] < -80) and vol_spike[i] and uptrend
-            # Short: Williams %R overbought (> -20) with volume spike in downtrend
-            short_condition = (williams_r[i] > -20) and vol_spike[i] and downtrend
+            # Long: pullback to EMA21 in uptrend with volume spike
+            long_condition = (close[i] <= ema_21[i]) and uptrend and vol_spike[i]
+            # Short: pullback to EMA21 in downtrend with volume spike
+            short_condition = (close[i] >= ema_21[i]) and downtrend and vol_spike[i]
             
             if long_condition:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             elif short_condition:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit: Williams %R returns above -50 or trend turns down
-            if (williams_r[i] > -50) or (not uptrend):
+            # Exit: price crosses above EMA21 or trend turns down
+            if (close[i] > ema_21[i]) or (not uptrend):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit: Williams %R returns below -50 or trend turns up
-            if (williams_r[i] < -50) or (not downtrend):
+            # Exit: price crosses below EMA21 or trend turns up
+            if (close[i] < ema_21[i]) or (not downtrend):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
