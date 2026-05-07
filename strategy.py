@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Weekly RSI Divergence with 1w EMA50 Trend Filter and Volume Confirmation
-# Long when: Weekly RSI bullish divergence (price makes lower low, RSI makes higher low) AND price > weekly EMA50 AND volume > 1.5x 20-day average
-# Short when: Weekly RSI bearish divergence (price makes higher high, RSI makes lower high) AND price < weekly EMA50 AND volume > 1.5x 20-day average
-# Exit when weekly RSI returns to neutral zone (40-60) or volume drops below average
-# Designed for 1d timeframe with low trade frequency (target: 10-25/year) to minimize fee drag
-# Uses weekly timeframe for divergence detection to capture major reversals
-# Volume filter ensures institutional participation
-# RSI divergence works in both bull and bear markets by identifying exhaustion
-
-name = "1d_WeeklyRSI_Divergence_EMA50_Volume"
-timeframe = "1d"
+# Hypothesis: 4h Chop Index regime filter + 12h Donchian breakout + volume confirmation.
+# Chop Index > 61.8 = ranging market (mean revert at Donchian bands)
+# Chop Index < 38.2 = trending market (breakout follow)
+# Long when Chop < 38.2 AND price breaks above 12h Donchian(20) upper band AND volume > 1.5x 20-period average
+# Short when Chop < 38.2 AND price breaks below 12h Donchian(20) lower band AND volume > 1.5x 20-period average
+# Exit when Chop > 61.8 (range) OR price reverts to Donchian midpoint
+# Designed for 4h timeframe with low trade frequency (target: 20-50/year) to avoid fee drag.
+# Uses Chop Index to avoid whipsaws in ranging markets and Donchian for clear breakout signals.
+# Volume filter ensures participation and avoids low-conviction moves.
+name = "4h_Chop_Donchian_Breakout_12hVol"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,74 +26,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Chop Index (14-period)
+    def true_range(h, l, c_prev):
+        return np.maximum(h - l, np.maximum(np.abs(h - c_prev), np.abs(l - c_prev)))
+    
+    tr = np.zeros_like(close)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = true_range(high[i], low[i], close[i-1])
+    
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    
+    chop = np.where(
+        (highest_high - lowest_low) > 0,
+        100 * np.log10(atr14.sum() / (highest_high - lowest_low)) / np.log10(14),
+        50
+    )
+    
+    # 12h Donchian(20) channels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Weekly RSI for divergence detection
-    rsi_period = 14
-    delta = pd.Series(close_1w).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
-    avg_loss = loss.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_values)
+    donch_h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donch_l = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    donch_m = (donch_h + donch_l) / 2
     
-    # Volume filter: current volume > 1.5x 20-day average
+    donch_h_aligned = align_htf_to_ltf(prices, df_12h, donch_h)
+    donch_l_aligned = align_htf_to_ltf(prices, df_12h, donch_l)
+    donch_m_aligned = align_htf_to_ltf(prices, df_12h, donch_m)
+    
+    # Volume filter: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Sufficient warmup for weekly indicators
+    start_idx = 50  # Sufficient warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(rsi_1w_aligned[i]) or 
-            np.isnan(volume_filter[i])):
+        if (np.isnan(chop[i]) or np.isnan(donch_h_aligned[i]) or np.isnan(donch_l_aligned[i]) or 
+            np.isnan(donch_m_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Need at least 2 weekly points for divergence check
-            if i >= 50 + 16:  # Need 2 weekly bars (approximately 16 daily bars per week)
-                # Get current and previous weekly aligned values
-                rsi_now = rsi_1w_aligned[i]
-                rsi_prev = rsi_1w_aligned[i-16] if i-16 >= 0 else rsi_1w_aligned[0]
-                price_now = close[i]
-                price_prev = close[i-16] if i-16 >= 0 else close[0]
-                
-                # Bullish divergence: price makes lower low, RSI makes higher low
-                bull_div = (price_now < price_prev) and (rsi_now > rsi_prev)
-                # Bearish divergence: price makes higher high, RSI makes lower high
-                bear_div = (price_now > price_prev) and (rsi_now < rsi_prev)
-                
-                if bull_div and (price_now > ema50_1w_aligned[i]) and volume_filter[i]:
-                    signals[i] = 0.25
-                    position = 1
-                elif bear_div and (price_now < ema50_1w_aligned[i]) and volume_filter[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # Long conditions: Chop < 38.2 (trending) AND price breaks above Donchian upper AND volume filter
+            long_cond = (chop[i] < 38.2) and (close[i] > donch_h_aligned[i]) and volume_filter[i]
+            # Short conditions: Chop < 38.2 (trending) AND price breaks below Donchian lower AND volume filter
+            short_cond = (chop[i] < 38.2) and (close[i] < donch_l_aligned[i]) and volume_filter[i]
+            
+            if long_cond:
+                signals[i] = 0.25
+                position = 1
+            elif short_cond:
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Long exit: RSI returns to neutral (>50) or volume filter fails
-            if rsi_1w_aligned[i] > 50 or not volume_filter[i]:
+            # Long exit: Chop > 61.8 (range) OR price returns to Donchian midpoint
+            if chop[i] > 61.8 or close[i] < donch_m_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI returns to neutral (<50) or volume filter fails
-            if rsi_1w_aligned[i] < 50 or not volume_filter[i]:
+            # Short exit: Chop > 61.8 (range) OR price returns to Donchian midpoint
+            if chop[i] > 61.8 or close[i] > donch_m_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
