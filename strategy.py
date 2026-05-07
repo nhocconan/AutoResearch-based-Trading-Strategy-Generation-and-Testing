@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# 4H_Camarilla_R3S3_1DTrend_Volume
-# Hypothesis: 4h strategy using daily Camarilla R3/S3 levels with daily trend filter and volume confirmation.
-# Enters long when price breaks above daily R3, close > daily EMA34 (uptrend), and volume > 2x average.
-# Enters short when price breaks below daily S3, close < daily EMA34 (downtrend), and volume > 2x average.
-# Exits when price returns to opposite S3/R3 level. Designed to avoid overtrading with strict entry conditions.
-# Uses daily trend filter to work in both bull and bear markets by only trading in direction of higher timeframe trend.
-# Target: 4h timeframe with daily HTF for trend and levels.
+# 1D_Vortex_Trend_Reversal_Volume
+# Hypothesis: 1d strategy using Vortex Indicator (VI) for trend direction and reversal signals with volume confirmation.
+# Goes long when VI+ crosses above VI- (bullish reversal) with volume > 1.5x average, short when VI- crosses above VI+ (bearish reversal) with volume > 1.5x average.
+# Uses weekly trend filter (weekly EMA50) to only take trades in direction of higher timeframe trend.
+# Exits when opposite Vortex crossover occurs. Designed for low trade frequency (<50/year) to avoid fee drag.
+# Works in both bull and bear markets by aligning with weekly trend.
 
-name = "4H_Camarilla_R3S3_1DTrend_Volume"
-timeframe = "4h"
+name = "1D_Vortex_Trend_Reversal_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,69 +24,79 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) == 0:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) == 0:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous daily period's OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Vortex Indicator (VI) on daily data
+    # VM+ = |current high - previous low|
+    # VM- = |current low - previous high|
+    vm_plus = np.abs(high - np.roll(low, 1))
+    vm_minus = np.abs(low - np.roll(high, 1))
+    # Set first value to 0 to avoid using future data
+    vm_plus[0] = 0
+    vm_minus[0] = 0
     
-    # Calculate all Camarilla levels
-    hl_range = high_1d - low_1d
-    r3_1d = close_1d + 1.1 * hl_range / 2
-    s3_1d = close_1d - 1.1 * hl_range / 2
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR is just high-low
     
-    # Align all levels to 4h timeframe (use previous daily period's levels)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    # Smooth VI components (14-period)
+    n_period = 14
+    vi_plus = pd.Series(vm_plus).rolling(window=n_period, min_periods=n_period).sum().values / \
+              pd.Series(tr).rolling(window=n_period, min_periods=n_period).sum().values
+    vi_minus = pd.Series(vm_minus).rolling(window=n_period, min_periods=n_period).sum().values / \
+               pd.Series(tr).rolling(window=n_period, min_periods=n_period).sum().values
     
-    # Calculate EMA34 for trend filter (daily)
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Weekly trend filter: EMA50 on weekly close
+    weekly_close = df_1w['close'].values
+    ema50_1w = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Volume spike detection: 2.0x average volume (20-period for stability)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: 1.5x average volume (50-period for stability)
+    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)  # Ensure we have volume MA and EMA34 data
+    start_idx = max(50, 50)  # Ensure we have VI, weekly EMA, and volume MA data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(vi_plus[i]) or np.isnan(vi_minus[i]) or 
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above daily R3, price above daily EMA34 (uptrend), volume spike (>2x)
-            if (close[i] > r3_1d_aligned[i] and 
-                close[i] > ema34_1d_aligned[i] and 
-                volume[i] > 2.0 * vol_ma[i]):
+            # Long: VI+ crosses above VI- (bullish reversal) AND price above weekly EMA50 (uptrend filter) AND volume spike
+            if (vi_plus[i] > vi_minus[i] and vi_plus[i-1] <= vi_minus[i-1] and  # crossover
+                close[i] > ema50_1w_aligned[i] and
+                volume[i] > 1.5 * vol_ma[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below daily S3, price below daily EMA34 (downtrend), volume spike (>2x)
-            elif (close[i] < s3_1d_aligned[i] and 
-                  close[i] < ema34_1d_aligned[i] and 
-                  volume[i] > 2.0 * vol_ma[i]):
+            # Short: VI- crosses above VI+ (bearish reversal) AND price below weekly EMA50 (downtrend filter) AND volume spike
+            elif (vi_minus[i] > vi_plus[i] and vi_minus[i-1] <= vi_plus[i-1] and  # crossover
+                  close[i] < ema50_1w_aligned[i] and
+                  volume[i] > 1.5 * vol_ma[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price returns to or below daily S3 (opposite level)
-            if close[i] <= s3_1d_aligned[i]:
+            # Exit: VI- crosses above VI+ (bearish reversal)
+            if vi_minus[i] > vi_plus[i] and vi_minus[i-1] <= vi_plus[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price returns to or above daily R3 (opposite level)
-            if close[i] >= r3_1d_aligned[i]:
+            # Exit: VI+ crosses above VI- (bullish reversal)
+            if vi_plus[i] > vi_minus[i] and vi_plus[i-1] <= vi_minus[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
