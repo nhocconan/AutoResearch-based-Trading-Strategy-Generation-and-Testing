@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Premium_Index_Trend_Filter"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,57 +19,63 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # 1d Camarilla R3 and S3 levels
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_ = prev_high - prev_low
+    r3 = pivot + (range_ * 1.1 / 2)
+    s3 = pivot - (range_ * 1.1 / 2)
     
-    # 1d RSI for momentum filter
-    delta = pd.Series(df_1d['close']).diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=14).mean()
-    rs = gain / loss
-    rsi1d = 100 - (100 / (1 + rs))
-    rsi1d = rsi1d.fillna(50).values  # Neutral when undefined
-    rsi1d_aligned = align_htf_to_ltf(prices, df_1d, rsi1d)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # 6h volume spike: > 1.5x 24-period average (4 days)
+    # 1w EMA34 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    ema34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    
+    # 12h volume spike: > 1.5x 24-period average (12 days)
     vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     vol_spike = volume > 1.5 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(24, 34)  # Wait for volume MA and EMA34
+    start_idx = max(24, 34)  # Wait for volume MA and weekly EMA
     
     for i in range(start_idx, n):
-        if np.isnan(ema34_1d_aligned[i]) or np.isnan(rsi1d_aligned[i]):
+        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(ema34_1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price above EMA34, RSI > 50, volume spike
-            if close[i] > ema34_1d_aligned[i] and rsi1d_aligned[i] > 50 and vol_spike[i]:
+            # Long: Close above R3, above weekly EMA34, volume spike
+            if close[i] > r3_aligned[i] and close[i] > ema34_1w_aligned[i] and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price below EMA34, RSI < 50, volume spike
-            elif close[i] < ema34_1d_aligned[i] and rsi1d_aligned[i] < 50 and vol_spike[i]:
+            # Short: Close below S3, below weekly EMA34, volume spike
+            elif close[i] < s3_aligned[i] and close[i] < ema34_1w_aligned[i] and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Price below EMA34 or RSI < 40
-            if close[i] < ema34_1d_aligned[i] or rsi1d_aligned[i] < 40:
+            # Exit: Close below S3 or below weekly EMA34
+            if close[i] < s3_aligned[i] or close[i] < ema34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price above EMA34 or RSI > 60
-            if close[i] > ema34_1d_aligned[i] or rsi1d_aligned[i] > 60:
+            # Exit: Close above R3 or above weekly EMA34
+            if close[i] > r3_aligned[i] or close[i] > ema34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -77,10 +83,13 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 6s trend following with 1d EMA34 trend filter and 1d RSI momentum filter.
-# Long when price > 1d EMA34, RSI > 50 (bullish momentum), and volume spike confirms.
-# Short when price < 1d EMA34, RSI < 50 (bearish momentum), and volume spike confirms.
-# Uses 1d timeframe for trend/momentum to avoid whipsaws, 6s for entry timing.
-# Volume spike (>1.5x average) ensures conviction. Discrete 0.25 position size limits risk.
-# Works in bull markets (trend + momentum) and bear markets (reverse criteria).
-# Target: 20-50 trades/year to minimize fee drag while capturing sustained moves.
+# Hypothesis: 12h Camarilla R3/S3 breakout with weekly trend filter and volume confirmation.
+# Long when price breaks above R3 (strong resistance), above weekly EMA34 (bullish trend),
+# and volume spike confirms conviction. Short when price breaks below S3 (strong support),
+# below weekly EMA34 (bearish trend), with volume spike.
+# Uses weekly timeframe for trend to avoid whipsaws, 12h for entry timing.
+# Camarilla R3/S3 are strong institutional levels; breakouts often lead to sustained moves.
+# Volume spike (>1.5x average) ensures institutional participation.
+# Discrete 0.25 position size limits risk and reduces fee churn.
+# Works in bull markets (breakouts above R3) and bear markets (breakdowns below S3).
+# Target: 15-35 trades/year to minimize fee drag while capturing sustained moves.
