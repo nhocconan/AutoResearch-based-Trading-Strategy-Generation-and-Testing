@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_ADX_PlusDM_WeeklyTrend_Filter"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,41 +17,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 50:
+    # Get 1d data for Camarilla and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate weekly 50-period SMA for trend filter
-    weekly_close = df_weekly['close'].values
-    weekly_sma50 = pd.Series(weekly_close).rolling(window=50, min_periods=50).mean().values
-    weekly_trend = align_htf_to_ltf(prices, df_weekly, weekly_sma50)
+    # Calculate Camarilla levels on daily data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate ADX and directional movement on 6h data
-    period = 14
-    up_move = np.diff(high, prepend=high[0])
-    down_move = np.diff(low, prepend=low[0]) * -1  # positive values
+    # Daily range
+    daily_range = high_1d - low_1d
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # Camarilla levels (based on previous day)
+    # R3 = Close + (High - Low) * 1.1/2
+    # S3 = Close - (High - Low) * 1.1/2
+    camarilla_multiplier = 1.1 / 2
+    r3 = close_1d + daily_range * camarilla_multiplier
+    s3 = close_1d - daily_range * camarilla_multiplier
     
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = tr1[0]  # first element
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # 1-day EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    atr = pd.Series(tr).rolling(window=period, min_periods=period).mean().values
-    
-    # Avoid division by zero
-    atr_safe = np.where(atr == 0, 1e-10, atr)
-    
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=period, min_periods=period).sum().values / atr_safe
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=period, min_periods=period).sum().values / atr_safe
-    
-    dx = np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10) * 100
-    adx = pd.Series(dx).rolling(window=period, min_periods=period).mean().values
+    # Align Camarilla levels and EMA to 4h timeframe (no extra delay needed for these)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume confirmation: current volume vs 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -64,50 +56,43 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data is not ready
-        if (np.isnan(adx[i]) or 
-            np.isnan(plus_di[i]) or 
-            np.isnan(minus_di[i]) or 
-            np.isnan(weekly_trend[i]) or 
+        if (np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or 
             np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Strong trend filter: weekly price above weekly SMA50
-        weekly_uptrend = close[i] > weekly_trend[i]
-        weekly_downtrend = close[i] < weekly_trend[i]
-        
         if position == 0:
-            # Long: ADX > 25 (strong trend), +DI > -DI, weekly uptrend, volume confirmation
-            if (adx[i] > 25 and 
-                plus_di[i] > minus_di[i] and 
-                weekly_uptrend and 
+            # Long: Price breaks above R3, above 1d EMA34, volume confirmation
+            if (close[i] > r3_aligned[i] and 
+                close[i] > ema_34_aligned[i] and 
                 volume_ratio[i] > 1.5):
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
-            # Short: ADX > 25 (strong trend), -DI > +DI, weekly downtrend, volume confirmation
-            elif (adx[i] > 25 and 
-                  minus_di[i] > plus_di[i] and 
-                  weekly_downtrend and 
+            # Short: Price breaks below S3, below 1d EMA34, volume confirmation
+            elif (close[i] < s3_aligned[i] and 
+                  close[i] < ema_34_aligned[i] and 
                   volume_ratio[i] > 1.5):
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit long: trend weakens (+DI < -DI) or weekly trend changes
-            if (plus_di[i] < minus_di[i] or 
-                not weekly_uptrend):
+            # Exit long: Price drops below S3 or below EMA34
+            if (close[i] < s3_aligned[i] or 
+                close[i] < ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit short: trend weakens (-DI < +DI) or weekly trend changes
-            if (minus_di[i] < plus_di[i] or 
-                not weekly_downtrend):
+            # Exit short: Price rises above R3 or above EMA34
+            if (close[i] > r3_aligned[i] or 
+                close[i] > ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
