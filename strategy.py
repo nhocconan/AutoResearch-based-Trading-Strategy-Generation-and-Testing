@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 4h_Keltner_Breakout_VolumeTrend
-# Hypothesis: 4h chart strategy using Keltner Channel breakout with volume confirmation and EMA50 trend filter.
-# Keltner Channel (ATR-based) provides volatility-adjusted breakout levels.
-# Volume > 1.5x average confirms breakout strength. EMA50 trend filter ensures alignment with higher timeframe trend.
-# Designed to work in both bull and bear markets by combining volatility breakout with trend and volume filters.
-# Target: 25-40 trades/year per symbol to minimize fee drag while maintaining edge.
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Combo
+# Hypothesis: Combines Camarilla pivot points (R1/S1) from daily data with 1d EMA trend filter and volume confirmation.
+# Camarilla levels provide high-probability reversal/breakout zones. Breakout of R1/S1 with volume and trend alignment
+# captures institutional flow. Works in both bull/bear markets by following the 1d trend direction.
+# Target: 20-35 trades/year per symbol to minimize fee drag while maintaining edge.
 
 timeframe = "4h"
-name = "4h_Keltner_Breakout_VolumeTrend"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Combo"
 leverage = 1.0
 
 import numpy as np
@@ -24,69 +23,75 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter (EMA50)
+    # Get daily data for Camarilla pivots and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) == 0:
         return np.zeros(n)
     
-    # Calculate daily EMA50 for trend filter
+    # Calculate Camarilla levels from previous day (using typical price)
+    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # Where C = (H+L+C)/3 of previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate ATR for Keltner Channel (20-period ATR, 2x multiplier)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Typical price of previous day
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3
+    # Range of previous day
+    range_1d = high_1d - low_1d
     
-    # Keltner Channel: 20-period EMA of typical price ± 2*ATR
-    typical_price = (high + low + close) / 3
-    ema_tp = pd.Series(typical_price).ewm(span=20, adjust=False, min_periods=20).mean().values
-    keltner_upper = ema_tp + 2 * atr
-    keltner_lower = ema_tp - 2 * atr
+    # Camarilla R1 and S1 levels
+    camarilla_r1 = typical_price_1d + range_1d * 1.1 / 12
+    camarilla_s1 = typical_price_1d - range_1d * 1.1 / 12
     
-    # Volume spike detection: 1.5x average volume (6-period = 1 day on 4h chart)
-    vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
+    # Align Camarilla levels to 4h timeframe (use previous day's levels)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # 1d EMA34 for trend filter (proven effective in backtests)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume spike detection: 2x average volume (12-period = 2 days on 4h chart)
+    vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20, 6)  # Ensure we have EMA50, ATR, and volume MA data
+    start_idx = max(34, 12)  # Ensure we have EMA34 and volume MA data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(keltner_upper[i]) or 
-            np.isnan(keltner_lower[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above Keltner Upper with volume, and 1d trend is bullish (price > EMA50)
-            if (high[i] > keltner_upper[i] and 
-                volume[i] > 1.5 * vol_ma[i] and 
-                close[i] > ema_50_1d_aligned[i]):
+            # Long: price breaks above Camarilla R1 with volume, and 1d trend is bullish (price > EMA34)
+            if (high[i] > camarilla_r1_aligned[i] and 
+                volume[i] > 2.0 * vol_ma[i] and 
+                close[i] > ema_34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Keltner Lower with volume, and 1d trend is bearish (price < EMA50)
-            elif (low[i] < keltner_lower[i] and 
-                  volume[i] > 1.5 * vol_ma[i] and 
-                  close[i] < ema_50_1d_aligned[i]):
+            # Short: price breaks below Camarilla S1 with volume, and 1d trend is bearish (price < EMA34)
+            elif (low[i] < camarilla_s1_aligned[i] and 
+                  volume[i] > 2.0 * vol_ma[i] and 
+                  close[i] < ema_34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price breaks below Keltner Lower (reversal signal)
-            if low[i] < keltner_lower[i]:
+            # Exit: price breaks below Camarilla S1 (mean reversion to pivot)
+            if low[i] < camarilla_s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price breaks above Keltner Upper (reversal signal)
-            if high[i] > keltner_upper[i]:
+            # Exit: price breaks above Camarilla R1 (mean reversion to pivot)
+            if high[i] > camarilla_r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
