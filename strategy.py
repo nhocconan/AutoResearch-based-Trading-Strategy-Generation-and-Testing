@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_KAMA_Adaptive_Trend_With_Volume_Confirmation"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,51 +17,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate KAMA on 6h data
-    def kama(close_series, period=10, fast_ema=2, slow_ema=30):
-        change = np.abs(np.diff(close_series, n=period))
-        volatility = np.sum(np.abs(np.diff(close_series)), axis=1)
-        er = np.where(volatility != 0, change / volatility, 0)
-        sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
-        kama = np.full_like(close_series, np.nan, dtype=float)
-        kama[period] = close_series[period]
-        for i in range(period+1, len(close_series)):
-            kama[i] = kama[i-1] + sc[i] * (close_series[i] - kama[i-1])
-        return kama
+    # 12h lookback for trend and volume
+    lookback = 20
     
-    kama_values = kama(close, period=10, fast_ema=2, slow_ema=30)
-    
-    # Get daily data for trend filter
+    # Daily OHLC for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 1:
         return np.zeros(n)
     
-    daily_close = df_1d['close'].values
     daily_high = df_1d['high'].values
     daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
     
-    # Daily EMA34 for trend
-    daily_ema34 = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    daily_ema34_aligned = align_htf_to_ltf(prices, df_1d, daily_ema34)
+    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    camarilla_r1 = daily_close + (daily_high - daily_low) * 1.1 / 12
+    camarilla_s1 = daily_close - (daily_high - daily_low) * 1.1 / 12
     
-    # Volume filter: current volume > 1.5x 20-period average
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma_20[i] = np.mean(volume[i-20:i])
-    vol_filter = volume > (1.5 * vol_ma_20)
+    # Align Camarilla levels to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # Daily trend: price above/below EMA34
+    ema_34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    daily_trend_up = close > ema_34_aligned
+    daily_trend_down = close < ema_34_aligned
+    
+    # Volume filter: current volume > 2.0x 10-period average (12h)
+    vol_ma_10 = np.full(n, np.nan)
+    for i in range(10, n):
+        vol_ma_10[i] = np.mean(volume[i-10:i])
+    vol_filter = volume > (2.0 * vol_ma_10)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 4  # ~1 day (4*6h) to prevent overtrading
+    cooldown_bars = 4  # ~2 days (4*12h) to prevent overtrading
     
-    start_idx = max(30, 20)  # KAMA needs 30, volume MA needs 20
+    start_idx = max(lookback, 10)  # Ensure all indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(kama_values[i]) or 
-            np.isnan(daily_ema34_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or 
+            np.isnan(vol_ma_10[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,35 +74,35 @@ def generate_signals(prices):
         bars_since_last_trade += 1
         
         # Determine daily trend direction
-        trend_up = close[i] > daily_ema34_aligned[i]
-        trend_down = close[i] < daily_ema34_aligned[i]
+        trend_up = daily_trend_up[i]
+        trend_down = daily_trend_down[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: Price above KAMA with bullish daily trend and volume
-            if (close[i] > kama_values[i] and 
+            # Long: Price breaks above Camarilla R1 with volume in daily uptrend
+            if (close[i] > r1_aligned[i] and 
                 trend_up and 
                 vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: Price below KAMA with bearish daily trend and volume
-            elif (close[i] < kama_values[i] and 
+            # Short: Price breaks below Camarilla S1 with volume in daily downtrend
+            elif (close[i] < s1_aligned[i] and 
                   trend_down and 
                   vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit: Price falls below KAMA or daily trend changes to down
-            if close[i] < kama_values[i] or not trend_up:
+            # Exit: Price falls back below Camarilla S1 or daily trend changes to down
+            if close[i] < s1_aligned[i] or not trend_up:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price rises above KAMA or daily trend changes to up
-            if close[i] > kama_values[i] or not trend_down:
+            # Exit: Price rises back above Camarilla R1 or daily trend changes to up
+            if close[i] > r1_aligned[i] or not trend_down:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
@@ -110,4 +111,4 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: KAMA adapts to market conditions - fast in trends, slow in ranges. Combined with daily EMA34 trend filter and volume confirmation, it captures strong trends while avoiding whipsaws in ranges. Works in bull markets (buy above KAMA in uptrend) and bear markets (sell below KAMA in downtrend). Target: 50-150 trades over 4 years (12-37/year) to minimize fee drag. KAMA's adaptive nature reduces false signals during consolidation periods.
+# Hypothesis: On 12h timeframe, price breaking above/below Camarilla R1/S1 levels with volume confirmation and daily EMA34 trend filter captures institutional breakout momentum. Camarilla levels provide mathematically derived support/resistance with institutional relevance. Works in bull markets (breakouts above R1 in daily uptrend) and bear markets (breakdowns below S1 in daily downtrend). Target: 50-150 trades over 4 years (12-37/year) to minimize fee drag while capturing significant moves. Daily trend filter ensures alignment with higher timeframe momentum.
