@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Liquidity_Sweep_Reversal_Volume"
-timeframe = "6h"
+name = "12h_Donchian20_Trend_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,77 +17,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d and 1w data ONCE before loop
+    # Load 12h and 1d data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 20 or len(df_1w) < 2:
+    if len(df_12h) < 25 or len(df_1d) < 25:
         return np.zeros(n)
     
-    # 1d daily range for liquidity levels (previous day high/low)
-    prev_high_1d = df_1d['high'].shift(1).values
-    prev_low_1d = df_1d['low'].shift(1).values
+    # 12h Donchian channels (20-period)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    donchian_high_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_low_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # Align 1d liquidity levels to 6h timeframe
-    liq_high_1d = align_htf_to_ltf(prices, df_1d, prev_high_1d)
-    liq_low_1d = align_htf_to_ltf(prices, df_1d, prev_low_1d)
+    # Align Donchian levels to 12h timeframe (already 12h data)
+    donchian_high_12h_aligned = align_htf_to_ltf(prices, df_12h, donchian_high_12h)
+    donchian_low_12h_aligned = align_htf_to_ltf(prices, df_12h, donchian_low_12h)
     
-    # 1w trend filter: price above/below 20-period EMA
-    close_1w = df_1w['close'].values
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # 6h volume filter: > 2x 24-period average (6h * 24 = 6 days)
-    vol_ma_6h = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    vol_filter = volume > 2.0 * vol_ma_6h
+    # 12h volume spike: > 2.0x 20-period average
+    vol_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike_12h = volume > 2.0 * vol_ma_12h
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 24)  # Wait for volume MA and EMA
+    start_idx = max(40, 50)  # Wait for Donchian and EMA50
     
     for i in range(start_idx, n):
-        if (np.isnan(liq_high_1d[i]) or np.isnan(liq_low_1d[i]) or 
-            np.isnan(ema20_1w_aligned[i])):
+        if (np.isnan(donchian_high_12h_aligned[i]) or np.isnan(donchian_low_12h_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: sweep below previous day low then reverse with volume
-            # Look for rejection of lows: current low touches/slightly breaks liq_low then closes back above
-            if (low[i] <= liq_low_1d[i] * 1.002 and  # Allow 0.2% slippage for sweep
-                close[i] > liq_low_1d[i] and        # Close back above liquidity low
-                vol_filter[i] and                   # Volume confirmation
-                close[i] > ema20_1w_aligned[i]):    # Weekly uptrend filter
-                signals[i] = 0.25
+            # Long: Break above Donchian high with volume spike and uptrend (price > EMA50)
+            if (close[i] > donchian_high_12h_aligned[i] and vol_spike_12h[i] and 
+                close[i] > ema50_1d_aligned[i]):
+                signals[i] = 0.30
                 position = 1
-            # Short: sweep above previous day high then reverse with volume
-            elif (high[i] >= liq_high_1d[i] * 0.998 and  # Allow 0.2% slippage for sweep
-                  close[i] < liq_high_1d[i] and          # Close back below liquidity high
-                  vol_filter[i] and                      # Volume confirmation
-                  close[i] < ema20_1w_aligned[i]):       # Weekly downtrend filter
-                signals[i] = -0.25
+            # Short: Break below Donchian low with volume spike and downtrend (price < EMA50)
+            elif (close[i] < donchian_low_12h_aligned[i] and vol_spike_12h[i] and 
+                  close[i] < ema50_1d_aligned[i]):
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit: price breaks below liquidity low or weekly trend fails
-            if close[i] < liq_low_1d[i] * 0.998 or close[i] < ema20_1w_aligned[i]:
+            # Exit: Price below Donchian low or trend reversal (price < EMA50)
+            if close[i] < donchian_low_12h_aligned[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit: price breaks above liquidity high or weekly trend fails
-            if close[i] > liq_high_1d[i] * 1.002 or close[i] > ema20_1w_aligned[i]:
+            # Exit: Price above Donchian high or trend reversal (price > EMA50)
+            if close[i] > donchian_high_12h_aligned[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-# Hypothesis: Liquidity sweeps (stop hunts) at daily high/low levels create reversal opportunities
-# with institutional order flow. Volume confirms genuine reversal vs fakeout. Weekly EMA filter
-# ensures alignment with higher timeframe trend. Works in both bull/bear markets as liquidity
-# sweeps occur in all conditions. Target: 15-25 trades/year per symbol to minimize fee drag.
+# Hypothesis: Donchian breakouts on 12h with volume confirmation and 1d EMA50 trend filter capture
+# strong momentum moves in both bull and bear markets. Volume spike ensures institutional participation.
+# Trend filter avoids counter-trend trades. Position size 0.30 limits risk. Target ~25 trades/year.
+# Exit on retrace to opposite Donchian band or trend reversal. Simple, robust, low-frequency.
