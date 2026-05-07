@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_Trend_Following_With_1d_Volume_Spike_Rule
-Hypothesis: Use 4h Donchian breakout (20) as primary signal, filtered by 1d volume spike (2x average volume) and 1d ADX trend filter (ADX > 25). Long when price breaks above Donchian high in bullish 1d trend with volume spike, short when breaks below Donchian low in bearish 1d trend with volume spike. Exit when price crosses opposite Donchian band. Designed for 4h to capture strong trending moves with low frequency (target 20-50 trades/year).
+4h_Donchian_Breakout_with_1d_Trend_and_Volume_Spike
+Hypothesis: 4h Donchian breakout (20) filtered by 1d ADX trend strength (>25) and 1d volume spike (>2x 20-day average).
+Long on breakout above Donchian high in bullish 1d trend with volume spike.
+Short on breakout below Donchian low in bearish 1d trend with volume spike.
+Exit on opposite Donchian band touch.
+Designed for low-frequency, high-conviction trades in both bull and bear markets.
 """
 
-name = "4h_Trend_Following_With_1d_Volume_Spike_Rule"
+name = "4h_Donchian_Breakout_with_1d_Trend_and_Volume_Spike"
 timeframe = "4h"
 leverage = 1.0
 
@@ -55,7 +59,7 @@ def generate_signals(prices):
     dm_plus = np.concatenate([[0], dm_plus])
     dm_minus = np.concatenate([[0], dm_minus])
     
-    # Smoothed values
+    # Smoothed values (Wilder smoothing)
     def smooth_wilder(arr, period):
         smoothed = np.full_like(arr, np.nan)
         if len(arr) < period:
@@ -106,22 +110,15 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Determine 1d trend direction using ADX and price vs EMA proxy
-        # Simplified: use ADX > 25 as trending, and price position for direction
-        # We'll use close vs 20-period EMA on 1d as trend direction filter
-        if i >= 20:  # Need enough for EMA
-            # Simple trend: if ADX > 25 and price above recent average = uptrend
-            # Use 20-period SMA on 1d as trend filter
-            sma_20_1d = np.full_like(close_1d, np.nan)
-            for j in range(20, len(close_1d)):
-                sma_20_1d[j] = np.mean(close_1d[j-20:j])
-            sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_20_1d)
-            if not np.isnan(sma_20_1d_aligned[i]):
-                trend_1d_up = adx_aligned[i] > 25 and close_1d_aligned[i] > sma_20_1d_aligned[i]
-                trend_1d_down = adx_aligned[i] > 25 and close_1d_aligned[i] < sma_20_1d_aligned[i]
-            else:
-                trend_1d_up = False
-                trend_1d_down = False
+        # Determine 1d trend direction using ADX and price vs 20-period SMA
+        sma_20_1d = np.full_like(close_1d, np.nan)
+        for j in range(20, len(close_1d)):
+            sma_20_1d[j] = np.mean(close_1d[j-20:j])
+        sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_20_1d)
+        
+        if not np.isnan(sma_20_1d_aligned[i]):
+            trend_1d_up = adx_aligned[i] > 25 and close_1d_aligned[i] > sma_20_1d_aligned[i]
+            trend_1d_down = adx_aligned[i] > 25 and close_1d_aligned[i] < sma_20_1d_aligned[i]
         else:
             trend_1d_up = False
             trend_1d_down = False
