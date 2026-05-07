@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-12H_Camarilla_R1_S1_Breakout_1D_Trend_Volume_v4
-Hypothesis: 12h price breaks above/below 1D Camarilla R1/S1 levels with 1D EMA34 trend confirmation and volume spike.
+4H_Camarilla_R1_S1_Breakout_1D_Trend_Volume
+Hypothesis: 4h price breaks above/below 1D Camarilla R1/S1 levels with 1D EMA34 trend confirmation and volume spike.
 Works in bull/bear markets: R1/S1 breakouts capture strong moves while avoiding minor retracements.
-EMA34 filter ensures alignment with daily trend, volume confirmation validates breakout strength.
-Targets 12-37 trades/year to minimize fee drag on 12h timeframe.
-Version v4: Added 2-bar confirmation for breakout, reduced position size to 0.20, and added 72-bar cooldown.
+EMA34 filter ensures alignment with daily trend, volume validation confirms breakout strength.
+Targets 20-50 trades/year to minimize fee drag on 4h timeframe.
 """
-name = "12H_Camarilla_R1_S1_Breakout_1D_Trend_Volume_v4"
-timeframe = "12h"
+name = "4H_Camarilla_R1_S1_Breakout_1D_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -46,7 +45,7 @@ def generate_signals(prices):
     ema_34 = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Volume filter: current 12h volume > 1.5 x 20-period average volume
+    # Volume filter: current 4h volume > 1.5 x 20-period average volume
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_avg * 1.5)
     
@@ -69,20 +68,20 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Minimum 72 bars between trades (12 days on 12h TF) to reduce frequency
-            if bars_since_exit < 72:
+            # Minimum 48 bars between trades (8 days on 4h TF) to reduce frequency
+            if bars_since_exit < 48:
                 continue
                 
-            # Long: price breaks above R1 with EMA34 uptrend and volume spike (2-bar confirmation)
-            if (close[i] > r1_aligned[i] and close[i-1] > r1_aligned[i-1] and close[i-2] <= r1_aligned[i-2] and 
+            # Long: price breaks above R1 with EMA34 uptrend and volume spike
+            if (close[i] > r1_aligned[i] and close[i-1] <= r1_aligned[i-1] and 
                 close[i] > ema_34_aligned[i] and volume_filter[i]):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
                 bars_since_exit = 0
-            # Short: price breaks below S1 with EMA34 downtrend and volume spike (2-bar confirmation)
-            elif (close[i] < s1_aligned[i] and close[i-1] < s1_aligned[i-1] and close[i-2] >= s1_aligned[i-2] and 
+            # Short: price breaks below S1 with EMA34 downtrend and volume spike
+            elif (close[i] < s1_aligned[i] and close[i-1] >= s1_aligned[i-1] and 
                   close[i] < ema_34_aligned[i] and volume_filter[i]):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
                 bars_since_exit = 0
         elif position != 0:
@@ -97,6 +96,6 @@ def generate_signals(prices):
                 bars_since_exit = 0
             else:
                 # Hold position
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
