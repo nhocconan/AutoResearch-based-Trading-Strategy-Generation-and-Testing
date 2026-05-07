@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "1d_KAMA_RSI_Chop_Reversal_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,67 +17,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h trend filter (HTF)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # KAMA trend (ER=10, fast=2, slow=30)
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Choppiness Index (14)
+    atr = np.zeros(n)
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    sum_atr14 = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
+    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(sum_atr14 / (hh - ll)) / np.log10(14)
+    chop = np.where((hh - ll) != 0, chop, 50)
+    
+    # Weekly trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
-    
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    trend_up = close > ema50_12h_aligned
-    trend_down = close < ema50_12h_aligned
-    
-    # Daily Camarilla pivot levels (R3/S3)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_prev = df_1d['close'].shift(1).values
-    close_1d_prev = np.concatenate([[close_1d_prev[0]], close_1d_prev[:-1]])
-    
-    R3 = close_1d_prev + (high_1d - low_1d) * 1.1 / 4
-    S3 = close_1d_prev - (high_1d - low_1d) * 1.1 / 4
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    
-    # Volume confirmation: spike > 2x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > 2.0 * vol_ma
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    trend_up = close > ema50_1w_aligned
+    trend_down = close < ema50_1w_aligned
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Wait for EMA and volume MA
+    start_idx = 50  # Wait for EMA and other indicators
     
     for i in range(start_idx, n):
-        if np.isnan(ema50_12h_aligned[i]) or np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]):
+        if np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or np.isnan(ema50_1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Close breaks above R3 with volume spike and 12h uptrend
-            if close[i] > R3_aligned[i] and vol_spike[i] and trend_up[i]:
+            # Long: Price below KAMA, RSI oversold, choppy market
+            if close[i] < kama[i] and rsi[i] < 30 and chop[i] > 61.8:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close breaks below S3 with volume spike and 12h downtrend
-            elif close[i] < S3_aligned[i] and vol_spike[i] and trend_down[i]:
+            # Short: Price above KAMA, RSI overbought, choppy market
+            elif close[i] > kama[i] and rsi[i] > 70 and chop[i] > 61.8:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Close below S3 or trend turns down
-            if close[i] < S3_aligned[i] or not trend_up[i]:
+            # Exit: Price crosses above KAMA or RSI overbought
+            if close[i] > kama[i] or rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Close above R3 or trend turns up
-            if close[i] > R3_aligned[i] or not trend_down[i]:
+            # Exit: Price crosses below KAMA or RSI oversold
+            if close[i] < kama[i] or rsi[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -85,10 +94,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R3/S3 breakouts with 12h trend filter and volume spike capture strong institutional moves.
-# Long when price breaks above R3 (strong resistance) with volume confirmation in 12h uptrend.
-# Short when price breaks below S3 (strong support) with volume confirmation in 12h downtrend.
-# R3/S3 are stronger levels than R1/S1, leading to fewer but higher-quality trades.
-# Volume spike (>2x average) ensures conviction behind the breakout.
-# Designed for 4h timeframe to target 20-50 trades/year, avoiding overtrading.
-# Works in bull markets (breaks above R3 in uptrend) and bear markets (breaks below S3 in downtrend).
+# Hypothesis: KAMA + RSI + Chop filter captures mean reversion in choppy markets while avoiding strong trends.
+# Long when price is below KAMA (trend), RSI < 30 (oversold), and Chop > 61.8 (choppy market).
+# Short when price is above KAMA, RSI > 70 (overbought), and Chop > 61.8.
+# Exits when price crosses KAMA or RSI reaches opposite extreme.
+# Weekly EMA50 filter ensures we only trade in the direction of the weekly trend.
+# Designed for 1d timeframe to target 10-30 trades/year, avoiding overtrading.
+# Works in choppy markets (range-bound) and avoids trending markets where mean reversion fails.
