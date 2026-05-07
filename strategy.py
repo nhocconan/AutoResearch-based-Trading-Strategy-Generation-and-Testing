@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3S3_Breakout_1wTrend_VolumeSpike"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
 timeframe = "12h"
 leverage = 1.0
 
@@ -17,18 +17,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter and daily for Camarilla levels
-    df_1w = get_htf_data(prices, '1w')
+    # Get daily data for Camarilla levels and trend filter
     df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_1w) < 50 or len(df_1d) < 2:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Weekly trend filter: EMA50
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Daily Camarilla R3 and S3 levels from previous day
+    # Calculate Camarilla R3 and S3 levels from previous day
     high_prev = df_1d['high'].shift(1).values
     low_prev = df_1d['low'].shift(1).values
     close_prev = df_1d['close'].shift(1).values
@@ -40,25 +34,29 @@ def generate_signals(prices):
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Volume filter: current volume > 2x 24-period average (2 days for 12h)
-    vol_ma_24 = np.full(n, np.nan)
-    for i in range(24, n):
-        vol_ma_24[i] = np.mean(volume[i-24:i])
-    vol_filter = volume > (2.0 * vol_ma_24)
+    # 1d trend filter: EMA34
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume filter: current volume > 2.0x 20-period average
+    vol_ma_20 = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma_20[i] = np.mean(volume[i-20:i])
+    vol_filter = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 4  # 2 days for 12h timeframe
+    cooldown_bars = 4  # ~2 days for 12h to reduce trades
     
-    start_idx = max(100, 24, 50)
+    start_idx = max(100, 20, 34)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(r3_aligned[i]) or 
             np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(vol_ma_24[i])):
+            np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,23 +67,23 @@ def generate_signals(prices):
         
         bars_since_last_trade += 1
         
-        # Determine weekly trend direction
-        trend_up = close > ema_50_1w_aligned[i]
-        trend_down = close < ema_50_1w_aligned[i]
+        # Determine 1d trend direction
+        trend_up = close > ema_34_1d_aligned[i]
+        trend_down = close < ema_34_1d_aligned[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
             # Long: Break above R3 in uptrend with strong volume
             if (close[i] > r3_aligned[i] and 
                 trend_up[i] and 
                 vol_filter[i]):
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
             # Short: Break below S3 in downtrend with strong volume
             elif (close[i] < s3_aligned[i] and 
                   trend_down[i] and 
                   vol_filter[i]):
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
@@ -95,7 +93,7 @@ def generate_signals(prices):
                 position = 0
                 bars_since_last_trade = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
             # Exit: Price re-enters Camarilla body or trend change
             if (close[i] < r3_aligned[i] and close[i] > s3_aligned[i]) or not trend_down[i]:
@@ -103,13 +101,6 @@ def generate_signals(prices):
                 position = 0
                 bars_since_last_trade = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
-
-# Hypothesis: Weekly EMA50 trend filter with daily Camarilla R3/S3 breakouts and volume confirmation
-# on 12h timeframe targets 50-150 trades over 4 years. Weekly trend ensures alignment with major market
-# direction, reducing false breakouts. Volume >2x 2-day average confirms institutional participation.
-# Position size 0.30 balances profit potential with drawdown control. Works in bull (breakouts above R3)
-# and bear (breakdowns below S3) by trading with weekly trend. Cooldown of 4 bars (2 days) prevents
-# overtrading and reduces fee drag. Target: 12-37 trades/year per symbol.
