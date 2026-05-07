@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-6H_RSI_Recovery_With_12hTrend_v1
-Hypothesis: In 6B timeframe, buy when RSI(14) recovers from oversold (<30) in alignment with 12h uptrend (EMA50),
-and sell/short when RSI becomes overbought (>70) in 12h downtrend. Uses volume confirmation to avoid false signals.
-Designed to work in both bull (buy dips) and bear (sell rallies) markets by following higher timeframe trend.
+4H_Camarilla_R3_S3_Breakout_1dEMA34_Trend_Filter_v2
+Hypothesis: Trade breakouts of 1d Camarilla R3/S3 levels with 1d EMA34 trend filter and volume confirmation.
+Long when price breaks above R3 and 1d EMA34 is rising; short when price breaks below S3 and 1d EMA34 is falling.
+Volume filter: current volume > 1.5x 20-period average volume.
+This strategy targets high-probability breakouts in trending markets while avoiding false signals in chop.
+Designed for 4h timeframe with 1d HTF for trend and pivot levels.
 """
-name = "6H_RSI_Recovery_With_12hTrend_v1"
-timeframe = "6h"
+name = "4H_Camarilla_R3_S3_Breakout_1dEMA34_Trend_Filter_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,41 +25,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 1d data for Camarilla levels and EMA
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 12h EMA(50) for trend
-    close_12h = pd.Series(df_12h['close'])
-    ema_12h = close_12h.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate 1d Camarilla levels (R3, S3)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    r3 = pivot + (range_1d * 1.1 / 4)  # R3 level
+    s3 = pivot - (range_1d * 1.1 / 4)  # S3 level
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Calculate RSI(14) on 6h close
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # Calculate 1d EMA34 for trend filter
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Volume filter: current volume > 1.3 * 20-period average volume
+    # Volume filter: current volume > 1.5 * 20-period average volume
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_avg * 1.3)
+    volume_filter = volume > (vol_avg * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_exit = 0  # bars since last exit to prevent overtrading
     
-    start_idx = max(30, 20)  # Ensure sufficient warmup
+    start_idx = max(34, 20)  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
         bars_since_exit += 1
         
         # Skip if any data is not ready
-        if (np.isnan(ema_12h_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,31 +68,29 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Minimum 8 bars between trades (~1.3 days on 6h TF) to reduce frequency
+            # Minimum 8 bars between trades (1.33 days on 4h TF) to reduce frequency
             if bars_since_exit < 8:
                 continue
                 
-            # Long: RSI recovers from oversold (<30) in 12h uptrend
-            if (rsi[i] > 30 and rsi[i-1] <= 30 and 
-                close[i] > ema_12h_aligned[i] and 
-                volume_filter[i]):
+            # Long: price breaks above R3 with rising EMA34 and volume
+            if (close[i] > r3_aligned[i] and close[i-1] <= r3_aligned[i-1] and 
+                ema_34_aligned[i] > ema_34_aligned[i-1] and volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_exit = 0
-            # Short: RSI declines from overbought (>70) in 12h downtrend
-            elif (rsi[i] < 70 and rsi[i-1] >= 70 and 
-                  close[i] < ema_12h_aligned[i] and 
-                  volume_filter[i]):
+            # Short: price breaks below S3 with falling EMA34 and volume
+            elif (close[i] < s3_aligned[i] and close[i-1] >= s3_aligned[i-1] and 
+                  ema_34_aligned[i] < ema_34_aligned[i-1] and volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_exit = 0
         elif position != 0:
-            # Exit: RSI returns to neutral zone (40-60) or trend reversal
-            if position == 1 and (rsi[i] >= 60 or close[i] < ema_12h_aligned[i]):
+            # Exit: price returns to opposite S3/R3 level
+            if position == 1 and close[i] < s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_exit = 0
-            elif position == -1 and (rsi[i] <= 40 or close[i] > ema_12h_aligned[i]):
+            elif position == -1 and close[i] > r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_exit = 0
