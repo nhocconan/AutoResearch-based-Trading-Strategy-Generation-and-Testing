@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_1w_1d_EquiDepth_Channel_Breakout"
-timeframe = "6h"
+name = "4h_1d_Camarilla_R1_S1_Breakout_Trend_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,77 +17,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Weekly Equi-Depth Channel (Quantile-based)
-    # 20-period quantiles on weekly close
-    close_1w = df_1w['close'].values
-    q20 = pd.Series(close_1w).rolling(window=20, min_periods=20).quantile(0.2).values
-    q80 = pd.Series(close_1w).rolling(window=20, min_periods=20).quantile(0.8).values
-    
-    # Align weekly quantiles to 6h timeframe
-    q20_aligned = align_htf_to_ltf(prices, df_1w, q20)
-    q80_aligned = align_htf_to_ltf(prices, df_1w, q80)
-    
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Daily Volume Spike (5-period avg)
-    vol_ma_5 = pd.Series(df_1d['volume']).rolling(window=5, min_periods=5).mean().values
-    vol_ma_5_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_5)
+    # Calculate daily Camarilla pivot levels from previous day
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
+    
+    # Camarilla levels
+    s1 = prev_close - (range_hl * 1.08 / 2)
+    r1 = prev_close + (range_hl * 1.08 / 2)
+    
+    # Align daily levels to 4h timeframe
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    
+    # Daily trend filter: EMA(34) on daily close
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume spike detection: 6-period average (1.5 days of 4h bars)
+    vol_ma_6 = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 5)  # Wait for weekly quantiles and daily volume MA
+    start_idx = max(34, 6)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(q20_aligned[i]) or np.isnan(q80_aligned[i]) or 
-            np.isnan(vol_ma_5_aligned[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(vol_ma_6[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above weekly Q80 with daily volume spike
-            vol_condition = df_1d['volume'].iloc[i] > vol_ma_5_aligned[i] * 2.0
+            # Long: price above S1 with volume and daily uptrend
+            vol_condition = volume[i] > vol_ma_6[i] * 2.0
+            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
             
-            if close[i] > q80_aligned[i] and vol_condition:
-                signals[i] = 0.25
+            if close[i] > s1_aligned[i] and vol_condition and uptrend:
+                signals[i] = 0.30
                 position = 1
-            # Short: price breaks below weekly Q20 with daily volume spike
-            elif close[i] < q20_aligned[i] and vol_condition:
-                signals[i] = -0.25
+            # Short: price below R1 with volume and daily downtrend
+            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit: price returns below weekly Q80
-            if close[i] < q80_aligned[i]:
+            # Exit: price back below S1 or volume drops
+            if close[i] < s1_aligned[i] or volume[i] < vol_ma_6[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit: price returns above weekly Q20
-            if close[i] > q20_aligned[i]:
+            # Exit: price back above R1 or volume drops
+            if close[i] > r1_aligned[i] or volume[i] < vol_ma_6[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-# Hypothesis: 6h Equi-Depth Channel Breakout with weekly quantiles and daily volume confirmation
-# - Weekly Q20/Q80 act as dynamic support/resistance based on price distribution
-# - Breakout above Q80 with 2x daily volume = long opportunity
-# - Breakdown below Q20 with 2x daily volume = short opportunity
-# - Uses actual weekly quantiles (not fixed levels) to adapt to volatility regimes
-# - Volume confirmation ensures institutional participation
-# - Works in both bull (buy Q80 breaks) and bear (sell Q20 breaks) via breakout logic
-# - Exit when price returns to the opposite quantile
-# - Position size 0.25 targets ~50-100 trades over 4 years (~12-25/year)
+# Hypothesis: 4h Camarilla S1/R1 breakout with daily trend and volume confirmation
+# - Daily Camarilla S1/R1 act as strong support/resistance levels
+# - Breakout above S1 with volume in daily uptrend = long opportunity
+# - Breakdown below R1 with volume in daily downtrend = short opportunity
+# - Volume spike (2.0x average) confirms institutional participation (stricter filter)
+# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
+# - Exit when price returns to S1/R1 or volume weakens
+# - Position size 0.30 targets ~30-50 trades/year, avoiding fee drag
+# - Uses actual daily Camarilla levels (not weekly) for better responsiveness
+# - Designed to work in BOTH bull and bear markets via trend filter
