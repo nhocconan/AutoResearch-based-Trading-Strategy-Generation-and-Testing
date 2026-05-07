@@ -1,17 +1,6 @@
-# 4H_Camarilla_R3_S3_Breakout_1dTrend_EMA34_VolumeSpike
-# Hypothesis: At 4h timeframe, use 1d trend via EMA34 and volume confirmation (current volume > 20-period average) with Camarilla R3/S3 breakouts. This combines daily trend structure with intraday breakout levels and volume confirmation to filter false breakouts. Designed for 75-200 total trades over 4 years (19-50/year) on 4h timeframe.
-# Uses proper MTF loading with get_htf_data once before loop and align_htf_to_ltf for correct timing.
-# Entry: Long when price > EMA34 (uptrend) AND close > R3 (resistance breakout) with volume spike
-# Exit: When price crosses below EMA34 (trend change)
-# Short: When price < EMA34 (downtrend) AND close < S3 (support breakdown) with volume spike
-# Exit: When price crosses above EMA34 (trend change)
-# Position size: 0.25 (25% of capital) to manage drawdown and reduce fee churn
-# Designed to work in both bull and bear markets by following daily trend with breakout confirmation
-# BTC and ETH are primary targets; SOL-only performance is insufficient
-
 #!/usr/bin/env python3
-name = "4H_Camarilla_R3_S3_Breakout_1dTrend_EMA34_VolumeSpike"
-timeframe = "4h"
+name = "6H_Camarilla_R3_S3_Breakout_1DTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -50,7 +39,7 @@ def generate_signals(prices):
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Volume filter: current 4h volume > 20-period average volume
+    # Volume filter: current 6h volume > 20-period average volume
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > vol_avg
     
@@ -71,13 +60,13 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price above 1d EMA34 (uptrend), 4h close above daily R3, volume confirmation
+            # Long: price above 1d EMA34 (uptrend), 6h close above daily R3, volume confirmation
             if (close[i] > ema_34_1d_aligned[i] and 
                 close[i] > r3_aligned[i] and 
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below 1d EMA34 (downtrend), 4h close below daily S3, volume confirmation
+            # Short: price below 1d EMA34 (downtrend), 6h close below daily S3, volume confirmation
             elif (close[i] < ema_34_1d_aligned[i] and 
                   close[i] < s3_aligned[i] and 
                   volume_filter[i]):
