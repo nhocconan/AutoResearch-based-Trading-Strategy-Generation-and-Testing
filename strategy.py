@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeS"
-timeframe = "4h"
+name = "1d_WedgeBreakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,64 +17,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot and EMA34
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels (R1, S1) from previous day
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # 1w EMA20 trend filter
+    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
-    r1 = pivot + (range_hl * 1.1 / 12)
-    s1 = pivot - (range_hl * 1.1 / 12)
+    # Wedge detection: narrowing range over 10 days
+    # Upper trendline: connect recent highs
+    # Lower trendline: connect recent lows
+    lookback = 10
+    upper_trendline = np.full(n, np.nan)
+    lower_trendline = np.full(n, np.nan)
     
-    # Align Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    for i in range(lookback, n):
+        # Get recent highs and lows
+        recent_highs = high[i-lookback:i]
+        recent_lows = low[i-lookback:i]
+        x = np.arange(lookback)
+        
+        # Fit linear trendlines (degree 1)
+        if len(recent_highs) >= 2:
+            coeffs_high = np.polyfit(x, recent_highs, 1)
+            upper_trendline[i] = np.polyval(coeffs_high, lookback-1)  # Project to current point
+        
+        if len(recent_lows) >= 2:
+            coeffs_low = np.polyfit(x, recent_lows, 1)
+            lower_trendline[i] = np.polyval(coeffs_low, lookback-1)  # Project to current point
     
-    # 1d EMA34 trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume filter: current volume > 2.0 * 30-period average
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_ok = volume > (vol_ma * 2.0)
+    # Volume filter: current volume > 1.5 * 20-day average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ok = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Wait for EMA34 and volume MA
+    start_idx = max(20, lookback)  # Wait for EMA and wedge formation
     
     for i in range(start_idx, n):
-        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema_20_1w_aligned[i]) or np.isnan(upper_trendline[i]) or np.isnan(lower_trendline[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above R1 + above 1d EMA34 + volume spike
-            if close[i] > r1_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_ok[i]:
+            # Long: break above upper trendline in uptrend + volume
+            if close[i] > upper_trendline[i] and close[i] > ema_20_1w_aligned[i] and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 + below 1d EMA34 + volume spike
-            elif close[i] < s1_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_ok[i]:
+            # Short: break below lower trendline in downtrend + volume
+            elif close[i] < lower_trendline[i] and close[i] < ema_20_1w_aligned[i] and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: price returns to opposite Camarilla level or breaks in opposite direction
+            # Exit: price returns to opposite trendline or trend reversal
             if position == 1:
-                if close[i] < s1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+                if close[i] < lower_trendline[i] or close[i] < ema_20_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > r1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+                if close[i] > upper_trendline[i] or close[i] > ema_20_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
