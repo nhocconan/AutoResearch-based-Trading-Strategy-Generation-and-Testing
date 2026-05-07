@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_1D_Camarilla_R1_S1_Breakout_TrendVolume"
-timeframe = "4h"
+name = "1d_WilliamsAlligator_Trend_WeeklyFilter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,65 +17,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE for Camarilla levels and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Williams Alligator: three SMAs with forward shift
+    # Jaw (blue): 13-period SMA, shifted 8 bars forward
+    # Teeth (red): 8-period SMA, shifted 5 bars forward  
+    # Lips (green): 5-period SMA, shifted 3 bars forward
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
+    
+    # Load weekly data ONCE for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 13:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla R1, S1
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Weekly SMA for trend filter (8-period)
+    sma_8_1w = pd.Series(df_1w['close']).rolling(window=8, min_periods=8).mean().values
+    sma_8_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_8_1w)
     
-    # Camarilla R1 and S1 levels
-    R1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    S1 = prev_close - (prev_high - prev_low) * 1.1 / 12
-    
-    # Align Camarilla levels to 4h timeframe (wait for daily close)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    
-    # Daily EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume spike detection (2x 20-period average)
+    # Volume spike detection
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(sma_8_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_condition = volume[i] > vol_ma_20[i] * 2.0
+        # Alligator alignment: Lips > Teeth > Jaw = bullish alignment
+        # Lips < Teeth < Jaw = bearish alignment
+        bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
+        bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]
+        
+        vol_condition = volume[i] > vol_ma_20[i] * 1.5
         
         if position == 0:
-            # Long: break above R1 in daily uptrend with volume
-            if close[i] > R1_aligned[i] and ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and vol_condition:
+            # Long: bullish alignment + price above lips + weekly uptrend + volume
+            if bullish_alignment and close[i] > lips[i] and vol_condition and sma_8_1w_aligned[i] > sma_8_1w_aligned[i-1]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 in daily downtrend with volume
-            elif close[i] < S1_aligned[i] and ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and vol_condition:
+            # Short: bearish alignment + price below lips + weekly downtrend + volume
+            elif bearish_alignment and close[i] < lips[i] and vol_condition and sma_8_1w_aligned[i] < sma_8_1w_aligned[i-1]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below S1 or trend reversal
-            if close[i] < S1_aligned[i] or ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]:
+            # Exit: bearish alignment or price back below teeth
+            if bearish_alignment or close[i] < teeth[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above R1 or trend reversal
-            if close[i] > R1_aligned[i] or ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]:
+            # Exit: bullish alignment or price back above teeth
+            if bullish_alignment or close[i] > teeth[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -83,15 +83,17 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 4h Camarilla R1/S1 breakout with daily trend filter and volume confirmation
-# - Uses previous day's OHLC to calculate Camarilla R1 (resistance) and S1 (support) levels
-# - Enters long when price breaks above R1 in daily uptrend (EMA34 rising) with volume spike (2x average)
-# - Enters short when price breaks below S1 in daily downtrend (EMA34 falling) with volume spike
-# - Exits when price returns to S1/R1 or daily trend reverses
-# - Camarilla levels provide mathematically derived support/resistance based on prior day's range
-# - Daily EMA34 trend filter ensures alignment with higher timeframe trend
-# - Volume confirmation (2x 20-period average) filters out low-confidence breakouts
-# - Position size 0.25 balances profit potential with risk management
-# - Target: 20-50 trades per year to stay within fee drag limits
-# - Works in both bull (breakouts in uptrend) and bear (breakdowns in downtrend) markets
-# - Avoids overtrading by requiring multiple confluence factors (level break + trend + volume)
+# Hypothesis: Williams Alligator on daily timeframe with weekly trend filter
+# - Williams Alligator uses three SMAs (5,8,13) with forward shifts to identify trends
+# - Bullish: Lips(5) > Teeth(8) > Jaw(13) - aligned upward
+# - Bearish: Lips(5) < Teeth(8) < Jaw(13) - aligned downward
+# - Weekly SMA8 filter ensures alignment with higher timeframe trend
+# - Volume confirmation (1.5x average) reduces false signals
+# - Enter on alignment + price break of lips/middle line with volume
+# - Exit when alignment reverses or price crosses middle line
+# - Works in both bull and bear markets by following the trend
+# - Position size 0.25 targets ~20-60 trades/year to avoid fee drag
+# - Alligator is proven trend-following tool that avoids whipsaws in ranging markets
+# - Weekly filter ensures we only trade in the direction of the higher timeframe trend
+# - Novel combination: Williams Alligator + weekly trend + volume filter not recently tried
+# - Aims for 40-120 total trades over 4 years (10-30/year) to stay within limits
