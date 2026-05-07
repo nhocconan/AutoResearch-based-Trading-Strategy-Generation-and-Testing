@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_Donchian_Breakout_with_1d_Trend_and_Volume_Spike
-Hypothesis: 4h Donchian breakout (20) filtered by 1d ADX trend strength (>25) and 1d volume spike (>2x 20-day average).
-Long on breakout above Donchian high in bullish 1d trend with volume spike.
-Short on breakout below Donchian low in bearish 1d trend with volume spike.
-Exit on opposite Donchian band touch.
-Designed for low-frequency, high-conviction trades in both bull and bear markets.
+4h_KAMA_Trend_With_RSI_Pullback
+Hypothesis: KAMA adapts to market noise, providing reliable trend direction in both bull and bear markets.
+Enter long when KAMA turns up and price pulls back to KAMA with RSI < 40.
+Enter short when KAMA turns down and price pulls back to KAMA with RSI > 60.
+Exit on opposite KAMA cross.
+Uses 1d ADX > 20 to ensure trending market, reducing false signals in chop.
+Designed for low-frequency, high-conviction trades with controlled risk.
 """
 
-name = "4h_Donchian_Breakout_with_1d_Trend_and_Volume_Spike"
+name = "4h_KAMA_Trend_With_RSI_Pullback"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,20 +25,62 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for filters
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 4h Donchian channels (20-period)
-    lookback = 20
-    donch_high = np.full(n, np.nan)
-    donch_low = np.full(n, np.nan)
-    for i in range(lookback, n):
-        donch_high[i] = np.max(high[i-lookback:i])
-        donch_low[i] = np.min(low[i-lookback:i])
+    # KAMA (4h) - Adaptive moving average
+    er_period = 10
+    fast_sc = 2 / (2 + 1)  # EMA(2)
+    slow_sc = 2 / (30 + 1) # EMA(30)
+    
+    change = np.abs(np.diff(close, n=1))
+    change = np.concatenate([[0], change])
+    
+    volatility = np.zeros(n)
+    for i in range(1, n):
+        volatility[i] = volatility[i-1] + np.abs(close[i] - close[i-1])
+    
+    er = np.zeros(n)
+    for i in range(er_period, n):
+        if volatility[i] != 0:
+            er[i] = change[i-er_period+1:i+1].sum() / volatility[i]
+        else:
+            er[i] = 0
+    
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # KAMA direction (turning points)
+    kama_up = kama > np.roll(kama, 1)
+    kama_down = kama < np.roll(kama, 1)
+    kama_up[0] = False
+    kama_down[0] = False
+    
+    # RSI (4h) for pullback entries
+    rsi_period = 14
+    delta = np.diff(close)
+    delta = np.concatenate([[0], delta])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    for i in range(1, n):
+        if i < rsi_period:
+            avg_gain[i] = np.mean(gain[1:i+1]) if i > 0 else 0
+            avg_loss[i] = np.mean(loss[1:i+1]) if i > 0 else 0
+        else:
+            avg_gain[i] = (avg_gain[i-1] * (rsi_period-1) + gain[i]) / rsi_period
+            avg_loss[i] = (avg_loss[i-1] * (rsi_period-1) + loss[i]) / rsi_period
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
     # 1d ADX for trend filter (14-period)
     high_1d = df_1d['high'].values
@@ -80,72 +123,56 @@ def generate_signals(prices):
     dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
     adx = smooth_wilder(dx, atr_period)
     
-    # 1d volume average (20-period)
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = np.full_like(vol_1d, np.nan)
-    for i in range(20, len(vol_1d)):
-        vol_ma_1d[i] = np.mean(vol_1d[i-20:i])
-    
-    # Align 1d indicators to 4h
+    # Align indicators to 4h
+    kama_up_aligned = align_htf_to_ltf(prices, df_1d, kama_up.astype(float))
+    kama_down_aligned = align_htf_to_ltf(prices, df_1d, kama_down.astype(float))
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
-    
-    # Volume spike condition: current 1d volume > 2x 20-day average
-    vol_spike = vol_1d > (2 * vol_ma_1d)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(lookback, 30)  # Warmup
+    start_idx = max(30, 14)  # Warmup
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
-            np.isnan(close_1d_aligned[i]) or np.isnan(vol_spike_aligned[i])):
+        if (np.isnan(kama_up_aligned[i]) or np.isnan(kama_down_aligned[i]) or 
+            np.isnan(rsi_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(close_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine 1d trend direction using ADX and price vs 20-period SMA
-        sma_20_1d = np.full_like(close_1d, np.nan)
-        for j in range(20, len(close_1d)):
-            sma_20_1d[j] = np.mean(close_1d[j-20:j])
-        sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_20_1d)
-        
-        if not np.isnan(sma_20_1d_aligned[i]):
-            trend_1d_up = adx_aligned[i] > 25 and close_1d_aligned[i] > sma_20_1d_aligned[i]
-            trend_1d_down = adx_aligned[i] > 25 and close_1d_aligned[i] < sma_20_1d_aligned[i]
-        else:
-            trend_1d_up = False
-            trend_1d_down = False
+        # Trend filter: ADX > 20
+        trending = adx_aligned[i] > 20
         
         if position == 0:
-            # Long: Donchian breakout up in 1d uptrend with volume spike
-            if (close[i] > donch_high[i] and 
-                trend_1d_up and 
-                vol_spike_aligned[i]):
+            # Long: KAMA turning up, price pulls back to KAMA, RSI < 40
+            if (kama_up_aligned[i] and 
+                close[i] <= kama[i] * 1.005 and  # Allow small overshoot
+                rsi_aligned[i] < 40 and 
+                trending):
                 signals[i] = 0.25
                 position = 1
-            # Short: Donchian breakout down in 1d downtrend with volume spike
-            elif (close[i] < donch_low[i] and 
-                  trend_1d_down and 
-                  vol_spike_aligned[i]):
+            # Short: KAMA turning down, price pulls back to KAMA, RSI > 60
+            elif (kama_down_aligned[i] and 
+                  close[i] >= kama[i] * 0.995 and  # Allow small undershoot
+                  rsi_aligned[i] > 60 and 
+                  trending):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below Donchian low
-            if close[i] < donch_low[i]:
+            # Exit long: KAMA turns down
+            if kama_down_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above Donchian high
-            if close[i] > donch_high[i]:
+            # Exit short: KAMA turns up
+            if kama_up_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
