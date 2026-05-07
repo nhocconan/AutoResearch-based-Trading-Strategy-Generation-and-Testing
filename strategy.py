@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_Liquidity_Imbalance_Correction_1dLiquidityPools"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,65 +17,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and trend
+    # Get 1d data for liquidity pools (equal highs/lows)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 1d Camarilla R3/S3 levels (stronger breakout levels)
+    # Calculate 1d liquidity pools: equal highs and lows within 0.1% tolerance
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    range_1d = high_1d - low_1d
-    r3_1d = close_1d + 1.1666 * range_1d * 1.1 / 2
-    s3_1d = close_1d - 1.1666 * range_1d * 1.1 / 2
+    # Find equal highs (resistance liquidity) - within 0.1%
+    equal_highs = np.zeros(len(high_1d), dtype=bool)
+    equal_lows = np.zeros(len(low_1d), dtype=bool)
     
-    # 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    tolerance = 0.001  # 0.1%
     
-    # Align all to 4h timeframe
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    for i in range(1, len(high_1d)-1):
+        # Check if current high is equal to previous or next high (liquidity pool)
+        if (abs(high_1d[i] - high_1d[i-1]) / high_1d[i] < tolerance or 
+            abs(high_1d[i] - high_1d[i+1]) / high_1d[i] < tolerance):
+            equal_highs[i] = True
+            
+        # Check if current low is equal to previous or next low (liquidity pool)
+        if (abs(low_1d[i] - low_1d[i-1]) / low_1d[i] < tolerance or 
+            abs(low_1d[i] - low_1d[i+1]) / low_1d[i] < tolerance):
+            equal_lows[i] = True
     
-    # Volume filter: current volume > 2.0 * 20-period average (strict for 4h)
+    # Liquidity pool levels: price levels where stops are likely clustered
+    resistance_liq = np.where(equal_highs, high_1d, np.nan)
+    support_liq = np.where(equal_lows, low_1d, np.nan)
+    
+    # Forward fill liquidity levels (they remain valid until broken)
+    resistance_liq_series = pd.Series(resistance_liq)
+    support_liq_series = pd.Series(support_liq)
+    resistance_liq_ffill = resistance_liq_series.ffill().bfill().values
+    support_liq_ffill = support_liq_series.ffill().bfill().values
+    
+    # 1d trend filter: EMA50
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align all to 6h timeframe
+    resistance_liq_aligned = align_htf_to_ltf(prices, df_1d, resistance_liq_ffill)
+    support_liq_aligned = align_htf_to_ltf(prices, df_1d, support_liq_ffill)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume filter: current volume > 1.5 * 20-period average (moderate for 6h)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_avg * 2.0)
+    volume_filter = volume > (vol_avg * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 34, 34)
+    start_idx = max(50, 50, 50)
     
     for i in range(start_idx, n):
         # Skip if any data is not ready
-        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(resistance_liq_aligned[i]) or np.isnan(support_liq_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R3 + daily uptrend + volume
-            if close[i] > r3_1d_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_filter[i]:
+            # Long: price breaks above resistance liquidity pool + uptrend + volume
+            if close[i] > resistance_liq_aligned[i] and close[i] > ema_50_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 + daily downtrend + volume
-            elif close[i] < s3_1d_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_filter[i]:
+            # Short: price breaks below support liquidity pool + downtrend + volume
+            elif close[i] < support_liq_aligned[i] and close[i] < ema_50_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: price crosses back through the opposite S3/R3 level
+            # Exit: price returns to the opposite liquidity pool (mean reversion to liquidity)
             if position == 1:
-                if close[i] < s3_1d_aligned[i]:
+                if close[i] < support_liq_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > r3_1d_aligned[i]:
+                if close[i] > resistance_liq_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
