@@ -8,7 +8,7 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
-    n = len(prices)
+    n = len(prrices)
     if n < 100:
         return np.zeros(n)
     
@@ -71,13 +71,13 @@ def generate_signals(prices):
             if (close[i] > r1_aligned[i] and 
                 close[i] > ema_34_1d_aligned[i] and 
                 volume_ratio[i] > 2.0):
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             # Short: price breaks below S1 level, downtrend (price < EMA34), volume confirmation
             elif (close[i] < s1_aligned[i] and 
                   close[i] < ema_34_1d_aligned[i] and 
                   volume_ratio[i] > 2.0):
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
             # Exit long: price breaks below S1 level (reversal signal)
@@ -85,13 +85,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
             # Exit short: price breaks above R1 level (reversal signal)
             if close[i] > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
