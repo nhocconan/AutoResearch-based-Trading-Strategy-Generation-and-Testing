@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_1d_FibonacciExtension_Breakout_Trend"
-timeframe = "6h"
+name = "12h_Keltner_Breakout_TrendVolume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,71 +17,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
+    # Load weekly data ONCE before loop for ATR
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    # Load daily data ONCE before loop for EMA trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate weekly high/low for Fibonacci extension levels
-    # We'll use the previous week's range to project extension levels
-    # Group daily data into weeks (approximate)
-    weekly_high = df_1d['high'].rolling(window=5, min_periods=5).max().shift(1).values  # Previous week high
-    weekly_low = df_1d['low'].rolling(window=5, min_periods=5).min().shift(1).values    # Previous week low
-    weekly_close = df_1d['close'].rolling(window=5, min_periods=5).last().shift(1).values  # Previous week close
+    # Calculate ATR(14) on weekly
+    tr1 = np.maximum(df_1w['high'].values, np.roll(df_1w['close'].values, 1))
+    tr1 = np.maximum(tr1, np.roll(df_1w['low'].values, 1))
+    tr2 = np.abs(df_1w['high'].values - np.roll(df_1w['low'].values, 1))
+    tr = np.maximum(tr1, tr2)
+    tr[0] = tr[1]  # first bar
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_aligned = align_htf_to_ltf(prices, df_1w, atr_14)
     
-    # Calculate Fibonacci extension levels (127.2% and 161.8%)
-    weekly_range = weekly_high - weekly_low
-    fib_127 = weekly_close + weekly_range * 1.272
-    fib_161 = weekly_close + weekly_range * 1.618
+    # Calculate EMA(20) on daily
+    ema_20_1d = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
-    # Align weekly Fibonacci levels to 6h timeframe
-    fib_127_aligned = align_htf_to_ltf(prices, df_1d, fib_127)
-    fib_161_aligned = align_htf_to_ltf(prices, df_1d, fib_161)
+    # Keltner Channels on 12h: EMA(20) ± 2*ATR
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    upper = ema_20 + 2 * atr_14_aligned
+    lower = ema_20 - 2 * atr_14_aligned
     
-    # 1d EMA(50) for trend filter (using daily close)
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Volume spike detection: 4-period average (1 day of 6h bars)
+    # Volume spike: 4-bar average (2 days of 12h bars)
     vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 4)  # Wait for EMA and volume MA
+    start_idx = max(20, 14, 4)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(fib_127_aligned[i]) or 
-            np.isnan(fib_161_aligned[i]) or np.isnan(vol_ma_4[i])):
+        if (np.isnan(ema_20_1d_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
+            np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(vol_ma_4[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above 127.2% extension with volume and 1d uptrend
+            # Long: close above upper Keltner with volume and daily uptrend
             vol_condition = volume[i] > vol_ma_4[i] * 2.0
-            uptrend = ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1]
+            uptrend = ema_20_1d_aligned[i] > ema_20_1d_aligned[i-1]
             
-            if close[i] > fib_127_aligned[i] and vol_condition and uptrend:
+            if close[i] > upper[i] and vol_condition and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 127.2% extension (downside) with volume and 1d downtrend
-            elif close[i] < (2 * ema_50_1d_aligned[i] - fib_127_aligned[i]) and vol_condition and not uptrend:
-                # Synthetic downside extension: mirror the 127.2% level around EMA
+            # Short: close below lower Keltner with volume and daily downtrend
+            elif close[i] < lower[i] and vol_condition and not uptrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price drops below 161.8% extension or volume drops
-            if close[i] < fib_161_aligned[i] or volume[i] < vol_ma_4[i] * 1.3:
+            # Exit: close back below EMA(20) or volume drops
+            if close[i] < ema_20[i] or volume[i] < vol_ma_4[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price rises above synthetic 161.8% extension or volume drops
-            synthetic_161 = 2 * ema_50_1d_aligned[i] - fib_161_aligned[i]
-            if close[i] > synthetic_161 or volume[i] < vol_ma_4[i] * 1.3:
+            # Exit: close back above EMA(20) or volume drops
+            if close[i] > ema_20[i] or volume[i] < vol_ma_4[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -89,14 +90,14 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 6s Fibonacci extension breakout with 1d trend and volume confirmation
-# - Uses weekly Fibonacci extension levels (127.2%, 161.8%) from prior week's range
-# - Breakout above 127.2% extension with volume in 1d uptrend = long opportunity
-# - Breakdown below synthetic 127.2% extension (mirrored) with volume in 1d downtrend = short opportunity
-# - Volume spike (2.0x average) confirms strong institutional participation
-# - Fibonacci extensions work in both bull (continuation) and bear (counter-trend rallies) markets
-# - Exit when price reaches 161.8% extension (profit target) or volume weakens
-# - Position size 0.25 targets ~30-60 trades/year, staying within limits
-# - Novel: Weekly Fibonacci extensions + 1d trend + volume confirmation not recently tried on 6h
-# - Aims for 50-150 total trades over 4 years (12-37/year) to avoid fee drag
-# - Works in BOTH bull and bear markets via trend filter and symmetric logic
+# Hypothesis: 12h Keltner Channel breakout with weekly ATR and daily trend
+# - Keltner Channels (EMA ± 2*ATR) adapt to volatility better than fixed bands
+# - Weekly ATR(14) provides stable volatility measure less prone to whipsaw
+# - Breakout above upper band with volume in daily uptrend = long
+# - Breakdown below lower band with volume in daily downtrend = short
+# - Volume spike (2x average) confirms institutional participation
+# - Exit when price returns to EMA(20) or volume weakens
+# - Position size 0.25 targets ~20-50 trades/year, avoiding fee drag
+# - Weekly ATR ensures volatility normalization across regimes
+# - Daily trend filter prevents counter-trend entries in choppy markets
+# - Works in both bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend)
