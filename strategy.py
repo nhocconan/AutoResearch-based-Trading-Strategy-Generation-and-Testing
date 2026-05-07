@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w trend filter and volume confirmation.
-# Long when price breaks above 1d Donchian upper (20-period high) AND 1w EMA20 uptrend AND volume > 1.5 * 20-day average.
-# Short when price breaks below 1d Donchian lower (20-period low) AND 1w EMA20 downtrend AND volume > 1.5 * 20-day average.
-# Uses weekly trend to avoid counter-trend trades and volume to confirm breakout strength.
-# Designed for low frequency (target: 10-25 trades/year) to minimize fee drag and improve robustness.
-# Works in bull markets via breakouts and in bear markets via short breakdowns with trend filter.
-name = "1d_Donchian20_1wTrend_Volume"
-timeframe = "1d"
+# Hypothesis: 6h Williams %R with 1d ADX trend filter and volume confirmation.
+# Long when Williams %R crosses above -20 (oversold recovery) AND 1d ADX > 25 (trending) AND 1d volume spike.
+# Short when Williams %R crosses below -80 (overbought breakdown) AND 1d ADX > 25 AND 1d volume spike.
+# Williams %R identifies momentum reversals, ADX filters for trending markets to avoid whipsaws,
+# volume confirms institutional interest. Designed for 6h timeframe to balance signal frequency and noise.
+# Works in bull markets (captures oversold bounces) and bear markets (captures overbought breakdowns).
+name = "6h_WilliamsR_ADX_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,31 +23,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for Donchian channels and volume average
+    # Load 1d data for ADX and volume spike
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d Donchian channels (20-period)
-    donchian_high = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
+    # 1d ADX calculation (14-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 1d volume average (20-period EMA)
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = high_1d[0] - low_1d[0]  # first period
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Directional Movement
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    up_move[0] = 0
+    down_move[0] = 0
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values
+    def smooth_wilder(arr, period):
+        result = np.zeros_like(arr)
+        result[period-1] = np.nansum(arr[:period])
+        for i in range(period, len(arr)):
+            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
+        return result
+    
+    atr = smooth_wilder(tr, 14)
+    plus_di = 100 * smooth_wilder(plus_dm, 14) / atr
+    minus_di = 100 * smooth_wilder(minus_dm, 14) / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = smooth_wilder(dx, 14)
+    
+    # 1d volume spike: current volume > 2.0 * 20-period EMA
     vol_ema_20 = pd.Series(df_1d['volume']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_spike_1d = np.where(vol_ema_20 > 0, df_1d['volume'].values / vol_ema_20, 1.0) > 2.0
     
-    # Load 1w data for trend filter (EMA20)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
     
-    # 1w EMA20 for trend direction
-    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Align all indicators to 1d timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    vol_ema_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ema_20)
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # 6h Williams %R (14-period)
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14)
+    williams_r = np.where((highest_high_14 - lowest_low_14) > 0, williams_r, -50.0)  # avoid division by zero
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -55,26 +83,23 @@ def generate_signals(prices):
     start_idx = 50  # Sufficient warmup for calculations
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(vol_ema_20_aligned[i]) or np.isnan(ema_20_1w_aligned[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(vol_spike_1d_aligned[i]) or 
+            np.isnan(williams_r[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Williams %R cross signals
+        williams_r_prev = williams_r[i-1] if i > 0 else -50
+        wr_cross_above_20 = (williams_r_prev <= -20) and (williams_r[i] > -20)
+        wr_cross_below_80 = (williams_r_prev >= -80) and (williams_r[i] < -80)
+        
         if position == 0:
-            # Volume confirmation: current volume > 1.5 * 20-day EMA
-            vol_confirm = volume[i] > 1.5 * vol_ema_20_aligned[i]
-            
-            # Long condition: break above Donchian high, weekly uptrend, volume confirmation
-            long_condition = (close[i] > donchian_high_aligned[i]) and \
-                            (ema_20_1w_aligned[i] > ema_20_1w_aligned[i-1]) and \
-                            vol_confirm
-            
-            # Short condition: break below Donchian low, weekly downtrend, volume confirmation
-            short_condition = (close[i] < donchian_low_aligned[i]) and \
-                             (ema_20_1w_aligned[i] < ema_20_1w_aligned[i-1]) and \
-                             vol_confirm
+            # Long condition: WR crosses above -20, ADX > 25 (trending), volume spike
+            long_condition = wr_cross_above_20 and (adx_aligned[i] > 25) and vol_spike_1d_aligned[i]
+            # Short condition: WR crosses below -80, ADX > 25 (trending), volume spike
+            short_condition = wr_cross_below_80 and (adx_aligned[i] > 25) and vol_spike_1d_aligned[i]
             
             if long_condition:
                 signals[i] = 0.25
@@ -83,15 +108,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price breaks below Donchian low or weekly trend turns down
-            if (close[i] < donchian_low_aligned[i]) or (ema_20_1w_aligned[i] < ema_20_1w_aligned[i-1]):
+            # Exit: WR crosses below -50 (momentum loss) or ADX weakens (< 20)
+            if (williams_r[i] < -50) or (adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price breaks above Donchian high or weekly trend turns up
-            if (close[i] > donchian_high_aligned[i]) or (ema_20_1w_aligned[i] > ema_20_1w_aligned[i-1]):
+            # Exit: WR crosses above -50 (momentum loss) or ADX weakens (< 20)
+            if (williams_r[i] > -50) or (adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
