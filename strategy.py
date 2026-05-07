@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Donchian20_TrendVolume_1d"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Regime"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,9 +17,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Donchian calculation
+    # Get 1d data for trend filter (EMA50) and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # Calculate 1d EMA50 for trend filter
@@ -27,25 +27,37 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Donchian channels from previous 1d candle (20-period)
+    # Calculate Camarilla levels from previous 1d candle (R1 and S1)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Shift to get previous 1d period's values for Donchian calculation
+    # Shift to get previous 1d period's values
     high_1d_shifted = np.roll(high_1d, 1)
     low_1d_shifted = np.roll(low_1d, 1)
+    close_1d_shifted = np.roll(close_1d, 1)
     
-    # Calculate Donchian upper and lower bands (20-period high/low of previous day)
-    donchian_upper = pd.Series(high_1d_shifted).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_1d_shifted).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla width for R1/S1: (H-L)*1.1/12
+    camarilla_width = (high_1d_shifted - low_1d_shifted) * 1.1 / 12
+    r1 = close_1d_shifted + camarilla_width  # R1 level
+    s1 = close_1d_shifted - camarilla_width  # S1 level
     
-    # Align Donchian levels to 12h timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
+    # Align Camarilla levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
     # Calculate volume confirmation (current volume vs 20-period average)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / vol_ma20
+    
+    # Calculate 20-period ATR for volatility regime filter
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR is just high-low
+    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    atr_ratio = atr / pd.Series(tr).rolling(window=50, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -55,37 +67,40 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any data is not ready
         if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(donchian_upper_aligned[i]) or 
-            np.isnan(donchian_lower_aligned[i]) or 
-            np.isnan(volume_ratio[i])):
+            np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
+            np.isnan(volume_ratio[i]) or
+            np.isnan(atr_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian upper, uptrend (price > EMA50), volume confirmation
-            if (close[i] > donchian_upper_aligned[i] and 
+            # Long: price breaks above R1 level, uptrend (price > EMA50), volume confirmation, low volatility regime
+            if (close[i] > r1_aligned[i] and 
                 close[i] > ema_50_1d_aligned[i] and 
-                volume_ratio[i] > 2.0):
+                volume_ratio[i] > 2.0 and
+                atr_ratio[i] < 0.8):  # Low volatility regime (avoid choppy markets)
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower, downtrend (price < EMA50), volume confirmation
-            elif (close[i] < donchian_lower_aligned[i] and 
+            # Short: price breaks below S1 level, downtrend (price < EMA50), volume confirmation, low volatility regime
+            elif (close[i] < s1_aligned[i] and 
                   close[i] < ema_50_1d_aligned[i] and 
-                  volume_ratio[i] > 2.0):
+                  volume_ratio[i] > 2.0 and
+                  atr_ratio[i] < 0.8):  # Low volatility regime
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below Donchian lower (reversal signal)
-            if close[i] < donchian_lower_aligned[i]:
+            # Exit long: price breaks below S1 level (reversal signal) OR volatility spikes
+            if close[i] < s1_aligned[i] or atr_ratio[i] > 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above Donchian upper (reversal signal)
-            if close[i] > donchian_upper_aligned[i]:
+            # Exit short: price breaks above R1 level (reversal signal) OR volatility spikes
+            if close[i] > r1_aligned[i] or atr_ratio[i] > 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
