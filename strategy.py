@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 12h_1d_Camarilla_Pivot_R3_S3_Breakout_Trend_Volume
-# Hypothesis: 12-hour Camarilla pivot (R3/S3) breakout with 1-day EMA trend filter and volume confirmation
-# Works in bull markets via breakout above R3 and in bear markets via breakdown below S3
-# Volume filter reduces false breakouts, trend filter avoids counter-trend trades
-# Target: 15-30 trades per year (~60-120 over 4 years) with position size 0.25
+# 4h_Camarilla_Pivot_R3_S3_Breakout_Trend_1dVwap_PriceAction
+# Hypothesis: Camarilla R3/S3 breakout with 1d VWAP trend filter and volume confirmation.
+# Works in bull via R3 breakouts, bear via S3 breakdowns. VWAP filters counter-trend, volume avoids false breaks.
+# Target: 20-50 trades per year (~80-200 over 4 years) with position size 0.25
 
-name = "12h_1d_Camarilla_Pivot_R3_S3_Breakout_Trend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_Pivot_R3_S3_Breakout_Trend_1dVwap_PriceAction"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,31 +22,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for Camarilla pivots and trend filter
+    # Load 1d data ONCE for pivot and VWAP
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Previous day's high, low, close for Camarilla
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Calculate Camarilla pivot levels from previous 1d bar
-    # Typical price = (high + low + close) / 3
+    # Camarilla R3 and S3 levels
+    R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    
+    # 1d VWAP for trend filter
     typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    # Camarilla levels
-    R4 = typical_price + ((df_1d['high'] - df_1d['low']) * 1.1 / 2)
-    R3 = typical_price + ((df_1d['high'] - df_1d['low']) * 1.1 / 4)
-    R2 = typical_price + ((df_1d['high'] - df_1d['low']) * 1.1 / 6)
-    R1 = typical_price + ((df_1d['high'] - df_1d['low']) * 1.1 / 12)
-    S1 = typical_price - ((df_1d['high'] - df_1d['low']) * 1.1 / 12)
-    S2 = typical_price - ((df_1d['high'] - df_1d['low']) * 1.1 / 6)
-    S3 = typical_price - ((df_1d['high'] - df_1d['low']) * 1.1 / 4)
-    S4 = typical_price - ((df_1d['high'] - df_1d['low']) * 1.1 / 2)
+    vwap = (typical_price * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
+    vwap_vals = vwap.values
     
-    # Align pivot levels to 12h timeframe (use previous day's levels)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3.values)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3.values)
+    # Align to 4h
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap_vals)
     
     # Volume ratio: current volume / 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -56,46 +53,46 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need 20 periods for volume average
+    start_idx = 20  # Need volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(R3_aligned[i]) or 
-            np.isnan(S3_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
+            np.isnan(vwap_aligned[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Breakout conditions
-        breakout_up = close[i] > R3_aligned[i-1]  # Break above R3
-        breakout_down = close[i] < S3_aligned[i-1]  # Break below S3
+        breakout_up = close[i] > R3_aligned[i]  # Break above R3
+        breakout_down = close[i] < S3_aligned[i]  # Break below S3
         
         # Volume confirmation: volume > 1.5x average
         volume_confirm = vol_ratio[i] > 1.5
         
-        # Trend filter from 1d EMA34
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        # Trend filter from 1d VWAP
+        uptrend = close[i] > vwap_aligned[i]
+        downtrend = close[i] < vwap_aligned[i]
         
         if position == 0:
-            # Long: upward breakout above R3 + volume + uptrend
+            # Long: upward breakout + volume + uptrend
             if breakout_up and volume_confirm and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: downward breakout below S3 + volume + downtrend
+            # Short: downward breakout + volume + downtrend
             elif breakout_down and volume_confirm and downtrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price breaks below S3 or trend reversal
-            if close[i] < S3_aligned[i-1] or not uptrend:
+            # Exit: price breaks back below R3 or trend reversal
+            if close[i] < R3_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price breaks above R3 or trend reversal
-            if close[i] > R3_aligned[i-1] or not downtrend:
+            # Exit: price breaks back above S3 or trend reversal
+            if close[i] > S3_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
