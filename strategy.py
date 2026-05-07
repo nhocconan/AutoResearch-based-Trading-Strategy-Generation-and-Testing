@@ -1,19 +1,32 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3S3_Breakout_1dTrend_Volume_v1
-Hypothesis: Uses Camarilla pivot levels (R3/S3) from 1-day timeframe for entry,
-with 1-day EMA trend filter and volume confirmation. Designed to work in both
-bull and bear markets by only trading in direction of higher timeframe trend.
-Targets 20-40 trades per year to minimize fee drag.
+12h_Williams_Alligator_Trend_Filter_v1
+Hypothesis: Uses Williams Alligator (Jaw/Teeth/Lips) on 12h timeframe to identify trend direction,
+combined with 1-week trend filter and volume confirmation to avoid false signals.
+Williams Alligator uses smoothed moving averages (SMMA) to filter noise and identify
+trending vs ranging markets. Targets 15-30 trades/year to minimize fee drift.
+Works in both bull and bear markets by following the trend direction from higher timeframes.
 """
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_v1"
-timeframe = "4h"
+name = "12h_Williams_Alligator_Trend_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def smma(data, period):
+    """Smoothed Moving Average (SMMA) - similar to Wilder's smoothing"""
+    if len(data) < period:
+        return np.full_like(data, np.nan, dtype=float)
+    result = np.full_like(data, np.nan, dtype=float)
+    # First value is simple average
+    result[period-1] = np.mean(data[:period])
+    # Subsequent values: SMMA = (prev_SMMA * (period-1) + current_price) / period
+    for i in range(period, len(data)):
+        result[i] = (result[i-1] * (period-1) + data[i]) / period
+    return result
 
 def generate_signals(prices):
     n = len(prices)
@@ -25,32 +38,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla pivot levels from 1-day timeframe
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    # Williams Alligator on 12h: Jaw (13,8), Teeth (8,5), Lips (5,3)
+    # All are SMMA of median price (high+low)/2
+    median_price = (high + low) / 2
+    
+    jaw = smma(median_price, 13)
+    teeth = smma(median_price, 8)
+    lips = smma(median_price, 5)
+    
+    # Align Alligator lines to lower timeframe (12h data already matches our timeframe)
+    jaw_aligned = jaw  # Already on 12h timeframe
+    teeth_aligned = teeth
+    lips_aligned = lips
+    
+    # 1-week trend filter: EMA of weekly close
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Camarilla calculation: R3/S3 levels
-    # Pivot = (H + L + C) / 3
-    # Range = H - L
-    # R3 = Close + (Range * 1.1/2)
-    # S3 = Close - (Range * 1.1/2)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r3_1d = close_1d + (range_1d * 1.1 / 2)
-    s3_1d = close_1d - (range_1d * 1.1 / 2)
-    
-    # Align Camarilla levels to 4h timeframe
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    
-    # 1-day trend filter: EMA of daily close
-    ema_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # Volume confirmation: current volume > 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -60,32 +68,39 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any critical value is NaN
-        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(ema_1w_aligned[i]) or 
+            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Trend condition: Lips > Teeth > Jaw = uptrend, Lips < Teeth < Jaw = downtrend
+        is_uptrend = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]
+        is_downtrend = lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaw_aligned[i]
+        
         if position == 0:
-            # Long: price breaks above R3 with uptrend and volume confirmation
-            if close[i] > r3_1d_aligned[i] and close[i] > ema_1d_aligned[i] and volume[i] > vol_ma[i]:
+            # Long: uptrend + price above lips + 1-week trend up + volume confirmation
+            if (is_uptrend and close[i] > lips_aligned[i] and 
+                close[i] > ema_1w_aligned[i] and volume[i] > vol_ma[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 with downtrend and volume confirmation
-            elif close[i] < s3_1d_aligned[i] and close[i] < ema_1d_aligned[i] and volume[i] > vol_ma[i]:
+            # Short: downtrend + price below lips + 1-week trend down + volume confirmation
+            elif (is_downtrend and close[i] < lips_aligned[i] and 
+                  close[i] < ema_1w_aligned[i] and volume[i] > vol_ma[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price crosses below S3 or below EMA
-            if close[i] < s3_1d_aligned[i] or close[i] < ema_1d_aligned[i]:
+            # Exit: trend changes to downtrend OR price crosses below lips
+            if not is_uptrend or close[i] < lips_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price crosses above R3 or above EMA
-            if close[i] > r3_1d_aligned[i] or close[i] > ema_1d_aligned[i]:
+            # Exit: trend changes to uptrend OR price crosses above lips
+            if not is_downtrend or close[i] > lips_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
