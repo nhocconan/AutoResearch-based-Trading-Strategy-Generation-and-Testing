@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_Donchian_20_Volume_Trend"
+name = "4h_Donchian_Breakout_Volume_Trend"
 timeframe = "4h"
 leverage = 1.0
 
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,71 +24,56 @@ def generate_signals(prices):
     
     # 1d EMA34 for trend filter
     close_1d = df_1d['close'].values
-    ema_1d = np.zeros_like(close_1d)
-    ema_1d[0] = close_1d[0]
-    alpha = 2.0 / (34 + 1)
-    for i in range(1, len(close_1d)):
-        ema_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_1d[i-1]
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Align 1d EMA to 4h timeframe
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # 4h Donchian channel (20-period)
-    window = 20
-    highest = np.full(n, np.nan)
-    lowest = np.full(n, np.nan)
-    for i in range(window - 1, n):
-        highest[i] = np.max(high[i-window+1:i+1])
-        lowest[i] = np.min(low[i-window+1:i+1])
+    # 4h Donchian channels (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # 4h volume filter: > 1.5x 20-period average
-    vol_ma = np.full(n, np.nan)
-    for i in range(20 - 1, n):
-        vol_ma[i] = np.mean(volume[i-20+1:i+1])
-    vol_filter = volume > 1.5 * vol_ma
+    vol_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > 1.5 * vol_ma_4h
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # Wait for indicators
+    start_idx = max(34, 20)  # Wait for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(highest[i]) or np.isnan(lowest[i]) or 
-            np.isnan(vol_ma[i])):
+        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(vol_ma_4h[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price > Donchian upper + trend up + volume
-            if (close[i] > highest[i] and close[i] > ema_1d_aligned[i] and vol_filter[i]):
-                signals[i] = 0.25
+            # Long: Breakout above upper Donchian + above 1d EMA34 + volume
+            if (close[i] > high_20[i] and close[i] > ema_34_1d_aligned[i] and vol_filter[i]):
+                signals[i] = 0.30
                 position = 1
-            # Short: Price < Donchian lower + trend down + volume
-            elif (close[i] < lowest[i] and close[i] < ema_1d_aligned[i] and vol_filter[i]):
-                signals[i] = -0.25
+            # Short: Breakout below lower Donchian + below 1d EMA34 + volume
+            elif (close[i] < low_20[i] and close[i] < ema_34_1d_aligned[i] and vol_filter[i]):
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit: Price < Donchian lower or trend down
-            if close[i] < lowest[i] or close[i] < ema_1d_aligned[i]:
+            # Exit: Close below lower Donchian or below 1d EMA34
+            if close[i] < low_20[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit: Price > Donchian upper or trend up
-            if close[i] > highest[i] or close[i] > ema_1d_aligned[i]:
+            # Exit: Close above upper Donchian or above 1d EMA34
+            if close[i] > high_20[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-# Hypothesis: 4h Donchian breakout with 1d EMA trend filter and volume confirmation.
-# Donchian(20) captures breakouts from 20-period price channels.
-# 1d EMA34 provides higher timeframe trend alignment.
-# Volume filter ensures trades occur with market participation.
-# Works in both bull and bear markets by following the trend on higher timeframe.
-# Position size 0.25 limits risk, targeting 20-40 trades/year to minimize fee drag.
+# Hypothesis: 4h Donchian breakout with 1d EMA34 trend filter and volume confirmation.
+# Works in bull markets (breakouts above rising EMA) and bear markets (breakouts below falling EMA).
+# Volume filter ensures breakouts have participation. Position size 0.30 balances risk/return.
+# Target: 30-50 trades/year to minimize fee drag. Uses discrete levels to reduce churn.
