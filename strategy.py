@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Ichimoku_Cloud_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_v4"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 150:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,34 +17,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE for trend filter
+    # Load daily data ONCE for Camarilla pivot and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 26:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Ichimoku Cloud components (9, 26, 52)
-    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (high_9 + low_9) / 2
+    # Camarilla pivot levels from previous day (standard formula)
+    c_high = df_1d['high'].values
+    c_low = df_1d['low'].values
+    c_close = df_1d['close'].values
     
-    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (high_26 + low_26) / 2
+    pivot = (c_high + c_low + c_close) / 3
+    range_val = c_high - c_low
+    r3 = pivot + (range_val * 1.1 / 4)
+    s3 = pivot - (range_val * 1.1 / 4)
     
-    senkou_span_a = (tenkan_sen + kijun_sen) / 2
-    senkou_span_b = (pd.Series(high).rolling(window=52, min_periods=52).max().values + 
-                     pd.Series(low).rolling(window=52, min_periods=52).min().values) / 2
+    # Align pivot levels to 4h timeframe
+    r3_4h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_4h = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Align Ichimoku components to 12h timeframe
-    tenkan_12h = align_htf_to_ltf(prices, prices, tenkan_sen)
-    kijun_12h = align_htf_to_ltf(prices, prices, kijun_sen)
-    senkou_a_12h = align_htf_to_ltf(prices, prices, senkou_span_a)
-    senkou_b_12h = align_htf_to_ltf(prices, prices, senkou_span_b)
-    
-    # Daily EMA26 for trend filter
-    close_1d = df_1d['close'].values
-    ema_26_1d = pd.Series(close_1d).ewm(span=26, adjust=False, min_periods=26).mean().values
-    ema_26_12h = align_htf_to_ltf(prices, df_1d, ema_26_1d)
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(c_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_4h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume spike detection (2x 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -52,42 +46,39 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(26, 20)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(tenkan_12h[i]) or np.isnan(kijun_12h[i]) or 
-            np.isnan(senkou_a_12h[i]) or np.isnan(senkou_b_12h[i]) or 
-            np.isnan(ema_26_12h[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or 
+            np.isnan(ema_34_4h[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Cloud top and bottom
-        cloud_top = max(senkou_a_12h[i], senkou_b_12h[i])
-        cloud_bottom = min(senkou_a_12h[i], senkou_b_12h[i])
-        
         vol_condition = volume[i] > vol_ma_20[i] * 2.0
         
         if position == 0:
-            # Long: price breaks above cloud in daily uptrend with volume
-            if close[i] > cloud_top and ema_26_12h[i] > ema_26_12h[i-1] and vol_condition:
+            # Long: break above R3 in daily uptrend with volume
+            if close[i] > r3_4h[i] and ema_34_4h[i] > ema_34_4h[i-1] and vol_condition:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below cloud in daily downtrend with volume
-            elif close[i] < cloud_bottom and ema_26_12h[i] < ema_26_12h[i-1] and vol_condition:
+            # Short: break below S3 in daily downtrend with volume
+            elif close[i] < s3_4h[i] and ema_34_4h[i] < ema_34_4h[i-1] and vol_condition:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price returns to cloud or trend reverses
-            if close[i] < cloud_top or ema_26_12h[i] < ema_26_12h[i-1]:
+            # Exit: price returns to pivot or trend reverses
+            pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
+            if close[i] < pivot_4h[i] or ema_34_4h[i] < ema_34_4h[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price returns to cloud or trend reverses
-            if close[i] > cloud_bottom or ema_26_12h[i] > ema_26_12h[i-1]:
+            # Exit: price returns to pivot or trend reverses
+            pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
+            if close[i] > pivot_4h[i] or ema_34_4h[i] > ema_34_4h[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -95,12 +86,16 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Ichimoku Cloud breakouts with daily trend filter and volume confirmation
-# - Ichimoku Cloud provides dynamic support/resistance; breakouts indicate strong momentum
-# - Daily EMA26 trend filter ensures trades align with higher-timeframe direction
+# Hypothesis: Camarilla R3/S3 breakouts with daily trend filter and volume confirmation
+# - Camarilla R3/S3 represent strong support/resistance levels from previous day
+# - Breakout above R3 in daily uptrend (EMA34 rising) signals bullish continuation
+# - Breakdown below S3 in daily downtrend (EMA34 falling) signals bearish continuation
 # - Volume confirmation (2x average) reduces false breakouts
-# - Works in both bull (cloud breakouts in uptrend) and bear (cloud breakdowns in downtrend)
-# - Position size 0.25 targets ~20-40 trades/year to avoid fee drag
-# - Uses 12h timeframe for execution, 1d for trend and volume context
-# - Ichimoku is underutilized in crypto; offers unique edge vs. saturated strategies
-# - Focus on BTC/ETH as primary targets with proven cloud effectiveness in trending markets
+# - Exit when price returns to pivot point or daily trend reverses
+# - Reduced position size to 0.25 to lower risk and further reduce trade frequency
+# - Works in both bull (breakouts in uptrend) and bear (breakdowns in downtrend)
+# - Uses 1d timeframe for structure and trend, 4h for execution timing
+# - Tightened entry conditions to target ~20-40 trades/year to avoid fee drag
+# - Focus on BTC/ETH as primary targets, avoids overtrading pitfalls of similar strategies
+# - Refined version with reduced position size for better risk-adjusted returns
+# - Prioritizes trade quality over quantity to improve generalization to test period
