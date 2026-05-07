@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_Camarilla_R3_S3_Breakout_4hTrend_1dVolatilityFilter"
-timeframe = "1h"
+name = "6h_Donchian20_WeeklyPivotDir_VolumeConfirm"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -17,86 +17,76 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Weekly data for pivot direction and context
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # 1d data for volatility filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # Weekly pivot calculation (using previous week's OHLC)
+    prev_week_high = df_1w['high'].shift(1).values
+    prev_week_low = df_1w['low'].shift(1).values
+    prev_week_close = df_1w['close'].shift(1).values
     
-    # Previous 4h bar's OHLC for Camarilla calculation (using 4h close)
-    prev_high_4h = df_4h['high'].shift(1).values
-    prev_low_4h = df_4h['low'].shift(1).values
-    prev_close_4h = df_4h['close'].shift(1).values
+    # Pivot point and support/resistance levels
+    pivot = (prev_week_high + prev_week_low + prev_week_close) / 3
+    r1 = 2 * pivot - prev_week_low
+    s1 = 2 * pivot - prev_week_high
+    r2 = pivot + (prev_week_high - prev_week_low)
+    s2 = pivot - (prev_week_high - prev_week_low)
     
-    # Calculate Camarilla levels: R3, S3 (4h)
-    camarilla_r3 = prev_close_4h + (prev_high_4h - prev_low_4h) * 1.1 / 2
-    camarilla_s3 = prev_close_4h - (prev_high_4h - prev_low_4h) * 1.1 / 2
+    # Align weekly pivot levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
     
-    # Align Camarilla levels to 1h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s3)
+    # Donchian channel (20-period) on 6h
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 4h EMA trend filter (21-period)
-    ema_4h = pd.Series(df_4h['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    
-    # 1d ATR for volatility filter (14-period)
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1d = tr.rolling(window=14, min_periods=14).mean().values
-    
-    # Align ATR to 1h timeframe
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # Session filter: 8-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Volume confirmation: current volume > 2.0 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Wait for warmup
-        # Skip if any critical value is NaN or outside session
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(ema_4h_aligned[i]) or np.isnan(atr_1d_aligned[i]) or
-            not in_session[i]):
+    for i in range(20, n):
+        # Skip if any critical value is NaN
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(donchian_high[i]) or
+            np.isnan(donchian_low[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R3 with 4h uptrend and low volatility
-            if (close[i] > camarilla_r3_aligned[i] and 
-                close[i] > ema_4h_aligned[i] and 
-                atr_1d_aligned[i] < np.nanmedian(atr_1d_aligned[max(0, i-100):i+1])):
-                signals[i] = 0.20
+            # Long: Donchian breakout above weekly R2 with volume confirmation
+            if (close[i] > donchian_high[i] and 
+                close[i] > r2_aligned[i] and 
+                volume[i] > 2.0 * vol_ma[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 with 4h downtrend and low volatility
-            elif (close[i] < camarilla_s3_aligned[i] and 
-                  close[i] < ema_4h_aligned[i] and 
-                  atr_1d_aligned[i] < np.nanmedian(atr_1d_aligned[max(0, i-100):i+1])):
-                signals[i] = -0.20
+            # Short: Donchian breakout below weekly S2 with volume confirmation
+            elif (close[i] < donchian_low[i] and 
+                  close[i] < s2_aligned[i] and 
+                  volume[i] > 2.0 * vol_ma[i]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price crosses below R3 or drops below 4h EMA
-            if close[i] < camarilla_r3_aligned[i] or close[i] < ema_4h_aligned[i]:
+            # Exit: price breaks below weekly pivot or Donchian low
+            if close[i] < pivot_aligned[i] or close[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: price crosses above S3 or rises above 4h EMA
-            if close[i] > camarilla_s3_aligned[i] or close[i] > ema_4h_aligned[i]:
+            # Exit: price breaks above weekly pivot or Donchian high
+            if close[i] > pivot_aligned[i] or close[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
