@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 1D_RSI_EMA200_Downtrend_Pullback
-# Hypothesis: Mean-reversion pullback in downtrend using daily timeframe. 
-# Enters long when RSI < 30 (oversold) and price > EMA200 (avoid downtrend).
-# Exits when RSI > 50 (mean reversion) or price < EMA200 (trend resumption).
-# Uses volume confirmation (1.5x avg) to filter false signals.
-# Designed for low trade frequency (<20/year) to minimize fee drag and work in both bull/bear regimes.
+# 6h_Camarilla_R3S3_Breakout_12hTrend_Volume
+# Hypothesis: 6s strategy using 12-hour Camarilla levels with trend filter from 12h EMA50 and volume spike.
+# Breaks out at R3/S3 levels when price > EMA50 (uptrend) or < EMA50 (downtrend) with volume > 2x average.
+# Uses tight exits at opposite S3/R3 levels to limit holding periods. Designed for 6h timeframe to avoid
+# overtrading while capturing trends in both bull and bear markets via trend filter.
 
-name = "1D_RSI_EMA200_Downtrend_Pullback"
-timeframe = "1d"
+name = "6h_Camarilla_R3S3_Breakout_12hTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -16,57 +15,90 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # RSI calculation (14-period)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Get 12h data for Camarilla pivot calculation and trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) == 0:
+        return np.zeros(n)
     
-    # EMA200 for trend filter
-    ema200 = pd.Series(close).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate Camarilla pivot levels from previous 12h period's OHLC
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Volume confirmation: 1.5x average volume (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate all Camarilla levels
+    hl_range = high_12h - low_12h
+    r3_12h = close_12h + 1.1 * hl_range / 2
+    r2_12h = close_12h + 1.1 * hl_range / 6
+    r1_12h = close_12h + 1.1 * hl_range / 12
+    s1_12h = close_12h - 1.1 * hl_range / 12
+    s2_12h = close_12h - 1.1 * hl_range / 6
+    s3_12h = close_12h - 1.1 * hl_range / 2
+    pp_12h = (high_12h + low_12h + close_12h) / 3
+    
+    # Align all levels to 6h timeframe (use previous 12h period's levels)
+    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
+    r2_12h_aligned = align_htf_to_ltf(prices, df_12h, r2_12h)
+    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
+    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
+    s2_12h_aligned = align_htf_to_ltf(prices, df_12h, s2_12h)
+    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
+    pp_12h_aligned = align_htf_to_ltf(prices, df_12h, pp_12h)
+    
+    # Calculate EMA50 for trend filter (12h)
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    
+    # Volume spike detection: 2.0x average volume (30-period for stability)
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long
+    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(200, 20)  # Ensure EMA200 and volume MA are valid
+    start_idx = max(30, 50)  # Ensure we have volume MA and EMA50 data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(rsi[i]) or np.isnan(ema200[i]) or 
-            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(r3_12h_aligned[i]) or np.isnan(s3_12h_aligned[i]) or 
+            np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: RSI oversold (<30), price above EMA200 (avoid strong downtrend), volume confirmation
-            if (rsi[i] < 30 and 
-                close[i] > ema200[i] and 
-                volume[i] > 1.5 * vol_ma[i]):
+            # Long: price breaks above R3, price above EMA50 (uptrend), volume spike (>2x)
+            if (close[i] > r3_12h_aligned[i] and 
+                close[i] > ema50_12h_aligned[i] and 
+                volume[i] > 2.0 * vol_ma[i]):
                 signals[i] = 0.25
                 position = 1
+            # Short: price breaks below S3, price below EMA50 (downtrend), volume spike (>2x)
+            elif (close[i] < s3_12h_aligned[i] and 
+                  close[i] < ema50_12h_aligned[i] and 
+                  volume[i] > 2.0 * vol_ma[i]):
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Exit: RSI > 50 (mean reversion complete) or price < EMA200 (trend resumption)
-            if (rsi[i] > 50 or 
-                close[i] < ema200[i]):
+            # Exit: price returns to or below S3 (opposite level)
+            if close[i] <= s3_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
+        elif position == -1:
+            # Exit: price returns to or above R3 (opposite level)
+            if close[i] >= r3_12h_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
