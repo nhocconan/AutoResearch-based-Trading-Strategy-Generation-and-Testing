@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-name = "6h_WilliamsFractal_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_RVOL_Breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -17,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter (EMA50) and fractals
+    # Get 1d data for trend filter (EMA50)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -27,20 +27,15 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Williams Fractals on 1d (need 2-bar confirmation delay)
-    bearish_fractal, bullish_fractal = compute_williams_fractals(
-        df_1d['high'].values,
-        df_1d['low'].values,
-    )
-    # Fractals need 2 extra 1d bars for confirmation (center bar + 2 confirming bars)
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
-    
-    # Volume filter: current 1d volume > 20-period average volume
+    # Get 1d data for RVOL calculation (current volume vs 20-day average)
     vol_1d = df_1d['volume'].values
-    vol_avg = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    volume_filter = vol_1d > vol_avg
-    volume_filter_aligned = align_htf_to_ltf(prices, df_1d, volume_filter)
+    vol_ma20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20)
+    
+    # Calculate RVOL (relative volume) for 4h bar
+    # RVOL = current 4h volume / average 4h volume over last 20 periods
+    vol_ma20_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    rvol = volume / vol_ma20_4h
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -50,25 +45,24 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any data is not ready
         if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(bearish_fractal_aligned[i]) or 
-            np.isnan(bullish_fractal_aligned[i]) or 
-            np.isnan(volume_filter_aligned[i])):
+            np.isnan(vol_ma20_aligned[i]) or 
+            np.isnan(rvol[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above 1d EMA50 (uptrend), bullish fractal confirmed, volume confirmation
+            # Long: price above 1d EMA50 (uptrend), RVOL > 1.5 (volume spike), price > open (bullish candle)
             if (close[i] > ema_50_1d_aligned[i] and 
-                bullish_fractal_aligned[i] and 
-                volume_filter_aligned[i]):
+                rvol[i] > 1.5 and 
+                close[i] > prices['open'].iloc[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below 1d EMA50 (downtrend), bearish fractal confirmed, volume confirmation
+            # Short: price below 1d EMA50 (downtrend), RVOL > 1.5 (volume spike), price < open (bearish candle)
             elif (close[i] < ema_50_1d_aligned[i] and 
-                  bearish_fractal_aligned[i] and 
-                  volume_filter_aligned[i]):
+                  rvol[i] > 1.5 and 
+                  close[i] < prices['open'].iloc[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
