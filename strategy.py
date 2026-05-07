@@ -1,6 +1,6 @@
-#!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
-timeframe = "4h"
+#1h_4h_1d_Trend_Momentum_Volume
+name = "1h_4h_1d_Trend_Momentum_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,78 +17,86 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Load 4h data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # 12h EMA50 for trend filter
-    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # 4h EMA20 for trend filter
+    ema20_4h = pd.Series(df_4h['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
     
-    # Calculate 4h Camarilla pivot levels from previous 4h bar
-    high_prev = np.roll(high, 1)
-    low_prev = np.roll(low, 1)
-    close_prev = np.roll(close, 1)
-    high_prev[0] = np.nan
-    low_prev[0] = np.nan
-    close_prev[0] = np.nan
+    # 4h RSI for momentum filter
+    delta_4h = pd.Series(df_4h['close']).diff()
+    gain_4h = (delta_4h.where(delta_4h > 0, 0)).rolling(window=14, min_periods=14).mean()
+    loss_4h = (-delta_4h.where(delta_4h < 0, 0)).rolling(window=14, min_periods=14).mean()
+    rs_4h = gain_4h / loss_4h
+    rsi14_4h = 100 - (100 / (1 + rs_4h))
+    rsi14_4h = rsi14_4h.fillna(50).values  # Neutral when undefined
+    rsi14_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi14_4h)
     
-    pivot = (high_prev + low_prev + close_prev) / 3.0
-    range_prev = high_prev - low_prev
+    # 1d volume spike: > 1.8x 20-period average
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = vol_1d > 1.8 * vol_ma_1d
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
     
-    # Camarilla levels
-    R1 = close_prev + range_prev * 1.1 / 12
-    S1 = close_prev - range_prev * 1.1 / 12
-    R3 = close_prev + range_prev * 1.1 / 4
-    S3 = close_prev - range_prev * 1.1 / 4
-    
-    # 4h volume spike: > 1.5x 20-period average (~3.3 days)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > 1.5 * vol_ma
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 50)  # Wait for volume MA and EMA50
+    start_idx = max(40, 20)  # Wait for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(ema50_12h_aligned[i]) or np.isnan(R1[i]) or np.isnan(S1[i]):
+        if not session_filter[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        if np.isnan(ema20_4h_aligned[i]) or np.isnan(rsi14_4h_aligned[i]) or np.isnan(vol_spike_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above R1 with volume spike and 12h uptrend
-            if close[i] > R1[i] and vol_spike[i] and close[i] > ema50_12h_aligned[i]:
-                signals[i] = 0.25
+            # Long: Price above 4h EMA20, RSI > 55, 1d volume spike
+            if close[i] > ema20_4h_aligned[i] and rsi14_4h_aligned[i] > 55 and vol_spike_1d_aligned[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short: Price breaks below S1 with volume spike and 12h downtrend
-            elif close[i] < S1[i] and vol_spike[i] and close[i] < ema50_12h_aligned[i]:
-                signals[i] = -0.25
+            # Short: Price below 4h EMA20, RSI < 45, 1d volume spike
+            elif close[i] < ema20_4h_aligned[i] and rsi14_4h_aligned[i] < 45 and vol_spike_1d_aligned[i]:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit: Price breaks below S1 or 12h trend turns down
-            if close[i] < S1[i] or close[i] < ema50_12h_aligned[i]:
+            # Exit: Price below 4h EMA20 or RSI < 40
+            if close[i] < ema20_4h_aligned[i] or rsi14_4h_aligned[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit: Price breaks above R1 or 12h trend turns up
-            if close[i] > R1[i] or close[i] > ema50_12h_aligned[i]:
+            # Exit: Price above 4h EMA20 or RSI > 60
+            if close[i] > ema20_4h_aligned[i] or rsi14_4h_aligned[i] > 60:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-# Hypothesis: Camarilla R1/S1 breakout with 12h EMA50 trend filter and volume confirmation.
-# Long when price breaks above R1 (bullish breakout), 12h EMA50 up, and volume spike confirms.
-# Short when price breaks below S1 (bearish breakdown), 12h EMA50 down, and volume spike confirms.
-# Uses 12h timeframe for trend to avoid whipsaws, 4h for entry timing.
-# Volume spike (>1.5x average) ensures conviction. Discrete 0.25 position size limits risk.
-# Works in bull markets (breakouts with trend) and bear markets (breakdowns with trend).
-# Target: 20-50 trades/year to minimize fee drag while capturing sustained moves.
+# Hypothesis: 1h trend following with 4h EMA20 trend filter and 4h RSI momentum filter.
+# Long when price > 4h EMA20, RSI > 55 (bullish momentum), and 1d volume spike confirms conviction.
+# Short when price < 4h EMA20, RSI < 45 (bearish momentum), and 1d volume spike confirms conviction.
+# Uses 4h timeframe for trend/momentum to avoid whipsaws, 1h for entry timing.
+# 1d volume spike (>1.8x average) ensures institutional participation.
+# Session filter (08-20 UTC) reduces noise during low-liquidity hours.
+# Discrete 0.20 position size limits risk and controls drawdown.
+# Target: 15-35 trades/year to minimize fee drag while capturing sustained moves in both bull and bear markets.
