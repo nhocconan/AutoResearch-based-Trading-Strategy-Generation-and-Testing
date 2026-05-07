@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-# 6h_Volume_Weighted_RSI_Pullback_1wTrend
-# Hypothesis: On 6b timeframe, RSI(14) pullbacks to 40-60 range during strong weekly trends
-# (above/below weekly EMA50) with volume confirmation (1.5x average) capture high-probability
-# mean-reversion entries within the trend. Works in bull markets via long pullbacks in uptrend
-# and bear markets via short pullbacks in downtrend. Volume filter ensures institutional
-# participation, reducing false signals. Target: 60-120 trades over 4 years (15-30/year).
+# 12h_WeeklyPivot_CamR3S3_Breakout_1dTrend_Volume
+# Hypothesis: Weekly Pivot + Daily Camarilla R3/S3 breakouts on 12h timeframe
+# Weekly pivot provides institutional support/resistance from weekly structure.
+# Daily Camarilla R3/S3 acts as intraday breakout levels within the week.
+# Combined with 1d EMA34 trend filter and volume confirmation to avoid false breakouts.
+# Works in bull markets via long breakouts above weekly pivot + daily R3,
+# and in bear markets via short breakdowns below weekly pivot + daily S3.
+# Target: 15-35 trades per year (~60-140 over 4 years) with position size 0.25.
 
-name = "6h_Volume_Weighted_RSI_Pullback_1wTrend"
-timeframe = "6h"
+name = "12h_WeeklyPivot_CamR3S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,24 +26,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load weekly data for pivot points
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 1:
         return np.zeros(n)
     
-    # Weekly EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Load daily data for Camarilla and trend filter
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 34:
+        return np.zeros(n)
     
-    # RSI(14) calculation
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Calculate Weekly Pivot Points (using prior week's OHLC)
+    # Standard pivot: P = (H + L + C) / 3
+    # R1 = 2*P - L, S1 = 2*P - H
+    # R2 = P + (H - L), S2 = P - (H - L)
+    # We use R1 and S1 as key levels
+    weekly_high = df_weekly['high'].shift(1).values  # Previous week's high
+    weekly_low = df_weekly['low'].shift(1).values    # Previous week's low
+    weekly_close = df_weekly['close'].shift(1).values # Previous week's close
+    
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    weekly_s1 = 2 * weekly_pivot - weekly_high
+    
+    # Align weekly pivot levels to 12h timeframe
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s1)
+    
+    # Calculate Daily Camarilla R3 and S3 levels (using prior day's OHLC)
+    # Camarilla: R3 = C + 1.1*(H-L)/2, S3 = C - 1.1*(H-L)/2
+    daily_high = df_daily['high'].shift(1).values    # Previous day's high
+    daily_low = df_daily['low'].shift(1).values      # Previous day's low
+    daily_close = df_daily['close'].shift(1).values  # Previous day's close
+    
+    camarilla_r3 = daily_close + 1.1 * (daily_high - daily_low) / 2
+    camarilla_s3 = daily_close - 1.1 * (daily_high - daily_low) / 2
+    
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_daily, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_daily, camarilla_s3)
+    
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_daily['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_daily, ema_34_1d)
     
     # Volume ratio: current volume / 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -50,45 +77,48 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 14)  # Need 20 for volume MA, 14 for RSI
+    start_idx = 20  # Need 20 periods for volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(rsi_values[i]) or 
-            np.isnan(vol_ratio[i])):
+        # Skip if any required data is NaN
+        if (np.isnan(weekly_r1_aligned[i]) or np.isnan(weekly_s1_aligned[i]) or
+            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine weekly trend
-        uptrend = close[i] > ema_50_1w_aligned[i]
-        downtrend = close[i] < ema_50_1w_aligned[i]
-        
-        # RSI pullback conditions: 40-60 range (avoid extremes)
-        rsi_pullback = (rsi_values[i] >= 40) & (rsi_values[i] <= 60)
+        # Breakout conditions: price breaks above weekly R1 + daily R3 OR below weekly S1 + daily S3
+        breakout_up = close[i] > weekly_r1_aligned[i] and close[i] > camarilla_r3_aligned[i]
+        breakout_down = close[i] < weekly_s1_aligned[i] and close[i] < camarilla_s3_aligned[i]
         
         # Volume confirmation: volume > 1.5x average
         volume_confirm = vol_ratio[i] > 1.5
         
+        # Trend filter from 1d EMA34
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
+        
         if position == 0:
-            # Long: RSI pullback in uptrend with volume
-            if rsi_pullback and uptrend and volume_confirm:
+            # Long: upward breakout above weekly R1 AND daily R3 + volume + uptrend
+            if breakout_up and volume_confirm and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI pullback in downtrend with volume
-            elif rsi_pullback and downtrend and volume_confirm:
+            # Short: downward breakout below weekly S1 AND daily S3 + volume + downtrend
+            elif breakout_down and volume_confirm and downtrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: RSI reaches overbought (>70) or trend reversal
-            if rsi_values[i] > 70 or not uptrend:
+            # Exit: price breaks back below weekly R1 OR daily R3 (failed breakout) or trend reversal
+            if close[i] < weekly_r1_aligned[i] or close[i] < camarilla_r3_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: RSI reaches oversold (<30) or trend reversal
-            if rsi_values[i] < 30 or not downtrend:
+            # Exit: price breaks back above weekly S1 OR daily S3 (failed breakdown) or trend reversal
+            if close[i] > weekly_s1_aligned[i] or close[i] > camarilla_s3_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
