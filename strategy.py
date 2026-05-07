@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 6h_ElderRay_Power_Breakout_1dTrend_Volume
-# Hypothesis: Elder Ray (Bull/Bear Power) + 1d trend filter + volume spikes on 6h timeframe.
-# Uses 13-period EMA for power calculation, with entries when power crosses zero with volume confirmation.
-# Works in both bull/bear by adapting to trend direction via 1d EMA50 filter.
-# Target: 15-30 trades/year to minimize fee drag while capturing strong momentum moves.
+# 12h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Confirm
+# Hypothesis: 12h strategy using Camarilla R3/S3 breakouts with 1-day trend filter and volume confirmation.
+# Targets 25-40 trades/year to avoid fee drag. Works in bull/bear via trend filter and volume spike confirmation.
+# Uses 1d EMA50 for trend and 12h volume spike (20-period average) for entry confirmation.
 
-name = "6h_ElderRay_Power_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Confirm"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -32,23 +31,20 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 13-period EMA for Elder Ray (same for both timeframes)
-    close_series = pd.Series(close)
-    ema_13 = close_series.ewm(span=13, adjust=False, min_periods=13).values
+    # Calculate Camarilla pivot levels: R3, S3
+    camarilla_range = high_1d - low_1d
+    r3 = close_1d + 1.1 * camarilla_range / 4
+    s3 = close_1d - 1.1 * camarilla_range / 4
     
-    # Calculate Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high - ema_13
-    bear_power = low - ema_13
-    
-    # Get 1d EMA50 for trend filter
+    # Get 1d data for trend filter (EMA50)
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align all indicators to 6h timeframe
-    bull_power_6h = align_htf_to_ltf(prices, df_1d, bull_power)  # Wait for 1d close
-    bear_power_6h = align_htf_to_ltf(prices, df_1d, bear_power)  # Wait for 1d close
-    ema_50_1d_6h = align_htf_to_ltf(prices, df_1d, ema_50_1d)   # Wait for 1d close
+    # Align all indicators to 12h timeframe
+    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
+    ema_50_1d_12h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume spike filter on 6h (20-period average)
+    # Volume spike filter on 12h (20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma_20)
     
@@ -58,8 +54,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical value is NaN
-        if (np.isnan(bull_power_6h[i]) or np.isnan(bear_power_6h[i]) or 
-            np.isnan(ema_50_1d_6h[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or 
+            np.isnan(ema_50_1d_12h[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,29 +65,27 @@ def generate_signals(prices):
         bars_since_entry += 1
         
         if position == 0:
-            # Long: Bull Power crosses above zero, above 1d EMA50 trend, volume spike
-            if (bull_power_6h[i] > 0 and bull_power_6h[i-1] <= 0 and 
-                close[i] > ema_50_1d_6h[i] and volume_spike[i]):
+            # Long: Price > R3, above 1d EMA50 trend, volume spike
+            if close[i] > r3_12h[i] and close[i] > ema_50_1d_12h[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
                 bars_since_entry = 0
-            # Short: Bear Power crosses below zero, below 1d EMA50 trend, volume spike
-            elif (bear_power_6h[i] < 0 and bear_power_6h[i-1] >= 0 and 
-                  close[i] < ema_50_1d_6h[i] and volume_spike[i]):
+            # Short: Price < S3, below 1d EMA50 trend, volume spike
+            elif close[i] < s3_12h[i] and close[i] < ema_50_1d_12h[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
                 bars_since_entry = 0
         elif position == 1:
-            # Exit: Bull Power crosses below zero OR trend fails
-            if bull_power_6h[i] < 0 or close[i] < ema_50_1d_6h[i]:
+            # Exit: price closes below R3 or below 1d EMA50 trend
+            if close[i] < r3_12h[i] or close[i] < ema_50_1d_12h[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Bear Power crosses above zero OR trend fails
-            if bear_power_6h[i] > 0 or close[i] > ema_50_1d_6h[i]:
+            # Exit: price closes above S3 or above 1d EMA50 trend
+            if close[i] > s3_12h[i] or close[i] > ema_50_1d_12h[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
