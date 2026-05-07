@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_Breakout_12hEMA50_Trend_VolumeS"
-timeframe = "4h"
+name = "1h_Camarilla_R3S3_Breakout_1dTrend"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -17,14 +17,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    # Get 1d data for Camarilla levels
+    # Get 1d data for Camarilla levels and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # Calculate Camarilla R3 and S3 levels from previous day
@@ -35,33 +30,37 @@ def generate_signals(prices):
     r3 = close_prev + 1.1 * (high_prev - low_prev) / 4
     s3 = close_prev - 1.1 * (high_prev - low_prev) / 4
     
-    # Align daily levels to 4h timeframe (with 1-day delay for completed bar)
+    # Align daily levels to 1h timeframe (with 1-day delay for completed bar)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # 12h trend filter: EMA50
-    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # 1d trend filter: EMA50
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume filter: current volume > 1.8x 20-period average
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma_20[i] = np.mean(volume[i-20:i])
-    vol_filter = volume > (1.8 * vol_ma_20)
+    # Volume filter: current volume > 1.5x 24-period average (24h)
+    vol_ma_24 = np.full(n, np.nan)
+    for i in range(24, n):
+        vol_ma_24[i] = np.mean(volume[i-24:i])
+    vol_filter = volume > (1.5 * vol_ma_24)
+    
+    # Session filter: 8-20 UTC
+    hours = prices.index.hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 2  # ~8 hours for 4h to reduce trades
+    cooldown_bars = 12  # ~12 hours for 1h to reduce trades
     
-    start_idx = max(100, 20, 50)
+    start_idx = max(100, 24, 50)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(r3_aligned[i]) or 
             np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+            np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(vol_ma_24[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,23 +71,23 @@ def generate_signals(prices):
         
         bars_since_last_trade += 1
         
-        # Determine 12h trend direction
-        trend_up = close > ema_50_12h_aligned[i]
-        trend_down = close < ema_50_12h_aligned[i]
+        # Determine 1d trend direction
+        trend_up = close > ema_50_1d_aligned[i]
+        trend_down = close < ema_50_1d_aligned[i]
         
-        if position == 0 and bars_since_last_trade >= cooldown_bars:
+        if position == 0 and bars_since_last_trade >= cooldown_bars and session_filter[i]:
             # Long: Break above R3 in uptrend with strong volume
             if (close[i] > r3_aligned[i] and 
                 trend_up[i] and 
                 vol_filter[i]):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
                 bars_since_last_trade = 0
             # Short: Break below S3 in downtrend with strong volume
             elif (close[i] < s3_aligned[i] and 
                   trend_down[i] and 
                   vol_filter[i]):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
@@ -98,7 +97,7 @@ def generate_signals(prices):
                 position = 0
                 bars_since_last_trade = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
             # Exit: Price re-enters Camarilla body or trend change
             if (close[i] < r3_aligned[i] and close[i] > s3_aligned[i]) or not trend_down[i]:
@@ -106,13 +105,10 @@ def generate_signals(prices):
                 position = 0
                 bars_since_last_trade = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-# Hypothesis: Using 4h timeframe with Camarilla R3/S3 breakouts, 12h EMA50 trend filter, and 1.8x volume spike
-# will yield 15-40 trades per year (60-160 total over 4 years), minimizing fee drag. The strategy trades
-# with the higher timeframe trend, capturing institutional breakouts in both bull and bear markets.
-# Position size of 0.25 manages drawdown, and cooldown of 2 bars prevents overtrading. Focus on BTC/ETH
-# as primary targets, avoiding SOL-only bias. This combines proven elements from top performers:
-# Camarilla levels + higher timeframe trend + volume confirmation.
+# Hypothesis: Using 1h timeframe with Camarilla R3/S3 breakouts, 1d EMA50 trend filter, volume confirmation, and session filter (8-20 UTC)
+# will yield 15-37 trades per year (60-150 total over 4 years), minimizing fee drag. The strategy trades with the higher timeframe trend,
+# capturing institutional breakouts in both bull and bear markets. Position size of 0.20 manages drawdown, and cooldown of 12 bars prevents overtrading.
