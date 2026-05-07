@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_PriceChannel_Volume_Trend_v1
-Hypothesis: On daily timeframe, buy when price breaks above 20-day high with volume confirmation and weekly uptrend; sell when price breaks below 20-day low with volume confirmation and weekly downtrend. This captures breakouts in trending markets while avoiding false signals in ranging markets. The weekly trend filter ensures we only trade in the direction of the higher timeframe momentum, reducing whipsaws during market reversals.
+6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: On 6h timeframe, use daily Camarilla pivot levels (R3/S3) for breakout entries, with 1d EMA34 trend filter and volume spike confirmation. This strategy works in both bull and bear markets by capturing strong breakouts aligned with daily trend, while volume confirmation filters false breakouts. The Camarilla levels provide objective support/resistance, and the 6h timeframe reduces noise compared to lower timeframes.
 """
-name = "1d_PriceChannel_Volume_Trend_v1"
-timeframe = "1d"
+name = "6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -21,60 +21,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get daily data for Camarilla pivots and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly EMA50 for trend
-    ema_50 = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    # Calculate daily Camarilla pivot levels (based on previous day)
+    # Camarilla: R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low)
+    # S3 = close - 1.1*(high-low), S4 = close - 1.5*(high-low)
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Daily Donchian channels (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels for each day
+    R3 = prev_close + 1.1 * (prev_high - prev_low)
+    S3 = prev_close - 1.1 * (prev_high - prev_low)
     
-    # Volume filter: current volume > 1.5 * 20-day average volume
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_avg * 1.5)
+    # Align Camarilla levels to 6h timeframe (wait for daily close)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    
+    # Calculate daily EMA34 for trend filter
+    ema_34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    
+    # Volume spike: current volume > 2.0 * 24-period average volume (48h on 6h)
+    vol_avg = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > (vol_avg * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    bars_since_exit = 0  # bars since last exit to prevent overtrading
     
-    start_idx = max(50, 20)  # Ensure sufficient warmup
+    start_idx = max(34, 24)  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
+        bars_since_exit += 1
+        
         # Skip if any data is not ready
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                bars_since_exit = 0
             continue
         
         if position == 0:
-            # Long: price breaks above 20-day high + weekly uptrend + volume
-            if (close[i] > donchian_high[i] and 
-                close[i] > ema_50_aligned[i] and 
-                volume_filter[i]):
+            # Minimum 4 bars between trades (24 hours on 6h TF) to reduce frequency
+            if bars_since_exit < 4:
+                continue
+                
+            # Long: break above R3 + price above EMA34 + volume spike
+            if (close[i] > R3_aligned[i] and 
+                close[i] > ema_34_aligned[i] and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 20-day low + weekly downtrend + volume
-            elif (close[i] < donchian_low[i] and 
-                  close[i] < ema_50_aligned[i] and 
-                  volume_filter[i]):
+                bars_since_exit = 0
+            # Short: break below S3 + price below EMA34 + volume spike
+            elif (close[i] < S3_aligned[i] and 
+                  close[i] < ema_34_aligned[i] and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
+                bars_since_exit = 0
         elif position != 0:
-            # Exit: price returns to opposite Donchian level or trend reversal
-            if position == 1 and (close[i] < donchian_low[i] or close[i] < ema_50_aligned[i]):
+            # Exit: price returns to opposite Camarilla level or trend reversal
+            if position == 1 and (close[i] < S3_aligned[i] or close[i] < ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and (close[i] > donchian_high[i] or close[i] > ema_50_aligned[i]):
+                bars_since_exit = 0
+            elif position == -1 and (close[i] > R3_aligned[i] or close[i] > ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
+                bars_since_exit = 0
             else:
                 # Hold position
                 signals[i] = 0.25 if position == 1 else -0.25
