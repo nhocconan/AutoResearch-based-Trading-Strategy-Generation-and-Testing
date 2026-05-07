@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-# 1d_KAMA_Trend_1wTrend_Volume
-# Hypothesis: Uses Kaufman Adaptive Moving Average (KAMA) on daily timeframe for trend direction, filtered by 1-week KAMA trend and volume confirmation.
-# KAMA adapts to market noise, reducing false signals in choppy markets while capturing strong trends.
-# Works in both bull and bear markets by only trading in the direction of the 1-week trend.
-# Target: 7-25 trades/year to stay within optimal frequency range and minimize fee drag.
+# 6h_Camarilla_R3S3_Breakout_1dTrend_Volume
+# Hypothesis: Combines Camarilla pivot levels from daily data with 1-day EMA trend filter and volume confirmation.
+# Goes long when price breaks above R3 with bullish daily trend and volume spike.
+# Goes short when price breaks below S3 with bearish daily trend and volume spike.
+# Uses tight stop via EMA reversal and volume drop. Designed for 6h timeframe to capture multi-day moves
+# while avoiding noise. Works in both bull and bear markets by following the daily trend.
+# Target: 15-30 trades/year to stay within optimal frequency range.
 
-name = "1d_KAMA_Trend_1wTrend_Volume"
-timeframe = "1d"
+name = "6h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -19,76 +21,88 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-week data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get 1d data for Camarilla pivots and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate KAMA (14-period) on daily data
-    close_series = pd.Series(close)
-    change = abs(close_series - close_series.shift(10))
-    volatility = abs(close_series - close_series.shift(1)).rolling(window=10, min_periods=10).sum()
-    er = change / volatility.replace(0, np.nan)
-    er = er.fillna(0)
-    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Calculate daily EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_6h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate KAMA (14-period) on 1-week data for trend filter
-    close_1w = df_1w['close'].values
-    close_1w_series = pd.Series(close_1w)
-    change_1w = abs(close_1w_series - close_1w_series.shift(10))
-    volatility_1w = abs(close_1w_series - close_1w_series.shift(1)).rolling(window=10, min_periods=10).sum()
-    er_1w = change_1w / volatility_1w.replace(0, np.nan)
-    er_1w = er_1w.fillna(0)
-    sc_1w = (er_1w * (0.6645 - 0.0645) + 0.0645) ** 2
-    kama_1w = np.zeros(len(close_1w))
-    kama_1w[0] = close_1w[0]
-    for i in range(1, len(close_1w)):
-        kama_1w[i] = kama_1w[i-1] + sc_1w[i] * (close_1w[i] - kama_1w[i-1])
+    # Calculate Camarilla pivot levels from previous day
+    # R4 = C + ((H-L) * 1.5000)
+    # R3 = C + ((H-L) * 1.2500)
+    # R2 = C + ((H-L) * 1.1666)
+    # R1 = C + ((H-L) * 1.0833)
+    # PP = (H + L + C) / 3
+    # S1 = C - ((H-L) * 1.0833)
+    # S2 = C - ((H-L) * 1.1666)
+    # S3 = C - ((H-L) * 1.2500)
+    # S4 = C - ((H-L) * 1.5000)
     
-    # Align 1-week KAMA to daily timeframe
-    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
+    # We need previous day's H, L, C
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Volume confirmation: volume above 20-day average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > vol_ma_20
+    # Shift by 1 to get previous day's values (avoid look-ahead)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d = np.roll(close_1d, 1)
+    # Set first day's previous values to NaN (no prior day)
+    prev_high_1d[0] = np.nan
+    prev_low_1d[0] = np.nan
+    prev_close_1d[0] = np.nan
+    
+    # Calculate Camarilla levels based on previous day
+    camarilla_r3 = prev_close_1d + ((prev_high_1d - prev_low_1d) * 1.2500)
+    camarilla_s3 = prev_close_1d - ((prev_high_1d - prev_low_1d) * 1.2500)
+    
+    # Align Camarilla levels to 6h timeframe
+    camarilla_r3_6h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_6h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Calculate volume spike on 6h timeframe (24-period average = 4 days)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > (2.0 * vol_ma_24)  # Require strong volume spike
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):  # Start after sufficient data for indicators
+    for i in range(50, n):
         # Skip if any critical value is NaN
-        if (np.isnan(kama[i]) or np.isnan(kama_1w_aligned[i]) or 
-            np.isnan(volume_ok[i])):
+        if (np.isnan(camarilla_r3_6h[i]) or np.isnan(camarilla_s3_6h[i]) or 
+            np.isnan(ema_34_1d_6h[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price above daily KAMA AND above weekly KAMA AND volume confirmation
-            if close[i] > kama[i] and close[i] > kama_1w_aligned[i] and volume_ok[i]:
+            # Long: Price breaks above R3 + bullish daily trend (price > EMA34) + volume spike
+            if close[i] > camarilla_r3_6h[i] and close[i] > ema_34_1d_6h[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price below daily KAMA AND below weekly KAMA AND volume confirmation
-            elif close[i] < kama[i] and close[i] < kama_1w_aligned[i] and volume_ok[i]:
+            # Short: Price breaks below S3 + bearish daily trend (price < EMA34) + volume spike
+            elif close[i] < camarilla_s3_6h[i] and close[i] < ema_34_1d_6h[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Price crosses below daily KAMA OR weekly KAMA
-            if close[i] < kama[i] or close[i] < kama_1w_aligned[i]:
+            # Exit: Price closes below EMA34 (trend reversal) OR volume drops significantly
+            if close[i] < ema_34_1d_6h[i] or volume[i] < (0.5 * vol_ma_24[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price crosses above daily KAMA OR weekly KAMA
-            if close[i] > kama[i] or close[i] > kama_1w_aligned[i]:
+            # Exit: Price closes above EMA34 (trend reversal) OR volume drops significantly
+            if close[i] > ema_34_1d_6h[i] or volume[i] < (0.5 * vol_ma_24[i]):
                 signals[i] = 0.0
                 position = 0
             else:
