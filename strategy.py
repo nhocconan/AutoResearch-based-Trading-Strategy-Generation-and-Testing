@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_ElderRay_BullPower_BearPower_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Donchian_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,52 +23,48 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Elder Ray components: Bull Power (High - EMA13), Bear Power (Low - EMA13) on daily
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    bull_power_1d = high_1d - ema13_1d
-    bear_power_1d = low_1d - ema13_1d
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    # Donchian channels (20-period) on 12h
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation: spike > 1.8x 20-period average
+    # Volume confirmation: spike > 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > 1.8 * vol_ma
+    vol_spike = volume > 2.0 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 13)  # Wait for volume MA and EMA
+    start_idx = max(34, 20)  # Wait for EMA and Donchian
     
     for i in range(start_idx, n):
-        if np.isnan(ema13_1d_aligned[i]) or np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]):
+        if np.isnan(ema34_1d_aligned[i]) or np.isnan(high_20[i]) or np.isnan(low_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Bull Power > 0 and rising, with volume spike in daily uptrend
-            if bull_power_aligned[i] > 0 and bull_power_aligned[i] > bull_power_aligned[i-1] and vol_spike[i] and close[i] > ema13_1d_aligned[i]:
+            # Long: price breaks above Donchian upper band with volume spike in daily uptrend
+            if high[i] > high_20[i-1] and vol_spike[i] and close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 and falling, with volume spike in daily downtrend
-            elif bear_power_aligned[i] < 0 and bear_power_aligned[i] < bear_power_aligned[i-1] and vol_spike[i] and close[i] < ema13_1d_aligned[i]:
+            # Short: price breaks below Donchian lower band with volume spike in daily downtrend
+            elif low[i] < low_20[i-1] and vol_spike[i] and close[i] < ema34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Bull Power <= 0 or trend turns down
-            if bull_power_aligned[i] <= 0 or close[i] < ema13_1d_aligned[i]:
+            # Exit: price breaks below Donchian lower band or trend turns down
+            if low[i] < low_20[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Bear Power >= 0 or trend turns up
-            if bear_power_aligned[i] >= 0 or close[i] > ema13_1d_aligned[i]:
+            # Exit: price breaks above Donchian upper band or trend turns up
+            if high[i] > high_20[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -76,9 +72,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Elder Ray (Bull/Bear Power) on 6h with daily trend filter and volume spike captures institutional accumulation/distribution.
-# Long when Bull Power (High - EMA13) is positive and rising with volume confirmation in daily uptrend.
-# Short when Bear Power (Low - EMA13) is negative and falling with volume confirmation in daily downtrend.
-# Works in bull markets (rising Bull Power in uptrend) and bear markets (falling Bear Power in downtrend).
-# Volume spike (>1.8x average) ensures conviction behind the move.
-# Designed for 6h timeframe to target 50-150 total trades over 4 years, avoiding overtrading.
+# Hypothesis: Donchian breakout on 12h with daily trend filter and volume surge captures strong momentum moves.
+# Long when price breaks above 20-period high with volume confirmation in daily uptrend (close > EMA34).
+# Short when price breaks below 20-period low with volume confirmation in daily downtrend (close < EMA34).
+# Volume spike (>2.0x average) ensures institutional participation.
+# Exit on reversal of breakout or trend change.
+# Designed for 12h timeframe to target 50-150 total trades over 4 years, avoiding overtrading.
