@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Pivots_Trend_Scalp"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 150:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,30 +17,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE for Camarilla pivot and trend filter
+    # Load daily data ONCE for pivot points and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Camarilla pivot levels from previous day (standard formula)
+    # Pivot points from previous day (standard formula)
     c_high = df_1d['high'].values
     c_low = df_1d['low'].values
     c_close = df_1d['close'].values
     
     pivot = (c_high + c_low + c_close) / 3
     range_val = c_high - c_low
-    r3 = pivot + (range_val * 1.1 / 4)
-    s3 = pivot - (range_val * 1.1 / 4)
+    r1 = pivot + (range_val * 1.0)  # R1: P + 1*R
+    s1 = pivot - (range_val * 1.0)  # S1: P - 1*R
+    r2 = pivot + (range_val * 2.0)  # R2: P + 2*R
+    s2 = pivot - (range_val * 2.0)  # S2: P - 2*R
     
-    # Align pivot levels to 12h timeframe
-    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
+    # Align pivot levels to 4h timeframe
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    r2_4h = align_htf_to_ltf(prices, df_1d, r2)
+    s2_4h = align_htf_to_ltf(prices, df_1d, s2)
     
     # Daily EMA34 for trend filter
     ema_34_1d = pd.Series(c_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_34_4h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume spike detection (2x 20-period average)
+    # Volume spike detection (1.5x 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -49,36 +53,35 @@ def generate_signals(prices):
     start_idx = max(34, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or 
-            np.isnan(ema_34_12h[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or 
+            np.isnan(r2_4h[i]) or np.isnan(s2_4h[i]) or 
+            np.isnan(ema_34_4h[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_condition = volume[i] > vol_ma_20[i] * 2.0
+        vol_condition = volume[i] > vol_ma_20[i] * 1.5
         
         if position == 0:
-            # Long: break above R3 in daily uptrend with volume
-            if close[i] > r3_12h[i] and ema_34_12h[i] > ema_34_12h[i-1] and vol_condition:
+            # Long: price above R1 and rising in daily uptrend with volume
+            if close[i] > r1_4h[i] and ema_34_4h[i] > ema_34_4h[i-1] and vol_condition:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S3 in daily downtrend with volume
-            elif close[i] < s3_12h[i] and ema_34_12h[i] < ema_34_12h[i-1] and vol_condition:
+            # Short: price below S1 and falling in daily downtrend with volume
+            elif close[i] < s1_4h[i] and ema_34_4h[i] < ema_34_4h[i-1] and vol_condition:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price returns to pivot or trend reverses
-            pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
-            if close[i] < pivot_12h[i] or ema_34_12h[i] < ema_34_12h[i-1]:
+            # Exit: price returns to S1 or trend reverses
+            if close[i] < s1_4h[i] or ema_34_4h[i] < ema_34_4h[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price returns to pivot or trend reverses
-            pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
-            if close[i] > pivot_12h[i] or ema_34_12h[i] > ema_34_12h[i-1]:
+            # Exit: price returns to R1 or trend reverses
+            if close[i] > r1_4h[i] or ema_34_4h[i] > ema_34_4h[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -86,14 +89,14 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R3/S3 breakouts with daily trend filter and volume confirmation on 12h timeframe
-# - Camarilla R3/S3 represent strong support/resistance levels from previous day
-# - Breakout above R3 in daily uptrend (EMA34 rising) signals bullish continuation
-# - Breakdown below S3 in daily downtrend (EMA34 falling) signals bearish continuation
-# - Volume confirmation (2x average) reduces false breakouts
-# - Exit when price returns to pivot point or daily trend reverses
-# - Position size 0.25 targets ~15-30 trades/year to avoid fee drag on 12h
+# Hypothesis: Pivot point (R1/S1) breakouts with daily trend filter and volume confirmation
+# - Uses standard pivot points (R1/S1) from previous day as support/resistance
+# - Breakout above R1 in daily uptrend (EMA34 rising) signals bullish continuation
+# - Breakdown below S1 in daily downtrend (EMA34 falling) signals bearish continuation
+# - Volume confirmation (1.5x average) reduces false breakouts
+# - Exit when price returns to S1/R1 or daily trend reverses
+# - Position size 0.25 targets ~25-35 trades/year to avoid fee drag
 # - Works in both bull (breakouts in uptrend) and bear (breakdowns in downtrend)
-# - Uses 1d timeframe for structure and trend, 12h for execution timing
-# - Reduced position size and fewer trades compared to 4h version to minimize fee drag
-# - Focus on BTC and ETH as primary targets (not SOL-only)
+# - Uses 1d timeframe for structure and trend, 4h for execution timing
+# - Pivot points are more widely used than Camarilla, potentially less crowded
+# - Simpler than Camarilla (only R1/S1) to reduce overfitting and increase robustness
