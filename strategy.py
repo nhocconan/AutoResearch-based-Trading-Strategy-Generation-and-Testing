@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Donchian20_Volume_TrendFilter_v2"
-timeframe = "4h"
+name = "1d_Camarilla_R3_S3_Breakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,36 +17,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for Donchian calculation
+    # Load weekly data ONCE for trend and volume context
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    # Load daily data ONCE for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Load 4h data for volume and trend
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
+    # Weekly trend filter: 20-period EMA on close
+    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # 1d Donchian channel (20-period)
-    # Upper band = highest high of last 20 daily candles
-    # Lower band = lowest low of last 20 daily candles
-    high_series = pd.Series(df_1d['high'])
-    low_series = pd.Series(df_1d['low'])
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    # Weekly volume average for spike detection
+    vol_avg_1w = pd.Series(df_1w['volume']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_avg_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_avg_1w)
     
-    # Align Donchian levels to 4h timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    prev_range = prev_high - prev_low
     
-    # 4h volume filter: volume > 1.3x 20-period EMA
-    vol_ema_4h = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_filter = np.where(vol_ema_4h > 0, volume / vol_ema_4h, 1.0) > 1.3
+    # Camarilla levels for current day (based on previous day)
+    # R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
+    camarilla_r3 = prev_close + prev_range * 1.1 / 4
+    camarilla_s3 = prev_close - prev_range * 1.1 / 4
     
-    # 4h trend filter: price vs 50-period EMA
-    ema_50_4h = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend = close > ema_50_4h
-    downtrend = close < ema_50_4h
+    # Align Camarilla levels to daily timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Daily volume spike: current volume > 1.5x 20-period EMA
+    vol_ema_1d = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_spike = np.where(vol_ema_1d > 0, volume / vol_ema_1d, 1.0) > 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -54,18 +60,22 @@ def generate_signals(prices):
     start_idx = 100  # Sufficient warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
-            np.isnan(vol_filter[i]) or np.isnan(uptrend[i]) or np.isnan(downtrend[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Trend filter: price above/below 1w EMA20
+        uptrend = close[i] > ema_20_1w_aligned[i]
+        downtrend = close[i] < ema_20_1w_aligned[i]
+        
         if position == 0:
-            # Long entry: price breaks above Donchian upper with volume filter in uptrend
-            long_condition = (close[i] > donchian_upper_aligned[i]) and vol_filter[i] and uptrend[i]
-            # Short entry: price breaks below Donchian lower with volume filter in downtrend
-            short_condition = (close[i] < donchian_lower_aligned[i]) and vol_filter[i] and downtrend[i]
+            # Long breakout: price > R3 with volume spike in uptrend
+            long_condition = (close[i] > r3_aligned[i]) and vol_spike[i] and uptrend
+            # Short breakdown: price < S3 with volume spike in downtrend
+            short_condition = (close[i] < s3_aligned[i]) and vol_spike[i] and downtrend
             
             if long_condition:
                 signals[i] = 0.25
@@ -74,15 +84,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price re-enters below Donchian upper or trend turns down
-            if (close[i] < donchian_upper_aligned[i]) or (not uptrend[i]):
+            # Exit: price re-enters below R3 or trend turns down
+            if (close[i] < r3_aligned[i]) or (not uptrend):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price re-enters above Donchian lower or trend turns up
-            if (close[i] > donchian_lower_aligned[i]) or (not downtrend[i]):
+            # Exit: price re-enters above S3 or trend turns up
+            if (close[i] > s3_aligned[i]) or (not downtrend):
                 signals[i] = 0.0
                 position = 0
             else:
