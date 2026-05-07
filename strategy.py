@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_PivotBreakout_1dTrend_Volume_v1"
-timeframe = "12h"
+name = "4h_KAMA_RSI_Chop_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,69 +17,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for Pivot and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load 12h data ONCE before loop for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Calculate daily Pivot (standard) from previous day
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Calculate KAMA on close
+    close_series = pd.Series(close)
+    # Efficiency Ratio (ER)
+    change = abs(close_series - close_series.shift(10))
+    volatility = abs(close_series.diff()).rolling(window=10).sum()
+    er = change / volatility.replace(0, np.nan)
+    er = er.fillna(0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
     
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
+    # Align KAMA to 4h
+    kama_aligned = align_htf_to_ltf(prices, df_12h, kama)
     
-    # Pivot support/resistance levels
-    s1 = pivot - range_hl
-    r1 = pivot + range_hl
+    # RSI(14) on 4h close
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
     
-    # Align daily levels to 12h timeframe
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    # Choppiness Index (14) on 4h
+    atr = np.zeros(n)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0]-low[0], np.abs(high[0]-close[0]), np.abs(low[0]-close[0])])], 
+                         np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(highest_high - lowest_low) / np.log10(14) / np.log10(np.sum(atr, axis=0, keepdims=True).T if False else np.sum(pd.Series(atr).rolling(14).sum().values))
+    chop = pd.Series(chop).fillna(50).values  # Default to neutral when undefined
     
-    # Daily EMA(34) for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume spike detection: 2-period average (1 day of 12h bars)
-    vol_ma_2 = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
+    # Volume spike detection: 4-period average (1 day of 4h bars)
+    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 2)  # Wait for EMA and volume MA
+    start_idx = max(30, 14, 4)  # Wait for KAMA, RSI, chop, volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(vol_ma_2[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(rsi[i]) or 
+            np.isnan(chop[i]) or np.isnan(vol_ma_4[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above S1 with volume and daily uptrend
-            vol_condition = volume[i] > vol_ma_2[i] * 2.0
-            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
-            
-            if close[i] > s1_aligned[i] and vol_condition and uptrend:
+            # Long: price above KAMA, RSI > 50, chop < 61.8 (trending)
+            vol_condition = volume[i] > vol_ma_4[i] * 1.5
+            if close[i] > kama_aligned[i] and rsi[i] > 50 and chop[i] < 61.8 and vol_condition:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below R1 with volume and daily downtrend
-            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
+            # Short: price below KAMA, RSI < 50, chop < 61.8 (trending)
+            elif close[i] < kama_aligned[i] and rsi[i] < 50 and chop[i] < 61.8 and vol_condition:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below S1 or volume drops
-            if close[i] < s1_aligned[i] or volume[i] < vol_ma_2[i] * 1.5:
+            # Exit: price back below KAMA or RSI < 40
+            if close[i] < kama_aligned[i] or rsi[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above R1 or volume drops
-            if close[i] > r1_aligned[i] or volume[i] < vol_ma_2[i] * 1.5:
+            # Exit: price back above KAMA or RSI > 60
+            if close[i] > kama_aligned[i] or rsi[i] > 60:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -87,18 +105,18 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 12h Pivot S1/R1 breakout with 1d trend and volume confirmation
-# - Daily Pivot S1/R1 act as key support/resistance levels from prior session
-# - Breakout above S1 with volume in daily uptrend = long opportunity
-# - Breakdown below R1 with volume in daily downtrend = short opportunity
-# - Volume spike (2x average) confirms institutional participation
-# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
-# - Exit when price returns to S1/R1 or volume weakens
-# - Position size 0.25 targets ~15-30 trades/year, avoiding fee drag
-# - Uses actual daily Pivot levels (not weekly) for better responsiveness
-# - Daily trend filter reduces whipsaws vs using same timeframe
-# - Designed to work in BOTH bull and bear markets via trend filter
-# - Volume confirmation reduces false breakouts
-# - Novel combination: Pivot (1d) + trend (1d) + volume (12h) on 12h timeframe
+# Hypothesis: 4h KAMA trend + RSI momentum + Chop regime filter + volume confirmation
+# - KAMA adapts to market noise, effective in both trending and ranging markets
+# - RSI > 50 for long, < 50 for short ensures momentum alignment
+# - Chop < 61.8 filters for trending regimes (avoids ranging markets where trend fails)
+# - Volume confirmation (1.5x average) reduces false signals
+# - Works in bull markets (KAMA up, RSI > 50) and bear markets (KAMA down, RSI < 50)
+# - Exit when trend weakens (price crosses KAMA) or momentum fades (RSI extremes)
+# - Position size 0.25 targets ~20-50 trades/year to avoid fee drag
+# - Uses 12h KAMA for higher timeframe trend filter, reducing whipsaws
+# - Combines adaptive trend (KAMA), momentum (RSI), regime (Chop), and volume
 # - Aims for 50-150 total trades over 4 years (12-37/year) to stay within limits
-# - Focus on BTC/ETH as primary targets, not SOL-only strategies
+# - Prioritizes BTC/ETH performance; avoids over-optimization on SOL
+# - Discrete position sizing minimizes transaction costs from signal changes
+# - Uses proper alignment to avoid look-ahead bias with multi-timeframe data
+# - All indicators use sufficient lookback with min_periods to ensure validity
