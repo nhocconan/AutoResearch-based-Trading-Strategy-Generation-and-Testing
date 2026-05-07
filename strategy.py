@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 4h_Vortex_Trend_Filter_v2
-# Hypothesis: Reduced-trading version of Vortex strategy. Uses Vortex(14) from daily timeframe
-# combined with 4h EMA50 filter and volume confirmation to reduce false signals.
-# Only enters when Vortex shows strong trend (VI+ > VI- by threshold) and price is
-# aligned with EMA50. Volume must be above average to confirm conviction.
-# Targets 20-40 trades/year to avoid fee drag while maintaining trend-following edge.
+# 1d_Weekly_Momentum_Breakout_v1
+# Hypothesis: Combines weekly momentum (price above weekly EMA20) with daily breakouts of Donchian(20) channels
+# and volume confirmation. Uses weekly trend filter to avoid counter-trend trades, reducing false signals in choppy markets.
+# Designed for low trade frequency (target: 15-25 trades/year) to minimize fee drag while capturing strong trends.
+# Works in bull markets via breakouts and in bear markets via short breakdowns with trend alignment.
 
-name = "4h_Vortex_Trend_Filter_v2"
-timeframe = "4h"
+name = "1d_Weekly_Momentum_Breakout_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -24,87 +23,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Vortex calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Vortex Indicator components (VM+ and VM-)
-    vm_plus = np.abs(high_1d[1:] - low_1d[:-1])
-    vm_minus = np.abs(low_1d[1:] - high_1d[:-1])
+    # Weekly EMA20 for trend filter
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Daily Donchian(20) channels
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Sum over 14 periods
-    n_1d = len(high_1d)
-    vi_plus = np.zeros(n_1d)
-    vi_minus = np.zeros(n_1d)
-    
-    for i in range(14, n_1d):
-        if i >= 14:
-            sum_vm_plus = np.sum(vm_plus[i-13:i+1])
-            sum_vm_minus = np.sum(vm_minus[i-13:i+1])
-            sum_tr = np.sum(tr[i-13:i+1])
-            if sum_tr > 0:
-                vi_plus[i] = sum_vm_plus / sum_tr
-                vi_minus[i] = sum_vm_minus / sum_tr
-    
-    # Align Vortex indicators to 4h timeframe
-    vi_plus_4h = align_htf_to_ltf(prices, df_1d, vi_plus)
-    vi_minus_4h = align_htf_to_ltf(prices, df_1d, vi_minus)
-    
-    # 4h EMA50 for stronger trend filter
-    ema_50_4h = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Volume confirmation: volume > 20-period average
+    # Volume confirmation: volume > 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if any critical value is NaN
-        if (np.isnan(vi_plus_4h[i]) or np.isnan(vi_minus_4h[i]) or 
-            np.isnan(ema_50_4h[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(ema_20_1w_aligned[i]) or 
+            np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
+            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Strong trend confirmation: VI+ > VI- by 0.02 threshold
             vol_ok = volume[i] > vol_ma[i]
             
-            # Long: strong bullish vortex + price above EMA50 + volume confirmation
-            if (vi_plus_4h[i] > vi_minus_4h[i] + 0.02 and 
-                close[i] > ema_50_4h[i] and vol_ok):
+            # Long: price breaks above Donchian high + above weekly EMA20 + volume
+            if (close[i] > highest_20[i] and 
+                close[i] > ema_20_1w_aligned[i] and vol_ok):
                 signals[i] = 0.25
                 position = 1
-            # Short: strong bearish vortex + price below EMA50 + volume confirmation
-            elif (vi_minus_4h[i] > vi_plus_4h[i] + 0.02 and 
-                  close[i] < ema_50_4h[i] and vol_ok):
+            # Short: price breaks below Donchian low + below weekly EMA20 + volume
+            elif (close[i] < lowest_20[i] and 
+                  close[i] < ema_20_1w_aligned[i] and vol_ok):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: trend weakens or reverses
-            if (vi_minus_4h[i] >= vi_plus_4h[i] or 
-                close[i] < ema_50_4h[i]):
+            # Exit: price breaks below Donchian low or weekly trend turns bearish
+            if (close[i] < lowest_20[i] or 
+                close[i] < ema_20_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: trend weakens or reverses
-            if (vi_plus_4h[i] >= vi_minus_4h[i] or 
-                close[i] > ema_50_4h[i]):
+            # Exit: price breaks above Donchian high or weekly trend turns bullish
+            if (close[i] > highest_20[i] or 
+                close[i] > ema_20_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
