@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,8 +17,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h lookback for trend and volume
-    lookback = 20
+    # 12h OHLC for trend
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 1:
+        return np.zeros(n)
+    
+    close_12h = df_12h['close'].values
+    # 12h EMA50 trend
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    trend_up = close > ema_50_12h_aligned
+    trend_down = close < ema_50_12h_aligned
     
     # Daily OHLC for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
@@ -33,36 +42,29 @@ def generate_signals(prices):
     camarilla_r1 = daily_close + (daily_high - daily_low) * 1.1 / 12
     camarilla_s1 = daily_close - (daily_high - daily_low) * 1.1 / 12
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Daily trend: price above/below EMA34
-    ema_34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    daily_trend_up = close > ema_34_aligned
-    daily_trend_down = close < ema_34_aligned
-    
-    # Volume filter: current volume > 2.0x 10-period average (12h)
-    vol_ma_10 = np.full(n, np.nan)
-    for i in range(10, n):
-        vol_ma_10[i] = np.mean(volume[i-10:i])
-    vol_filter = volume > (2.0 * vol_ma_10)
+    # Volume filter: current volume > 2.0x 24-period average (4h bars = 4 days)
+    vol_ma_24 = np.full(n, np.nan)
+    for i in range(24, n):
+        vol_ma_24[i] = np.mean(volume[i-24:i])
+    vol_filter = volume > (2.0 * vol_ma_24)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 4  # ~2 days (4*12h) to prevent overtrading
+    cooldown_bars = 6  # ~1 day (6*4h) to prevent overtrading
     
-    start_idx = max(lookback, 10)  # Ensure all indicators are ready
+    start_idx = 24  # Volume MA needs 24 bars
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(r1_aligned[i]) or 
             np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or 
-            np.isnan(vol_ma_10[i])):
+            np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(vol_ma_24[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,36 +75,36 @@ def generate_signals(prices):
         
         bars_since_last_trade += 1
         
-        # Determine daily trend direction
-        trend_up = daily_trend_up[i]
-        trend_down = daily_trend_down[i]
+        # Determine trend direction
+        trending_up = trend_up[i]
+        trending_down = trend_down[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: Price breaks above Camarilla R1 with volume in daily uptrend
+            # Long: Price breaks above Camarilla R1 with volume in 12h uptrend
             if (close[i] > r1_aligned[i] and 
-                trend_up and 
+                trending_up and 
                 vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: Price breaks below Camarilla S1 with volume in daily downtrend
+            # Short: Price breaks below Camarilla S1 with volume in 12h downtrend
             elif (close[i] < s1_aligned[i] and 
-                  trend_down and 
+                  trending_down and 
                   vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit: Price falls back below Camarilla S1 or daily trend changes to down
-            if close[i] < s1_aligned[i] or not trend_up:
+            # Exit: Price falls back below Camarilla S1 or 12h trend changes to down
+            if close[i] < s1_aligned[i] or not trending_up:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price rises back above Camarilla R1 or daily trend changes to up
-            if close[i] > r1_aligned[i] or not trend_down:
+            # Exit: Price rises back above Camarilla R1 or 12h trend changes to up
+            if close[i] > r1_aligned[i] or not trending_down:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
@@ -111,4 +113,4 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: On 12h timeframe, price breaking above/below Camarilla R1/S1 levels with volume confirmation and daily EMA34 trend filter captures institutional breakout momentum. Camarilla levels provide mathematically derived support/resistance with institutional relevance. Works in bull markets (breakouts above R1 in daily uptrend) and bear markets (breakdowns below S1 in daily downtrend). Target: 50-150 trades over 4 years (12-37/year) to minimize fee drag while capturing significant moves. Daily trend filter ensures alignment with higher timeframe momentum.
+# Hypothesis: On 4h timeframe, price breaking above/below Camarilla R1/S1 levels with volume confirmation and 12h EMA50 trend filter captures institutional breakout momentum. Camarilla levels provide mathematically derived support/resistance with institutional relevance. Works in bull markets (breakouts above R1 in 12h uptrend) and bear markets (breakdowns below S1 in 12h downtrend). Target: 75-200 trades over 4 years (19-50/year) to minimize fee drag while capturing significant moves. 12h trend filter ensures alignment with higher timeframe momentum.
