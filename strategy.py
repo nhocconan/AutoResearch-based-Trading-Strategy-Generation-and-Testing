@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
-# Hypothesis: Camarilla pivot levels (R1/S1) from daily chart combined with 1d EMA34 trend and volume spikes capture institutional breakout moves.
-# Works in bull via R1 breakouts and bear via S1 breakdowns. Volume filter reduces false signals, trend filter avoids counter-trend trades.
+# 4h_Donchian20_Breakout_1dTrend_VolumeSpike
+# Hypothesis: Donchian(20) breakouts on 4h capture short-term momentum with 1d EMA trend filter and volume confirmation.
+# Works in bull markets via long breakouts and bear via short breakdowns. Volume filter reduces false breakouts.
 # Target: 20-50 trades per year (~80-200 over 4 years) with position size 0.25.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+name = "4h_Donchian20_Breakout_1dTrend_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
 
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,30 +22,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for Camarilla pivots and trend filter
+    # Load 1d data ONCE for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Camarilla pivot levels from previous 1d bar
-    # Using formulas: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # where C, H, L are from previous completed 1d bar
-    prev_close = df_1d['close'].shift(1).values  # previous day close
-    prev_high = df_1d['high'].shift(1).values    # previous day high
-    prev_low = df_1d['low'].shift(1).values      # previous day low
-    
-    # Calculate R1 and S1 for each 1d bar
-    camarilla_range = (prev_high - prev_low) * 1.1 / 12
-    r1_levels = prev_close + camarilla_range
-    s1_levels = prev_close - camarilla_range
-    
-    # Align to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_levels)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_levels)
+    # Donchian(20) channels on 4h
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume ratio: current volume / 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -54,45 +42,45 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Need EMA34 period
+    start_idx = 20  # Need 20 periods for Donchian and volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(vol_ratio[i]):
+        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ratio[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Breakout conditions: price breaks above R1 or below S1
-        breakout_up = close[i] > r1_aligned[i]
-        breakout_down = close[i] < s1_aligned[i]
+        # Breakout conditions: price breaks above 20-period high or below 20-period low
+        breakout_up = close[i] > high_20[i-1]  # Use previous bar's high to avoid look-ahead
+        breakout_down = close[i] < low_20[i-1]  # Use previous bar's low
         
         # Volume confirmation: volume > 2x average
         volume_confirm = vol_ratio[i] > 2.0
         
-        # Trend filter from 1d EMA34
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        # Trend filter from 1d EMA50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
         if position == 0:
-            # Long: breakout above R1 + volume + uptrend
+            # Long: upward breakout + volume + uptrend
             if breakout_up and volume_confirm and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below S1 + volume + downtrend
+            # Short: downward breakout + volume + downtrend
             elif breakout_down and volume_confirm and downtrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price breaks back below S1 or trend reversal
-            if close[i] < s1_aligned[i] or not uptrend:
+            # Exit: price breaks back below 20-period low or trend reversal
+            if close[i] < low_20[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price breaks back above R1 or trend reversal
-            if close[i] > r1_aligned[i] or not downtrend:
+            # Exit: price breaks back above 20-period high or trend reversal
+            if close[i] > high_20[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
