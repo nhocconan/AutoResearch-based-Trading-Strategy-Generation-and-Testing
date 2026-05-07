@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1S1_Breakout_4hTrend_Volume
-Hypothesis: Camarilla pivot levels (R1/S1) on 1h combined with 4h EMA trend filter and volume confirmation captures high-probability breakouts. Camarilla levels provide institutional support/resistance; 4h EMA ensures alignment with higher timeframe momentum; volume confirms breakout strength. Session filter (08-20 UTC) reduces noise. Target: 60-150 trades over 4 years.
+6h_RollingZScore_1wTrend_Volume
+Hypothesis: Mean reversion at extreme Z-scores (2.0) with 1-week trend filter and volume confirmation captures reversals while avoiding trend-following whipsaws. The Z-score measures deviation from the 60-period mean, and extreme values indicate potential reversals. Weekly trend ensures alignment with higher timeframe momentum. Volume adds confirmation. Designed for low frequency and high win rate in both bull and bear markets.
+Target: 50-150 total trades over 4 years.
 """
-name = "1h_Camarilla_R1S1_Breakout_4hTrend_Volume"
-timeframe = "1h"
+name = "6h_RollingZScore_1wTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -13,107 +14,67 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Pivot points from previous day (using daily data for Camarilla)
-    # For 1h chart, we use previous day's OHLC to calculate today's Camarilla levels
-    # We'll calculate daily pivots and align to 1h
+    # Z-score: (close - mean) / std over 60 periods
+    period = 60
+    mean = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    # Avoid division by zero
+    z_score = np.where(std != 0, (close - mean) / std, 0.0)
     
-    # Get daily data for pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate daily pivot: (H + L + C) / 3
-    # Camarilla levels:
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    # R2 = C + (H - L) * 1.1 / 6
-    # S2 = C - (H - L) * 1.1 / 6
-    # We'll use R1/S1 for breakout
-    
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
-    
-    # Previous day's values for today's levels
-    prev_daily_high = np.roll(daily_high, 1)
-    prev_daily_low = np.roll(daily_low, 1)
-    prev_daily_close = np.roll(daily_close, 1)
-    # First day will have NaN from roll, we'll handle
-    
-    # Calculate Camarilla R1 and S1 for each day
-    camarilla_r1 = prev_daily_close + (prev_daily_high - prev_daily_low) * 1.1 / 12
-    camarilla_s1 = prev_daily_close - (prev_daily_high - prev_daily_low) * 1.1 / 12
-    
-    # Align daily Camarilla levels to 1h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # 4h EMA50 for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # 1w EMA50 for trend filter
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Volume filter: current volume > 1.5 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_avg * 1.5)
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for EMA and pivots
+    start_idx = max(100, period - 1)  # Need enough data for Z-score
     
     for i in range(start_idx, n):
         # Skip if any data is not ready
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(ema_50_4h_aligned[i]) or np.isnan(vol_avg[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        if not session_filter[i]:
+        if (np.isnan(z_score[i]) or np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R1 + 4h uptrend + volume
-            if close[i] > camarilla_r1_aligned[i] and close[i] > ema_50_4h_aligned[i] and volume_filter[i]:
-                signals[i] = 0.20
+            # Long: Z-score < -2.0 (oversold) + 1w uptrend + volume
+            if z_score[i] < -2.0 and close[i] > ema_50_1w_aligned[i] and volume_filter[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + 4h downtrend + volume
-            elif close[i] < camarilla_s1_aligned[i] and close[i] < ema_50_4h_aligned[i] and volume_filter[i]:
-                signals[i] = -0.20
+            # Short: Z-score > 2.0 (overbought) + 1w downtrend + volume
+            elif z_score[i] > 2.0 and close[i] < ema_50_1w_aligned[i] and volume_filter[i]:
+                signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: price returns to the opposite Camarilla level (mean reversion)
+            # Exit: Z-score returns to zero (mean reversion)
             if position == 1:
-                if close[i] <= camarilla_s1_aligned[i]:
+                if z_score[i] >= 0.0:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
             else:  # position == -1
-                if close[i] >= camarilla_r1_aligned[i]:
+                if z_score[i] <= 0.0:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
