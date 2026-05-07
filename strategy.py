@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_1d_1w_KAMA_Direction_Signal_12h_1wTrend_Volume"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_Volume_Trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,87 +17,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for KAMA and weekly trend
+    # Load daily data ONCE before loop for Donchian channels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Load 1w data ONCE before loop for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
+    # Calculate daily Donchian channels (20-period high/low)
+    donchian_high = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
     
-    # Calculate KAMA on daily close
-    close_1d = df_1d['close'].values
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0)
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # Align daily Donchian to 4h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # KAMA direction: 1 if close > KAMA, -1 if close < KAMA
-    kama_direction = np.where(close_1d > kama, 1, -1)
+    # 4h EMA(21) for trend filter
+    ema_21_4h = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Calculate 1w EMA(34) for trend filter
-    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align daily KAMA direction and weekly EMA to 12h timeframe
-    kama_dir_aligned = align_htf_to_ltf(prices, df_1d, kama_direction)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Volume spike detection: 2-period average (half day of 12h bars)
-    vol_ma_2 = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
+    # Volume spike detection: 4-period average (1 day of 4h bars)
+    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 2)  # Wait for EMA and volume MA
+    start_idx = max(20, 4)  # Wait for Donchian and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(kama_dir_aligned[i]) or np.isnan(ema_1w_aligned[i]) or 
-            np.isnan(vol_ma_2[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(ema_21_4h[i]) or np.isnan(vol_ma_4[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: KAMA bullish + price above KAMA + weekly uptrend + volume spike
-            kama_bullish = kama_dir_aligned[i] == 1
-            price_above_kama = close[i] > kama_dir_aligned[i] * close[i]  # Simplified: use price vs kama value
-            # Actually need KAMA value aligned - recalculate approach
-            # Instead, let's use a simpler approach: if KAMA direction is bullish and price rising
-            weekly_uptrend = ema_1w_aligned[i] > ema_1w_aligned[i-1]
-            vol_condition = volume[i] > vol_ma_2[i] * 2.0
+            # Long: price breaks above daily Donchian high with volume and uptrend
+            vol_condition = volume[i] > vol_ma_4[i] * 1.8
+            uptrend = ema_21_4h[i] > ema_21_4h[i-1]
             
-            # Use price vs previous close as proxy for KAMA relationship
-            price_rising = close[i] > close[i-1]
-            
-            if kama_bullish and price_rising and weekly_uptrend and vol_condition:
+            if close[i] > donchian_high_aligned[i] and vol_condition and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA bearish + price falling + weekly downtrend + volume spike
-            elif (kama_dir_aligned[i] == -1 and 
-                  close[i] < close[i-1] and 
-                  ema_1w_aligned[i] < ema_1w_aligned[i-1] and 
-                  vol_condition):
+            # Short: price breaks below daily Donchian low with volume and downtrend
+            elif close[i] < donchian_low_aligned[i] and vol_condition and not uptrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: KAMA turns bearish or volume drops
-            if (kama_dir_aligned[i] == -1 or 
-                volume[i] < vol_ma_2[i] * 1.2):
+            # Exit: price returns to daily Donchian low or volume drops
+            if close[i] < donchian_low_aligned[i] or volume[i] < vol_ma_4[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: KAMA turns bullish or volume drops
-            if (kama_dir_aligned[i] == 1 or 
-                volume[i] < vol_ma_2[i] * 1.2):
+            # Exit: price returns to daily Donchian high or volume drops
+            if close[i] > donchian_high_aligned[i] or volume[i] < vol_ma_4[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -105,15 +78,17 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 12h KAMA direction signal with 1w trend filter and volume confirmation
-# - KAMA (Kaufman Adaptive Moving Average) adapts to market noise, reducing false signals
-# - KAMA direction (bullish/bearish) from daily timeframe provides the core signal
-# - Weekly EMA(34) trend filter ensures we only trade in the direction of the higher timeframe trend
-# - Volume spike (2x average) confirms institutional participation and reduces false breakouts
-# - Works in both bull (KAMA bullish in weekly uptrend) and bear (KAMA bearish in weekly downtrend)
-# - Exit when KAMA direction changes or volume weakens
-# - Position size 0.25 targets ~15-35 trades/year, avoiding fee drag
-# - Uses adaptive moving average that adjusts to market volatility (better than fixed MA)
-# - Weekly trend filter reduces whipsaws vs using same or lower timeframe
-# - Volume confirmation reduces false signals in ranging markets
-# - Designed for low trade frequency to minimize fee drag impact on returns
+# Hypothesis: 4h Donchian breakout with daily Donchian channels, volume confirmation, and 4h trend filter
+# - Daily Donchian(20) provides robust support/resistance levels from prior 20 days
+# - Breakout above daily high with volume in 4h uptrend = long opportunity
+# - Breakdown below daily low with volume in 4h downtrend = short opportunity
+# - Volume spike (1.8x average) confirms institutional participation
+# - Works in both bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend)
+# - Exit when price returns to daily Donchian low/high or volume weakens
+# - Position size 0.25 targets ~20-50 trades/year, avoiding fee drag
+# - Uses actual daily Donchian levels (not intraday) for better robustness
+# - 4h trend filter reduces whipsaws vs using same timeframe
+# - Designed to work in BOTH bull and bear markets via trend filter
+# - Volume confirmation reduces false breakouts
+# - Combination: Donchian (1d) + trend (4h) + volume (4h) provides clean signals
+# - Aims for 50-150 total trades over 4 years (12-37/year) to stay within limits
