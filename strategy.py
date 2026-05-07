@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_TRIX_VolumeSpike_Regime
-Hypothesis: 4h TRIX momentum with volume spike and chop regime filter captures
-strong trending moves while avoiding whipsaws in range markets. TRIX > 0 with
-volume confirmation indicates bullish momentum, TRIX < 0 indicates bearish.
-Chop filter (CHOP > 61.8) avoids false signals in ranging markets. Designed
-to work in both bull and bear markets by following momentum with regime awareness.
-Targets 20-50 trades/year to minimize fee drag on 4h timeframe.
+6H_Price_Action_Breakout_with_1D_Trend_and_Volume
+Hypothesis: 6h price breaks above/below the prior 6h high/low with 1D EMA50 trend confirmation and volume spike.
+This captures momentum continuation in both bull and bear markets by filtering breakouts with higher timeframe trend.
+Volume confirmation reduces false breakouts. Targets 12-37 trades/year to minimize fee drag on 6h timeframe.
 """
-name = "4h_TRIX_VolumeSpike_Regime"
-timeframe = "4h"
+name = "6H_Price_Action_Breakout_with_1D_Trend_and_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -18,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,82 +23,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1D data for chop regime filter
+    # Get 1D data for EMA trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate TRIX (12,12,12) - triple EMA of ROC
-    # ROC = (close - close[12]) / close[12] * 100
-    close_series = pd.Series(close)
-    roc = close_series.pct_change(12) * 100  # 12-period ROC
-    ema1 = roc.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
-    trix = ema3.values
+    # Calculate 1D EMA50 for trend direction
+    close_1d_series = pd.Series(df_1d['close'])
+    ema_50 = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Calculate Chop Index for regime detection (using 1D data)
-    # CHOP = 100 * log10(sum(ATR,14) / (max(high,14) - min(low,14))) / log10(14)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with index
-    
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    max_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    range_14 = max_high_14 - min_low_14
-    
-    chop = 100 * np.log10(pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values / range_14) / np.log10(14)
-    
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # Volume filter: current 4h volume > 1.8 x 20-period average volume
+    # Volume filter: current 6h volume > 2.0 x 20-period average volume
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_avg * 1.8)
+    volume_filter = volume > (vol_avg * 2.0)
     
-    # Align TRIX to LTF (no additional delay needed for TRIX)
-    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
+    # Calculate prior 6h high/low for breakout levels
+    # Shift by 1 to use only completed bars
+    prior_high = np.roll(high, 1)
+    prior_low = np.roll(low, 1)
+    prior_high[0] = np.nan  # First bar has no prior
+    prior_low[0] = np.nan
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    bars_since_exit = 0  # bars since last exit to prevent overtrading
     
-    start_idx = max(50, 20)  # Ensure sufficient warmup for all indicators
+    start_idx = max(50, 20)  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
+        bars_since_exit += 1
+        
         # Skip if any data is not ready
-        if (np.isnan(trix_aligned[i]) or np.isnan(chop_aligned[i]) or 
-            np.isnan(vol_avg[i])):
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(vol_avg[i]) or 
+            np.isnan(prior_high[i]) or np.isnan(prior_low[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                bars_since_exit = 0
             continue
         
         if position == 0:
-            # Long: TRIX positive, volume spike, and not in chop regime (trending market)
-            if (trix_aligned[i] > 0 and trix_aligned[i-1] <= 0 and 
-                volume_filter[i] and chop_aligned[i] < 61.8):
+            # Minimum 24 bars between trades (4 days on 6h TF) to reduce frequency
+            if bars_since_exit < 24:
+                continue
+                
+            # Long: price breaks above prior 6h high with 1D EMA50 uptrend and volume spike
+            if (close[i] > prior_high[i] and 
+                close[i] > ema_50_aligned[i] and 
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX negative, volume spike, and not in chop regime (trending market)
-            elif (trix_aligned[i] < 0 and trix_aligned[i-1] >= 0 and 
-                  volume_filter[i] and chop_aligned[i] < 61.8):
+                bars_since_exit = 0
+            # Short: price breaks below prior 6h low with 1D EMA50 downtrend and volume spike
+            elif (close[i] < prior_low[i] and 
+                  close[i] < ema_50_aligned[i] and 
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
+                bars_since_exit = 0
         elif position != 0:
-            # Exit: TRIX crosses zero (momentum reversal)
-            if position == 1 and trix_aligned[i] < 0:
+            # Exit: price returns to opposite EMA50 side (trend reversal)
+            if position == 1 and close[i] < ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and trix_aligned[i] > 0:
+                bars_since_exit = 0
+            elif position == -1 and close[i] > ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
+                bars_since_exit = 0
             else:
                 # Hold position
                 signals[i] = 0.25 if position == 1 else -0.25
