@@ -1,9 +1,3 @@
-# 1H_Camarilla_R3S3_1DTrend_VolumeSpike_v5
-# Hypothesis: 1h strategy using 4h Camarilla R3/S3 breakouts filtered by 1d EMA34 trend and volume spikes.
-# Uses 4h for structure and 1d for trend direction, 1h only for precise entry timing.
-# Targets 15-37 trades/year via strict entry conditions to minimize fee drag.
-# Works in bull/bear markets by only trading with the daily trend.
-
 #!/usr/bin/env python3
 
 name = "1H_Camarilla_R3S3_1DTrend_VolumeSpike_v5"
