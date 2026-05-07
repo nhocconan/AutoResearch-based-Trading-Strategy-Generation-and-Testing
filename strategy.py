@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_WeeklyPivot_DailyTrend_VolumeBreak"
-timeframe = "1d"
+name = "6h_Engulfing_1dTrend_Threshold"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -13,87 +13,71 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
-        return np.zeros(n)
-    
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Weekly pivot points from weekly data (use last completed week)
-    # Calculate weekly high/low/close from weekly data
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
-    
-    # Pivot levels
-    pp = (weekly_high + weekly_low + weekly_close) / 3
-    r1 = 2 * pp - weekly_low
-    s1 = 2 * pp - weekly_high
-    r2 = pp + (weekly_high - weekly_low)
-    s2 = pp - (weekly_high - weekly_low)
-    r3 = weekly_high + 2 * (pp - weekly_low)
-    s3 = weekly_low - 2 * (weekly_high - pp)
-    
-    # Align weekly pivot levels to daily timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
-    
-    # Daily trend filter: EMA(34) on daily close
+    # Daily EMA(34) for trend filter
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume spike detection: 20-period average (20 days)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Bullish engulfing: current bullish candle engulfs previous bearish candle
+    bullish_engulf = (close > open_price) & (open_price < close) & \
+                     (close > open_price) & (open_price < close) & \
+                     (close > open_price) & (open_price < close)  # Placeholder, will fix below
+    # Actually compute bullish and bearish engulfing properly
+    bullish_engulf = (close > open_price) & (open_price <= close) & \
+                     (close[1:] > open_price[:-1]) & (open_price[1:] <= close[:-1]) & \
+                     (close > open_price[:-1]) & (open_price < close[:-1])
+    # Fix: shift to align indices
+    bullish_engulf = np.zeros(n, dtype=bool)
+    bearish_engulf = np.zeros(n, dtype=bool)
+    for i in range(1, n):
+        bullish_engulf[i] = (close[i] > open_price[i]) and (open_price[i] <= close[i]) and \
+                            (close[i] > open_price[i-1]) and (open_price[i] < close[i-1])
+        bearish_engulf[i] = (close[i] < open_price[i]) and (open_price[i] >= close[i]) and \
+                            (close[i] < open_price[i-1]) and (open_price[i] > close[i-1])
+    
+    # Align engulfing signals to 60-minute timeframe (no alignment needed as computed on 6h)
+    # But we need to ensure we don't use future data - already fine as we use i-1 and i
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Wait for all indicators
+    start_idx = 34  # Wait for EMA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(pp_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if np.isnan(ema_34_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above S1 with volume and daily uptrend
-            vol_condition = volume[i] > vol_ma_20[i] * 2.0
-            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
-            
-            if close[i] > s1_aligned[i] and vol_condition and uptrend:
+            # Long: bullish engulfing in daily uptrend
+            if bullish_engulf[i] and ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below R1 with volume and daily downtrend
-            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
+            # Short: bearish engulfing in daily downtrend
+            elif bearish_engulf[i] and ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below pivot or volume drops
-            if close[i] < pp_aligned[i] or volume[i] < vol_ma_20[i] * 1.5:
+            # Exit: bearish engulfing or trend change
+            if bearish_engulf[i] or ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above pivot or volume drops
-            if close[i] > pp_aligned[i] or volume[i] < vol_ma_20[i] * 1.5:
+            # Exit: bullish engulfing or trend change
+            if bullish_engulf[i] or ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,12 +85,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 1d weekly pivot breakout with daily trend and volume confirmation
-# - Weekly pivot points (S1/R1) act as dynamic support/resistance levels
-# - Breakout above S1 with volume in daily uptrend = long opportunity
-# - Breakdown below R1 with volume in daily downtrend = short opportunity
-# - Volume spike (2x average) confirms institutional participation
-# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
-# - Exit when price returns to weekly pivot (PP) or volume weakens
-# - Position size 0.25 targets 10-25 trades/year, avoiding fee drag
-# - Weekly pivot provides structure that works across market regimes
+# Hypothesis: 6h engulfing candles with daily EMA(34) trend filter
+# - Bullish/bearish engulfing patterns indicate strong momentum shifts
+# - Daily EMA(34) ensures we only trade in the direction of higher timeframe trend
+# - Works in bull markets (buy bullish engulfing in uptrend) and bear markets (sell bearish engulfing in downtrend)
+# - Engulfing patterns are relatively rare, keeping trade frequency low (target: 15-30/year)
+# - Position size 0.25 limits drawdown while allowing meaningful gains
+# - Simple, robust logic with clear entry/exit conditions
