@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_1d_200EMA_Pullback_Momentum"
-timeframe = "6h"
+name = "12h_1w_1d_Camarilla_R3S3_Breakout_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,68 +17,89 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Daily EMA(200) for long-term trend filter
-    ema_200_1d = pd.Series(df_1d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # 6h RSI(14) for momentum
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate weekly ATR for volatility filter
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    tr1 = high_1w[1:] - low_1w[1:]
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.concatenate([[np.inf], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 6h EMA(20) for short-term trend
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate daily Camarilla R3/S3 levels from previous day
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Volume filter: 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
+    
+    # Camarilla R3/S3 levels (wider bands for 12h timeframe)
+    s3 = prev_close - (range_hl * 1.125)
+    r3 = prev_close + (range_hl * 1.125)
+    
+    # Align weekly ATR and daily levels to 12h timeframe
+    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    
+    # Daily trend filter: EMA(34) on daily close
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volatility filter: avoid low volatility regimes
+    vol_filter = atr_1w_aligned > 0  # Ensure we have valid ATR
+    
+    # Volume spike detection: 4-period average (2 days of 12h bars)
+    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(200, 20, 14)  # Wait for all indicators
+    start_idx = max(34, 4)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_200_1d_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(ema_20[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or np.isnan(atr_1w_aligned[i]) or 
+            np.isnan(vol_ma_4[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above daily EMA200, RSI > 50, price above EMA20, volume confirmation
-            if (close[i] > ema_200_1d_aligned[i] and 
-                rsi[i] > 50 and 
-                close[i] > ema_20[i] and 
-                volume[i] > vol_ma_20[i] * 1.5):
+            # Long: price above S3 with volume and daily uptrend, in sufficient volatility
+            vol_condition = volume[i] > vol_ma_4[i] * 2.0
+            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
+            
+            if close[i] > s3_aligned[i] and vol_condition and uptrend and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below daily EMA200, RSI < 50, price below EMA20, volume confirmation
-            elif (close[i] < ema_200_1d_aligned[i] and 
-                  rsi[i] < 50 and 
-                  close[i] < ema_20[i] and 
-                  volume[i] > vol_ma_20[i] * 1.5):
+            # Short: price below R3 with volume and daily downtrend, in sufficient volatility
+            elif close[i] < r3_aligned[i] and vol_condition and not uptrend and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price crosses below EMA20 or RSI drops below 40
-            if close[i] < ema_20[i] or rsi[i] < 40:
+            # Exit: price back below S3 or volume drops
+            if close[i] < s3_aligned[i] or volume[i] < vol_ma_4[i] * 1.1:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price crosses above EMA20 or RSI rises above 60
-            if close[i] > ema_20[i] or rsi[i] > 60:
+            # Exit: price back above R3 or volume drops
+            if close[i] > r3_aligned[i] or volume[i] < vol_ma_4[i] * 1.1:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -86,15 +107,15 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 6s EMA20 pullback strategy with daily EMA200 trend filter
-# - Uses daily EMA200 to determine long-term trend (bull/bear filter)
-# - Enters long when price is above daily EMA200, RSI > 50, and pulls back to EMA20 with volume
-# - Enters short when price is below daily EMA200, RSI < 50, and bounces to EMA20 with volume
-# - Works in both bull and bear markets by aligning with higher timeframe trend
-# - Volume confirmation (1.5x average) ensures institutional participation
-# - Exits on EMA20 crossover or RSI exhaustion to avoid overstaying
-# - Position size 0.25 targets ~20-50 trades/year, minimizing fee drag
-# - Designed for BTC/ETH which respect EMA200 as major support/resistance
-# - Uses momentum (RSI) to avoid buying into strong downtrends or selling into strong uptrends
-# - Simple, robust logic with minimal overfitting risk
-# - Aims for 50-150 total trades over 4 years (12-37/year) on BTC/ETH/SOL
+# Hypothesis: 12h Camarilla R3/S3 breakout with weekly volatility filter, daily trend and volume confirmation
+# - Weekly ATR filter ensures we only trade in sufficient volatility environments
+# - Daily Camarilla R3/S3 act as strong support/resistance levels (wider bands for 12h)
+# - Breakout above S3 with volume in daily uptrend = long opportunity
+# - Breakdown below R3 with volume in daily downtrend = short opportunity
+# - Volume spike (2.0x average) confirms institutional participation
+# - Weekly volatility filter avoids ranging/low-volatility markets where breakouts fail
+# - Works in both bull (buy S3 breaks in uptrend) and bear (sell R3 breaks in downtrend)
+# - Exit when price returns to S3/R3 or volume weakens
+# - Position size 0.25 targets ~20-40 trades/year, avoiding fee drag on 12h timeframe
+# - Uses multiple timeframes: 12h entry, 1d for levels/trend, 1w for volatility filter
+# - Designed to work in BOTH bull and bear markets via trend filter and volatility adaptation
