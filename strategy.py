@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_1w_1d_WilliamsFractal_Pullback_Trend"
-timeframe = "6h"
+name = "12h_1d_Camarilla_S1R1_Breakout_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,92 +17,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
-        return np.zeros(n)
-    
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate Williams fractals (5-bar window: high/low of center bar)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Calculate daily Camarilla pivot levels from previous day
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    bearish_fractal = np.full(len(high_1w), np.nan)
-    bullish_fractal = np.full(len(low_1w), np.nan)
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
     
-    for i in range(2, len(high_1w) - 2):
-        if (high_1w[i] > high_1w[i-1] and high_1w[i] > high_1w[i-2] and
-            high_1w[i] > high_1w[i+1] and high_1w[i] > high_1w[i+2]):
-            bearish_fractal[i] = high_1w[i]
-        if (low_1w[i] < low_1w[i-1] and low_1w[i] < low_1w[i-2] and
-            low_1w[i] < low_1w[i+1] and low_1w[i] < low_1w[i+2]):
-            bullish_fractal[i] = low_1w[i]
+    # Camarilla levels
+    s1 = prev_close - (range_hl * 1.08 / 2)
+    r1 = prev_close + (range_hl * 1.08 / 2)
     
-    # Weekly trend: EMA(8) on weekly close
-    ema_8_1w = pd.Series(df_1w['close']).ewm(span=8, adjust=False, min_periods=8).mean().values
+    # Align daily levels to 12h timeframe
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     
     # Daily trend filter: EMA(34) on daily close
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align weekly fractals and trends to 6h timeframe with proper delay
-    # Williams fractal needs 2 extra weekly bars for confirmation
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bullish_fractal, additional_delay_bars=2)
-    ema_8_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_8_1w)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume spike detection: 4-period average (1 day of 6h bars)
+    # Volume spike detection: 4-period average (2 days of 12h bars)
     vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(8, 34, 4)  # Wait for indicators
+    start_idx = max(34, 4)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or
-            np.isnan(ema_8_1w_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or
-            np.isnan(vol_ma_4[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(vol_ma_4[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: pullback to bullish fractal support in weekly uptrend with volume
+            # Long: price above S1 with volume and daily uptrend
             vol_condition = volume[i] > vol_ma_4[i] * 2.0
-            weekly_uptrend = ema_8_1w_aligned[i] > ema_8_1w_aligned[i-1]
-            daily_uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
+            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
             
-            if (not np.isnan(bullish_fractal_aligned[i]) and
-                low[i] <= bullish_fractal_aligned[i] * 1.002 and  # allow small penetration
-                weekly_uptrend and daily_uptrend and vol_condition):
+            if close[i] > s1_aligned[i] and vol_condition and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: pullback to bearish fractal resistance in weekly downtrend with volume
-            elif (not np.isnan(bearish_fractal_aligned[i]) and
-                  high[i] >= bearish_fractal_aligned[i] * 0.998 and  # allow small penetration
-                  not weekly_uptrend and not daily_uptrend and vol_condition):
+            # Short: price below R1 with volume and daily downtrend
+            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price closes below bullish fractal or trend changes
-            if (close[i] < bullish_fractal_aligned[i] * 0.995 or
-                ema_8_1w_aligned[i] < ema_8_1w_aligned[i-1] or
-                ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]):
+            # Exit: price back below S1 or volume drops
+            if close[i] < s1_aligned[i] or volume[i] < vol_ma_4[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price closes above bearish fractal or trend changes
-            if (close[i] > bearish_fractal_aligned[i] * 1.005 or
-                ema_8_1w_aligned[i] > ema_8_1w_aligned[i-1] or
-                ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]):
+            # Exit: price back above R1 or volume drops
+            if close[i] > r1_aligned[i] or volume[i] < vol_ma_4[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -110,13 +87,14 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 6h Williams fractal pullback with weekly/daily trend and volume confirmation
-# - Weekly Williams fractals identify significant swing points from institutional order flow
-# - Pullback to bullish fractal support in weekly uptrend = long opportunity
-# - Pullback to bearish fractal resistance in weekly downtrend = short opportunity
-# - Requires alignment of weekly and daily trends to avoid counter-trend trades
-# - Volume spike (2x average) confirms institutional participation at fractal levels
-# - Works in both bull (buy pullbacks in uptrend) and bear (sell pullbacks in downtrend)
-# - Williams fractals require 2-bar confirmation to avoid false signals
-# - Position size 0.25 targets ~15-35 trades/year, avoiding fee drag on 6s timeframe
-# - Uses actual weekly fractals (not resampled) for proper swing point detection
+# Hypothesis: 12h Camarilla S1/R1 breakout with daily trend and volume confirmation
+# - Daily Camarilla S1/R1 act as strong support/resistance levels
+# - Breakout above S1 with volume in daily uptrend = long opportunity
+# - Breakdown below R1 with volume in daily downtrend = short opportunity
+# - Volume spike (2.0x average) confirms institutional participation
+# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
+# - Exit when price returns to S1/R1 or volume weakens
+# - Position size 0.25 targets ~15-25 trades/year, avoiding fee drag
+# - Uses actual daily Camarilla levels (not weekly) for better responsiveness
+# - Designed to work in BOTH bull and bear markets via trend filter
+# - 12h timeframe targets 50-150 total trades over 4 years (12-37/year) as per requirements
