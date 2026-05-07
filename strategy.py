@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-# 6h_AroonOscillator_12hTrend_Volume
-# Hypothesis: Uses Aroon Oscillator (25-period) to detect trend strength and direction, filtered by 12h EMA50 trend and volume confirmation.
-# Aroon Oscillator ranges from -100 to +100, with values above +50 indicating strong uptrend and below -50 indicating strong downtrend.
-# This helps capture sustained trends while avoiding choppy markets. Works in both bull and bear markets by only trading in the direction of the 12h trend.
-# Target: 15-30 trades/year to stay within optimal frequency range and minimize fee drag.
+# 4h_Camarilla_R1S1_1dATR10_Trend_Volume
+# Hypothesis: Uses Camarilla pivot levels (R1/S1) on 1d chart with 1d ATR-based trend filter (close > EMA10 + ATR*0.5 for long, < EMA10 - ATR*0.5 for short) and volume confirmation. Designed to work in both bull and bear markets by trading only in the direction of the 1d ATR-adjusted trend. Target: 20-40 trades/year to minimize fee drag.
 
-name = "6h_AroonOscillator_12hTrend_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R1S1_1dATR10_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,53 +20,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter and Aroon calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get 1d data for trend filter and Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_6h = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1d EMA10 and ATR10 for trend filter
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate Aroon Oscillator (25-period) on 12h data
-    # Aroon Up = ((25 - periods since 25-period high) / 25) * 100
-    # Aroon Down = ((25 - periods since 25-period low) / 25) * 100
-    # Aroon Oscillator = Aroon Up - Aroon Down
-    period = 25
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    ema_10_1d = pd.Series(close_1d).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    aroon_up = np.full(len(close_12h), np.nan)
-    aroon_down = np.full(len(close_12h), np.nan)
+    # Calculate True Range and ATR(10)
+    tr1 = high_1d[1:] - low_1d[:-1]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_10_1d = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    for i in range(period - 1, len(close_12h)):
-        # Find highest high in last 'period' periods
-        period_high_idx = np.argmax(high_12h[i - period + 1:i + 1])
-        periods_since_high = period - 1 - period_high_idx
-        aroon_up[i] = ((period - periods_since_high) / period) * 100
-        
-        # Find lowest low in last 'period' periods
-        period_low_idx = np.argmin(low_12h[i - period + 1:i + 1])
-        periods_since_low = period - 1 - period_low_idx
-        aroon_down[i] = ((period - periods_since_low) / period) * 100
+    # Calculate ATR-based trend: long if close > EMA10 + 0.5*ATR, short if close < EMA10 - 0.5*ATR
+    trend_long_1d = close_1d > (ema_10_1d + 0.5 * atr_10_1d)
+    trend_short_1d = close_1d < (ema_10_1d - 0.5 * atr_10_1d)
     
-    aroon_osc = aroon_up - aroon_down  # Range: -100 to +100
+    # Calculate Camarilla pivot levels (R1, S1) from previous day
+    # R1 = close + 1.1*(high - low)/12
+    # S1 = close - 1.1*(high - low)/12
+    # Using previous day's data to avoid look-ahead
+    high_shift = np.concatenate([[np.nan], high_1d[:-1]])
+    low_shift = np.concatenate([[np.nan], low_1d[:-1]])
+    close_shift = np.concatenate([[np.nan], close_1d[:-1]])
     
-    # Align Aroon Oscillator to 6h timeframe
-    aroon_osc_6h = align_htf_to_ltf(prices, df_12h, aroon_osc)
+    camarilla_range = high_shift - low_shift
+    r1 = close_shift + 1.1 * camarilla_range / 12
+    s1 = close_shift - 1.1 * camarilla_range / 12
     
-    # Calculate volume spike on 6h timeframe (20-period average)
+    # Align 1d indicators to 4h timeframe
+    ema_10_1d_4h = align_htf_to_ltf(prices, df_1d, ema_10_1d)
+    atr_10_1d_4h = align_htf_to_ltf(prices, df_1d, atr_10_1d)
+    trend_long_1d_4h = align_htf_to_ltf(prices, df_1d, trend_long_1d.astype(float))
+    trend_short_1d_4h = align_htf_to_ltf(prices, df_1d, trend_short_1d.astype(float))
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Calculate volume spike on 4h timeframe (20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):
+    for i in range(30, n):
         # Skip if any critical value is NaN
-        if (np.isnan(aroon_osc_6h[i]) or np.isnan(ema_50_12h_6h[i]) or 
+        if (np.isnan(ema_10_1d_4h[i]) or np.isnan(atr_10_1d_4h[i]) or 
+            np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
+            np.isnan(trend_long_1d_4h[i]) or np.isnan(trend_short_1d_4h[i]) or
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -77,24 +82,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Aroon Oscillator > 50 (strong uptrend) + above 12h EMA50 + volume spike
-            if aroon_osc_6h[i] > 50 and close[i] > ema_50_12h_6h[i] and volume_spike[i]:
+            # Long: Close > R1 + uptrend filter + volume spike
+            if close[i] > r1_4h[i] and trend_long_1d_4h[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Aroon Oscillator < -50 (strong downtrend) + below 12h EMA50 + volume spike
-            elif aroon_osc_6h[i] < -50 and close[i] < ema_50_12h_6h[i] and volume_spike[i]:
+            # Short: Close < S1 + downtrend filter + volume spike
+            elif close[i] < s1_4h[i] and trend_short_1d_4h[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Aroon Oscillator falls below 0 (trend weakening) or price closes below 12h EMA50
-            if aroon_osc_6h[i] < 0 or close[i] < ema_50_12h_6h[i]:
+            # Exit: Close below S1 or trend turns bearish
+            if close[i] < s1_4h[i] or not trend_long_1d_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Aroon Oscillator rises above 0 (trend weakening) or price closes above 12h EMA50
-            if aroon_osc_6h[i] > 0 or close[i] > ema_50_12h_6h[i]:
+            # Exit: Close above R1 or trend turns bullish
+            if close[i] > r1_4h[i] or not trend_short_1d_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
