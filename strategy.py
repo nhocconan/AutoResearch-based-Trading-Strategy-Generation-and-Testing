@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_WeeklyPivot_DailyTrend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,65 +17,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate weekly pivot points from previous week (complete week only)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate daily Camarilla pivot points from previous day (complete day only)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Use previous week's complete data to calculate this week's pivot
-    # Skip the current incomplete week
-    prev_high = high_1w[:-1]
-    prev_low = low_1w[:-1]
-    prev_close = close_1w[:-1]
+    # Use previous day's complete data to calculate today's pivot
+    # Skip the current incomplete day
+    prev_high = high_1d[:-1]
+    prev_low = low_1d[:-1]
+    prev_close = close_1d[:-1]
     
-    # Need at least one complete week
+    # Need at least one complete day
     if len(prev_high) < 1:
         return np.zeros(n)
     
+    # Calculate pivot points
     pivot = (prev_high + prev_low + prev_close) / 3
-    r1 = 2 * pivot - prev_low
-    s1 = 2 * pivot - prev_high
-    hl_range = prev_high - prev_low
-    r2 = pivot + hl_range
-    s2 = pivot - hl_range
+    range_hl = prev_high - prev_low
+    r1 = pivot + (range_hl * 1.1 / 12)
+    s1 = pivot - (range_hl * 1.1 / 12)
     
-    # Create arrays for each week (align with weeks)
-    pivot_per_week = np.full(len(df_1w), np.nan)
-    r1_per_week = np.full(len(df_1w), np.nan)
-    s1_per_week = np.full(len(df_1w), np.nan)
-    r2_per_week = np.full(len(df_1w), np.nan)
-    s2_per_week = np.full(len(df_1w), np.nan)
+    # Create arrays for each day (align with days)
+    pivot_per_day = np.full(len(df_1d), np.nan)
+    r1_per_day = np.full(len(df_1d), np.nan)
+    s1_per_day = np.full(len(df_1d), np.nan)
     
-    # Shift by one week: current week gets previous week's levels
-    pivot_per_week[1:] = pivot
-    r1_per_week[1:] = r1
-    s1_per_week[1:] = s1
-    r2_per_week[1:] = r2
-    s2_per_week[1:] = s2
+    # Shift by one day: current day gets previous day's levels
+    pivot_per_day[1:] = pivot
+    r1_per_day[1:] = r1
+    s1_per_day[1:] = s1
     
-    # Align to 6h timeframe (only complete weekly levels available)
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_per_week)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1_per_week)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1_per_week)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2_per_week)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2_per_week)
+    # Align to 12h timeframe (only complete daily levels available)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_per_day)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_per_day)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_per_day)
     
     # Calculate daily EMA(34) for trend filter
-    close_1d = df_1d['close'].values
     ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Volume spike detection (20-period average on 6h)
+    # Volume spike detection (20-period average on 12h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # ATR for volatility filter (14-period)
@@ -92,8 +79,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         if np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or \
-           np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(ema_34_aligned[i]) or \
-           np.isnan(vol_ma[i]) or np.isnan(atr[i]):
+           np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -138,11 +124,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 6h weekly pivot breakout with daily trend filter, volume confirmation, and volatility filter.
-# Weekly pivot levels (R1/S1) from previous week identify key support/resistance.
+# Hypothesis: 12h Camarilla R1/S1 breakout with daily EMA34 trend filter, volume confirmation, and volatility filter.
+# Uses previous day's Camarilla levels (R1/S1) as key support/resistance.
 # Breakout above R1 with volume suggests bullish momentum; breakdown below S1 suggests bearish.
 # Daily EMA(34) filter ensures we only trade in the direction of the daily trend.
 # Volume confirmation ensures institutional participation.
 # Volatility filter avoids whipsaws during extreme volatility spikes.
 # Works in bull markets (buy breakouts above R1 in uptrend) and bear markets (sell breakdowns below S1 in downtrend).
-# Position size 0.25 balances risk and keeps trade frequency manageable (~10-25 trades/year).
+# Position size 0.25 balances risk and keeps trade frequency manageable (~12-30 trades/year).
