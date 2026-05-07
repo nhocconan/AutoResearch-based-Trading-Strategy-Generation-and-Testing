@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_1w_Camarilla_S1R1_Breakout_Trend"
-timeframe = "1d"
+name = "6h_1d_PriceAction_Reversal_With_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,78 +17,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate weekly Camarilla pivot levels from previous week
-    prev_high = df_1w['high'].shift(1).values
-    prev_low = df_1w['low'].shift(1).values
-    prev_close = df_1w['close'].shift(1).values
+    # Calculate daily 14-period RSI
+    close_1d = df_1d['close'].values
+    delta = np.diff(close_1d)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
     
-    # Camarilla levels
-    s1 = prev_close - (range_hl * 1.08 / 2)
-    r1 = prev_close + (range_hl * 1.08 / 2)
-    s2 = prev_close - (range_hl * 1.16 / 2)
-    r2 = prev_close + (range_hl * 1.16 / 2)
-    s3 = prev_close - (range_hl * 1.26 / 4)
-    r3 = prev_close + (range_hl * 1.26 / 4)
+    # Align daily RSI to 6h timeframe
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Align weekly levels to daily timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    # Volume spike detection: 4-period average (1 day of 6h bars)
+    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     
-    # Weekly trend filter: EMA(34) on weekly close
-    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # 6h price action: check for pin bar patterns
+    body_size = np.abs(close - open_)
+    upper_wick = high - np.maximum(close, open_)
+    lower_wick = np.minimum(close, open_) - low
     
-    # Volume spike detection: 2-period average (2 weeks)
-    vol_ma_2 = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
+    # Bullish pin bar: long lower wick, small body, close near high
+    bullish_pin = (lower_wick > 2 * body_size) & (body_size < (high - low) * 0.3) & (close > open_)
+    # Bearish pin bar: long upper wick, small body, close near low
+    bearish_pin = (upper_wick > 2 * body_size) & (body_size < (high - low) * 0.3) & (close < open_)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 2)  # Wait for EMA and volume MA
+    start_idx = max(14, 4)  # Wait for RSI and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(vol_ma_2[i])):
+        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(vol_ma_4[i]) or 
+            np.isnan(bullish_pin[i]) or np.isnan(bearish_pin[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above S1 with volume and weekly uptrend
-            vol_condition = volume[i] > vol_ma_2[i] * 2.0
-            uptrend = ema_34_1w_aligned[i] > ema_34_1w_aligned[i-1]
-            
-            if close[i] > s1_aligned[i] and vol_condition and uptrend:
+            # Long: bullish pin bar at RSI oversold with volume confirmation
+            if bullish_pin[i] and rsi_1d_aligned[i] < 30 and volume[i] > vol_ma_4[i] * 1.5:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below R1 with volume and weekly downtrend
-            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
+            # Short: bearish pin bar at RSI overbought with volume confirmation
+            elif bearish_pin[i] and rsi_1d_aligned[i] > 70 and volume[i] > vol_ma_4[i] * 1.5:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below S1 or volume drops
-            if close[i] < s1_aligned[i] or volume[i] < vol_ma_2[i] * 1.0:
+            # Exit: RSI returns to neutral or opposite pin bar appears
+            if rsi_1d_aligned[i] > 50 or bearish_pin[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above R1 or volume drops
-            if close[i] > r1_aligned[i] or volume[i] < vol_ma_2[i] * 1.0:
+            # Exit: RSI returns to neutral or opposite pin bar appears
+            if rsi_1d_aligned[i] < 50 or bullish_pin[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -96,15 +88,12 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Weekly Camarilla S1/R1 breakout with weekly trend and volume confirmation
-# - Weekly Camarilla S1/R1 act as strong support/resistance levels
-# - Breakout above S1 with volume in weekly uptrend = long opportunity
-# - Breakdown below R1 with volume in weekly downtrend = short opportunity
-# - Volume spike (2x average) confirms institutional participation
-# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
-# - Exit when price returns to S1/R1 or volume weakens
-# - Position size 0.25 targets ~10-20 trades/year, avoiding fee drag
-# - Uses weekly timeframe for higher reliability and fewer trades
-# - Designed to work in BOTH bull and bear markets via trend filter
-# - Weekly timeframe reduces noise and false breakouts compared to lower timeframes
-# - Focus on major institutional levels for higher probability trades
+# Hypothesis: 6h price action reversal with daily RSI extremes and volume confirmation
+# - Uses daily RSI to identify overbought/oversold conditions on higher timeframe
+# - Looks for pin bar reversals (strong rejection) on 6h chart at RSI extremes
+# - Volume confirmation (1.5x average) ensures institutional participation
+# - Works in both bull (buy oversold pins in rallies) and bear (sell overbought pins in declines)
+# - Exits when RSI returns to neutral (50) or opposite signal appears
+# - Position size 0.25 targets ~20-60 trades/year, avoiding fee drag
+# - Price action based, avoids lagging indicators
+# - Designed to work in ranging and trending markets via RSI filter
