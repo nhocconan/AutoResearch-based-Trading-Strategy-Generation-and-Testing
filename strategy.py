@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-name = "4h_TRIX_Zero_Cross_Volume_Confirm_Trend_Filter"
-timeframe = "4h"
+name = "6h_Keltner_Channel_Breakout_1dATR_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtd_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,65 +17,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
+    # Calculate EMA(20) and ATR(10) for Keltner Channel on 6h
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    atr10_raw = pd.Series(high - low).rolling(window=10, min_periods=10).mean().values
+    
+    upper_keltner = ema20 + 2.0 * atr10_raw
+    lower_keltner = ema20 - 2.0 * atr10_raw
+    
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    # 1d ATR(14) for volatility filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    atr14_1d_raw = np.maximum(high_1d - low_1d,
+                              np.maximum(np.abs(high_1d - np.roll(close_1d, 1)),
+                                         np.abs(low_1d - np.roll(close_1d, 1))))
+    atr14_1d = pd.Series(atr14_1d_raw).rolling(window=14, min_periods=14).mean().values
     
-    # TRIX on 1d: TRIX = EMA(EMA(EMA(close, 15), 15), 15) then percent change
-    ema1 = pd.Series(close_1d).ewm(span=15, adjust=False, min_periods=15).mean()
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean()
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean()
-    trix_raw = (ema3 / ema3.shift(1) - 1) * 100
-    trix = trix_raw.values
-    trix_signal = pd.Series(trix).ewm(span=9, adjust=False, min_periods=9).mean().values
+    # Align 1d ATR to 6h
+    atr14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
     
-    # Align TRIX signal line to 4h (needs extra delay for signal confirmation)
-    trix_signal_aligned = align_htf_to_ltf(prices, df_1d, trix_signal, additional_delay_bars=1)
-    
-    # 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # Volume spike: > 2.0x 24-period average (6 trading days)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    vol_spike = volume > 2.0 * vol_ma
+    # Volume filter: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > 1.5 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 50)  # Wait for TRIX and EMA50
+    start_idx = max(20, 10)  # Wait for EMA20 and ATR10
     
     for i in range(start_idx, n):
-        if np.isnan(trix_signal_aligned[i]) or np.isnan(ema50_1d_aligned[i]):
+        if np.isnan(ema20[i]) or np.isnan(upper_keltner[i]) or np.isnan(lower_keltner[i]) or np.isnan(atr14_1d_aligned[i]):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Volatility filter: avoid low volatility regimes
+        if atr14_1d_aligned[i] < 0.01 * close[i]:  # Skip if ATR too low relative to price
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: TRIX crosses above zero with volume spike in uptrend
-            if trix_signal_aligned[i] > 0 and trix_signal_aligned[i-1] <= 0 and vol_spike[i] and close[i] > ema50_1d_aligned[i]:
+            # Long: Close breaks above upper Keltner with volume filter
+            if close[i] > upper_keltner[i] and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX crosses below zero with volume spike in downtrend
-            elif trix_signal_aligned[i] < 0 and trix_signal_aligned[i-1] >= 0 and vol_spike[i] and close[i] < ema50_1d_aligned[i]:
+            # Short: Close breaks below lower Keltner with volume filter
+            elif close[i] < lower_keltner[i] and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: TRIX crosses below zero or trend turns down
-            if trix_signal_aligned[i] < 0 or close[i] < ema50_1d_aligned[i]:
+            # Exit: Close below EMA(20) or volatility drops
+            if close[i] < ema20[i] or atr14_1d_aligned[i] < 0.008 * close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: TRIX crosses above zero or trend turns up
-            if trix_signal_aligned[i] > 0 or close[i] > ema50_1d_aligned[i]:
+            # Exit: Close above EMA(20) or volatility drops
+            if close[i] > ema20[i] or atr14_1d_aligned[i] < 0.008 * close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -83,10 +90,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: TRIX (triple exponential moving average) zero-cross with volume confirmation and 1d EMA50 trend filter.
-# TRIX is a momentum oscillator that filters out insignificant cycles. Zero-cross signals momentum shifts.
-# Long when TRIX crosses above zero with volume spike in uptrend (price > EMA50).
-# Short when TRIX crosses below zero with volume spike in downtrend (price < EMA50).
-# Volume spike (>2.0x 24-period average) ensures conviction behind the momentum shift.
-# Works in both bull and bear markets by capturing momentum shifts in either direction.
-# Discrete position size (0.25) minimizes churn. Target ~25-40 trades/year (~100-160 total over 4 years).
+# Hypothesis: Keltner Channel breakout on 6h with 1d ATR volatility filter and volume confirmation.
+# Long when price breaks above upper Keltner (EMA20 + 2*ATR) with volume filter in normal/high volatility.
+# Short when price breaks below lower Keltner (EMA20 - 2*ATR) with volume filter.
+# Uses volatility filter to avoid whipsaws in low-volatility regimes.
+# Designed for 6h timeframe to target 50-150 total trades over 4 years.
+# Works in both trending (breakouts) and ranging (mean-reversion via volatility filter) markets.
