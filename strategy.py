@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_FundingRate_MeanReversion_With_WeeklyTrend
-Hypothesis: Use funding rate z-score mean reversion on 1d timeframe, filtered by weekly trend (EMA34). 
-Long when funding rate z-score < -2.0 and weekly trend is up, short when z-score > +2.0 and weekly trend is down.
-Exit when z-score reverts to zero or weekly trend flips. 
-Funding rate provides edge in BTC/ETH mean reversion during extremes, weekly trend filter avoids counter-trend trades.
-Designed for 1d to capture low-frequency mean reversion (target 10-25 trades/year).
+4h_KAMA_Trend_Direction_12h_TrendFilter_v2
+Hypothesis: Use KAMA (Kaufman Adaptive Moving Average) on 4h to determine trend direction, filtered by 12h EMA trend and volume confirmation. Long when KAMA slope turns positive in 12h uptrend with volume above average, short when slope turns negative in 12h downtrend with volume above average. Exit when KAMA slope reverses. Designed for 4h to capture trend changes with low frequency (target 20-50 trades/year).
 """
 
-name = "1d_FundingRate_MeanReversion_With_WeeklyTrend"
-timeframe = "1d"
+name = "4h_KAMA_Trend_Direction_12h_TrendFilter_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -21,77 +17,96 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load funding rate data (assumed to be available via external source)
-    # For now, we'll simulate funding rate as a placeholder - in reality this would load from data/processed/funding/
-    # Since we don't have actual funding data in prices, we'll use a proxy based on price action
-    # This is a limitation - in practice this strategy would load external funding data
-    
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 34:
         return np.zeros(n)
     
-    # Calculate weekly EMA34 for trend filter
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
+    # Calculate KAMA on 4h
+    period = 10
+    # Vectorized efficiency ratio calculation
+    change = np.abs(np.subtract(close[period:], close[:-period]))
+    # Calculate volatility using cumulative sum of absolute differences
+    diff = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.cumsum(diff)
+    # Calculate efficiency ratio
+    er = np.zeros_like(close)
+    for i in range(period, len(close)):
+        price_change = np.abs(close[i] - close[i-period])
+        sum_vol = volatility[i] - volatility[i-period]
+        if sum_vol > 0:
+            er[i] = price_change / sum_vol
+        else:
+            er[i] = 0
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)  # EMA(2)
+    slow_sc = 2 / (30 + 1) # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Calculate KAMA
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Weekly trend determination
-    weekly_uptrend = close_1w_aligned > ema_34_1w_aligned
-    weekly_downtrend = close_1w_aligned < ema_34_1w_aligned
+    # KAMA slope (direction)
+    kama_slope = np.diff(kama, prepend=kama[0])
     
-    # Proxy for funding rate z-score using price deviation from weekly average
-    # In reality, this would be replaced with actual funding rate data
-    weekly_mean = pd.Series(close_1w).rolling(window=30, min_periods=30).mean().values
-    weekly_mean_aligned = align_htf_to_ltf(prices, df_1w, weekly_mean)
-    weekly_std = pd.Series(close_1w).rolling(window=30, min_periods=30).std().values
-    weekly_std_aligned = align_htf_to_ltf(prices, df_1w, weekly_std)
+    # Get 12h EMA34 for trend filter
+    close_12h = df_12h['close'].values
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # Avoid division by zero
-    weekly_std_aligned = np.where(weekly_std_aligned == 0, 1e-10, weekly_std_aligned)
+    # Get 12h close price aligned
+    close_12h_aligned = align_htf_to_ltf(prices, df_12h, close_12h)
     
-    # Price z-score relative to weekly mean (proxy for funding rate extremes)
-    price_zscore = (close - weekly_mean_aligned) / weekly_std_aligned
+    # Volume confirmation: 20-period average on 4h
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = np.divide(volume, vol_ma20, out=np.zeros_like(volume), where=vol_ma20!=0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 30)  # Warmup for weekly EMA and stats
+    start_idx = max(34, period)  # Warmup for 12h EMA34 and KAMA
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(close_1w_aligned[i]) or 
-            np.isnan(weekly_mean_aligned[i]) or np.isnan(weekly_std_aligned[i]) or
-            np.isnan(price_zscore[i])):
+        if (np.isnan(kama_slope[i]) or np.isnan(ema_34_12h_aligned[i]) or 
+            np.isnan(close_12h_aligned[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # 12h trend determination
+        trend_12h_up = close_12h_aligned[i] > ema_34_12h_aligned[i]
+        trend_12h_down = close_12h_aligned[i] < ema_34_12h_aligned[i]
+        
         if position == 0:
-            # Long: price significantly below weekly mean (proxy for negative funding extreme) in weekly uptrend
-            if (price_zscore[i] < -2.0 and weekly_uptrend[i]):
+            # Long: KAMA slope turns positive in 12h uptrend with volume confirmation
+            if (kama_slope[i] > 0 and kama_slope[i-1] <= 0 and  # slope just turned positive
+                trend_12h_up and 
+                vol_ratio[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: price significantly above weekly mean (proxy for positive funding extreme) in weekly downtrend
-            elif (price_zscore[i] > 2.0 and weekly_downtrend[i]):
+            # Short: KAMA slope turns negative in 12h downtrend with volume confirmation
+            elif (kama_slope[i] < 0 and kama_slope[i-1] >= 0 and  # slope just turned negative
+                  trend_12h_down and 
+                  vol_ratio[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price reverts to weekly mean or weekly trend turns down
-            if (price_zscore[i] > -0.5 or not weekly_uptrend[i]):
+            # Exit long: KAMA slope turns negative
+            if kama_slope[i] < 0 and kama_slope[i-1] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price reverts to weekly mean or weekly trend turns up
-            if (price_zscore[i] < 0.5 or not weekly_downtrend[i]):
+            # Exit short: KAMA slope turns positive
+            if kama_slope[i] > 0 and kama_slope[i-1] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
