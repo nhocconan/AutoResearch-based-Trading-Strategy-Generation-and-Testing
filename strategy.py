@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "4h"
+name = "1d_KAMA_1wTrend_VolumeFilter_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,72 +17,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot levels and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous day
-    # Camarilla formula: 
-    # H = high, L = low, C = close of previous day
-    # R4 = C + ((H-L) * 1.1/2)
-    # R3 = C + ((H-L) * 1.1/4)
-    # S3 = C - ((H-L) * 1.1/4)
-    # S4 = C - ((H-L) * 1.1/2)
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # 1w KAMA trend filter (more adaptive than EMA)
+    price_series = pd.Series(df_1w['close'])
+    change = abs(price_series.diff(1))
+    volatility = price_series.diff(1).abs().rolling(window=10, min_periods=10).sum()
+    er = change / volatility.replace(0, np.nan)
+    er = er.fillna(0)
+    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
+    kama = [price_series.iloc[0]]
+    for i in range(1, len(price_series)):
+        kama.append(kama[-1] + sc.iloc[i] * (price_series.iloc[i] - kama[-1]))
+    kama = np.array(kama)
+    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama)
     
-    # Calculate Camarilla levels
-    camarilla_HL = prev_high - prev_low
-    R3 = prev_close + (camarilla_HL * 1.1 / 4)
-    S3 = prev_close - (camarilla_HL * 1.1 / 4)
+    # Daily KAMA for entry signal
+    price_series_d = pd.Series(close)
+    change_d = abs(price_series_d.diff(1))
+    volatility_d = price_series_d.diff(1).abs().rolling(window=10, min_periods=10).sum()
+    er_d = change_d / volatility_d.replace(0, np.nan)
+    er_d = er_d.fillna(0)
+    sc_d = (er_d * (0.6645 - 0.0645) + 0.0645) ** 2
+    kama_d = [price_series_d.iloc[0]]
+    for i in range(1, len(price_series_d)):
+        kama_d.append(kama_d[-1] + sc_d.iloc[i] * (price_series_d.iloc[i] - kama_d[-1]))
+    kama_d = np.array(kama_d)
     
-    # Align Camarilla levels to 4h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    
-    # 1d EMA34 trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume filter: current volume > 1.8 * 20-period average
+    # Volume filter: current volume > 1.3 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > (vol_ma * 1.8)
+    volume_ok = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(1, 20)  # Need 1 for daily data, 20 for volume MA
+    start_idx = max(20, 30)  # Need 20 for volume MA, 30 for weekly KAMA warmup
     
     for i in range(start_idx, n):
-        # Skip if any required data is not available
-        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if np.isnan(kama_1w_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(kama_d[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R3 AND above daily EMA34 + volume
-            if close[i] > R3_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_ok[i]:
+            # Long: price above daily KAMA AND above weekly KAMA + volume
+            if close[i] > kama_d[i] and close[i] > kama_1w_aligned[i] and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 AND below daily EMA34 + volume
-            elif close[i] < S3_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_ok[i]:
+            # Short: price below daily KAMA AND below weekly KAMA + volume
+            elif close[i] < kama_d[i] and close[i] < kama_1w_aligned[i] and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: price returns to opposite Camarilla level or breaks in opposite direction
+            # Exit: price crosses daily KAMA in opposite direction
             if position == 1:
-                if close[i] < S3_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+                if close[i] < kama_d[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > R3_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+                if close[i] > kama_d[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
