@@ -1,12 +1,11 @@
-#!/usr/bin/env python3
-# 4h_Camarilla_R3_S3_Breakout_1dTrend_Volume
-# Hypothesis: 4-hour Camarilla R3/S3 breakouts with 1-day trend filter and volume spikes.
-# Uses tighter R3/S3 levels (less frequent than R1/S1) to reduce trade frequency while maintaining edge.
-# Long: price breaks above R3 with daily uptrend (price>EMA34) and volume spike (>2x 20-period avg).
-# Short: price breaks below S3 with daily downtrend (price<EMA34) and volume spike.
-# Exit: price returns to Pivot Point (PP). Designed for ~25-40 trades/year to avoid fee drag.
+# 4h_ETF_Flow_Pullback_1dTrend_Volume
+# Hypothesis: Combines ETF flow proxy (volume imbalance) with 1-day trend and pullback entries.
+# Long: Pullback to EMA20 during daily uptrend with buying volume imbalance (buys > sells).
+# Short: Pullback to EMA20 during daily downtrend with selling volume imbalance (sells > buys).
+# Uses institutional flow signals to capture reversals in trend context.
+# Target: 30-50 trades/year to avoid fee drag.
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+name = "4h_ETF_Flow_Pullback_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,74 +22,70 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    taker_buy_volume = prices['taker_buy_volume'].values
     
-    # Get daily data for Camarilla pivot calculation and trend filter
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) == 0:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous day's OHLC
-    # Classic Camarilla: R3 = C + 1.1*(H-L)/4, S3 = C - 1.1*(H-L)/4
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate daily EMA50 for trend filter
     close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate pivot components
-    hl_range = high_1d - low_1d
-    r3_1d = close_1d + 1.1 * hl_range / 4
-    s3_1d = close_1d - 1.1 * hl_range / 4
-    pp_1d = (high_1d + low_1d + close_1d) / 3  # Pivot Point
+    # Calculate EMA20 on 4h for pullback entries
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align Camarilla levels to 4h timeframe (use previous day's levels)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
+    # Volume imbalance: buying pressure vs selling pressure
+    # taker_buy_volume = volume bought at ask (aggressive buys)
+    # volume - taker_buy_volume = volume sold at bid (aggressive sells)
+    buy_pressure = taker_buy_volume
+    sell_pressure = volume - taker_buy_volume
+    volume_imbalance = buy_pressure - sell_pressure  # positive = buying pressure
     
-    # Calculate EMA34 for trend filter (daily)
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Volume spike detection: 2.0x average volume (20-period for stability)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Smooth the imbalance to reduce noise
+    vol_imb_smooth = pd.Series(volume_imbalance).ewm(span=10, adjust=False).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34, 20)  # Ensure we have Camarilla, EMA34, and volume MA data
+    start_idx = max(20, 50, 10)  # Ensure we have EMA20, EMA50, and smoothed imbalance
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
-            np.isnan(pp_1d_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(ema20[i]) or np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(vol_imb_smooth[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R3, price above EMA34 (uptrend), volume spike
-            if (close[i] > r3_1d_aligned[i] and 
-                close[i] > ema34_1d_aligned[i] and 
-                volume[i] > 2.0 * vol_ma[i]):
+            # Long: pullback to EMA20 during daily uptrend with buying pressure
+            if (close[i] >= ema20[i] * 0.998 and close[i] <= ema20[i] * 1.002 and  # near EMA20
+                close[i] > ema50_1d_aligned[i] and  # daily uptrend
+                vol_imb_smooth[i] > 0):  # buying pressure
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3, price below EMA34 (downtrend), volume spike
-            elif (close[i] < s3_1d_aligned[i] and 
-                  close[i] < ema34_1d_aligned[i] and 
-                  volume[i] > 2.0 * vol_ma[i]):
+            # Short: pullback to EMA20 during daily downtrend with selling pressure
+            elif (close[i] >= ema20[i] * 0.998 and close[i] <= ema20[i] * 1.002 and  # near EMA20
+                  close[i] < ema50_1d_aligned[i] and  # daily downtrend
+                  vol_imb_smooth[i] < 0):  # selling pressure
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price returns to or below Pivot Point (PP)
-            if close[i] <= pp_1d_aligned[i]:
+            # Exit: price moves significantly away from EMA20 or trend changes
+            if (close[i] < ema20[i] * 0.97 or  # 3% below EMA20
+                close[i] < ema50_1d_aligned[i]):  # trend broken
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price returns to or above Pivot Point (PP)
-            if close[i] >= pp_1d_aligned[i]:
+            # Exit: price moves significantly away from EMA20 or trend changes
+            if (close[i] > ema20[i] * 1.03 or  # 3% above EMA20
+                close[i] > ema50_1d_aligned[i]):  # trend broken
                 signals[i] = 0.0
                 position = 0
             else:
