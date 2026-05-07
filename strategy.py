@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -34,7 +34,7 @@ def generate_signals(prices):
     r3 = close_prev + 1.1 * (high_prev - low_prev) / 4
     s3 = close_prev - 1.1 * (high_prev - low_prev) / 4
     
-    # Align daily levels to 12h timeframe (with 1-day delay for completed bar)
+    # Align daily levels to 4h timeframe (with 1-day delay for completed bar)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
@@ -47,9 +47,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 3  # ~36 hours for 12h to reduce trades
+    cooldown_bars = 3  # ~12 hours for 4h to reduce trades
     
-    start_idx = max(100, 20, 50)
+    start_idx = max(200, 20, 50)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
@@ -105,10 +105,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Using 12h timeframe with Camarilla R3/S3 breakouts, 1d EMA34 trend filter,
-# and volume confirmation will yield 12-37 trades per year (50-150 total over 4 years).
-# The strategy trades with the daily trend, capturing institutional breakouts
+# Hypothesis: Using 4h timeframe with Camarilla R3/S3 breakouts, 1d EMA34 trend filter,
+# and volume confirmation will yield 19-50 trades per year (75-200 total over 4 years).
+# The strategy trades with the higher timeframe trend, capturing institutional breakouts
 # in both bull and bear markets. Volume filter ensures breakouts have institutional
 # participation. Position size of 0.25 manages drawdown, and cooldown of 3 bars
-# prevents overtrading. This version uses 12h timeframe to reduce trade frequency
-# and improve robustness in bear markets like 2025.
+# prevents overtrading. This version returns to the proven 1d EMA34 trend filter
+# from top performers to maintain consistency with successful variants.
