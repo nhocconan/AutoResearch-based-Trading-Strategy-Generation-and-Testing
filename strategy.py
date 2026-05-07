@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_EMA20_1dTrend_12hVolume_Signal
-Hypothesis: On 6b, enter long when price crosses above EMA20 with 1d uptrend (price>EMA50) and 12h volume above 1.5x average; short when price crosses below EMA20 with 1d downtrend and 12h volume spike. Uses EMA20 for responsiveness, 1d trend for bias, and volume for confirmation. Designed for 6h to achieve 15-30 trades/year with clear trend following logic that works in both bull (follow uptrend) and bear (follow downtrend) markets.
+4h_Williams_VixFix_MeanReversion
+Hypothesis: Williams VixFix identifies volatility spikes during panic selling in bear markets and complacency in bull markets. Combined with 1-week trend filter and Bollinger mean reversion, it captures oversold bounces in downtrends and overbought pullbacks in uptrends. Designed for 4h to achieve 20-35 trades/year with controlled risk, working in both bull and bear regimes by following higher timeframe trend while fading short-term extremes.
 """
-name = "6h_EMA20_1dTrend_12hVolume_Signal"
-timeframe = "6h"
+name = "4h_Williams_VixFix_MeanReversion"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -13,70 +13,76 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Get 12h data for volume filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
+    # Williams VixFix: measures put/call panic via high-low relationship
+    # Formula: VIXFIX = (HIGHEST HIGH - LOW) / HIGHEST HIGH * 100
+    # We use 22-period lookback (approx 1 month) to match VIX calculation
+    highest_high = pd.Series(high).rolling(window=22, min_periods=22).max().values
+    vixfix = (highest_high - low) / highest_high * 100
     
-    # Calculate EMA20 on 6b
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Bollinger Bands for mean reversion signals
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    bb_upper = sma_20 + 2 * std_20
+    bb_lower = sma_20 - 2 * std_20
     
-    # Calculate 1-day EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # 1-week EMA50 for trend filter
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate 12h volume average
-    vol_avg_12h = pd.Series(df_12h['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_avg_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_avg_12h)
+    # Volume filter: avoid low-liquidity periods
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_avg * 0.5)  # at least half average volume
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Need sufficient warmup for averages
+    start_idx = 70  # sufficient warmup for all indicators
     
     for i in range(start_idx, n):
         # Skip if any data is not ready
-        if (np.isnan(ema_20[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(vol_avg_12h_aligned[i])):
+        if (np.isnan(vixfix[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price crosses above EMA20 + 1d uptrend + 12h volume spike
-            if (close[i] > ema_20[i] and close[i-1] <= ema_20[i-1] and  # crossover
-                close[i] > ema_50_1d_aligned[i] and  # 1d uptrend
-                volume[i] > vol_avg_12h_aligned[i] * 1.5):  # volume spike
+            # Long: VixFix spike (fear) + price below BB lower + 1w uptrend
+            if (vixfix[i] > np.percentile(vixfix[max(0, i-100):i+1], 80) and  # recent high volatility
+                close[i] < bb_lower[i] and
+                close[i] > ema_50_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price crosses below EMA20 + 1d downtrend + 12h volume spike
-            elif (close[i] < ema_20[i] and close[i-1] >= ema_20[i-1] and  # crossover
-                  close[i] < ema_50_1d_aligned[i] and  # 1d downtrend
-                  volume[i] > vol_avg_12h_aligned[i] * 1.5):  # volume spike
+            # Short: VixFix spike (fear) + price above BB upper + 1w downtrend
+            elif (vixfix[i] > np.percentile(vixfix[max(0, i-100):i+1], 80) and  # recent high volatility
+                  close[i] > bb_upper[i] and
+                  close[i] < ema_50_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: price returns to EMA20 (mean reversion within trend)
+            # Exit: price returns to Bollinger middle (mean reversion complete)
             if position == 1:
-                if close[i] < ema_20[i]:
+                if close[i] >= sma_20[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > ema_20[i]:
+                if close[i] <= sma_20[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
