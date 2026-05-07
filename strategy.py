@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_HeikinAshi_Trend_With_1dADX_Filter"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1wTrend_Volume_Spike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -12,105 +12,76 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Price arrays
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    open_price = prices['open'].values
+    volume = prices['volume'].values
     
-    # Calculate Heikin Ashi values
-    ha_close = (open_price + high + low + close) / 4
-    ha_open = np.zeros_like(ha_close)
-    ha_open[0] = (open_price[0] + close[0]) / 2
-    for i in range(1, n):
-        ha_open[i] = (ha_open[i-1] + ha_close[i-1]) / 2
-    
-    ha_high = np.maximum(high, np.maximum(ha_open, ha_close))
-    ha_low = np.minimum(low, np.minimum(ha_open, ha_close))
-    
-    # 1d data for ADX filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # 1w data for trend filter and context
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d ADX (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 1d data for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # Align with index
+    # Previous 1d bar's OHLC for Camarilla calculation
+    prev_high_1d = df_1d['high'].shift(1).values
+    prev_low_1d = df_1d['low'].shift(1).values
+    prev_close_1d = df_1d['close'].shift(1).values
     
-    # Directional Movement
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
+    # Calculate Camarilla levels: R3, S3
+    camarilla_r3 = prev_close_1d + (prev_high_1d - prev_low_1d) * 1.1 / 2
+    camarilla_s3 = prev_close_1d - (prev_high_1d - prev_low_1d) * 1.1 / 2
     
-    # Smoothed values
-    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_dm14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
-    minus_dm14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # DI values
-    plus_di = 100 * plus_dm14 / tr14
-    minus_di = 100 * minus_dm14 / tr14
+    # 1w EMA trend filter (34-period)
+    ema_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Align ADX to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # ADX trend threshold: only trade when ADX > 25 (trending market)
-    adx_threshold = 25
+    # Volume spike: current volume > 2.0 * 20-period average (on 12h)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Wait for HA and ADX warmup
+    for i in range(100, n):  # Wait for EMA and volume MA warmup
         # Skip if any critical value is NaN
-        if (np.isnan(ha_close[i]) or np.isnan(ha_open[i]) or 
-            np.isnan(ha_high[i]) or np.isnan(ha_low[i]) or
-            np.isnan(adx_aligned[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Only trade when ADX indicates trending market
-        if adx_aligned[i] <= adx_threshold:
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
+            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: HA close > HA open (bullish candle) in uptrend
-            if ha_close[i] > ha_open[i]:
+            # Long: price breaks above R3 with 1w uptrend and volume spike
+            if (close[i] > camarilla_r3_aligned[i] and 
+                close[i] > ema_1w_aligned[i] and 
+                volume[i] > 2.0 * vol_ma[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: HA close < HA open (bearish candle) in downtrend
-            elif ha_close[i] < ha_open[i]:
+            # Short: price breaks below S3 with 1w downtrend and volume spike
+            elif (close[i] < camarilla_s3_aligned[i] and 
+                  close[i] < ema_1w_aligned[i] and 
+                  volume[i] > 2.0 * vol_ma[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: HA close < HA open (trend reversal)
-            if ha_close[i] < ha_open[i]:
+            # Exit: price crosses below R3 or drops below 1w EMA
+            if close[i] < camarilla_r3_aligned[i] or close[i] < ema_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: HA close > HA open (trend reversal)
-            if ha_close[i] > ha_open[i]:
+            # Exit: price crosses above S3 or rises above 1w EMA
+            if close[i] > camarilla_s3_aligned[i] or close[i] > ema_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
