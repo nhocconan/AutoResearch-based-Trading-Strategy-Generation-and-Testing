@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
-12H_1D_Camarilla_Pivot_Bounce_With_Volume_Confirmation
-Hypothesis: Price tends to respect daily Camarilla pivot levels (H3/L3) on 12h timeframe.
-In bull markets: price above daily EMA50, look for long bounces from daily L3 with volume confirmation.
-In bear markets: price below daily EMA50, look for short bounces from daily H3 with volume confirmation.
-Uses strict entry conditions to limit trades and reduce fee drag, suitable for 12h timeframe.
+6H_Camarilla_R3_S3_Breakout_12hTrend_1dVolume_Adapt
+Hypothesis: At 6h timeframe, use 12h trend via EMA34 and 1d volume confirmation with 
+Camarilla R3/S3 breakouts. This combines medium-term trend (12h) with short-term 
+structure (Camarilla) and volume confirmation to filter false breakouts. 
+In uptrends: buy breakouts above R3 with above-average volume.
+In downtrends: sell breakdowns below S3 with above-average volume.
+Volume filter prevents entries during low-liquidity periods, reducing whipsaws.
+Designed for 50-150 total trades over 4 years (12-37/year) on 6h timeframe.
 """
-name = "12H_1D_Camarilla_Pivot_Bounce_With_Volume_Confirmation"
-timeframe = "12h"
+name = "6H_Camarilla_R3_S3_Breakout_12hTrend_1dVolume_Adapt"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,42 +27,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1D data for Camarilla levels and EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h data for trend filter (EMA34)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 34:
         return np.zeros(n)
     
-    # Calculate daily EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 12h EMA34 for trend filter
+    close_12h = df_12h['close'].values
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # Calculate daily Camarilla levels (H3, L3)
+    # Get 1d data for Camarilla levels (R3, S3) and volume average
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Calculate daily Camarilla levels (R3, S3)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla: H3 = close + (high - low) * 1.1/4, L3 = close - (high - low) * 1.1/4
-    h3 = close_1d + (high_1d - low_1d) * 1.1 / 4
-    l3 = close_1d - (high_1d - low_1d) * 1.1 / 4
+    # Camarilla: R3 = close + (high - low) * 1.1 / 4, S3 = close - (high - low) * 1.1 / 4
+    r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
+    s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
     
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Volume filter: current 12h volume > 1.5 x 20-period average volume
+    # Volume filter: current 6h volume > 1.3 x 20-period average volume
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_avg * 1.5)
+    volume_filter = volume > (vol_avg * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Ensure sufficient warmup
+    start_idx = max(34, 20)  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any data is not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(h3_aligned[i]) or 
-            np.isnan(l3_aligned[i]) or 
+        if (np.isnan(ema_34_12h_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or 
             np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -67,28 +75,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price above daily EMA50, touches or crosses above daily L3, volume confirmation
-            if (close[i] > ema_50_1d_aligned[i] and 
-                close[i] > l3_aligned[i] and 
+            # Long: price above 12h EMA34 (uptrend), 6h close above daily R3, volume confirmation
+            if (close[i] > ema_34_12h_aligned[i] and 
+                close[i] > r3_aligned[i] and 
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below daily EMA50, touches or crosses below daily H3, volume confirmation
-            elif (close[i] < ema_50_1d_aligned[i] and 
-                  close[i] < h3_aligned[i] and 
+            # Short: price below 12h EMA34 (downtrend), 6h close below daily S3, volume confirmation
+            elif (close[i] < ema_34_12h_aligned[i] and 
+                  close[i] < s3_aligned[i] and 
                   volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below daily EMA50
-            if close[i] < ema_50_1d_aligned[i]:
+            # Exit long: price crosses below 12h EMA34 (trend change)
+            if close[i] < ema_34_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above daily EMA50
-            if close[i] > ema_50_1d_aligned[i]:
+            # Exit short: price crosses above 12h EMA34 (trend change)
+            if close[i] > ema_34_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
