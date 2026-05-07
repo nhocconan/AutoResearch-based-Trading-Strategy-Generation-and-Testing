@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_KAMA_RSI_Chop_v2"
-timeframe = "4h"
+name = "1h_4h_1d_RSIVolumeTrend_v1"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,106 +17,98 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Load 4h data ONCE before loop for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate KAMA on close
-    close_series = pd.Series(close)
-    # Efficiency Ratio (ER)
-    change = abs(close_series - close_series.shift(10))
-    volatility = abs(close_series.diff()).rolling(window=10).sum()
-    er = change / volatility.replace(0, np.nan)
-    er = er.fillna(0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
+    # Load daily data ONCE before loop for RSI and volume context
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Align KAMA to 4h
-    kama_aligned = align_htf_to_ltf(prices, df_12h, kama)
+    # 4h EMA(50) for trend filter
+    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # RSI(14) on 4h close
-    delta = pd.Series(close).diff()
+    # Daily RSI(14) for momentum filter
+    delta = pd.Series(df_1d['close']).diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_14 = 100 - (100 / (1 + rs))
+    rsi_14_vals = rsi_14.values
+    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_vals)
     
-    # Choppiness Index (14) on 4h
-    atr = np.zeros(n)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0]-low[0], np.abs(high[0]-close[0]), np.abs(low[0]-close[0])])], 
-                         np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(highest_high - lowest_low) / np.log10(14) / np.log10(np.sum(atr, axis=0, keepdims=True).T if False else np.sum(pd.Series(atr).rolling(14).sum().values))
-    chop = pd.Series(chop).fillna(50).values  # Default to neutral when undefined
+    # Daily volume SMA(20) for volume filter
+    vol_sma_20 = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
+    vol_sma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_sma_20)
     
-    # Volume spike detection: 4-period average (1 day of 4h bars)
-    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    # Hourly session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 14, 4)  # Wait for KAMA, RSI, chop, volume MA
+    start_idx = 50  # Wait for EMA and RSI
     
     for i in range(start_idx, n):
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(chop[i]) or np.isnan(vol_ma_4[i])):
+        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(rsi_14_aligned[i]) or 
+            np.isnan(vol_sma_20_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
+        
         if position == 0:
-            # Long: price above KAMA, RSI > 50, chop < 61.8 (trending)
-            vol_condition = volume[i] > vol_ma_4[i] * 1.5
-            if close[i] > kama_aligned[i] and rsi[i] > 50 and chop[i] < 61.8 and vol_condition:
-                signals[i] = 0.25
+            # Long: RSI < 40 (oversold) + price > 4h EMA50 + volume > 1.5x daily avg + session
+            vol_condition = volume[i] > vol_sma_20_aligned[i] * 1.5
+            if (rsi_14_aligned[i] < 40 and 
+                close[i] > ema_50_4h_aligned[i] and 
+                vol_condition and 
+                in_session):
+                signals[i] = 0.20
                 position = 1
-            # Short: price below KAMA, RSI < 50, chop < 61.8 (trending)
-            elif close[i] < kama_aligned[i] and rsi[i] < 50 and chop[i] < 61.8 and vol_condition:
-                signals[i] = -0.25
+            # Short: RSI > 60 (overbought) + price < 4h EMA50 + volume > 1.5x daily avg + session
+            elif (rsi_14_aligned[i] > 60 and 
+                  close[i] < ema_50_4h_aligned[i] and 
+                  vol_condition and 
+                  in_session):
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit: price back below KAMA or RSI < 40
-            if close[i] < kama_aligned[i] or rsi[i] < 40:
+            # Exit: RSI > 50 (momentum fading) or price < 4h EMA50 or outside session
+            if (rsi_14_aligned[i] > 50 or 
+                close[i] < ema_50_4h_aligned[i] or 
+                not in_session):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit: price back above KAMA or RSI > 60
-            if close[i] > kama_aligned[i] or rsi[i] > 60:
+            # Exit: RSI < 50 (momentum fading) or price > 4h EMA50 or outside session
+            if (rsi_14_aligned[i] < 50 or 
+                close[i] > ema_50_4h_aligned[i] or 
+                not in_session):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-# Hypothesis: 4h KAMA trend + RSI momentum + Chop regime filter + volume confirmation
-# - KAMA adapts to market noise, effective in both trending and ranging markets
-# - RSI > 50 for long, < 50 for short ensures momentum alignment
-# - Chop < 61.8 filters for trending regimes (avoids ranging markets where trend fails)
-# - Volume confirmation (1.5x average) reduces false signals
-# - Works in bull markets (KAMA up, RSI > 50) and bear markets (KAMA down, RSI < 50)
-# - Exit when trend weakens (price crosses KAMA) or momentum fades (RSI extremes)
-# - Position size 0.25 targets ~20-50 trades/year to avoid fee drag
-# - Uses 12h KAMA for higher timeframe trend filter, reducing whipsaws
-# - Combines adaptive trend (KAMA), momentum (RSI), regime (Chop), and volume
-# - Aims for 50-150 total trades over 4 years (12-37/year) to stay within limits
-# - Prioritizes BTC/ETH performance; avoids over-optimization on SOL
-# - Discrete position sizing minimizes transaction costs from signal changes
-# - Uses proper alignment to avoid look-ahead bias with multi-timeframe data
-# - All indicators use sufficient lookback with min_periods to ensure validity
+# Hypothesis: 1h RSI mean reversion with 4h trend filter and volume confirmation
+# - Uses daily RSI(14) for oversold/overbought signals (<40/>60)
+# - 4h EMA(50) filter ensures trades align with higher timeframe trend
+# - Volume spike (>1.5x daily average) confirms institutional participation
+# - Session filter (08-20 UTC) reduces noise during low-liquidity hours
+# - Works in both bull and bear markets: buys oversold dips in uptrend, sells overbought rallies in downtrend
+# - Position size 0.20 limits drawdown while allowing meaningful returns
+# - Target: 15-35 trades/year to avoid fee drag (60-140 total over 4 years)
+# - Exits when RSI reverts to neutral (50) or trend fails or outside session
+# - Novel combination: daily RSI + 4h trend + volume filter not recently tried on 1h timeframe
