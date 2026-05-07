@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,39 +17,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE for Camarilla levels and trend filter
+    # Load daily data ONCE for pivot calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     # Calculate Camarilla levels from previous day
-    # R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
-    prev_close = df_1d['close'].values
-    prev_high = df_1d['high'].values
-    prev_low = df_1d['low'].values
+    close_prev = df_1d['close'].shift(1).values
+    high_prev = df_1d['high'].shift(1).values
+    low_prev = df_1d['low'].shift(1).values
     
-    camarilla_R3 = prev_close + (prev_high - prev_low) * 1.1 / 2
-    camarilla_S3 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    # Camarilla R3, R4, S3, S4
+    R4 = close_prev + (high_prev - low_prev) * 1.1 / 2
+    R3 = close_prev + (high_prev - low_prev) * 1.1 / 4
+    S3 = close_prev - (high_prev - low_prev) * 1.1 / 4
+    S4 = close_prev - (high_prev - low_prev) * 1.1 / 2
     
-    # Align Camarilla levels to 12h timeframe
-    camarilla_R3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R3)
-    camarilla_S3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S3)
+    # Align daily levels to 4h
+    R3_4h = align_htf_to_ltf(prices, df_1d, R3)
+    R4_4h = align_htf_to_ltf(prices, df_1d, R4)
+    S3_4h = align_htf_to_ltf(prices, df_1d, S3)
+    S4_4h = align_htf_to_ltf(prices, df_1d, S4)
     
     # Daily EMA34 for trend filter
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_34_4h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume spike detection on 12h
+    # Volume spike detection on 4h
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30
+    start_idx = 50  # enough for EMA and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(camarilla_R3_aligned[i]) or np.isnan(camarilla_S3_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(R3_4h[i]) or np.isnan(R4_4h[i]) or np.isnan(S3_4h[i]) or 
+            np.isnan(S4_4h[i]) or np.isnan(ema_34_4h[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -58,24 +62,24 @@ def generate_signals(prices):
         vol_condition = volume[i] > vol_ma_20[i] * 1.5
         
         if position == 0:
-            # Long: Close breaks above R3 in daily uptrend with volume
-            if close[i] > camarilla_R3_aligned[i] and vol_condition and ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]:
+            # Long: break above R3 with volume in daily uptrend
+            if close[i] > R3_4h[i] and vol_condition and ema_34_4h[i] > ema_34_4h[i-1]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close breaks below S3 in daily downtrend with volume
-            elif close[i] < camarilla_S3_aligned[i] and vol_condition and ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]:
+            # Short: break below S3 with volume in daily downtrend
+            elif close[i] < S3_4h[i] and vol_condition and ema_34_4h[i] < ema_34_4h[i-1]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Close back below S3 or trend reversal
-            if close[i] < camarilla_S3_aligned[i] or ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]:
+            # Exit: close back below R3 or trend reversal
+            if close[i] < R3_4h[i] or ema_34_4h[i] < ema_34_4h[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Close back above R3 or trend reversal
-            if close[i] > camarilla_R3_aligned[i] or ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]:
+            # Exit: close back above S3 or trend reversal
+            if close[i] > S3_4h[i] or ema_34_4h[i] > ema_34_4h[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -83,15 +87,14 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R3/S3 breakouts with daily trend filter and volume confirmation
-# - Camarilla R3/S3 are key intraday support/resistance levels derived from previous day's range
-# - Breakout above R3 in daily uptrend (EMA34 rising) signals continuation long
-# - Breakdown below S3 in daily downtrend (EMA34 falling) signals continuation short
-# - Volume confirmation (1.5x average) filters false breakouts
-# - Designed for 12h timeframe to target 50-150 total trades over 4 years (12-37/year)
-# - Works in both bull and bear markets by following daily trend direction
-# - Uses proven Camarilla + volume + trend combination with proper risk control
-# - Position size 0.25 balances return potential with drawdown control
-# - Expected to generate ~80-120 trades total to stay within frequency limits
-# - Previous Camarilla strategies showed strong performance when properly filtered
-# - This implementation avoids overtrading by requiring trend alignment and volume spike
+# Hypothesis: Camarilla R3/S3 breakout with daily trend filter and volume confirmation
+# - Uses Camarilla levels from previous day (R3, S3) as key support/resistance
+# - Long when price breaks above R3 with volume spike in daily uptrend (EMA34 rising)
+# - Short when price breaks below S3 with volume spike in daily downtrend (EMA34 falling)
+# - Volume confirmation (1.5x 20-period MA) reduces false breakouts
+# - Exits when price returns to the broken level or trend reverses
+# - Position size 0.25 limits risk and keeps trade frequency ~20-50/year
+# - Works in bull markets (buying R3 breaks in uptrend) and bear markets (selling S3 breaks in downtrend)
+# - Daily trend filter ensures alignment with higher timeframe, reducing whipsaws
+# - Target: 80-150 total trades over 4 years (20-38/year) to avoid fee drag
+# - Camarilla levels are proven to work well on crypto, especially with volume confirmation
