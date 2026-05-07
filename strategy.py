@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot level S3/R3 breakout with volume confirmation and 1d trend filter.
+# Hypothesis: 4h Camarilla pivot level S3/R3 breakout with volume confirmation and 1d trend filter.
 # Uses Camarilla pivot levels from daily data for precise entry points, confirmed by volume spikes and 1d EMA trend.
 # Designed to work in both bull and bear markets by following the 1d trend direction.
-# Target: 15-30 trades/year per symbol to stay within limits and avoid excessive fee drag.
-name = "12h_Camarilla_S3R3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+# Target: 20-50 trades/year per symbol to avoid excessive fee drag.
+name = "4h_Camarilla_S3R3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -41,14 +41,14 @@ def generate_signals(prices):
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     
-    # 12h volume average for spike detection
-    vol_ema_12h = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike = np.where(vol_ema_12h > 0, volume / vol_ema_12h, 1.0) > 2.0
+    # 4h volume average for spike detection
+    vol_ema_4h = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_spike = np.where(vol_ema_4h > 0, volume / vol_ema_4h, 1.0) > 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Sufficient warmup for EMA and pivot calculation
+    start_idx = 100  # Sufficient warmup for EMA and pivot calculation
     
     for i in range(start_idx, n):
         if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(S3_aligned[i]) or 
