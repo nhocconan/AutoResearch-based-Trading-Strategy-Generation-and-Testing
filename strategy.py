@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_v5"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_v6"
 timeframe = "4h"
 leverage = 1.0
 
@@ -55,11 +55,11 @@ def generate_signals(prices):
         if position == 0:
             # Long: Break above R1 in 1d uptrend with volume spike
             if close[i] > r1_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_spike:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             # Short: Break below S1 in 1d downtrend with volume spike
             elif close[i] < s1_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_spike:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         elif position != 0:
             # Exit: Price returns to previous day's close (pivot point)
@@ -71,6 +71,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.30 if position == 1 else -0.30
     
     return signals
