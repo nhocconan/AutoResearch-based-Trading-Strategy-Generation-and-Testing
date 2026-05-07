@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 4H_Camarilla_R3_S3_1DTrend_VolumeBreakout
-# Hypothesis: Uses daily Camarilla R3/S3 levels with 1-day EMA34 trend filter and volume spike confirmation.
-# Enters long when price breaks above R3 in uptrend with volume confirmation, short when breaks below S3 in downtrend.
-# Exits when price returns to the Camarilla mid-point (P) or on opposite Camarilla level break.
-# Designed for 4h timeframe with target 20-50 trades/year to minimize fee drag.
-# Works in bull/bear markets: trend filter prevents counter-trend trades, Camarilla levels provide clear support/resistance.
+# 4H_RSI_Squeeze_Pattern
+# Hypothesis: Combines RSI momentum squeeze with Bollinger Band compression and volume confirmation.
+# Enters long when RSI shows bullish divergence during low volatility squeeze, short on bearish divergence.
+# Uses 4h timeframe with daily trend filter to avoid counter-trend trades.
+# Designed for 20-40 trades/year to minimize fee drag while capturing mean reversion in ranging markets.
 
-name = "4H_Camarilla_R3_S3_1DTrend_VolumeBreakout"
+name = "4H_RSI_Squeeze_Pattern"
 timeframe = "4h"
 leverage = 1.0
 
@@ -19,90 +18,88 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:  # Need enough data for EMA34
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily Camarilla levels (based on previous day's OHLC)
-    # Camarilla formula: Range = High - Low
-    # R4 = Close + Range * 1.1/2
-    # R3 = Close + Range * 1.1/4
-    # R2 = Close + Range * 1.1/6
-    # R1 = Close + Range * 1.1/12
-    # PP = (High + Low + Close) / 3
-    # S1 = Close - Range * 1.1/12
-    # S2 = Close - Range * 1.1/6
-    # S3 = Close - Range * 1.1/4
-    # S4 = Close - Range * 1.1/2
+    # Calculate 20-period RSI
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Calculate Bollinger Bands (20, 2)
+    ma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper = ma20 + 2 * std20
+    lower = ma20 - 2 * std20
+    bb_width = (upper - lower) / ma20  # Normalized bandwidth
     
-    # Calculate Camarilla levels for each day
-    range_1d = prev_high - prev_low
-    r3 = prev_close + range_1d * 1.1 / 4
-    s3 = prev_close - range_1d * 1.1 / 4
-    pp = (prev_high + prev_low + prev_close) / 3  # Pivot point
+    # Daily EMA50 trend filter
+    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate 1-day EMA34 for trend filter
-    ema_34 = pd.Series(prev_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align Camarilla levels and EMA to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
-    
-    # Volume filter: current volume > 2.0x average volume (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume filter: current volume > 1.5x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Ensure we have EMA34 and volume MA data
+    start_idx = max(20, 50)  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(pp_aligned[i]) or np.isnan(ema_34_aligned[i]) or
-            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(rsi[i]) or np.isnan(bb_width[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma20[i]) or
+            vol_ma20[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume filter: spike confirmation (2x average volume)
-        volume_filter = volume[i] > 2.0 * vol_ma[i]
+        # Squeeze condition: low volatility (BB width in lowest 20% of last 50 periods)
+        bb_width_percentile = pd.Series(bb_width[max(0, i-49):i+1]).rank(pct=True).iloc[-1] if i >= 49 else 0.5
+        squeeze_condition = bb_width_percentile < 0.2
+        
+        # Volume confirmation
+        volume_filter = volume[i] > 1.5 * vol_ma20[i]
         
         if position == 0:
-            # Long: Price breaks above R3 + uptrend (price > EMA34) + volume spike
-            if (close[i] > r3_aligned[i] and 
-                close[i] > ema_34_aligned[i] and   # Uptrend filter
-                volume_filter):
+            # RSI conditions for entry
+            rsi_rising = rsi[i] > rsi[i-1]
+            rsi_falling = rsi[i] < rsi[i-1]
+            rsi_oversold = rsi[i] < 30
+            rsi_overbought = rsi[i] > 70
+            
+            # Long: RSI rising from oversold during squeeze + uptrend + volume
+            if (rsi_rising and rsi_oversold and squeeze_condition and 
+                close[i] > ema50_1d_aligned[i] and volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S3 + downtrend (price < EMA34) + volume spike
-            elif (close[i] < s3_aligned[i] and 
-                  close[i] < ema_34_aligned[i] and   # Downtrend filter
-                  volume_filter):
+            # Short: RSI falling from overbought during squeeze + downtrend + volume
+            elif (rsi_falling and rsi_overbought and squeeze_condition and 
+                  close[i] < ema50_1d_aligned[i] and volume_filter):
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit conditions:
-            # 1. Price returns to pivot point (mean reversion)
-            # 2. Opposite Camarilla level break (trend exhaustion)
-            at_pivot = abs(close[i] - pp_aligned[i]) < (r3_aligned[i] - pp_aligned[i]) * 0.1  # Within 10% of PP
-            opposite_break = (position == 1 and close[i] < s3_aligned[i]) or \
-                           (position == -1 and close[i] > r3_aligned[i])
+            # Exit conditions: RSI mean reversion or trend change
+            rsi_overbought_exit = rsi[i] > 70
+            rsi_oversold_exit = rsi[i] < 30
+            trend_change = (position == 1 and close[i] < ema50_1d_aligned[i]) or \
+                          (position == -1 and close[i] > ema50_1d_aligned[i])
             
-            if at_pivot or opposite_break:
+            if (position == 1 and rsi_overbought_exit) or \
+               (position == -1 and rsi_oversold_exit) or \
+               trend_change:
                 signals[i] = 0.0
                 position = 0
             else:
