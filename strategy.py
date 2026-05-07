@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-
-name = "1H_Camarilla_R3S3_1DTrend_VolumeSpike_v5"
+name = "1H_Camarilla_R3S3_1DTrend_VolumeSpike_v6"
 timeframe = "1h"
 leverage = 1.0
 
@@ -55,6 +54,10 @@ def generate_signals(prices):
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     vol_filter = atr > 0.003 * close  # ATR > 0.3% of price
     
+    # Session filter: 08:00 - 20:00 UTC (80% of day)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
@@ -64,7 +67,8 @@ def generate_signals(prices):
         # Skip if any critical value is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
             np.isnan(vol_ma[i]) or vol_ma[i] == 0 or
-            np.isnan(vol_filter[i]) or not vol_filter[i]):
+            np.isnan(vol_filter[i]) or not vol_filter[i] or
+            not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
