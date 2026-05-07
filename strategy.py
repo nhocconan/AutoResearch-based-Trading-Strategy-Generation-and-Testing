@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 """
-6h_MultiTimeframe_1wTrend_1dSupport_Resistance
-Hypothesis: 6h timeframe with weekly trend filter and daily support/resistance levels.
-Uses weekly EMA20 for trend direction (bullish when price > EMA20, bearish when price < EMA20).
-Looks for mean reversion entries at daily support/resistance levels:
-- Long when price touches or crosses below daily S1 (Camarilla) in weekly uptrend
-- Short when price touches or crosses above daily R1 (Camarilla) in weekly downtrend
-Uses volume confirmation to avoid false breaks (6h volume > 1.5x 20-period average).
-Designed for 15-35 trades/year to avoid fee drag in 6h timeframe.
-Works in bull/bear via trend filter and mean reversion at key levels.
+1d_WeeklyTrend_DailyBreakout_v2
+Hypothesis: Daily timeframe with weekly trend filter using EMA20 and daily breakout of price channels.
+Long when price breaks above daily Donchian upper channel (20) in weekly uptrend with volume confirmation.
+Short when price breaks below daily Donchian lower channel (20) in weekly downtrend with volume confirmation.
+Uses volume filter (daily volume > 1.5x 20-day average) to avoid false breakouts.
+Designed for 10-25 trades/year to minimize fee drag on daily timeframe.
+Works in bull/bear via trend filter and breakout logic.
 """
 
-name = "6h_MultiTimeframe_1wTrend_1dSupport_Resistance"
-timeframe = "6h"
+name = "1d_WeeklyTrend_DailyBreakout_v2"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -39,29 +37,25 @@ def generate_signals(prices):
     ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
     ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Get daily data for support/resistance levels
+    # Get daily data for Donchian channels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily OHLC for Camarilla levels (using prior daily bar)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Range and Camarilla levels from prior daily bar
-    range_1d = high_1d - low_1d
-    r1_1d = close_1d + 1.1 * (range_1d / 12)  # R1 = C + 1.1*(H-L)/12
-    s1_1d = close_1d - 1.1 * (range_1d / 12)  # S1 = C - 1.1*(H-L)/12
+    # Calculate daily Donchian channels (20-period)
+    high_max_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_min_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align Camarilla levels to 6h
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Align Donchian channels to daily (no shift needed as already daily)
+    donchian_high_aligned = high_max_20  # Already aligned to daily
+    donchian_low_aligned = low_min_20    # Already aligned to daily
     
-    # Get 6h volume for confirmation
-    vol_6h = volume
-    vol_ma20_6h = pd.Series(vol_6h).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_6h = np.divide(vol_6h, vol_ma20_6h, out=np.zeros_like(vol_6h), where=vol_ma20_6h!=0)
+    # Get daily volume for confirmation
+    vol_ma20_1d = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_1d = np.divide(volume, vol_ma20_1d, out=np.zeros_like(volume), where=vol_ma20_1d!=0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -71,16 +65,15 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema_20_1w_aligned[i]) or 
-            np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or
-            np.isnan(vol_ratio_6h[i])):
+            np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or
+            np.isnan(vol_ratio_1d[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Determine weekly trend
-        # Get weekly close aligned to 6h for trend comparison
         close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
         if np.isnan(close_1w_aligned[i]):
             if position != 0:
@@ -92,33 +85,31 @@ def generate_signals(prices):
         trend_down = close_1w_aligned[i] < ema_20_1w_aligned[i]
         
         if position == 0:
-            # Long: price touches/crosses below S1 in weekly uptrend with volume
-            if (low[i] <= s1_1d_aligned[i] and 
-                close[i] > s1_1d_aligned[i] and  # reversal confirmation
-                vol_ratio_6h[i] > 1.5 and 
+            # Long: price breaks above Donchian high in weekly uptrend with volume
+            if (high[i] > donchian_high_aligned[i] and 
+                close[i] > donchian_high_aligned[i] and  # confirmation close
+                vol_ratio_1d[i] > 1.5 and 
                 trend_up):
                 signals[i] = 0.25
                 position = 1
-            # Short: price touches/crosses above R1 in weekly downtrend with volume
-            elif (high[i] >= r1_1d_aligned[i] and 
-                  close[i] < r1_1d_aligned[i] and  # reversal confirmation
-                  vol_ratio_6h[i] > 1.5 and 
+            # Short: price breaks below Donchian low in weekly downtrend with volume
+            elif (low[i] < donchian_low_aligned[i] and 
+                  close[i] < donchian_low_aligned[i] and  # confirmation close
+                  vol_ratio_1d[i] > 1.5 and 
                   trend_down):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price touches/crosses above R1 or trend turns down
-            if (high[i] >= r1_1d_aligned[i] and 
-                close[i] < r1_1d_aligned[i]) or \
+            # Exit long: price closes below Donchian low or trend turns down
+            if (close[i] < donchian_low_aligned[i]) or \
                not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price touches/crosses below S1 or trend turns up
-            if (low[i] <= s1_1d_aligned[i] and 
-                close[i] > s1_1d_aligned[i]) or \
+            # Exit short: price closes above Donchian high or trend turns up
+            if (close[i] > donchian_high_aligned[i]) or \
                not trend_down:
                 signals[i] = 0.0
                 position = 0
