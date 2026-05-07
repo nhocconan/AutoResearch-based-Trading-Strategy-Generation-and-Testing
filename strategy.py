@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_RSI_Overbought_Oversold_With_Volume_Trend_Filter"
-timeframe = "4h"
+name = "1h_Camarilla_R3_S3_Breakout_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,83 +17,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h and 1d data ONCE before loop
+    # Load 4h data ONCE before loop
     df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_4h) < 20 or len(df_1d) < 30:
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # 1d RSI with mean reversion (oversold = buy, overbought = sell)
-    def calculate_rsi(close_prices, period=14):
-        delta = np.diff(close_prices, prepend=close_prices[0])
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = np.zeros_like(gain)
-        avg_loss = np.zeros_like(loss)
-        
-        avg_gain[period] = np.mean(gain[1:period+1])
-        avg_loss[period] = np.mean(loss[1:period+1])
-        
-        for i in range(period+1, len(gain)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-        
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
+    # 4h EMA20 for trend filter
+    close_4h = df_4h['close'].values
+    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
     
-    rsi_1d = calculate_rsi(df_1d['close'].values, 14)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Daily high/low for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # 1d trend filter: price above/below 50 EMA for trend direction
-    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate daily Camarilla R3 and S3 from previous day
+    prev_close_1d = df_1d['close'].shift(1).values
+    prev_high_1d = df_1d['high'].shift(1).values
+    prev_low_1d = df_1d['low'].shift(1).values
+    camarilla_r3_1d = prev_close_1d + (prev_high_1d - prev_low_1d) * 1.1 / 2
+    camarilla_s3_1d = prev_close_1d - (prev_high_1d - prev_low_1d) * 1.1 / 2
     
-    # 4h volume confirmation: volume > 1.5x 20-period average
-    vol_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm_4h = volume > 1.5 * vol_ma_4h
+    # Align daily Camarilla levels to 1h timeframe
+    camarilla_r3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
+    camarilla_s3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
+    
+    # 1h volume spike filter: > 2.5x 24-period average
+    vol_ma_1h = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_spike_1h = volume > 2.5 * vol_ma_1h
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Wait for RSI and EMA
+    start_idx = max(24, 20)  # Wait for volume MA and EMA
     
     for i in range(start_idx, n):
-        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(ema50_1d_aligned[i])):
+        # Skip if any required data is NaN
+        if (np.isnan(ema20_4h_aligned[i]) or 
+            np.isnan(camarilla_r3_1d_aligned[i]) or 
+            np.isnan(camarilla_s3_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: RSI oversold (<30) in uptrend (price > EMA50) with volume confirmation
-            if (rsi_1d_aligned[i] < 30 and close[i] > ema50_1d_aligned[i] and vol_confirm_4h[i]):
-                signals[i] = 0.25
+            # Long: Break above R3 with volume spike and price above 4h EMA20 (uptrend)
+            if (close[i] > camarilla_r3_1d_aligned[i] and 
+                vol_spike_1h[i] and 
+                close[i] > ema20_4h_aligned[i]):
+                signals[i] = 0.20
                 position = 1
-            # Short: RSI overbought (>70) in downtrend (price < EMA50) with volume confirmation
-            elif (rsi_1d_aligned[i] > 70 and close[i] < ema50_1d_aligned[i] and vol_confirm_4h[i]):
-                signals[i] = -0.25
+            # Short: Break below S3 with volume spike and price below 4h EMA20 (downtrend)
+            elif (close[i] < camarilla_s3_1d_aligned[i] and 
+                  vol_spike_1h[i] and 
+                  close[i] < ema20_4h_aligned[i]):
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit: RSI overbought (>70) or trend reversal (price < EMA50)
-            if rsi_1d_aligned[i] > 70 or close[i] < ema50_1d_aligned[i]:
+            # Exit: Price below S3 or below 4h EMA20 (trend reversal)
+            if close[i] < camarilla_s3_1d_aligned[i] or close[i] < ema20_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit: RSI oversold (<30) or trend reversal (price > EMA50)
-            if rsi_1d_aligned[i] < 30 or close[i] > ema50_1d_aligned[i]:
+            # Exit: Price above R3 or above 4h EMA20 (trend reversal)
+            if close[i] > camarilla_r3_1d_aligned[i] or close[i] > ema20_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
-
-# Hypothesis: RSI mean reversion works in both bull and bear markets when combined with trend filter.
-# In bull markets: buy oversold dips in uptrend. In bear markets: sell overbought rallies in downtrend.
-# Volume confirmation reduces false signals. Target: 20-40 trades/year to minimize fee drag.
-# Position size 0.25 limits risk. Exit on mean reversion completion or trend change.
