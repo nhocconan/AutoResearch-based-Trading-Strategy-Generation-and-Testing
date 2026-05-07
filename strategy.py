@@ -3,29 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams Alligator with 1w EMA50 trend filter and volume confirmation.
-# Williams Alligator: Jaw (13-period SMMA), Teeth (8-period SMMA), Lips (5-period SMMA)
-# Long when Lips > Teeth > Jaw AND price > 1w EMA50 (uptrend) AND volume > 1.5x 20-period average
-# Short when Lips < Teeth < Jaw AND price < 1w EMA50 (downtrend) AND volume > 1.5x 20-period average
-# Exit when Alligator lines cross in opposite direction or volume filter fails
-# Designed for 1d timeframe with low trade frequency (target: 10-25/year) to minimize fee drag.
-# Uses 1w EMA50 for trend filter to avoid counter-trend trades in strong trends.
-# Volume filter ensures participation and avoids low-conviction moves.
-name = "1d_WilliamsAlligator_1wEMA50_VolumeFilter"
-timeframe = "1d"
+# Hypothesis: 12h Donchian breakout with 1d trend filter and volume confirmation.
+# Long when price breaks above Donchian(20) high, price > 1d EMA50, volume > 1.3x 20-period avg.
+# Short when price breaks below Donchian(20) low, price < 1d EMA50, volume > 1.3x 20-period avg.
+# Exit when price crosses back through Donchian middle (10-period average) or volume drops.
+# Designed for 12h timeframe with low trade frequency (target: 15-25/year) to minimize fee drag.
+# Uses Donchian breakouts for clear structure, 1d EMA50 for trend filter, volume for confirmation.
+name = "12h_DonchianBreakout_1dEMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
-
-def smma(values, period):
-    """Smoothed Moving Average (SMMA)"""
-    if len(values) < period:
-        return np.full_like(values, np.nan, dtype=float)
-    result = np.full_like(values, np.nan, dtype=float)
-    # First value is simple moving average
-    result[period-1] = np.mean(values[:period])
-    # Subsequent values: (prev_smma * (period-1) + current_value) / period
-    for i in range(period, len(values)):
-        result[i] = (result[i-1] * (period-1) + values[i]) / period
-    return result
 
 def generate_signals(prices):
     n = len(prices)
@@ -37,23 +23,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Williams Alligator: Jaw (13), Teeth (8), Lips (5)
-    jaw = smma(close, 13)
-    teeth = smma(close, 8)
-    lips = smma(close, 5)
+    # Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # 1w EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # 1d EMA50 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Volume filter: current volume > 1.5x 20-period average
+    # Volume filter: current volume > 1.3x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma20)
+    volume_filter = volume > (1.3 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -61,18 +47,18 @@ def generate_signals(prices):
     start_idx = 50  # Sufficient warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(donchian_mid[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: Lips > Teeth > Jaw (bullish alignment) AND price > 1w EMA50 AND volume filter
-            long_cond = (lips[i] > teeth[i]) and (teeth[i] > jaw[i]) and (close[i] > ema50_1w_aligned[i]) and volume_filter[i]
-            # Short conditions: Lips < Teeth < Jaw (bearish alignment) AND price < 1w EMA50 AND volume filter
-            short_cond = (lips[i] < teeth[i]) and (teeth[i] < jaw[i]) and (close[i] < ema50_1w_aligned[i]) and volume_filter[i]
+            # Long conditions: break above Donchian high, price > 1d EMA50, volume filter
+            long_cond = (close[i] > donchian_high[i]) and (close[i] > ema50_1d_aligned[i]) and volume_filter[i]
+            # Short conditions: break below Donchian low, price < 1d EMA50, volume filter
+            short_cond = (close[i] < donchian_low[i]) and (close[i] < ema50_1d_aligned[i]) and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -81,15 +67,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Bearish alignment (Lips < Teeth < Jaw) OR volume filter fails
-            if (lips[i] < teeth[i] and teeth[i] < jaw[i]) or not volume_filter[i]:
+            # Long exit: cross below Donchian mid OR volume filter fails
+            if (close[i] < donchian_mid[i]) or not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Bullish alignment (Lips > Teeth > Jaw) OR volume filter fails
-            if (lips[i] > teeth[i] and teeth[i] > jaw[i]) or not volume_filter[i]:
+            # Short exit: cross above Donchian mid OR volume filter fails
+            if (close[i] > donchian_mid[i]) or not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
