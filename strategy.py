@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,62 +17,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Camarilla and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:  # Need at least 34 periods for EMA
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Camarilla pivot levels (R3, S3) from previous day
-    high_prev = df_1d['high'].shift(1).values
-    low_prev = df_1d['low'].shift(1).values
-    close_prev = df_1d['close'].shift(1).values
-    pp = (high_prev + low_prev + close_prev) / 3
-    r3 = pp + (high_prev - low_prev) * 1.1 / 4
-    s3 = pp - (high_prev - low_prev) * 1.1 / 4
+    # Calculate 12h EMA(50) for trend filter
+    ema_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # 1d EMA(34) for trend filter
-    ema_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate Camarilla levels from 1d data
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Align to 12h
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Use previous day's OHLC for Camarilla calculation (no look-ahead)
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Volume spike: current volume > 2.0 * 24-period average volume (on 12h)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    vol_spike = volume > (vol_ma * 2.0)
+    # Camarilla R3 and S3 levels
+    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    
+    # Align Camarilla levels to 4h
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Volume spike detection (20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 24  # Wait for volume MA
+    start_idx = 20  # Wait for volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(ema_1d_aligned[i]):
+        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R3, uptrend (price > EMA), volume spike
-            if close[i] > r3_aligned[i] and close[i] > ema_1d_aligned[i] and vol_spike[i]:
+            # Long: price breaks above R3 with volume spike and 12h uptrend
+            if (close[i] > r3_aligned[i] and 
+                volume[i] > vol_ma[i] * 1.5 and 
+                close[i] > ema_12h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3, downtrend (price < EMA), volume spike
-            elif close[i] < s3_aligned[i] and close[i] < ema_1d_aligned[i] and vol_spike[i]:
+            # Short: price breaks below S3 with volume spike and 12h downtrend
+            elif (close[i] < s3_aligned[i] and 
+                  volume[i] > vol_ma[i] * 1.5 and 
+                  close[i] < ema_12h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price breaks below S3 or trend reverses
-            if close[i] < s3_aligned[i] or close[i] < ema_1d_aligned[i]:
+            # Exit: price falls back below R3 or trend changes
+            if (close[i] < r3_aligned[i] or 
+                close[i] < ema_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price breaks above R3 or trend reverses
-            if close[i] > r3_aligned[i] or close[i] > ema_1d_aligned[i]:
+            # Exit: price rises back above S3 or trend changes
+            if (close[i] > s3_aligned[i] or 
+                close[i] > ema_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -80,9 +91,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA trend filter and volume spike confirmation.
-# Camarilla R3/S3 levels act as strong support/resistance; breaks indicate institutional interest.
-# EMA(34) on 1d ensures we trade with the higher timeframe trend, reducing whipsaws.
-# Volume spike confirms genuine breakout with participation.
-# In bull markets, we buy R3 breaks in uptrends; in bear markets, we sell S3 breaks in downtrends.
-# Position size 0.25 limits drawdown during adverse moves (e.g., 2022 crash).
+# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA(50) trend filter and volume confirmation.
+# Camarilla R3 and S3 represent strong intraday support/resistance levels.
+# Breakouts above R3 with volume indicate bullish momentum; breakdowns below S3 indicate bearish momentum.
+# The 12h EMA(50) filter ensures we only trade in the direction of the higher timeframe trend,
+# reducing whipsaws during sideways markets. Volume confirmation adds validity to breakouts.
+# This strategy works in bull markets (buying breakouts) and bear markets (selling breakdowns).
+# Position size 0.25 balances risk and reward while keeping trade frequency manageable.
