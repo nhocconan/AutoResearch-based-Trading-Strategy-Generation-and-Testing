@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-4H_Camarilla_R3S3_Breakout_1dEMA34_Volume_Spike_v1
-Hypothesis: Use 1d EMA34 for trend direction and 4h Camarilla R3/S3 levels for entry.
-Long when price crosses above 4h EMA and touches R3 level; 
-Short when price crosses below 4h EMA and touches S3 level.
-Volume confirmation: current volume > 2.0x 20-period average volume.
-This combines trend-following with precision pivot entries to reduce false signals and work in both bull and bear markets.
+12H_Camarilla_R1_S1_Breakout_1D_Trend_Volume_v1
+Hypothesis: Use 1d EMA34 for trend direction and 12h Camarilla R1/S1 levels for entry.
+Long when price crosses above EMA34 and touches 12h R1 level; short when price crosses below EMA34 and touches 12h S1 level.
+Volume confirmation: current volume > 1.5x 20-period average volume.
+Works in both bull and bear markets by aligning with daily trend and using precise pivot entries.
 """
-name = "4H_Camarilla_R3S3_Breakout_1dEMA34_Volume_Spike_v1"
-timeframe = "4h"
+name = "12H_Camarilla_R1_S1_Breakout_1D_Trend_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,30 +24,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for EMA trend
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 34:
+    # Get 1d data for EMA34 trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 4h EMA(34)
-    close_4h = pd.Series(df_4h['close'])
-    ema_4h = close_4h.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Calculate 1d EMA34
+    close_1d = pd.Series(df_1d['close'])
+    ema_34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Get 4h data for Camarilla levels (R3, S3)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h_vals = df_4h['close'].values
-    pivot = (high_4h + low_4h + close_4h_vals) / 3
-    range_4h = high_4h - low_4h
-    r3 = pivot + (range_4h * 1.1 / 4)  # R3 level
-    s3 = pivot - (range_4h * 1.1 / 4)  # S3 level
-    r3_aligned = align_htf_to_ltf(prices, df_4h, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_4h, s3)
+    # Get 12h data for Camarilla levels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 1:
+        return np.zeros(n)
     
-    # Volume filter: current volume > 2.0 * 20-period average volume
+    # Calculate 12h Camarilla levels (R1, S1)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    pivot = (high_12h + low_12h + close_12h) / 3
+    range_12h = high_12h - low_12h
+    r1 = pivot + (range_12h * 1.1 / 12)
+    s1 = pivot - (range_12h * 1.1 / 12)
+    r1_aligned = align_htf_to_ltf(prices, df_12h, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_12h, s1)
+    
+    # Volume filter: current volume > 1.5 * 20-period average volume
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_avg * 2.0)
+    volume_filter = volume > (vol_avg * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -60,7 +64,7 @@ def generate_signals(prices):
         bars_since_exit += 1
         
         # Skip if any data is not ready
-        if (np.isnan(ema_4h_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
             np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -69,29 +73,29 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Minimum 8 bars between trades (1.33 days on 4h TF) to reduce frequency
-            if bars_since_exit < 8:
+            # Minimum 12 bars between trades (1 day on 12h TF) to reduce frequency
+            if bars_since_exit < 12:
                 continue
                 
-            # Long: price crosses above EMA and touches R3 level
-            if (close[i] > ema_4h_aligned[i] and close[i-1] <= ema_4h_aligned[i-1] and 
-                low[i] <= r3_aligned[i] and volume_filter[i]):
+            # Long: price crosses above EMA34 and touches R1 level
+            if (close[i] > ema_34_1d_aligned[i] and close[i-1] <= ema_34_1d_aligned[i-1] and 
+                low[i] <= r1_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_exit = 0
-            # Short: price crosses below EMA and touches S3 level
-            elif (close[i] < ema_4h_aligned[i] and close[i-1] >= ema_4h_aligned[i-1] and 
-                  high[i] >= s3_aligned[i] and volume_filter[i]):
+            # Short: price crosses below EMA34 and touches S1 level
+            elif (close[i] < ema_34_1d_aligned[i] and close[i-1] >= ema_34_1d_aligned[i-1] and 
+                  high[i] >= s1_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_exit = 0
         elif position != 0:
-            # Exit: price returns to opposite EMA side
-            if position == 1 and close[i] < ema_4h_aligned[i]:
+            # Exit: price returns to opposite EMA34 side
+            if position == 1 and close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_exit = 0
-            elif position == -1 and close[i] > ema_4h_aligned[i]:
+            elif position == -1 and close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_exit = 0
