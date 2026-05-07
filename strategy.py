@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_v3"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_v4"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,8 +24,6 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Calculate Camarilla pivot levels (R3, S3) from previous day's OHLC
-    # R3 = close + 0.25 * (high - low)
-    # S3 = close - 0.25 * (high - low)
     prev_close = df_1d['close'].values
     prev_high = df_1d['high'].values
     prev_low = df_1d['low'].values
@@ -50,7 +48,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 6  # Prevent overtrading (approx 3 days for 4h)
+    cooldown_bars = 8  # Prevent overtrading (approx 4 days for 4h)
     
     start_idx = max(20, 34)  # Warmup for volume MA and EMA
     
@@ -113,5 +111,5 @@ def generate_signals(prices):
 # Long when price breaks above R3 in daily uptrend with volume confirmation.
 # Short when price breaks below S3 in daily downtrend with volume confirmation.
 # Daily EMA34 filter ensures we trade with the higher timeframe trend.
-# Volume spike confirms institutional participation. Cooldown prevents overtrading.
+# Volume spike confirms institutional participation. Increased cooldown reduces overtrading.
 # Effective in both bull (captures breakouts) and bear (avoids counter-trend trades).
