@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v2"
 timeframe = "4h"
 leverage = 1.0
 
