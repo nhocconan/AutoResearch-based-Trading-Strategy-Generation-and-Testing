@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike
-Hypothesis: 12h Camarilla pivot breakout (R3/S3) filtered by 1d ADX trend strength (>25) and 1d volume spike (>2x 20-day average).
-Long on breakout above R3 in bullish 1d trend with volume spike.
-Short on breakout below S3 in bearish 1d trend with volume spike.
-Exit on opposite Camarilla level (R2/S2) touch.
+12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_Rev2
+Hypothesis: Refined 12h strategy with stricter entry conditions to reduce trade frequency and improve win rate.
+Uses 12h Camarilla R3/S3 breakouts filtered by 1d ADX trend (>25) and volume spike (>2x 20-day average).
+Exits on opposite Camarilla level (R2/S2) touch. Uses tighter cooldown (10 bars) to prevent overtrading.
 Designed for low-frequency, high-conviction trades in both bull and bear markets.
 """
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_Rev2"
 timeframe = "12h"
 leverage = 1.0
 
@@ -108,6 +107,8 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    bars_since_last_trade = 0
+    cooldown_bars = 10  # Prevent overtrading
     
     start_idx = max(20, 30)  # Warmup
     
@@ -120,7 +121,12 @@ def generate_signals(prices):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                bars_since_last_trade = 0
+            else:
+                bars_since_last_trade += 1
             continue
+        
+        bars_since_last_trade += 1
         
         # Determine 1d trend direction using ADX and price vs 20-period SMA
         sma_20_1d = np.full_like(close_1d, np.nan)
@@ -135,24 +141,27 @@ def generate_signals(prices):
             trend_1d_up = False
             trend_1d_down = False
         
-        if position == 0:
+        if position == 0 and bars_since_last_trade >= cooldown_bars:
             # Long: Camarilla R3 breakout in 1d uptrend with volume spike
             if (close[i] > camarilla_R3[i] and 
                 trend_1d_up and 
                 vol_spike_aligned[i]):
                 signals[i] = 0.25
                 position = 1
+                bars_since_last_trade = 0
             # Short: Camarilla S3 breakdown in 1d downtrend with volume spike
             elif (close[i] < camarilla_S3[i] and 
                   trend_1d_down and 
                   vol_spike_aligned[i]):
                 signals[i] = -0.25
                 position = -1
+                bars_since_last_trade = 0
         elif position == 1:
             # Exit long: price crosses below camarilla S2
             if close[i] < camarilla_S2[i]:
                 signals[i] = 0.0
                 position = 0
+                bars_since_last_trade = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
@@ -160,6 +169,7 @@ def generate_signals(prices):
             if close[i] > camarilla_R2[i]:
                 signals[i] = 0.0
                 position = 0
+                bars_since_last_trade = 0
             else:
                 signals[i] = -0.25
     
