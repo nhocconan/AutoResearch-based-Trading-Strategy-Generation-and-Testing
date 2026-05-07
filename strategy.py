@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_WeeklyPivot_DailyTrend_VolumeBreak"
-timeframe = "12h"
+name = "1d_1wPivot_PriceAction_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,78 +17,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Weekly pivot points from daily data (last completed week)
-    # Approximate week: last 5 trading days of daily data
-    weekly_high = pd.Series(df_1d['high']).rolling(window=5, min_periods=5).max().values
-    weekly_low = pd.Series(df_1d['low']).rolling(window=5, min_periods=5).min().values
-    weekly_close = pd.Series(df_1d['close']).rolling(window=5, min_periods=5).mean().values
+    # Weekly pivot points from weekly data
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
     # Pivot levels
     pp = (weekly_high + weekly_low + weekly_close) / 3
     r1 = 2 * pp - weekly_low
     s1 = 2 * pp - weekly_high
-    r2 = pp + (weekly_high - weekly_low)
-    s2 = pp - (weekly_high - weekly_low)
-    r3 = weekly_high + 2 * (pp - weekly_low)
-    s3 = weekly_low - 2 * (weekly_high - pp)
     
-    # Align weekly pivot levels to 12h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Align weekly pivot levels to daily timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
     
-    # Daily trend filter: EMA(34) on daily close
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Daily price action: higher highs/lows for trend
+    hh_condition = high > np.roll(high, 1)
+    ll_condition = low > np.roll(low, 1)
+    lh_condition = high < np.roll(high, 1)
+    hl_condition = low < np.roll(low, 1)
     
-    # Volume spike detection: 4-period average (2 days of 12h bars)
-    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    # Volume spike detection: 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(5, 34, 4)  # Wait for all indicators
+    start_idx = max(20, 1)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(pp_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(vol_ma_4[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above S1 with volume and daily uptrend
-            vol_condition = volume[i] > vol_ma_4[i] * 2.0
-            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
+            # Long: price above S1 with higher low and volume in weekly uptrend
+            vol_condition = volume[i] > vol_ma_20[i] * 1.5
+            weekly_uptrend = weekly_close[i] > weekly_close[i-1] if i > 0 else False
+            price_action = ll_condition[i] and hl_condition[i]  # higher low and higher high
             
-            if close[i] > s1_aligned[i] and vol_condition and uptrend:
+            if close[i] > s1_aligned[i] and vol_condition and weekly_uptrend and price_action:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below R1 with volume and daily downtrend
-            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
+            # Short: price below R1 with lower high and volume in weekly downtrend
+            elif close[i] < r1_aligned[i] and vol_condition and not weekly_uptrend and lh_condition[i] and hl_condition[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below pivot or volume drops
-            if close[i] < pp_aligned[i] or volume[i] < vol_ma_4[i] * 1.5:
+            # Exit: price back below S1 or trend breaks
+            if close[i] < s1_aligned[i] or not ll_condition[i] or not hl_condition[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above pivot or volume drops
-            if close[i] > pp_aligned[i] or volume[i] < vol_ma_4[i] * 1.5:
+            # Exit: price back above R1 or trend breaks
+            if close[i] > r1_aligned[i] or not lh_condition[i] or not hl_condition[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -96,13 +89,13 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 12h weekly pivot breakout with daily trend and volume confirmation
-# - Weekly pivot points (S1/R1) act as dynamic support/resistance levels
-# - Breakout above S1 with volume in daily uptrend = long opportunity
-# - Breakdown below R1 with volume in daily downtrend = short opportunity
-# - Volume spike (2x average) confirms institutional participation
-# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
-# - Exit when price returns to weekly pivot (PP) or volume weakens
-# - Position size 0.25 targets 12-37 trades/year, avoiding fee drag
+# Hypothesis: Daily price action with weekly pivot support/resistance
+# - Weekly pivot points (S1/R1) act as key support/resistance levels
+# - Long when price breaks above S1 with higher low/higher high structure and volume
+# - Short when price breaks below R1 with lower high/lower low structure and volume
+# - Volume confirmation (1.5x average) filters weak breakouts
+# - Works in bull markets (buy S1 breaks in uptrend) and bear markets (sell R1 breaks in downtrend)
+# - Exit when price returns to weekly pivot level or price action breaks down
+# - Position size 0.25 targets 15-25 trades/year, minimizing fee drag
 # - Weekly pivot provides structure that works across market regimes
-# - 12h timeframe reduces trade frequency, minimizing fee drag while capturing swings
+# - Price action filters ensure we trade with momentum, not against it
