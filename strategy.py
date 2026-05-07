@@ -1,6 +1,10 @@
+# 12h_1W_Pivot_R1S1_Breakout_1DTrend_Volume
+# Hypothesis: Breakouts above weekly S1 in daily uptrend or below weekly R1 in daily downtrend with volume confirmation capture institutional participation. Weekly pivot provides structure; daily trend filters direction; volume confirms strength. Designed for 12h timeframe to limit trades (12-37/year) and avoid fee drag. Works in bull (buy S1 breaks) and bear (sell R1 breaks).
+# Timeframe: 12h, Target trades: 50-150 total over 4 years
+
 #!/usr/bin/env python3
-name = "6h_Keltner_RSI_MeanRev_TrendFilter"
-timeframe = "6h"
+name = "12h_1W_Pivot_R1S1_Breakout_1DTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,60 +23,68 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Keltner Channel (20, 2.0) on 6h
-    ema_mid = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    atr = pd.Series(np.maximum(high - low, np.maximum(abs(high - np.roll(close, 1)), abs(low - np.roll(close, 1))))).ewm(span=20, adjust=False, min_periods=20).mean().values
-    upper_keltner = ema_mid + 2 * atr
-    lower_keltner = ema_mid - 2 * atr
+    # Weekly pivot points from daily data (use last completed week)
+    # Approximate week as 7 days of daily data
+    weekly_high = pd.Series(high).rolling(window=7, min_periods=7).max().values
+    weekly_low = pd.Series(low).rolling(window=7, min_periods=7).min().values
+    weekly_close = pd.Series(close).rolling(window=7, min_periods=7).mean().values
     
-    # RSI(14) on 6h
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Pivot levels
+    pp = (weekly_high + weekly_low + weekly_close) / 3
+    r1 = 2 * pp - weekly_low
+    s1 = 2 * pp - weekly_high
+    
+    # Align weekly pivot levels to 12h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp.values)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
     
     # Daily trend filter: EMA(34) on daily close
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
+    # Volume spike detection: 2-period average (24h of 12h bars)
+    vol_ma_2 = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 14, 34)  # Wait for all indicators
+    start_idx = max(34, 2, 7)  # Wait for all indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_mid[i]) or np.isnan(upper_keltner[i]) or np.isnan(lower_keltner[i]) or
-            np.isnan(rsi[i]) or np.isnan(ema_34_1d_aligned[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(pp_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(vol_ma_2[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price below lower Keltner + RSI oversold + daily uptrend
-            if close[i] < lower_keltner[i] and rsi[i] < 30 and ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]:
+            # Long: price above S1 with volume and daily uptrend
+            vol_condition = volume[i] > vol_ma_2[i] * 2.0
+            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
+            
+            if close[i] > s1_aligned[i] and vol_condition and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price above upper Keltner + RSI overbought + daily downtrend
-            elif close[i] > upper_keltner[i] and rsi[i] > 70 and ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]:
+            # Short: price below R1 with volume and daily downtrend
+            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back to middle Keltner or RSI neutral
-            if close[i] > ema_mid[i] or rsi[i] > 50:
+            # Exit: price back below S1 or volume drops
+            if close[i] < s1_aligned[i] or volume[i] < vol_ma_2[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price back to middle Keltner or RSI neutral
-            if close[i] < ema_mid[i] or rsi[i] < 50:
+            # Exit: price back above R1 or volume drops
+            if close[i] > r1_aligned[i] or volume[i] < vol_ma_2[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -80,11 +92,4 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 6h Keltner Channel mean reversion with RSI and daily trend filter
-# - Mean reversion at Keltner bands (2*ATR from EMA20) in ranging markets
-# - RSI confirms overbought/oversold conditions (RSI<30 for long, >70 for short)
-# - Daily EMA34 trend filter ensures we only trade mean reversion in the direction of higher timeframe trend
-# - Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend)
-# - Exit when price returns to EMA20 or RSI normalizes
-# - Position size 0.25 targets ~20-40 trades/year, avoiding fee drag
-# - Combines proven mean reversion with trend filter for robustness across regimes
+# Hypothesis: Breakouts above weekly S1 in daily uptrend or below weekly R1 in daily downtrend with volume confirmation capture institutional participation. Weekly pivot provides structure; daily trend filters direction; volume confirms strength. Designed for 12h timeframe to limit trades (12-37/year) and avoid fee drag. Works in bull (buy S1 breaks) and bear (sell R1 breaks).
