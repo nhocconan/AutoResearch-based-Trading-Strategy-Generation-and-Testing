@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R3_S3_1DTrend_VolumeBreakout_v4
-# Hypothesis: 12-hour timeframe strategy using daily Camarilla R3/S3 breakouts with 1-day EMA34 trend filter and volume spike confirmation.
-# Targets 12-37 trades/year to minimize fee drag. Uses price channel structure with trend and volume filters.
-# Works in bull markets (breakouts with trend) and bear markets (fades from extremes with trend filter).
-# Added volatility filter to avoid whipsaws and reduced position size to manage drawdown.
+# 4H_Camarilla_R3_S3_1DTrend_VolumeBreakout_v4
+# Hypothesis: 4-hour strategy using daily Camarilla R3/S3 breakouts with 1-day EMA34 trend filter and volume spike confirmation.
+# Designed to work in both bull and bear markets by using trend filter to avoid counter-trend trades.
+# Targets 20-50 trades/year to minimize fee drag. Uses price channel structure with trend and volume filters.
+# Uses discrete position sizing (0.25) to reduce churn and improve generalization.
 
-name = "12h_Camarilla_R3_S3_1DTrend_VolumeBreakout_v4"
-timeframe = "12h"
+name = "4H_Camarilla_R3_S3_1DTrend_VolumeBreakout_v4"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -42,7 +42,7 @@ def generate_signals(prices):
     # Calculate 1-day EMA34 for trend filter
     ema_34 = pd.Series(prev_close).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align Camarilla levels, EMA, and pivot to 12h timeframe
+    # Align Camarilla levels, EMA, and pivot to 4h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
