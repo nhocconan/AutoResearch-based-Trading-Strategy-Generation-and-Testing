@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Keltner_Reversal_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Donchian20_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,76 +17,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for trend and Keltner
+    # Load daily data ONCE before loop for Donchian and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate daily ATR(10) for Keltner Channels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.inf], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    # Daily Donchian(20) channels
+    donch_high = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
     
-    # Daily EMA(20) as middle line
-    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Align Donchian levels to 12h timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
     
-    # Keltner Channels: upper = EMA + 2*ATR, lower = EMA - 2*ATR
-    keltner_upper = ema_20_1d + 2 * atr_10
-    keltner_lower = ema_20_1d - 2 * atr_10
+    # Daily EMA(34) for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Align Keltner levels to 6h timeframe
-    keltner_upper_aligned = align_htf_to_ltf(prices, df_1d, keltner_upper)
-    keltner_lower_aligned = align_htf_to_ltf(prices, df_1d, keltner_lower)
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
-    
-    # Daily trend filter: EMA(50) direction
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Volume spike detection: 4-period average (1 day of 6h bars)
-    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    # Volume spike detection: 2-period average (1 day of 12h bars)
+    vol_ma_2 = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 10, 4)  # Wait for EMA50, ATR10, and volume MA
+    start_idx = max(34, 20, 2)  # Wait for EMA, Donchian and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(keltner_upper_aligned[i]) or 
-            np.isnan(keltner_lower_aligned[i]) or np.isnan(ema_20_1d_aligned[i]) or
-            np.isnan(vol_ma_4[i])):
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_2[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price touches or breaks below lower Keltner with volume in daily uptrend
-            vol_condition = volume[i] > vol_ma_4[i] * 1.8
-            uptrend = ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1]
+            # Long: price above Donchian high with volume and daily uptrend
+            vol_condition = volume[i] > vol_ma_2[i] * 2.0
+            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
             
-            if close[i] <= keltner_lower_aligned[i] and vol_condition and uptrend:
+            if close[i] > donch_high_aligned[i] and vol_condition and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price touches or breaks above upper Keltner with volume in daily downtrend
-            elif close[i] >= keltner_upper_aligned[i] and vol_condition and not uptrend:
+            # Short: price below Donchian low with volume and daily downtrend
+            elif close[i] < donch_low_aligned[i] and vol_condition and not uptrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price returns to middle EMA or volume drops
-            if close[i] >= ema_20_1d_aligned[i] or volume[i] < vol_ma_4[i] * 1.2:
+            # Exit: price back below Donchian low or volume drops
+            if close[i] < donch_low_aligned[i] or volume[i] < vol_ma_2[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price returns to middle EMA or volume drops
-            if close[i] <= ema_20_1d_aligned[i] or volume[i] < vol_ma_4[i] * 1.2:
+            # Exit: price back above Donchian high or volume drops
+            if close[i] > donch_high_aligned[i] or volume[i] < vol_ma_2[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -94,15 +79,17 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 6h Keltner Channel reversal with 1d trend and volume confirmation
-# - Keltner Channels (EMA20 ± 2*ATR10) on daily timeframe identify dynamic support/resistance
-# - In uptrends, price often pulls back to lower Keltner before continuing up (long setup)
-# - In downtrends, price often rallies to upper Keltner before continuing down (short setup)
-# - Volume spike (1.8x average) confirms institutional participation at these key levels
-# - Daily EMA50 trend filter ensures we trade with the higher timeframe trend
-# - Works in both bull (buy dips in uptrend) and bear (sell rallies in downtrend) markets
-# - Exit when price returns to EMA20 (middle) or volume weakens
+# Hypothesis: 12h Donchian(20) breakout with 1d trend and volume confirmation
+# - Donchian(20) on daily chart provides robust support/resistance levels
+# - Breakout above daily Donchian high with volume in daily uptrend = long opportunity
+# - Breakdown below daily Donchian low with volume in daily downtrend = short opportunity
+# - Volume spike (2.0x average) confirms institutional participation
+# - Works in both bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend)
+# - Exit when price returns to opposite Donchian band or volume weakens
 # - Position size 0.25 targets ~20-50 trades/year, avoiding fee drag
-# - Novel combination: Keltner reversal (1d) + trend (1d) + volume (6h) - not recently tried on 6h
-# - Uses actual daily Keltner levels for better adaptation to volatility
+# - Uses actual daily Donchian levels for better stability vs intraday
+# - Daily trend filter reduces whipsaws vs using same timeframe
+# - Designed to work in BOTH bull and bear markets via trend filter
+# - Volume confirmation reduces false breakouts
+# - Novel combination: Donchian breakout (1d) + trend (1d) + volume (12h) not recently tried
 # - Aims for 50-150 total trades over 4 years (12-37/year) to stay within limits
