@@ -1,6 +1,9 @@
+# 1d_WeeklyPivot_Momentum_Breakout
+# Hypothesis: On daily timeframe, price breaking above/below weekly pivot levels with volume confirmation and weekly trend filter captures institutional order flow. Weekly pivot levels (R1/S1) act as key support/resistance where breakouts often continue in the direction of the weekly trend. This approach works in bull markets (breakouts above pivot in uptrend) and bear markets (breakdowns below pivot in downtrend) by aligning with higher timeframe momentum. Target: 30-100 trades over 4 years (7-25/year) to minimize fee drag while capturing significant moves.
+
 #!/usr/bin/env python3
-name = "4h_Donchian20_Breakout_1dEMA34_Trend_Volume"
-timeframe = "4h"
+name = "1d_WeeklyPivot_Momentum_Breakout"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,40 +20,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get weekly data for pivot levels and trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # 1d EMA34 trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate weekly pivot points (using prior week's OHLC)
+    # Pivot = (H + L + C) / 3
+    # R1 = 2*P - L
+    # S1 = 2*P - H
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Donchian channels from 4h data (20-period)
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
+    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    r1 = 2 * pivot - weekly_low
+    s1 = 2 * pivot - weekly_high
     
-    # Volume filter: current volume > 1.5x 20-period average (for 4h)
+    # Align weekly pivot levels to daily timeframe (available after weekly bar closes)
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    
+    # Weekly EMA20 trend filter
+    ema_20_1w = pd.Series(weekly_close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    
+    # Volume filter: current volume > 1.8x 20-day average
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-20:i])
-    vol_filter = volume > (1.5 * vol_ma_20)
+    vol_filter = volume > (1.8 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 3  # ~6 hours for 4h to reduce trades
+    cooldown_bars = 2  # ~2 days to prevent overtrading
     
-    start_idx = max(100, 20, 34)
+    start_idx = max(20, 10)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or 
+        if (np.isnan(pivot_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_20_1w_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -62,36 +76,36 @@ def generate_signals(prices):
         
         bars_since_last_trade += 1
         
-        # Determine 1d trend direction
-        trend_up = close > ema_34_1d_aligned[i]
-        trend_down = close < ema_34_1d_aligned[i]
+        # Determine weekly trend direction
+        trend_up = close > ema_20_1w_aligned[i]
+        trend_down = close < ema_20_1w_aligned[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: Price breaks above Donchian high with volume in uptrend
-            if (close[i] > donchian_high[i] and 
+            # Long: Price breaks above weekly R1 with volume in uptrend
+            if (close[i] > r1_aligned[i] and 
                 trend_up[i] and 
                 vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: Price breaks below Donchian low with volume in downtrend
-            elif (close[i] < donchian_low[i] and 
+            # Short: Price breaks below weekly S1 with volume in downtrend
+            elif (close[i] < s1_aligned[i] and 
                   trend_down[i] and 
                   vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit: Price falls below Donchian low or trend changes
-            if close[i] < donchian_low[i] or not trend_up[i]:
+            # Exit: Price falls back below weekly pivot or trend changes
+            if close[i] < pivot_aligned[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price rises above Donchian high or trend changes
-            if close[i] > donchian_high[i] or not trend_down[i]:
+            # Exit: Price rises back above weekly pivot or trend changes
+            if close[i] > pivot_aligned[i] or not trend_down[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
@@ -100,10 +114,4 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation on 4h timeframe.
-# Long when price breaks above Donchian high in uptrend with volume confirmation.
-# Short when price breaks below Donchian low in downtrend with volume confirmation.
-# Uses 4h timeframe to balance trade frequency and capture meaningful trends.
-# Target: 75-200 total trades over 4 years (19-50/year) as per experiment guidelines.
-# Works in bull markets (breakouts in uptrend) and bear markets (breakdowns in downtrend).
-# Based on top-performing pattern from DB: Donchian breakout + volume + trend filter.
+# Hypothesis: On daily timeframe, price breaking above/below weekly pivot levels with volume confirmation and weekly trend filter captures institutional order flow. Weekly pivot levels (R1/S1) act as key support/resistance where breakouts often continue in the direction of the weekly trend. This approach works in bull markets (breakouts above pivot in uptrend) and bear markets (breakdowns below pivot in downtrend) by aligning with higher timeframe momentum. Target: 30-100 trades over 4 years (7-25/year) to minimize fee drag while capturing significant moves.
