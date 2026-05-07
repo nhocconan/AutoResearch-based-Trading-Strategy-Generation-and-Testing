@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Keltner_Cross_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,63 +17,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for trend filter and Camarilla pivots
+    # Load 1d data ONCE before loop for trend filter and Keltner basis
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 1d EMA(34) for trend filter
-    ema_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # 1d EMA(20) for trend filter
+    ema_1d = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # 1d ATR(10) for Keltner channels
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr_1d).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Camarilla R3 and S3 levels
-    r3 = prev_close + (prev_high - prev_low) * 1.1 / 2
-    s3 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    # Keltner channels: middle = EMA(20), width = 2 * ATR(10)
+    keltner_middle = ema_1d
+    keltner_upper = keltner_middle + 2 * atr_1d
+    keltner_lower = keltner_middle - 2 * atr_1d
     
-    # Align 1d levels to 12h
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Align Keltner channels to 4h
+    keltner_middle_aligned = align_htf_to_ltf(prices, df_1d, keltner_middle)
+    keltner_upper_aligned = align_htf_to_ltf(prices, df_1d, keltner_upper)
+    keltner_lower_aligned = align_htf_to_ltf(prices, df_1d, keltner_lower)
     
-    # Volume filter: > 1.3x 20-period average
+    # Volume filter: > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > 1.3 * vol_ma
+    vol_filter = volume > 1.5 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for EMA(34) and volume MA
+    start_idx = 20  # Wait for EMA(20)
     
     for i in range(start_idx, n):
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(keltner_middle_aligned[i]) or np.isnan(keltner_upper_aligned[i]) or np.isnan(keltner_lower_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Break above R3 with 1d uptrend and volume
-            if (close[i] > r3_aligned[i] and close[i] > ema_1d_aligned[i] and vol_filter[i]):
+            # Long: Close above upper Keltner with uptrend and volume
+            if (close[i] > keltner_upper_aligned[i] and close[i] > ema_1d_aligned[i] and vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S3 with 1d downtrend and volume
-            elif (close[i] < s3_aligned[i] and close[i] < ema_1d_aligned[i] and vol_filter[i]):
+            # Short: Close below lower Keltner with downtrend and volume
+            elif (close[i] < keltner_lower_aligned[i] and close[i] < ema_1d_aligned[i] and vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Close below S3 or trend change
-            if close[i] < s3_aligned[i] or close[i] < ema_1d_aligned[i]:
+            # Exit: Close below middle Keltner or trend change
+            if close[i] < keltner_middle_aligned[i] or close[i] < ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Close above R3 or trend change
-            if close[i] > r3_aligned[i] or close[i] > ema_1d_aligned[i]:
+            # Exit: Close above middle Keltner or trend change
+            if close[i] > keltner_middle_aligned[i] or close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -81,8 +85,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA(34) trend filter and volume confirmation.
-# Uses daily timeframe for trend direction and pivot levels, reducing noise and false breakouts.
-# Volume confirmation ensures trades occur during active market participation.
-# Position size 0.25 limits drawdown while targeting 15-25 trades/year to avoid fee drag.
-# Designed to work in both bull and bear markets by following the daily trend.
+# Hypothesis: 4h Keltner channel breakout with 1d EMA(20) trend filter and volume confirmation.
+# Keltner channels adapt to volatility, providing dynamic support/resistance.
+# In uptrends, buy breakouts above upper channel; in downtrends, sell breakdowns below lower channel.
+# Exit when price returns to middle channel or trend changes.
+# Volume filter ensures trades occur with participation. Position size 0.25 controls risk.
+# Works in both bull (trend following) and bear (counter-trend reversals at extremes) markets.
