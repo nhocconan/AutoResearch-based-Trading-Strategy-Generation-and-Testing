@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_Camarilla_R3S3_Breakout_1wTrend_Volume_v2"
-timeframe = "1d"
+name = "6h_Camarilla_R3S3_Breakout_WeeklyTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -39,12 +39,12 @@ def generate_signals(prices):
     # Weekly EMA50 for trend filter
     ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align all to 1d timeframe
+    # Align all to 6h timeframe
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Volume filter: current volume > 2.0 * 20-period average (for 1d)
+    # Volume filter: current volume > 2.0 * 20-period average (strict for 6h)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_avg * 2.0)
     
