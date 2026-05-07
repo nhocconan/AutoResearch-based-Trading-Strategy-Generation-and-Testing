@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1S1_Breakout_4hTrend_Volume
-Hypothesis: On 1h timeframe, price breaking above Camarilla R1 or below S1 levels from the prior 4h period, combined with 4h EMA20 trend filter and volume confirmation, captures momentum moves. The 4h trend filter ensures alignment with higher timeframe momentum, reducing false breakouts. Volume confirmation filters low-conviction moves. Designed for 15-37 trades/year on 1h timeframe with strict entry conditions to avoid fee drag.
+6h_WickReversal_1wTrend_VolumeFilter
+Hypothesis: On 6h timeframe, price rejection at weekly high/low zones (long upper/lower wicks) combined with weekly trend filter and volume confirmation captures reversal opportunities in both bull and bear markets. Weekly trend ensures alignment with higher timeframe momentum, reducing false signals in choppy conditions. Wick rejection indicates institutional defense of key levels, effective in ranging and trending markets.
 """
-name = "1h_Camarilla_R1S1_Breakout_4hTrend_Volume"
-timeframe = "1h"
+name = "6h_WickReversal_1wTrend_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -21,68 +21,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Camarilla levels and trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get weekly data for trend filter and rejection zones
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # 4h Camarilla R1/S1 levels
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Weekly trend: EMA21
+    ema_21_1w = pd.Series(df_1w['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    range_4h = high_4h - low_4h
-    r1_4h = close_4h + 1.1666 * range_4h * 0.5 / 2
-    s1_4h = close_4h - 1.1666 * range_4h * 0.5 / 2
+    # Weekly rejection zones: weekly high and low
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
     
-    # 4h EMA20 for trend filter
-    ema_20_4h = pd.Series(df_4h['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Align weekly data to 6h timeframe
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high)
+    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low)
     
-    # Align all to 1h timeframe
-    r1_4h_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
-    s1_4h_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
-    
-    # Volume filter: current volume > 1.5 * 20-period average
+    # Volume filter: current volume > 1.3 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_avg * 1.5)
+    volume_filter = volume > (vol_avg * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)
+    start_idx = max(30, 20)
     
     for i in range(start_idx, n):
         # Skip if any data is not ready
-        if (np.isnan(r1_4h_aligned[i]) or np.isnan(s1_4h_aligned[i]) or 
-            np.isnan(ema_20_4h_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(ema_21_1w_aligned[i]) or np.isnan(weekly_high_aligned[i]) or 
+            np.isnan(weekly_low_aligned[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Calculate wick ratios for current 6h bar
+        body_size = abs(close[i] - prices['open'].iloc[i])
+        total_range = high[i] - low[i]
+        
+        # Avoid division by zero
+        if total_range == 0:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+            
+        upper_wick = high[i] - max(close[i], prices['open'].iloc[i])
+        lower_wick = min(close[i], prices['open'].iloc[i]) - low[i]
+        upper_wick_ratio = upper_wick / total_range
+        lower_wick_ratio = lower_wick / total_range
+        
         if position == 0:
-            # Long: price breaks above R1 + 4h uptrend + volume
-            if close[i] > r1_4h_aligned[i] and close[i] > ema_20_4h_aligned[i] and volume_filter[i]:
-                signals[i] = 0.20
+            # Long: long lower wick (rejection of weekly low) + weekly uptrend + volume
+            if (lower_wick_ratio > 0.4 and 
+                low[i] <= weekly_low_aligned[i] * 1.001 and  # near weekly low
+                close[i] > ema_21_1w_aligned[i] and 
+                volume_filter[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + 4h downtrend + volume
-            elif close[i] < s1_4h_aligned[i] and close[i] < ema_20_4h_aligned[i] and volume_filter[i]:
-                signals[i] = -0.20
+            # Short: long upper wick (rejection of weekly high) + weekly downtrend + volume
+            elif (upper_wick_ratio > 0.4 and 
+                  high[i] >= weekly_high_aligned[i] * 0.999 and  # near weekly high
+                  close[i] < ema_21_1w_aligned[i] and 
+                  volume_filter[i]):
+                signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: price crosses back through the opposite S1/R1 level
+            # Exit: price crosses weekly EMA21
             if position == 1:
-                if close[i] < s1_4h_aligned[i]:
+                if close[i] < ema_21_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
             else:  # position == -1
-                if close[i] > r1_4h_aligned[i]:
+                if close[i] > ema_21_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
