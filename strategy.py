@@ -3,18 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Bands breakout with 12h trend filter and volume confirmation.
-# Long when price breaks above upper BB(20,2) AND 12h EMA50 rising AND volume > 1.5x 20-period average.
-# Short when price breaks below lower BB(20,2) AND 12h EMA50 falling AND volume > 1.5x 20-period average.
-# Exit when price crosses back inside Bollinger Bands.
-# This strategy targets volatility expansion phases with trend alignment to capture momentum moves
-# while avoiding choppy markets. The 12h EMA50 filter ensures we trade with the higher timeframe trend.
-# Volume confirmation ensures institutional participation and reduces false breakouts.
-# Target: 15-35 trades/year (60-140 total over 4 years) to minimize fee drag.
-# Works in both bull and bear markets by following the 12h trend direction.
+# Hypothesis: 4h Camarilla pivot (S3/R3) breakout with 1d trend filter and volume confirmation.
+# Long when price breaks above R3 AND 1d EMA34 rising AND volume > 1.5x 20-period average.
+# Short when price breaks below S3 AND 1d EMA34 falling AND volume > 1.5x 20-period average.
+# Exit when price crosses back inside the Camarilla H-L range.
+# Uses proven Camarilla structure with volume confirmation and trend filter to capture momentum.
+# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
+# Works in both bull and bear markets by following the 1d trend direction.
 
-name = "6h_BollingerBreakout_12hEMA50_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,28 +25,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20,2)
-    bb_length = 20
-    bb_mult = 2.0
-    sma20 = pd.Series(close).rolling(window=bb_length, min_periods=bb_length).mean().values
-    std20 = pd.Series(close).rolling(window=bb_length, min_periods=bb_length).std().values
-    upper_band = sma20 + (bb_mult * std20)
-    lower_band = sma20 - (bb_mult * std20)
+    # Calculate Camarilla levels from previous day
+    # H, L, C from previous daily bar
+    # For 4h data, we need to get the previous day's H, L, C
+    # We'll calculate using daily data from the same source
     
-    # 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Calculate Camarilla levels for each day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 12h EMA50 direction
-    ema50_rising = np.zeros_like(ema50_12h_aligned, dtype=bool)
-    ema50_falling = np.zeros_like(ema50_12h_aligned, dtype=bool)
-    ema50_rising[1:] = ema50_12h_aligned[1:] > ema50_12h_aligned[:-1]
-    ema50_falling[1:] = ema50_12h_aligned[1:] < ema50_12h_aligned[:-1]
+    # Camarilla formulas
+    # R4 = C + ((H-L) * 1.1/2)
+    # R3 = C + ((H-L) * 1.1/4)
+    # S3 = C - ((H-L) * 1.1/4)
+    # We'll use R3 and S3 as our breakout levels
+    camarilla_r3 = close_1d + ((high_1d - low_1d) * 1.1 / 4)
+    camarilla_s3 = close_1d - ((high_1d - low_1d) * 1.1 / 4)
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # 1d EMA34 direction
+    ema34_rising = np.zeros_like(ema34_1d_aligned, dtype=bool)
+    ema34_falling = np.zeros_like(ema34_1d_aligned, dtype=bool)
+    ema34_rising[1:] = ema34_1d_aligned[1:] > ema34_1d_aligned[:-1]
+    ema34_falling[1:] = ema34_1d_aligned[1:] < ema34_1d_aligned[:-1]
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -57,23 +69,22 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(bb_length, 50)  # Sufficient warmup
+    start_idx = 1  # Need at least one day of data
     
     for i in range(start_idx, n):
-        if (np.isnan(sma20[i]) or np.isnan(std20[i]) or np.isnan(upper_band[i]) or 
-            np.isnan(lower_band[i]) or np.isnan(ema50_12h_aligned[i]) or 
-            np.isnan(ema50_rising[i]) or np.isnan(ema50_falling[i]) or 
-            np.isnan(volume_filter[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(ema34_rising[i]) or 
+            np.isnan(ema34_falling[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price breaks above upper BB, 12h EMA50 rising, volume filter
-            long_cond = (close[i] > upper_band[i]) and ema50_rising[i] and volume_filter[i]
-            # Short conditions: price breaks below lower BB, 12h EMA50 falling, volume filter
-            short_cond = (close[i] < lower_band[i]) and ema50_falling[i] and volume_filter[i]
+            # Long conditions: price breaks above R3, 1d EMA34 rising, volume filter
+            long_cond = (close[i] > camarilla_r3_aligned[i]) and ema34_rising[i] and volume_filter[i]
+            # Short conditions: price breaks below S3, 1d EMA34 falling, volume filter
+            short_cond = (close[i] < camarilla_s3_aligned[i]) and ema34_falling[i] and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -82,15 +93,16 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses back inside Bollinger Bands (below middle band)
-            if close[i] < sma20[i]:
+            # Long exit: price crosses back below S3 (or inside H-L range)
+            # Exit when price goes below S3 (reversion to mean)
+            if close[i] < camarilla_s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses back inside Bollinger Bands (above middle band)
-            if close[i] > sma20[i]:
+            # Short exit: price crosses back above R3
+            if close[i] > camarilla_r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
