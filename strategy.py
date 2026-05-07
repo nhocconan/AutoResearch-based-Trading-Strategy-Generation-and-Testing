@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Liquidity_Trap_Reversal"
-timeframe = "6h"
+name = "12h_KAMA_Trend_RSI_MeanReversion"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,94 +17,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE for liquidity trap detection
+    # Load daily data ONCE for trend filter and RSI
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Daily ATR for volatility filter
-    atr_14_1d = pd.Series(df_1d['close']).rolling(window=14, min_periods=14).apply(
-        lambda x: np.sqrt(np.mean((np.diff(x) ** 2))), raw=True
-    ).values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # KAMA on 12h close
+    change = np.abs(np.diff(close, prepend=close[0]))
+    direction = np.abs(np.diff(close, n=10, prefill=close[:10]))
+    er = np.where(direction != 0, change / direction, 0)
+    sc = (er * (0.6667 - 0.0645) + 0.0645) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Weekly trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Daily RSI for mean reversion
+    delta = np.diff(df_1d['close'], prepend=df_1d['close'][0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_1d = rsi
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Liquidity trap detection: price tests recent high/low but fails to break
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    
-    # Volume filter
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Daily EMA for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, lookback)
+    start_idx = max(50, 14)
     
     for i in range(start_idx, n):
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(atr_14_1d_aligned[i]) or np.isnan(ema_20_1w_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
+        if (np.isnan(kama[i]) or np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i])):
+            signals[i] = 0.0
             continue
         
-        # Avoid trading when volatility is too low
-        if atr_14_1d_aligned[i] < np.mean(atr_14_1d_aligned[max(0, i-50):i]) * 0.5:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
+        # Price above KAMA = uptrend, below = downtrend
+        price_above_kama = close[i] > kama[i]
+        price_below_kama = close[i] < kama[i]
         
-        # Liquidity trap long: price tests recent low but closes above it with volume
-        trap_long = (low[i] <= lowest_low[i] * 1.001) and (close[i] > lowest_low[i]) and (volume[i] > vol_ma_20[i] * 1.5)
+        # RSI conditions for mean reversion
+        rsi_oversold = rsi_1d_aligned[i] < 30
+        rsi_overbought = rsi_1d_aligned[i] > 70
         
-        # Liquidity trap short: price tests recent high but closes below it with volume
-        trap_short = (high[i] >= highest_high[i] * 0.999) and (close[i] < highest_high[i]) and (volume[i] > vol_ma_20[i] * 1.5)
+        # Trend filter: price relative to daily EMA50
+        price_above_ema = close[i] > ema_50_1d_aligned[i]
+        price_below_ema = close[i] < ema_50_1d_aligned[i]
         
-        if position == 0:
-            # Long trap: expect reversal up
-            if trap_long and ema_20_1w_aligned[i] > ema_20_1w_aligned[i-1]:
-                signals[i] = 0.25
-                position = 1
-            # Short trap: expect reversal down
-            elif trap_short and ema_20_1w_aligned[i] < ema_20_1w_aligned[i-1]:
-                signals[i] = -0.25
-                position = -1
-        elif position == 1:
-            # Exit: price breaks above recent high or trap fails
-            if close[i] > highest_high[i] or not trap_long:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:
-            # Exit: price breaks below recent low or trap fails
-            if close[i] < lowest_low[i] or not trap_short:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+        # Entry conditions
+        if price_above_kama and rsi_oversold and price_above_ema:
+            # Long: uptrend + oversold + above daily EMA
+            signals[i] = 0.25
+        elif price_below_kama and rsi_overbought and price_below_ema:
+            # Short: downtrend + overbought + below daily EMA
+            signals[i] = -0.25
+        else:
+            signals[i] = 0.0
     
     return signals
 
-# Hypothesis: 6h Liquidity Trap Reversal
-# - Identifies when price tests recent swing highs/lows but fails to break (liquidity grab)
-# - Uses daily ATR for volatility filter to avoid choppy markets
-# - Weekly EMA20 trend filter ensures alignment with higher timeframe trend
-# - Entry: price tests liquidity level and reverses with volume confirmation
-# - Exit: price breaks through the liquidity level or trap condition fails
-# - Works in both bull (traps at support in uptrend) and bear (traps at resistance in downtrend)
-# - Volume confirmation (1.5x average) reduces false signals
-# - Position size 0.25 targets ~50-150 trades over 4 years (12-37/year)
-# - Novel approach: focuses on failed breakouts rather than breakouts themselves
-# - Effective in ranging markets where liquidity hunts are common
-# - Weekly trend filter prevents counter-trend traps in strong trends
+# Hypothesis: 12h KAMA trend filter with daily RSI mean reversion
+# - KAMA adapts to market noise, providing smooth trend identification
+# - In uptrend (price > KAMA), look for long when daily RSI is oversold (<30)
+# - In downtrend (price < KAMA), look for short when daily RSI is overbought (>70)
+# - Daily EMA50 filter ensures alignment with higher timeframe trend
+# - Works in both bull (buy dips in uptrend) and bear (sell rallies in downtrend)
+# - Mean reversion component reduces whipsaws vs pure trend following
+# - Position size 0.25 targets ~15-35 trades/year to avoid fee drag
+# - Combines adaptive trend (KAMA) with oscillator extreme (RSI) for confluence
+# - Aims for 60-140 total trades over 4 years (15-35/year) to stay within limits
+# - Uses daily timeframe for RSI and EMA to reduce noise vs lower timeframes
+# - Avoids overtrading by requiring multiple conditions to align simultaneously
