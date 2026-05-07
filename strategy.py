@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Pivot_R3S3_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_Donchian_20_Volume_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,65 +22,63 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 1d High, Low, Close for pivot calculation
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla pivot levels for each 1d bar
-    # Pivot = (H + L + C) / 3
-    # R3 = C + (H - L) * 1.1 / 2
-    # S3 = C - (H - L) * 1.1 / 2
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r3_1d = close_1d + (high_1d - low_1d) * 1.1 / 2.0
-    s3_1d = close_1d - (high_1d - low_1d) * 1.1 / 2.0
-    
-    # Align 1d pivot levels to 6h timeframe
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    
     # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    close_1d = df_1d['close'].values
+    ema_1d = np.zeros_like(close_1d)
+    ema_1d[0] = close_1d[0]
+    alpha = 2.0 / (34 + 1)
+    for i in range(1, len(close_1d)):
+        ema_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_1d[i-1]
     
-    # 6h volume filter: > 1.5x 24-period average (48h)
-    vol_ma_6h = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    vol_filter = volume > 1.5 * vol_ma_6h
+    # Align 1d EMA to 4h timeframe
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # 4h Donchian channel (20-period)
+    window = 20
+    highest = np.full(n, np.nan)
+    lowest = np.full(n, np.nan)
+    for i in range(window - 1, n):
+        highest[i] = np.max(high[i-window+1:i+1])
+        lowest[i] = np.min(low[i-window+1:i+1])
+    
+    # 4h volume filter: > 1.5x 20-period average
+    vol_ma = np.full(n, np.nan)
+    for i in range(20 - 1, n):
+        vol_ma[i] = np.mean(volume[i-20+1:i+1])
+    vol_filter = volume > 1.5 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 24)  # Wait for indicators
+    start_idx = max(30, 20)  # Wait for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or 
-            np.isnan(s3_1d_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(vol_ma_6h[i])):
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(highest[i]) or np.isnan(lowest[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Break above R3 with uptrend (price > EMA34) and volume
-            if (close[i] > r3_1d_aligned[i] and close[i] > ema34_1d_aligned[i] and vol_filter[i]):
+            # Long: Price > Donchian upper + trend up + volume
+            if (close[i] > highest[i] and close[i] > ema_1d_aligned[i] and vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S3 with downtrend (price < EMA34) and volume
-            elif (close[i] < s3_1d_aligned[i] and close[i] < ema34_1d_aligned[i] and vol_filter[i]):
+            # Short: Price < Donchian lower + trend down + volume
+            elif (close[i] < lowest[i] and close[i] < ema_1d_aligned[i] and vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Price < EMA34 (trend change) or re-enter R3 range
-            if close[i] < ema34_1d_aligned[i] or close[i] < r3_1d_aligned[i]:
+            # Exit: Price < Donchian lower or trend down
+            if close[i] < lowest[i] or close[i] < ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price > EMA34 (trend change) or re-enter S3 range
-            if close[i] > ema34_1d_aligned[i] or close[i] > s3_1d_aligned[i]:
+            # Exit: Price > Donchian upper or trend up
+            if close[i] > highest[i] or close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -88,9 +86,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R3/S3 levels act as significant support/resistance.
-# Breakouts above R3 in uptrend (price > EMA34) or below S3 in downtrend (price < EMA34)
-# with volume confirmation capture institutional flow.
-# Works in bull (buy R3 breakouts) and bear (sell S3 breakdowns) regimes.
-# Uses 1d pivots for structure, 6s for entry, and volume to filter false breakouts.
-# Target: 20-40 trades/year to minimize fee drag. Position size 0.25 limits risk.
+# Hypothesis: 4h Donchian breakout with 1d EMA trend filter and volume confirmation.
+# Donchian(20) captures breakouts from 20-period price channels.
+# 1d EMA34 provides higher timeframe trend alignment.
+# Volume filter ensures trades occur with market participation.
+# Works in both bull and bear markets by following the trend on higher timeframe.
+# Position size 0.25 limits risk, targeting 20-40 trades/year to minimize fee drag.
