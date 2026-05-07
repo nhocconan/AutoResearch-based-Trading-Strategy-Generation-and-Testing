@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "1h_4h1d_Momentum_Pullback_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,92 +17,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load 4h data ONCE before loop for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop for Camarilla levels
+    # Load 1d data ONCE before loop for momentum filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 12h EMA(50) for trend filter
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # 4h EMA(50) for trend direction
+    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Calculate daily Camarilla levels (R3, S3) from previous day
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # 1d RSI(14) for momentum filter
+    delta = pd.Series(df_1d['close']).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_14_1d = (100 - (100 / (1 + rs))).values
+    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
     
-    # Camarilla formula: range = high - low
-    range_hl = prev_high - prev_low
-    
-    # Camarilla levels: R3 = close + (high - low) * 1.1/4
-    #               S3 = close - (high - low) * 1.1/4
-    r3 = prev_close + range_hl * 1.1 / 4
-    s3 = prev_close - range_hl * 1.1 / 4
-    
-    # Align daily Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # Volume spike detection: 3-period average (3 x 4h = 12h)
-    vol_ma_3 = pd.Series(volume).rolling(window=3, min_periods=3).mean().values
+    # 1h volume spike detection: 24-period average (1 day)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 3)  # Wait for EMA and volume MA
+    start_idx = max(50, 24)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(vol_ma_3[i])):
+        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(rsi_14_1d_aligned[i]) or 
+            np.isnan(vol_ma_24[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above S3 with volume and 12h uptrend
-            vol_condition = volume[i] > vol_ma_3[i] * 2.0
-            uptrend = ema_50_12h_aligned[i] > ema_50_12h_aligned[i-1]
+            # Long: pullback in 4h uptrend with 1d momentum and volume
+            uptrend_4h = close[i] > ema_50_4h_aligned[i]
+            momentum_up = rsi_14_1d_aligned[i] > 50 and rsi_14_1d_aligned[i] > rsi_14_1d_aligned[i-1]
+            vol_condition = volume[i] > vol_ma_24[i] * 1.5
             
-            if close[i] > s3_aligned[i] and vol_condition and uptrend:
-                signals[i] = 0.30
+            if uptrend_4h and momentum_up and vol_condition:
+                signals[i] = 0.20
                 position = 1
-            # Short: price below R3 with volume and 12h downtrend
-            elif close[i] < r3_aligned[i] and vol_condition and not uptrend:
-                signals[i] = -0.30
+            # Short: pullback in 4h downtrend with 1d momentum and volume
+            elif not uptrend_4h and (100 - rsi_14_1d_aligned[i]) > 50 and (100 - rsi_14_1d_aligned[i]) > (100 - rsi_14_1d_aligned[i-1]) and vol_condition:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit: price back below S3 or volume drops
-            if close[i] < s3_aligned[i] or volume[i] < vol_ma_3[i] * 1.3:
+            # Exit: trend break or momentum fade
+            if close[i] < ema_50_4h_aligned[i] * 0.995 or rsi_14_1d_aligned[i] < 45:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.20
         elif position == -1:
-            # Exit: price back above R3 or volume drops
-            if close[i] > r3_aligned[i] or volume[i] < vol_ma_3[i] * 1.3:
+            # Exit: trend break or momentum fade
+            if close[i] > ema_50_4h_aligned[i] * 1.005 or rsi_14_1d_aligned[i] > 55:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.20
     
     return signals
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 12h trend and volume confirmation
-# - Camarilla R3/S3 act as key support/resistance levels from prior day
-# - Breakout above S3 with volume in 12h uptrend = long opportunity
-# - Breakdown below R3 with volume in 12h downtrend = short opportunity
-# - Volume spike (2.0x average) confirms institutional participation
-# - 12h EMA(50) trend filter reduces whipsaws vs using same timeframe
-# - Works in both bull (buy S3 breaks in uptrend) and bear (sell R3 breaks in downtrend)
-# - Exit when price returns to S3/R3 or volume weakens
-# - Position size 0.30 targets ~30-60 trades/year, avoiding fee drag
-# - Uses actual daily Camarilla levels (not intraday) for better stability
-# - Novel combination: Daily Camarilla (1d) + trend (12h) + volume (4h) not recently tried
-# - Aims for 80-200 total trades over 4 years (20-50/year) to stay within limits
-# - Focus on BTC/ETH as primary targets, avoiding SOL-only bias
+# Hypothesis: 1h momentum pullback strategy with 4h trend filter and 1d momentum confirmation
+# - In 4h uptrend: buy pullbacks when 1d RSI shows rising momentum (>50 and increasing)
+# - In 4h downtrend: sell pullbacks when 1d RSI shows bearish momentum (<50 and decreasing)
+# - Volume confirmation (1.5x daily average) ensures institutional participation
+# - Uses 1h timeframe only for entry timing, direction comes from higher timeframes
+# - Tight exit conditions: trend break or RSI fading reduces whipsaws
+# - Position size 0.20 limits risk while allowing meaningful returns
+# - Designed to work in both bull (buy pullbacks in uptrend) and bear (sell pullbacks in downtrend)
+# - Target: 60-150 total trades over 4 years (15-37/year) to stay within fee limits
+# - Avoids overtrading by requiring confluence of trend, momentum, and volume
+# - Novel combination: 4h trend + 1d momentum + 1h volume not recently tested in isolation
