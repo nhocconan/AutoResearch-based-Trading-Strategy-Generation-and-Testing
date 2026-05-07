@@ -1,13 +1,12 @@
-#!/usr/bin/env python3
-"""
-6h_ThreeBarReversal_12hTrend_Filter
-Hypothesis: Three-bar reversal pattern (bullish/bearish) on 6h chart with 12h EMA50 trend filter and volume confirmation.
-Works in bull/bear markets by only taking reversals aligned with higher timeframe trend.
-Target: 20-40 trades/year per symbol (80-160 total over 4 years) to minimize fee drag.
-"""
+# 4h_Camarilla_R3_S3_Pullback_1dTrend_Volume
+# Hypothesis: Pullback to Camarilla R3/S3 levels in 1d trend with volume confirmation.
+# Camarilla levels (R3, S3) act as strong support/resistance in trending markets.
+# Entry on pullback to these levels with 1d EMA34 trend filter and volume spike.
+# Works in bull/bear by only taking pullbacks aligned with higher timeframe trend.
+# Target: 20-40 trades/year per symbol (80-160 total over 4 years) to minimize fee drag.
 
-name = "6h_ThreeBarReversal_12hTrend_Filter"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_Pullback_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,51 +23,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data for Camarilla levels and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume filter: current volume > 1.3x 20-period average
+    # Calculate Camarilla levels from previous 1d bar
+    # R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
+    # where C, H, L are close, high, low of previous day
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    
+    R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    
+    # Align Camarilla levels to 4h timeframe (available after 1d bar closes)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    
+    # Volume filter: current volume > 1.5x 20-period average
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-20:i])
-    vol_filter = volume > (1.3 * vol_ma_20)
-    
-    # Three-bar reversal detection
-    # Bullish: low < previous low AND close > previous close (after 2 down bars)
-    # Bearish: high > previous high AND close < previous close (after 2 up bars)
-    bullish_reversal = np.zeros(n, dtype=bool)
-    bearish_reversal = np.zeros(n, dtype=bool)
-    
-    for i in range(2, n):
-        # Bullish reversal: two consecutive lower lows followed by higher close
-        if (low[i-2] > low[i-1] and 
-            low[i-1] > low[i] and 
-            close[i] > close[i-1]):
-            bullish_reversal[i] = True
-        
-        # Bearish reversal: two consecutive higher highs followed by lower close
-        if (high[i-2] < high[i-1] and 
-            high[i-1] < high[i] and 
-            close[i] < close[i-1]):
-            bearish_reversal[i] = True
+    vol_filter = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 6  # Prevent overtrading (approx 1.5 days)
+    cooldown_bars = 6  # Prevent overtrading (approx 1 day)
     
-    start_idx = max(20, 50)  # Warmup for volume MA and EMA
+    start_idx = max(20, 34)  # Warmup for volume MA and EMA
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_12h_aligned[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(R3_aligned[i]) or 
+            np.isnan(S3_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -80,37 +76,37 @@ def generate_signals(prices):
         
         bars_since_last_trade += 1
         
-        # Determine 12h trend direction
-        close_12h_aligned = align_htf_to_ltf(prices, df_12h, close_12h)
-        trend_12h_up = close_12h_aligned[i] > ema_50_12h_aligned[i]
-        trend_12h_down = close_12h_aligned[i] < ema_50_12h_aligned[i]
+        # Determine 1d trend direction
+        close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
+        trend_1d_up = close_1d_aligned[i] > ema_34_1d_aligned[i]
+        trend_1d_down = close_1d_aligned[i] < ema_34_1d_aligned[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: bullish reversal in 12h uptrend with volume filter
-            if (bullish_reversal[i] and 
-                trend_12h_up and 
+            # Long: pullback to S3 in 1d uptrend with volume filter
+            if (close[i] <= S3_aligned[i] * 1.005 and  # Allow 0.5% tolerance
+                trend_1d_up and 
                 vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: bearish reversal in 12h downtrend with volume filter
-            elif (bearish_reversal[i] and 
-                  trend_12h_down and 
+            # Short: pullback to R3 in 1d downtrend with volume filter
+            elif (close[i] >= R3_aligned[i] * 0.995 and  # Allow 0.5% tolerance
+                  trend_1d_down and 
                   vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit conditions: bearish reversal OR trend change
-            if (bearish_reversal[i] or not trend_12h_up):
+            # Exit conditions: price crosses above R3 OR trend change
+            if (close[i] >= R3_aligned[i] * 0.995 or not trend_1d_up):
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit conditions: bullish reversal OR trend change
-            if (bullish_reversal[i] or not trend_12h_down):
+            # Exit conditions: price crosses below S3 OR trend change
+            if (close[i] <= S3_aligned[i] * 1.005 or not trend_1d_down):
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
