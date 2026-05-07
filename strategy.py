@@ -1,6 +1,3 @@
-# 4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike
-# Hypothesis: Breakouts from Camarilla R3/S3 levels on 4h with daily trend filter and volume spikes capture strong momentum moves. Works in bull (breakouts up in uptrend) and bear (breakouts down in downtrend). Volume surge confirms institutional participation. Low trade frequency avoids fee drag.
-
 #!/usr/bin/env python3
 
 name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
