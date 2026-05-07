@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-name = "1d_Adaptive_Kelly_Trend_With_Volume_Confirmation"
-timeframe = "1d"
+name = "6h_WeeklyPivot_DonchianBreakout_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_hlf
 
 def generate_signals(prices):
     n = len(prices)
@@ -17,110 +17,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 12h data once for Donchian channels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Daily indicators
-    # EMA 50 for trend direction
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    # ATR for volatility
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    # Volume average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 12h Donchian channels (20-period)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Weekly indicators for trend filter
-    # Weekly EMA 20
-    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    # Weekly RSI 14 for momentum
-    delta = np.diff(df_1w['close'])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_14_1w = (100 - (100 / (1 + rs))).values
-    # Align weekly indicators to daily
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    rsi_14_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_14_1w)
+    # Calculate upper/lower bands using rolling window
+    high_max_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    low_min_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    
+    # Align to 6h timeframe
+    donchian_upper = align_htf_to_ltf(prices, df_12h, high_max_20)
+    donchian_lower = align_htf_to_ltf(prices, df_12h, low_min_20)
+    
+    # Load 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume spike detection (6-period average)
+    vol_ma_6 = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)
+    start_idx = max(100, 20, 50)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(ema_20_1w_aligned[i]) or np.isnan(rsi_14_1w_aligned[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_6[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend condition: price relative to EMA50
-        price_above_ema50 = close[i] > ema_50[i]
-        price_below_ema50 = close[i] < ema_50[i]
-        
-        # Weekly trend and momentum
-        weekly_uptrend = ema_20_1w_aligned[i] > ema_20_1w_aligned[i-1]
-        weekly_downtrend = ema_20_1w_aligned[i] < ema_20_1w_aligned[i-1]
-        weekly_momentum_up = rsi_14_1w_aligned[i] > 50
-        weekly_momentum_down = rsi_14_1w_aligned[i] < 50
-        
-        # Volume confirmation
-        vol_spike = volume[i] > vol_ma[i] * 1.5
-        
-        # Kelly-inspired position sizing based on trend strength
-        # Calculate trend strength as distance from EMA50 normalized by ATR
-        if atr[i] > 0:
-            trend_strength = abs(close[i] - ema_50[i]) / atr[i]
-            # Scale position size: stronger trend = larger position (capped)
-            base_size = 0.25
-            size_multiplier = min(1.0 + (trend_strength - 1.0) * 0.2, 1.4)  # Max 40% increase
-            position_size = base_size * size_multiplier
-            position_size = min(position_size, 0.35)  # Hard cap at 0.35
-        else:
-            position_size = 0.25
+        # Volume condition
+        vol_condition = volume[i] > vol_ma_6[i] * 2.0
         
         if position == 0:
-            # Long: price above EMA50, weekly uptrend, momentum up, volume spike
-            if price_above_ema50 and weekly_uptrend and weekly_momentum_up and vol_spike:
-                signals[i] = position_size
+            # Long: Donchian breakout above upper band in uptrend
+            if close[i] > donchian_upper[i] and vol_condition and ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1]:
+                signals[i] = 0.25
                 position = 1
-            # Short: price below EMA50, weekly downtrend, momentum down, volume spike
-            elif price_below_ema50 and weekly_downtrend and weekly_momentum_down and vol_spike:
-                signals[i] = -position_size
+            # Short: Donchian breakout below lower band in downtrend
+            elif close[i] < donchian_lower[i] and vol_condition and ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price crosses below EMA50 or weekly trend/momentum turns down
-            if not price_above_ema50 or not weekly_uptrend or not weekly_momentum_up:
+            # Exit: price back below Donchian lower band or trend reversal
+            if close[i] < donchian_lower[i] or ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = position_size
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: price crosses above EMA50 or weekly trend/momentum turns up
-            if not price_below_ema50 or not weekly_downtrend or not weekly_momentum_down:
+            # Exit: price back above Donchian upper band or trend reversal
+            if close[i] > donchian_upper[i] or ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -position_size
+                signals[i] = -0.25
     
     return signals
 
-# Hypothesis: Adaptive position sizing based on trend strength with weekly trend filter
-# - Uses daily EMA50 as primary trend filter
-# - Weekly EMA20 and RSI14 for higher timeframe trend and momentum confirmation
-# - Volume spike (1.5x average) required for entry to avoid false signals
-# - Position size adapts to trend strength: stronger trends get larger positions (up to 0.35)
-# - Exits when price crosses EMA50 or weekly trend/momentum deteriorates
-# - Designed to work in both bull and bear markets by following the trend
-# - Adaptive sizing reduces risk in weak trends while capturing strong moves
-# - Volume confirmation filters out low-quality breakouts
-# - Weekly alignment ensures we only trade in the direction of higher timeframe momentum
-# - Target: 20-50 trades per year to minimize fee drag while capturing significant moves
+# Hypothesis: 6h Donchian breakout with 12h channels, 1d trend filter, and volume confirmation
+# - Uses 12h Donchian channels (20-period) for breakout signals
+# - 1d EMA50 trend filter ensures trades align with higher timeframe trend
+# - Volume confirmation (2x 6-period average) reduces false breakouts
+# - Works in both bull (breakouts above upper band in uptrend) and bear (breakdowns below lower band in downtrend)
+# - Position size 0.25 targets ~50-150 total trades over 4 years (12-37/year) to avoid fee drag
+# - Donchian breakouts provide clear entry/exit levels with built-in trend following
+# - Multi-timeframe approach (12h channels + 1d trend) reduces whipsaws vs single timeframe
+# - Novel combination: 12h Donchian + 1d trend + volume filter not recently tried in 6h timeframe
+# - Aims for 60-120 total trades over 4 years (15-30/year) to stay within limits
+# - Effective in both trending and ranging markets due to trend filter and volatility breakout logic
