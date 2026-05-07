@@ -1,9 +1,13 @@
-# 1d_KAMA_RSI_Trend_Filter_v1
-# Hypothesis: KAMA adapts to market noise, providing reliable trend direction in both bull and bear markets. Combined with RSI overbought/oversold levels and a volatility filter, it captures trend continuations while avoiding false signals in chop. Daily timeframe reduces trade frequency to minimize fee drag. Target: 15-25 trades/year.
+# 1h_Confluence_RSI_Volume_Trend_Filter_v1
+# Hypothesis: Combine RSI mean reversion with volume confirmation and 4h trend filter on 1h timeframe.
+# Uses RSI(14) < 30 for long, > 70 for short with volume spike (1.5x 20-period avg) and 4h EMA50 trend alignment.
+# Targets 15-30 trades/year by requiring confluence of oversold/overbought, volume, and trend.
+# Works in bull markets via pullbacks to rising EMA and in bear markets via bounces from falling EMA.
+# Exit on RSI crossing 50 (mean reversion completion) or opposite signal.
 
 #!/usr/bin/env python3
-name = "1d_KAMA_RSI_Trend_Filter_v1"
-timeframe = "1d"
+name = "1h_Confluence_RSI_Volume_Trend_Filter_v1"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -20,43 +24,26 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate 1w EMA21 for trend filter
-    ema_21_1w = pd.Series(df_1w['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    # Calculate 4h EMA50 for trend filter
+    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Calculate KAMA (10-period ER, 2 and 30 for SC)
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    kama_series = pd.Series(kama)
-    kama_trend = kama_series.rolling(window=5, min_periods=5).mean().values  # Smooth for signal
-    
-    # Calculate RSI(14)
+    # RSI calculation
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
     rsi = 100 - (100 / (1 + rs))
     
-    # Volatility filter: ATR(14) > 0.5% of price
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    vol_filter = atr > 0.005 * close  # ATR > 0.5% of price
+    # Volume filter: 20-period average volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Session filter: 08:00 - 20:00 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -65,39 +52,49 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(21, 14)  # Ensure EMA and RSI data
+    start_idx = max(20, 14)  # Ensure RSI and volume MA data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN or invalid
-        if (np.isnan(ema_21_1w_aligned[i]) or np.isnan(kama_trend[i]) or np.isnan(rsi[i]) or
-            np.isnan(vol_filter[i]) or not vol_filter[i] or
+        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(rsi[i]) or
+            np.isnan(vol_ma[i]) or vol_ma[i] == 0 or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Volume spike: current volume > 1.5 x 20-period average
+        volume_spike = volume[i] > 1.5 * vol_ma[i]
+        
         if position == 0:
-            # Long: Price above KAMA trend, RSI > 50 (bullish momentum), above weekly EMA21
-            if (close[i] > kama_trend[i] and 
-                rsi[i] > 50 and 
-                close[i] > ema_21_1w_aligned[i]):
-                signals[i] = 0.25
+            # Long: RSI < 30 (oversold), above 4h EMA50 (uptrend), with volume spike
+            if (rsi[i] < 30 and 
+                close[i] > ema_50_4h_aligned[i] and   # 4h uptrend
+                volume_spike):
+                signals[i] = 0.20
                 position = 1
-            # Short: Price below KAMA trend, RSI < 50 (bearish momentum), below weekly EMA21
-            elif (close[i] < kama_trend[i] and 
-                  rsi[i] < 50 and 
-                  close[i] < ema_21_1w_aligned[i]):
-                signals[i] = -0.25
+            # Short: RSI > 70 (overbought), below 4h EMA50 (downtrend), with volume spike
+            elif (rsi[i] > 70 and 
+                  close[i] < ema_50_4h_aligned[i] and   # 4h downtrend
+                  volume_spike):
+                signals[i] = -0.20
                 position = -1
         elif position != 0:
-            # Exit: Price crosses KAMA trend (mean reversion within trend)
-            if (position == 1 and close[i] < kama_trend[i]) or \
-               (position == -1 and close[i] > kama_trend[i]):
-                signals[i] = 0.0
-                position = 0
-            else:
-                # Maintain position
-                signals[i] = 0.25 if position == 1 else -0.25
+            # Exit: RSI crosses 50 (mean reversion completion) or opposite signal
+            if position == 1:
+                # Exit long when RSI >= 50 or bearish setup
+                if rsi[i] >= 50 or (rsi[i] > 70 and close[i] < ema_50_4h_aligned[i] and volume_spike):
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.20
+            else:  # position == -1
+                # Exit short when RSI <= 50 or bullish setup
+                if rsi[i] <= 50 or (rsi[i] < 30 and close[i] > ema_50_4h_aligned[i] and volume_spike):
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.20
     
     return signals
