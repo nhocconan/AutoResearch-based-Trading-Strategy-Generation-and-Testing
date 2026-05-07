@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Trix_VolumeSpike_Regime"
-timeframe = "4h"
+name = "6h_ElderRay_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,66 +17,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1-day data for regime filter
+    # Load 1d data ONCE for trend filter and Elder Ray calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate TRIX (15,9) on 4h close
-    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean()
-    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
-    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
-    trix = ema3.pct_change(periods=1)
-    trix_signal = trix.ewm(span=9, adjust=False, min_periods=9).mean()
-    trix_hist = (trix - trix_signal).values
+    # 1d EMA13 for Elder Ray calculation
+    ema_13_1d = pd.Series(df_1d['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # 1d EMA13 for trend filter (same as Elder Ray base)
+    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
     
-    # Daily chop regime: CHOP(14) > 61.8 = range, < 38.2 = trend
-    atr_1d = pd.Series(np.maximum(np.maximum(df_1d['high'] - df_1d['low'], 
-                                              np.abs(df_1d['high'] - df_1d['close'].shift(1))),
-                                  np.abs(df_1d['low'] - df_1d['close'].shift(1)))).rolling(14, min_periods=14).mean()
-    max_high_1d = df_1d['high'].rolling(14, min_periods=14).max()
-    min_low_1d = df_1d['low'].rolling(14, min_periods=14).min()
-    chop = 100 * np.log10((atr_1d.sum() / (max_high_1d - min_low_1d))) / np.log10(14)
-    chop_values = chop.values
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_values)
+    # Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power_1d = df_1d['high'].values - ema_13_1d
+    bear_power_1d = df_1d['low'].values - ema_13_1d
     
-    # Volume spike detection on 4h
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    vol_ratio = volume / vol_ma_20
+    # Align Bull/Bear Power to 6t
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    
+    # Volume spike detection on 6h
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = max(20, 13)
     
     for i in range(start_idx, n):
-        if (np.isnan(trix_hist[i]) or np.isnan(chop_aligned[i]) or 
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(ema_13_1d_aligned[i]) or np.isnan(bull_power_aligned[i]) or 
+            np.isnan(bear_power_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        trix_long = trix_hist[i] > 0 and trix_hist[i-1] <= 0
-        trix_short = trix_hist[i] < 0 and trix_hist[i-1] >= 0
-        vol_spike = vol_ratio[i] > 2.0
-        chop_condition = chop_aligned[i] > 61.8  # range regime for mean reversion
-        
         if position == 0:
-            if trix_long and vol_spike and chop_condition:
+            # Long: Bull Power > 0 (bullish momentum) + price above EMA13 + volume spike
+            if bull_power_aligned[i] > 0 and close[i] > ema_13_1d_aligned[i] and volume[i] > vol_ma_20[i] * 1.5:
                 signals[i] = 0.25
                 position = 1
-            elif trix_short and vol_spike and chop_condition:
+            # Short: Bear Power < 0 (bearish momentum) + price below EMA13 + volume spike
+            elif bear_power_aligned[i] < 0 and close[i] < ema_13_1d_aligned[i] and volume[i] > vol_ma_20[i] * 1.5:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            if trix_hist[i] < 0:  # TRIX histogram crosses below zero
+            # Exit: Bull Power turns negative or price below EMA13
+            if bull_power_aligned[i] <= 0 or close[i] < ema_13_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            if trix_hist[i] > 0:  # TRIX histogram crosses above zero
+            # Exit: Bear Power turns positive or price above EMA13
+            if bear_power_aligned[i] >= 0 or close[i] > ema_13_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -84,11 +77,13 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: TRIX histogram crossovers with volume spikes in choppy (range) markets
-# - TRIX (15,9) histogram zero cross provides momentum signal
-# - Volume spike (>2x 20-period average) confirms conviction
-# - Chop regime filter (CHOP(14) > 61.8) ensures ranging market for mean reversion
-# - Works in both bull and bear markets as it captures short-term reversals in ranges
-# - Exit on TRIX histogram sign change
-# - Position size 0.25 limits risk and reduces trade frequency
-# - Target: 20-50 trades/year to avoid fee drag on 4h timeframe
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d trend filter and volume confirmation
+# - Bull Power (High - EMA13) > 0 indicates bullish momentum, Bear Power (Low - EMA13) < 0 indicates bearish momentum
+# - Entry when power aligns with price position relative to EMA13 and volume confirms (1.5x average)
+# - Uses 1d Elder Ray aligned to 6h to avoid look-ahead, ensuring only completed 1d bar data is used
+# - Works in both bull (buy when Bull Power > 0) and bear (sell when Bear Power < 0) markets
+# - Volume filter reduces false signals during low-activity periods
+# - Exit when power signal invalidates or price crosses EMA13
+# - Position size 0.25 balances return and risk, targeting ~50-150 trades over 4 years
+# - Novel combination: Elder Ray momentum + volume spike on 6h with 1d alignment
+# - Avoids saturated Donchian/Camarilla families while capturing institutional order flow via power metrics
