@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1S1_Breakout_12hTrend_VolumeSpike"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume_v2"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,63 +17,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h high/low for Camarilla calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get daily data for Camarilla pivots and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate Camarilla levels: R1, S1
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    pivot = (high_12h + low_12h + close_12h) / 3
-    range_12h = high_12h - low_12h
-    R1 = close_12h + range_12h * 1.1 / 12
-    S1 = close_12h - range_12h * 1.1 / 12
+    # 1d EMA34 trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Align Camarilla levels to 4h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_12h, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_12h, S1)
+    # Calculate Camarilla R3 and S3 levels from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 12h EMA50 trend filter (requires 50 periods)
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
+    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
     
-    # Volume filter: current volume > 1.5 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > (vol_ma * 1.5)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Volume filter: current volume > 1.8 * 30-period average
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_ok = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 50)  # Need 20 for volume MA, 50 for EMA
+    start_idx = max(30, 34)  # Need 30 for volume MA, 34 for EMA
     
     for i in range(start_idx, n):
-        if np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R1 AND above 12h EMA50 + volume
-            if close[i] > R1_aligned[i] and close[i] > ema_50_12h_aligned[i] and volume_ok[i]:
+            # Long: price breaks above Camarilla R3 AND above daily EMA34 + volume
+            if close[i] > camarilla_r3_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 AND below 12h EMA50 + volume
-            elif close[i] < S1_aligned[i] and close[i] < ema_50_12h_aligned[i] and volume_ok[i]:
+            # Short: price breaks below Camarilla S3 AND below daily EMA34 + volume
+            elif close[i] < camarilla_s3_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: price returns to opposite Camarilla level or breaks trend
+            # Exit: price returns to Camarilla S3/R3 or breaks in opposite direction
             if position == 1:
-                if close[i] < S1_aligned[i] or close[i] < ema_50_12h_aligned[i]:
+                if close[i] < camarilla_s3_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > R1_aligned[i] or close[i] > ema_50_12h_aligned[i]:
+                if close[i] > camarilla_r3_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
