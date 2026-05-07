@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_PivotBreakout_Filtered_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_1dTrend_VolumeBreakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
