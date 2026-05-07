@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_1w_TurtleBreakout"
-timeframe = "1d"
+name = "6h_Weekly_Pivot_D1_Trend_Confirmation"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,59 +17,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Load weekly data ONCE for pivot points and trend filter
+    df_w = get_htf_data(prices, '1w')
+    if len(df_w) < 2:
         return np.zeros(n)
     
-    # Weekly EMA10 for trend filter
-    ema_10_1w = pd.Series(df_1w['close'].values).ewm(span=10, adjust=False, min_periods=10).mean().values
-    ema_10_aligned = align_htf_to_ltf(prices, df_1w, ema_10_1w)
+    # Weekly pivot points from previous week
+    w_high = df_w['high'].values
+    w_low = df_w['low'].values
+    w_close = df_w['close'].values
     
-    # Daily Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    pivot_w = (w_high + w_low + w_close) / 3
+    range_w = w_high - w_low
+    r1 = pivot_w + (range_w * 1.0 / 3)
+    s1 = pivot_w - (range_w * 1.0 / 3)
+    r2 = pivot_w + (range_w * 2.0 / 3)
+    s2 = pivot_w - (range_w * 2.0 / 3)
     
-    # Daily ATR for position sizing and stop (14-period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Align weekly pivot levels to 6h timeframe
+    r1_6h = align_htf_to_ltf(prices, df_w, r1)
+    s1_6h = align_htf_to_ltf(prices, df_w, s1)
+    r2_6h = align_htf_to_ltf(prices, df_w, r2)
+    s2_6h = align_htf_to_ltf(prices, df_w, s2)
+    pivot_6h = align_htf_to_ltf(prices, df_w, pivot_w)
+    
+    # Weekly EMA13 for trend filter
+    ema_13_w = pd.Series(w_close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema_13_6h = align_htf_to_ltf(prices, df_w, ema_13_w)
+    
+    # Volume spike detection (1.8x 24-period average)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 14)
+    start_idx = max(24, 13)
     
     for i in range(start_idx, n):
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(ema_10_aligned[i]) or np.isnan(atr_14[i])):
+        if (np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or np.isnan(r2_6h[i]) or 
+            np.isnan(s2_6h[i]) or np.isnan(pivot_6h[i]) or np.isnan(ema_13_6h[i]) or 
+            np.isnan(vol_ma_24[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        vol_condition = volume[i] > vol_ma_24[i] * 1.8
+        
         if position == 0:
-            # Long: break above 20-day high in weekly uptrend
-            if close[i] > high_20[i] and ema_10_aligned[i] > ema_10_aligned[i-1]:
+            # Long: break above R1 in weekly uptrend with volume
+            if close[i] > r1_6h[i] and ema_13_6h[i] > ema_13_6h[i-1] and vol_condition:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below 20-day low in weekly downtrend
-            elif close[i] < low_20[i] and ema_10_aligned[i] < ema_10_aligned[i-1]:
+            # Short: break below S1 in weekly downtrend with volume
+            elif close[i] < s1_6h[i] and ema_13_6h[i] < ema_13_6h[i-1] and vol_condition:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price returns to 20-day low or weekly trend reverses
-            if close[i] < low_20[i] or ema_10_aligned[i] < ema_10_aligned[i-1]:
+            # Exit: price returns to weekly pivot or trend reverses
+            if close[i] < pivot_6h[i] or ema_13_6h[i] < ema_13_6h[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price returns to 20-day high or weekly trend reverses
-            if close[i] > high_20[i] or ema_10_aligned[i] > ema_10_aligned[i-1]:
+            # Exit: price returns to weekly pivot or trend reverses
+            if close[i] > pivot_6h[i] or ema_13_6h[i] > ema_13_6h[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -77,13 +90,13 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Turtle-style breakout on daily timeframe with weekly trend filter
-# - Enter long when price breaks above 20-day high during weekly uptrend (EMA10 rising)
-# - Enter short when price breaks below 20-day low during weekly downtrend (EMA10 falling)
-# - Exit when price returns to 20-day low/high or weekly trend reverses
-# - Position size 0.25 limits drawdown during adverse moves (e.g., 2022 crash)
-# - Weekly trend filter ensures we only trade in the direction of higher timeframe momentum
-# - Works in bull markets (breakouts in uptrend) and bear markets (breakdowns in downtrend)
-# - Low trade frequency (~10-25/year) minimizes fee drag
-# - Uses actual Donchian breakouts (proven effective) with proper trend alignment
-# - Avoids overtrading by requiring clear weekly trend alignment for entries
+# Hypothesis: Weekly pivot breakouts with weekly trend filter and volume confirmation
+# - Weekly R1/S1 act as significant support/resistance from prior week
+# - Breakout above R1 in weekly uptrend (EMA13 rising) signals bullish continuation
+# - Breakdown below S1 in weekly downtrend (EMA13 falling) signals bearish continuation
+# - Volume confirmation (1.8x average) reduces false breakouts
+# - Exit when price returns to weekly pivot or weekly trend reverses
+# - Position size 0.25 targets ~20-40 trades/year to avoid fee drag
+# - Weekly timeframe provides structural context for 6h entries
+# - Works in both bull (breakouts in uptrend) and bear (breakdowns in downtrend)
+# - Focus on BTC/ETH as primary targets (weekly structure meaningful for major pairs)
