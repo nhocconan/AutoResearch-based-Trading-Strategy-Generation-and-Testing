@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3S3_Breakout_1wTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1wTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 150:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,35 +17,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE for trend filter
+    # Load weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Daily data for Camarilla pivot levels (previous day)
+    # Load daily data for Camarilla pivot
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Camarilla pivot levels from previous day (standard formula)
-    c_high = df_1d['high'].values
-    c_low = df_1d['low'].values
-    c_close = df_1d['close'].values
+    # Weekly EMA50 for trend filter
+    w_close = df_1w['close'].values
+    ema_50_1w = pd.Series(w_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    pivot = (c_high + c_low + c_close) / 3
-    range_val = c_high - c_low
-    r3 = pivot + (range_val * 1.1 / 4)
-    s3 = pivot - (range_val * 1.1 / 4)
+    # Camarilla pivot levels from previous day
+    d_high = df_1d['high'].values
+    d_low = df_1d['low'].values
+    d_close = df_1d['close'].values
     
-    # Align Camarilla levels to 12h timeframe
-    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
+    pivot = (d_high + d_low + d_close) / 3
+    range_val = d_high - d_low
+    r1 = pivot + (range_val * 1.1 / 12)
+    s1 = pivot - (range_val * 1.1 / 12)
     
-    # Weekly EMA50 for trend filter (more stable for long-term trend)
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Align pivot levels to 4h timeframe
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
     
-    # Volume spike detection (2x 20-period average on 12h)
+    # Volume spike detection (2x 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -54,8 +56,9 @@ def generate_signals(prices):
     start_idx = max(50, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or 
-            np.isnan(ema_50_12h[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or 
+            np.isnan(ema_50_4h[i]) or np.isnan(vol_ma_20[i]) or
+            np.isnan(pivot_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,42 +67,39 @@ def generate_signals(prices):
         vol_condition = volume[i] > vol_ma_20[i] * 2.0
         
         if position == 0:
-            # Long: break above R3 in weekly uptrend with volume
-            if close[i] > r3_12h[i] and ema_50_12h[i] > ema_50_12h[i-1] and vol_condition:
-                signals[i] = 0.25
+            # Long: break above R1 in weekly uptrend with volume
+            if close[i] > r1_4h[i] and ema_50_4h[i] > ema_50_4h[i-1] and vol_condition:
+                signals[i] = 0.30
                 position = 1
-            # Short: break below S3 in weekly downtrend with volume
-            elif close[i] < s3_12h[i] and ema_50_12h[i] < ema_50_12h[i-1] and vol_condition:
-                signals[i] = -0.25
+            # Short: break below S1 in weekly downtrend with volume
+            elif close[i] < s1_4h[i] and ema_50_4h[i] < ema_50_4h[i-1] and vol_condition:
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
             # Exit: price returns to pivot or trend reverses
-            pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
-            if close[i] < pivot_12h[i] or ema_50_12h[i] < ema_50_12h[i-1]:
+            if close[i] < pivot_4h[i] or ema_50_4h[i] < ema_50_4h[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
             # Exit: price returns to pivot or trend reverses
-            pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
-            if close[i] > pivot_12h[i] or ema_50_12h[i] > ema_50_12h[i-1]:
+            if close[i] > pivot_4h[i] or ema_50_4h[i] > ema_50_4h[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-# Hypothesis: Camarilla R3/S3 breakouts with weekly trend filter and volume confirmation on 12h timeframe
-# - Camarilla R3/S3 represent strong support/resistance levels from previous day
-# - Breakout above R3 in weekly uptrend (EMA50 rising) signals bullish continuation
-# - Breakdown below S3 in weekly downtrend (EMA50 falling) signals bearish continuation
+# Hypothesis: Camarilla R1/S1 breakouts with weekly trend filter and volume confirmation
+# - Camarilla R1/S1 represent tighter support/resistance levels from previous day
+# - Breakout above R1 in weekly uptrend (EMA50 rising) signals bullish continuation
+# - Breakdown below S1 in weekly downtrend (EMA50 falling) signals bearish continuation
 # - Volume confirmation (2x average) reduces false breakouts
 # - Exit when price returns to pivot point or weekly trend reverses
-# - Position size 0.25 targets ~20-40 trades/year to avoid fee drag
-# - Uses 1w timeframe for trend (more stable) and 1d for Camarilla levels (structure)
-# - 12h timeframe balances trade frequency and responsiveness
-# - Designed to work in both bull (breakouts in uptrend) and bear (breakdowns in downtrend)
-# - Weekly trend filter reduces whipsaw in choppy markets
-# - Volume confirmation ensures breakout strength
+# - Position size 0.30 targets ~30-50 trades/year to avoid fee drag
+# - Weekly trend filter provides stronger, more persistent trend than daily
+# - Works in both bull (breakouts in uptrend) and bear (breakdowns in downtrend)
+# - Uses 1w timeframe for trend and 1d for structure, 4h for execution timing
+# - R1/S1 levels are more frequently tested than R3/S3, increasing trade frequency while maintaining edge
