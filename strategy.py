@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-name = "4h_Camarilla_R3_S3_Breakout_12hTrend_Volume"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -32,17 +32,17 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
+    # Calculate Camarilla R1 and S1 from previous day
     prev_close = df_1d['close'].shift(1).values
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
     
-    camarilla_R3 = prev_high + 1.1 * (prev_high - prev_low)
-    camarilla_S3 = prev_low - 1.1 * (prev_high - prev_low)
+    camarilla_R1 = prev_close + 1.1 * (prev_high - prev_low)
+    camarilla_S1 = prev_close - 1.1 * (prev_high - prev_low)
     
     # Align Camarilla levels to 4h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S3)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
     
     # Volume filter: current volume > 1.5x 20-period average (4h)
     vol_ma_20 = np.full(n, np.nan)
@@ -59,8 +59,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(R3_aligned[i]) or 
-            np.isnan(S3_aligned[i]) or 
+        if (np.isnan(R1_aligned[i]) or 
+            np.isnan(S1_aligned[i]) or 
             np.isnan(ema_50_12h_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
@@ -79,33 +79,33 @@ def generate_signals(prices):
         trend_12h_down = close_12h_aligned[i] < ema_50_12h_aligned[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: Break above R3 with volume in 12h uptrend
-            if (close[i] > R3_aligned[i] and 
-                close[i-1] <= R3_aligned[i-1] and 
+            # Long: Break above R1 with volume in 12h uptrend
+            if (close[i] > R1_aligned[i] and 
+                close[i-1] <= R1_aligned[i-1] and 
                 trend_12h_up and 
                 vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: Break below S3 with volume in 12h downtrend
-            elif (close[i] < S3_aligned[i] and 
-                  close[i-1] >= S3_aligned[i-1] and 
+            # Short: Break below S1 with volume in 12h downtrend
+            elif (close[i] < S1_aligned[i] and 
+                  close[i-1] >= S1_aligned[i-1] and 
                   trend_12h_down and 
                   vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit: Close below S3 OR trend change
-            if (close[i] < S3_aligned[i]) or not trend_12h_up:
+            # Exit: Close below S1 OR trend change
+            if (close[i] < S1_aligned[i]) or not trend_12h_up:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Close above R3 OR trend change
-            if (close[i] > R3_aligned[i]) or not trend_12h_down:
+            # Exit: Close above R1 OR trend change
+            if (close[i] > R1_aligned[i]) or not trend_12h_down:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
@@ -114,10 +114,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R3/S3 breakout with 12h trend filter and volume confirmation on 4h timeframe.
-# Long when price breaks above R3 level with volume spike in 12h uptrend.
-# Short when price breaks below S3 level with volume spike in 12h downtrend.
-# Exits on reversal to S3/R3 levels or trend change.
+# Hypothesis: Camarilla R1/S1 breakout with 12h trend filter and volume confirmation on 4h timeframe.
+# Long when price breaks above R1 level with volume spike in 12h uptrend.
+# Short when price breaks below S1 level with volume spike in 12h downtrend.
+# Exits on reversal to S1/R1 levels or trend change.
 # Uses 1d Camarilla levels for intraday support/resistance and 12h EMA50 for trend.
 # Volume confirmation filters false breakouts. Cooldown prevents overtrading.
 # Target: 20-40 trades/year to avoid fee drag. Works in bull/bear by capturing
