@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Index (Bull/Bear Power) with 1d EMA34 trend filter and volume confirmation.
-# Bull Power = High - EMA13, Bear Power = EMA13 - Low. 
-# Long when Bull Power > 0 AND Bear Power < 0 AND EMA13 rising AND price > 1d EMA34 (uptrend) AND volume > 1.5x 20-period average.
-# Short when Bear Power > 0 AND Bull Power < 0 AND EMA13 falling AND price < 1d EMA34 (downtrend) AND volume > 1.5x 20-period average.
-# Exit when EMA13 flips direction or volume drops below average.
+# Hypothesis: 6h Williams Alligator (Jaw/Teeth/Lips) with 12h EMA50 trend filter and volume confirmation.
+# Williams Alligator: Jaw=SMA(13,8), Teeth=SMA(8,5), Lips=SMA(5,3)
+# Long when Lips > Teeth > Jaw AND EMA50 rising AND price > 12h EMA50 AND volume > 1.5x 20-period average
+# Short when Lips < Teeth < Jaw AND EMA50 falling AND price < 12h EMA50 AND volume > 1.5x 20-period average
+# Exit when Alligator alignment breaks or EMA50 flips direction or volume drops below average
 # Designed for 6h timeframe with moderate trade frequency (target: 15-30/year) to avoid fee drag.
-# Uses 1d EMA34 for trend filter to avoid counter-trend trades in strong trends.
+# Uses 12h EMA50 for trend filter to avoid counter-trend trades in strong trends.
 # Volume filter ensures participation and avoids low-conviction moves.
-name = "6h_ElderRay_1dEMA34_VolumeFilter"
+name = "6h_WilliamsAlligator_12hEMA50_VolumeFilter"
 timeframe = "6h"
 leverage = 1.0
 
@@ -25,27 +25,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # EMA13 for Elder Ray and trend
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Williams Alligator components
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # Bull Power = High - EMA13, Bear Power = EMA13 - Low
-    bull_power = high - ema13
-    bear_power = ema13 - low
+    # Alligator alignment
+    lips_above_teeth = lips > teeth
+    teeth_above_jaw = teeth > jaw
+    lips_below_teeth = lips < teeth
+    teeth_below_jaw = teeth < jaw
     
-    # EMA13 direction
-    ema13_rising = np.zeros_like(ema13, dtype=bool)
-    ema13_falling = np.zeros_like(ema13, dtype=bool)
-    ema13_rising[1:] = ema13[1:] > ema13[:-1]
-    ema13_falling[1:] = ema13[1:] < ema13[:-1]
-    
-    # 1d EMA34 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # EMA50 for trend filter (12h)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    
+    # EMA50 direction
+    ema50_rising = np.zeros_like(ema50_12h_aligned, dtype=bool)
+    ema50_falling = np.zeros_like(ema50_12h_aligned, dtype=bool)
+    ema50_rising[1:] = ema50_12h_aligned[1:] > ema50_12h_aligned[:-1]
+    ema50_falling[1:] = ema50_12h_aligned[1:] < ema50_12h_aligned[:-1]
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -54,22 +58,28 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Sufficient warmup for indicators
+    start_idx = 50  # Sufficient warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(ema13_rising[i]) or np.isnan(ema13_falling[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(lips_above_teeth[i]) or np.isnan(teeth_above_jaw[i]) or
+            np.isnan(lips_below_teeth[i]) or np.isnan(teeth_below_jaw[i]) or
+            np.isnan(ema50_12h_aligned[i]) or np.isnan(ema50_rising[i]) or 
+            np.isnan(ema50_falling[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: Bull Power > 0, Bear Power < 0, EMA13 rising, price > 1d EMA34, volume filter
-            long_cond = (bull_power[i] > 0) and (bear_power[i] < 0) and ema13_rising[i] and (close[i] > ema34_1d_aligned[i]) and volume_filter[i]
-            # Short conditions: Bear Power > 0, Bull Power < 0, EMA13 falling, price < 1d EMA34, volume filter
-            short_cond = (bear_power[i] > 0) and (bull_power[i] < 0) and ema13_falling[i] and (close[i] < ema34_1d_aligned[i]) and volume_filter[i]
+            # Long conditions: Lips > Teeth > Jaw AND EMA50 rising AND price > 12h EMA50 AND volume filter
+            long_cond = (lips_above_teeth[i] and teeth_above_jaw[i] and 
+                        ema50_rising[i] and (close[i] > ema50_12h_aligned[i]) and 
+                        volume_filter[i])
+            # Short conditions: Lips < Teeth < Jaw AND EMA50 falling AND price < 12h EMA50 AND volume filter
+            short_cond = (lips_below_teeth[i] and teeth_below_jaw[i] and 
+                         ema50_falling[i] and (close[i] < ema50_12h_aligned[i]) and 
+                         volume_filter[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -78,15 +88,17 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: EMA13 falling OR volume filter fails
-            if ema13_falling[i] or not volume_filter[i]:
+            # Long exit: Alligator alignment breaks OR EMA50 falling OR volume filter fails
+            if (not (lips_above_teeth[i] and teeth_above_jaw[i]) or 
+                ema50_falling[i] or not volume_filter[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: EMA13 rising OR volume filter fails
-            if ema13_rising[i] or not volume_filter[i]:
+            # Short exit: Alligator alignment breaks OR EMA50 rising OR volume filter fails
+            if (not (lips_below_teeth[i] and teeth_below_jaw[i]) or 
+                ema50_rising[i] or not volume_filter[i]):
                 signals[i] = 0.0
                 position = 0
             else:
