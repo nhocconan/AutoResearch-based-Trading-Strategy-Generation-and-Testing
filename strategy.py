@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Williams Alligator + 1-day trend filter with volume confirmation.
-# Long when: Jaw < Teeth < Lips (bullish alignment) AND EMA34(1d) rising AND volume > 1.5 * EMA50(volume).
-# Short when: Jaw > Teeth > Lips (bearish alignment) AND EMA34(1d) falling AND volume > 1.5 * EMA50(volume).
-# Exit when Alligator lines re-cross (Jaw crosses Teeth).
-# Williams Alligator identifies trend alignment; 1-day EMA34 filters higher timeframe trend;
-# Volume confirmation ensures breakout strength. Designed for low trade frequency (target: 15-30/year)
-# to minimize fee drag and improve generalization across bull/bear markets.
-name = "6h_WilliamsAlligator_1dEMA34_Volume"
-timeframe = "6h"
+# Hypothesis: 4-hour Williams %R (14) with 1-day trend filter (EMA34) and volume spike.
+# Long when: Williams %R < -80 (oversold) AND EMA34(1d) rising AND volume > 1.8 * EMA20(volume).
+# Short when: Williams %R > -20 (overbought) AND EMA34(1d) falling AND volume > 1.8 * EMA20(volume).
+# Exit when Williams %R crosses back above -50 (for long) or below -50 (for short).
+# Williams %R identifies mean-reversion extremes; EMA34 filters trend direction; volume spike confirms reversal.
+# Designed for low trade frequency (target: 20-40/year) to minimize fee drag and improve generalization.
+# Works in bull markets via buying oversold dips in uptrend and in bear markets via selling overbought rallies in downtrend.
+name = "4h_WilliamsR_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,33 +24,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Williams Alligator lines (13, 8, 5 SMAs shifted forward by 8, 5, 3 bars)
-    # Jaw (13-period SMA, shifted 8 bars)
-    jaw = pd.Series(high).rolling(window=13, min_periods=13).mean()
-    jaw = jaw.shift(8)
-    # Teeth (8-period SMA, shifted 5 bars)
-    teeth = pd.Series(low).rolling(window=8, min_periods=8).mean()
-    teeth = teeth.shift(5)
-    # Lips (5-period SMA, shifted 3 bars)
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean()
-    lips = lips.shift(3)
+    # Williams %R (14) - momentum oscillator
+    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    # Handle division by zero (when high == low)
+    williams_r[highest_high == lowest_low] = -50  # neutral when no range
     
-    jaw_vals = jaw.values
-    teeth_vals = teeth.values
-    lips_vals = lips.values
+    # Williams %R thresholds
+    williams_r_oversold = williams_r < -80
+    williams_r_overbought = williams_r > -20
+    williams_r_exit = williams_r > -50  # exit long when above -50
+    williams_r_exit_short = williams_r < -50  # exit short when below -50
     
-    # Bullish alignment: Jaw < Teeth < Lips
-    bullish_align = (jaw_vals < teeth_vals) & (teeth_vals < lips_vals)
-    # Bearish alignment: Jaw > Teeth > Lips
-    bearish_align = (jaw_vals > teeth_vals) & (teeth_vals > lips_vals)
-    
-    # EMA34 on 1d close for trend filter
+    # Load 1-day data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
+    # EMA34 on 1d close
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Rising if current > previous, falling if current < previous
     ema_34_rising = np.zeros_like(ema_34_1d, dtype=bool)
     ema_34_falling = np.zeros_like(ema_34_1d, dtype=bool)
     ema_34_rising[1:] = ema_34_1d[1:] > ema_34_1d[:-1]
@@ -59,28 +55,28 @@ def generate_signals(prices):
     ema_34_rising_aligned = align_htf_to_ltf(prices, df_1d, ema_34_rising)
     ema_34_falling_aligned = align_htf_to_ltf(prices, df_1d, ema_34_falling)
     
-    # Volume confirmation: current volume > 1.5 * 50-period EMA of volume
-    vol_ema_50 = pd.Series(volume).ewm(span=50, adjust=False, min_periods=50).mean().values
-    volume_conf = volume > (1.5 * vol_ema_50)
+    # Volume confirmation: current volume > 1.8 * 20-period EMA of volume
+    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_spike = volume > (1.8 * vol_ema_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Sufficient warmup for indicators
+    start_idx = 50  # Sufficient warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(jaw_vals[i]) or np.isnan(teeth_vals[i]) or np.isnan(lips_vals[i]) or 
-            np.isnan(ema_34_rising_aligned[i]) or np.isnan(ema_34_falling_aligned[i]) or np.isnan(vol_ema_50[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_34_rising_aligned[i]) or np.isnan(ema_34_falling_aligned[i]) or 
+            np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Bullish alignment AND EMA34(1d) rising AND volume confirmation
-            long_condition = bullish_align[i] and ema_34_rising_aligned[i] and volume_conf[i]
-            # Short: Bearish alignment AND EMA34(1d) falling AND volume confirmation
-            short_condition = bearish_align[i] and ema_34_falling_aligned[i] and volume_conf[i]
+            # Long: Williams %R oversold AND EMA34(1d) rising AND volume spike
+            long_condition = williams_r_oversold[i] and ema_34_rising_aligned[i] and volume_spike[i]
+            # Short: Williams %R overbought AND EMA34(1d) falling AND volume spike
+            short_condition = williams_r_overbought[i] and ema_34_falling_aligned[i] and volume_spike[i]
             
             if long_condition:
                 signals[i] = 0.25
@@ -89,15 +85,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Bearish alignment (Jaw > Teeth)
-            if jaw_vals[i] > teeth_vals[i]:
+            # Exit: Williams %R crosses above -50
+            if williams_r_exit[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Bullish alignment (Jaw < Teeth)
-            if jaw_vals[i] < teeth_vals[i]:
+            # Exit: Williams %R crosses below -50
+            if williams_r_exit_short[i]:
                 signals[i] = 0.0
                 position = 0
             else:
