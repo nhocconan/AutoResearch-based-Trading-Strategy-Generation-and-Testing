@@ -1,7 +1,6 @@
-# Solution
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -29,66 +28,52 @@ def generate_signals(prices):
     trend_up = close > ema34_1d_aligned
     trend_down = close < ema34_1d_aligned
     
-    # 12h Camarilla pivot levels (based on previous day's range)
-    # We'll calculate pivot levels using 1d data but align to 12h
-    # Camarilla levels: H4 = close + 1.5*(high-low), L4 = close - 1.5*(high-low)
-    # R3 = close + 1.1*(high-low), S3 = close - 1.1*(high-low)
-    # We use the previous day's range for today's levels
+    # Daily Camarilla pivot levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d_for_pivot = df_1d['close'].values
+    close_1d_prev = df_1d['close'].shift(1).values
+    close_1d_prev = np.concatenate([[close_1d_prev[0]], close_1d_prev[:-1]])
     
-    # Calculate Camarilla levels for each day
-    rng = high_1d - low_1d
-    r3 = close_1d_for_pivot + 1.1 * rng
-    s3 = close_1d_for_pivot - 1.1 * rng
-    r4 = close_1d_for_pivot + 1.5 * rng
-    s4 = close_1d_for_pivot - 1.5 * rng
+    R3 = close_1d_prev + (high_1d - low_1d) * 1.1 / 4
+    S3 = close_1d_prev - (high_1d - low_1d) * 1.1 / 4
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
-    # Align to 12h timeframe (1 bar = 12h, so 2 bars per day)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # Volume confirmation: current volume > 1.5 * 20-period average
+    # Volume confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (1.5 * vol_ma)
+    vol_surge = volume > 1.5 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure volume MA is valid
+    start_idx = max(34, 20)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        # Skip if any data not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if np.isnan(ema34_1d_aligned[i]) or np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R3 with volume confirmation and 1d uptrend
-            if close[i] > r3_aligned[i] and vol_confirm[i] and trend_up[i]:
+            # Long: Close breaks above R3 with volume surge and 1d uptrend
+            if close[i] > R3_aligned[i] and vol_surge[i] and trend_up[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 with volume confirmation and 1d downtrend
-            elif close[i] < s3_aligned[i] and vol_confirm[i] and trend_down[i]:
+            # Short: Close breaks below S3 with volume surge and 1d downtrend
+            elif close[i] < S3_aligned[i] and vol_surge[i] and trend_down[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price breaks below S3 or trend turns down
-            if close[i] < s3_aligned[i] or not trend_up[i]:
+            # Exit: Close below S3 or trend turns down
+            if close[i] < S3_aligned[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price breaks above R3 or trend turns up
-            if close[i] > r3_aligned[i] or not trend_down[i]:
+            # Exit: Close above R3 or trend turns up
+            if close[i] > R3_aligned[i] or not trend_down[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -96,10 +81,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R3/S3 breakout with volume confirmation and 1d trend filter
-# Captures institutional breakout patterns in both bull and bear markets.
-# Long when price breaks above R3 (bullish breakout) in 1d uptrend with volume.
-# Short when price breaks below S3 (bearish breakdown) in 1d downtrend with volume.
-# Uses 12h timeframe for optimal trade frequency (12-37 trades/year target).
-# Volume confirmation reduces false breakouts. Trend filter ensures alignment with higher timeframe.
-# Position size 0.25 manages risk through volatile crypto cycles.
+# Hypothesis: Camarilla R3/S3 breakouts with 1d trend filter and volume surge capture institutional breakout moves.
+# Long when price breaks above R3 (strong resistance) with volume confirmation in 1d uptrend.
+# Short when price breaks below S3 (strong support) with volume confirmation in 1d downtrend.
+# Uses daily Camarilla levels for institutional relevance, 1d EMA34 for trend, and volume surge for conviction.
+# Designed for 4h timeframe to balance trade frequency (~20-50/year) and capture multi-day trends.
+# Works in bull markets (breaks above R3 in uptrend) and bear markets (breaks below S3 in downtrend).
