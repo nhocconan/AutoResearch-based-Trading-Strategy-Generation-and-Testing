@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 1H_Camarilla_R3S3_1DTrend_VolumeSpike_v2
-# Hypothesis: 1-hour strategy using 4-hour structure for direction (breakout above/below R3/S3) 
-# and 1-day trend filter to avoid counter-trend trades. Entry requires volume spike confirmation.
-# Exit when price returns to middle of prior 1-day range. Uses 1h only for entry timing precision.
-# Designed for low trade frequency (target: 15-37 trades/year) to minimize fee drag in both bull and bear markets.
+# 1H_Camarilla_R3S3_1DTrend_VolumeSpike_v3
+# Hypothesis: 1h strategy using 4h Camarilla R3/S3 breakouts filtered by 1d EMA34 trend and volume spikes.
+# Uses 4h for structure and 1d for trend direction, 1h only for precise entry timing.
+# Targets 15-37 trades/year via strict entry conditions to minimize fee drag.
+# Works in bull/bear markets by only trading with the daily trend.
 
-name = "1H_Camarilla_R3S3_1DTrend_VolumeSpike_v2"
+name = "1H_Camarilla_R3S3_1DTrend_VolumeSpike_v3"
 timeframe = "1h"
 leverage = 1.0
 
