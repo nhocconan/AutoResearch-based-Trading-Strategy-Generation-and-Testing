@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dTrend_Volume
-Hypothesis: Trade 12-hour breakouts of daily Camarilla R1/S1 levels only when aligned with 1-day trend (EMA50) and confirmed by volume spike (>2x average). Uses daily timeframe for signal direction and 12h for precise entry, targeting 15-30 trades/year with low fee impact. Designed to work in both bull and bear markets by requiring trend alignment and volume confirmation.
+12h_VolumeSpike_RangeBreakout_1dTrend
+Hypothesis: Breakouts of daily range (high-low) on 12h timeframe with volume spike (>2x average) and aligned with 1-day EMA50 trend. Works in bull markets by buying strength and in bear markets by selling weakness. Uses 1d for trend and range, 12h for precise entry/exit to limit trades to 15-30/year.
 """
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+name = "12h_VolumeSpike_RangeBreakout_1dTrend"
 timeframe = "12h"
 leverage = 1.0
 
@@ -22,29 +22,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation and trend filter
+    # Get 1d data for range and trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot points (using prior 1d bar's OHLC)
     daily_high = df_1d['high'].values
     daily_low = df_1d['low'].values
     daily_close = df_1d['close'].values
     
-    camarilla_range = daily_high - daily_low
-    r1 = daily_close + (camarilla_range * 1.1 / 12)
-    s1 = daily_close - (camarilla_range * 1.1 / 12)
+    # Calculate daily range for breakout levels
+    daily_range = daily_high - daily_low
+    # Breakout levels: above daily high or below daily low
+    breakout_high = daily_high  # Break above prior day high
+    breakout_low = daily_low    # Break below prior day low
     
-    # Align Camarilla levels to 12h timeframe (with 1-bar delay for completed 1d bar)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1, additional_delay_bars=1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1, additional_delay_bars=1)
+    # Align daily levels to 12h timeframe (with 1-bar delay for completed 1d bar)
+    breakout_high_aligned = align_htf_to_ltf(prices, df_1d, breakout_high, additional_delay_bars=1)
+    breakout_low_aligned = align_htf_to_ltf(prices, df_1d, breakout_low, additional_delay_bars=1)
+    daily_close_aligned = align_htf_to_ltf(prices, df_1d, daily_close)
     
-    # Get 1d trend filter (EMA50)
+    # 1d trend filter: EMA50
     ema_50_1d = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Get 12h volume for confirmation
+    # Volume confirmation: 20-period average on 12h
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.divide(volume, vol_ma20, out=np.zeros_like(volume), where=vol_ma20!=0)
     
@@ -55,8 +57,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
+        if (np.isnan(breakout_high_aligned[i]) or 
+            np.isnan(breakout_low_aligned[i]) or 
+            np.isnan(daily_close_aligned[i]) or 
             np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(vol_ratio[i])):
             if position != 0:
@@ -65,39 +68,32 @@ def generate_signals(prices):
             continue
         
         # Determine 1d trend
-        close_1d_aligned = align_htf_to_ltf(prices, df_1d, daily_close)
-        if np.isnan(close_1d_aligned[i]):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-            
-        trend_up = close_1d_aligned[i] > ema_50_1d_aligned[i]
-        trend_down = close_1d_aligned[i] < ema_50_1d_aligned[i]
+        trend_up = daily_close_aligned[i] > ema_50_1d_aligned[i]
+        trend_down = daily_close_aligned[i] < ema_50_1d_aligned[i]
         
         if position == 0:
-            # Long breakout: price breaks above R1 with upward trend and volume spike
-            if (close[i] > r1_aligned[i] and 
+            # Long breakout: price breaks above prior day high with upward trend and volume spike
+            if (close[i] > breakout_high_aligned[i] and 
                 trend_up and 
                 vol_ratio[i] > 2.0):
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: price breaks below S1 with downward trend and volume spike
-            elif (close[i] < s1_aligned[i] and 
+            # Short breakdown: price breaks below prior day low with downward trend and volume spike
+            elif (close[i] < breakout_low_aligned[i] and 
                   trend_down and 
                   vol_ratio[i] > 2.0):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to 1d close or trend turns down
-            if close[i] < close_1d_aligned[i] or not trend_up:
+            # Exit long: price returns to prior day close or trend turns down
+            if close[i] < daily_close_aligned[i] or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to 1d close or trend turns up
-            if close[i] > close_1d_aligned[i] or not trend_down:
+            # Exit short: price returns to prior day close or trend turns up
+            if close[i] > daily_close_aligned[i] or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
