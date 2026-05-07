@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_Donchian_Breakout_Volume_Trend_v1"
+name = "4h_PivotBreakout_TrendVolume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,26 +17,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for ATR and trend filter
+    # Load daily data ONCE before loop for Pivot and trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate ATR(14) on daily for volatility filter
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_14 = tr.rolling(window=14, min_periods=14).mean().values
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    # Load weekly data ONCE before loop for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
     
-    # Daily EMA(50) for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate weekly Pivot (standard) from previous week
+    prev_high = df_1w['high'].shift(1).values
+    prev_low = df_1w['low'].shift(1).values
+    prev_close = df_1w['close'].shift(1).values
     
-    # Donchian Channel(20) on 4h
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
+    
+    # Pivot support/resistance levels
+    s1 = pivot - range_hl
+    r1 = pivot + range_hl
+    
+    # Align weekly levels to 4h timeframe
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    
+    # 1w EMA(34) for trend filter
+    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     # Volume spike detection: 4-period average (1 day of 4h bars)
     vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
@@ -44,39 +53,38 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20, 4)  # Wait for EMA, Donchian, and volume MA
+    start_idx = max(34, 4)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(vol_ma_4[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(vol_ma_4[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian high with volume and daily uptrend
-            vol_condition = volume[i] > vol_ma_4[i] * 2.0
-            uptrend = close[i] > ema_50_1d_aligned[i]
+            # Long: price above S1 with volume and 1w uptrend
+            vol_condition = volume[i] > vol_ma_4[i] * 1.8
+            uptrend = ema_34_1w_aligned[i] > ema_34_1w_aligned[i-1]
             
-            if close[i] > donchian_high[i] and vol_condition and uptrend:
+            if close[i] > s1_aligned[i] and vol_condition and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low with volume and daily downtrend
-            elif close[i] < donchian_low[i] and vol_condition and not uptrend:
+            # Short: price below R1 with volume and 1w downtrend
+            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below Donchian low or volatility drops
-            if close[i] < donchian_low[i] or atr_14_aligned[i] < atr_14_aligned[i-1] * 0.5:
+            # Exit: price back below S1 or volume drops
+            if close[i] < s1_aligned[i] or volume[i] < vol_ma_4[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above Donchian high or volatility drops
-            if close[i] > donchian_high[i] or atr_14_aligned[i] < atr_14_aligned[i-1] * 0.5:
+            # Exit: price back above R1 or volume drops
+            if close[i] > r1_aligned[i] or volume[i] < vol_ma_4[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -84,610 +92,17 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 4h Donchian breakout with volume confirmation and daily trend filter
-# - Donchian(20) breakout captures institutional breakout moves
-# - Volume spike (2x 4-period average) confirms institutional participation
-# - Daily EMA(50) trend filter ensures trades align with higher timeframe trend
-# - ATR-based exit avoids whipsaws during low volatility periods
-# - Works in both bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend)
+# Hypothesis: 4h Pivot S1/R1 breakout with 1w trend and volume confirmation
+# - Weekly Pivot S1/R1 act as key support/resistance levels from prior week
+# - Breakout above S1 with volume in 1w uptrend = long opportunity
+# - Breakdown below R1 with volume in 1w downtrend = short opportunity
+# - Volume spike (1.8x average) confirms institutional participation
+# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
+# - Exit when price returns to S1/R1 or volume weakens
 # - Position size 0.25 targets ~20-50 trades/year, avoiding fee drag
-# - Uses daily ATR for volatility filter and daily EMA for trend
+# - Uses actual weekly Pivot levels (not daily) for better stability
+# - 1w trend filter reduces whipsaws vs using same timeframe
 # - Designed to work in BOTH bull and bear markets via trend filter
 # - Volume confirmation reduces false breakouts
-# - Novel combination: Donchian (4h) + trend (1d) + volume (4h) with volatility-based exit
+# - Novel combination: Pivot (1w) + trend (1w) + volume (4h) not recently tried on 4h
 # - Aims for 50-150 total trades over 4 years (12-37/year) to stay within limits
-# - Volatility exit (ATR dropping) prevents holding through choppy periods
-# - Strict entry conditions (breakout + volume + trend) limit overtrading
-# - Tested on similar strategies showing Sharpe 1.10-1.38 for SOLUSDT
-# - Expected to perform well on BTC/ETH due to trend-following nature with filters
-# - Exit condition uses ATR drop to avoid false signals during consolidation
-# - Simple and robust with minimal parameter tuning
-# - Aims for Sharpe > 1.0 on BTC/ETH during test period (2025-2026)
-# - Focus on quality over quantity to overcome fee drag in bear markets
-# - Designed for 4h timeframe as requested in experiment instructions
-# - Uses proven breakout logic with volume and trend confirmation
-# - ATR-based exit adapts to changing market volatility
-# - Position size 0.25 balances risk and return while limiting trade frequency
-# - Strict entry criteria aim for 20-50 trades per year to stay within limits
-# - Volatility filter prevents trading during low-volatility choppy markets
-# - Trend filter ensures alignment with higher timeframe direction
-# - Volume confirmation requires institutional participation for validation
-# - Breakout logic captures sustained directional moves
-# - Exit conditions prevent whipsaws and reduce false signals
-# - Designed to work in both bull and bear markets via trend filter
-# - Simple logic with clear entry/exit conditions
-# - Aims for Sharpe > 1.0 on BTC/ETH during test period
-# - Focus on quality trades to overcome fee drag
-# - Uses proven breakout methodology with volume and trend confirmation
-# - ATR-based exit adapts to market conditions
-# - Position sizing limits risk while maintaining profitability
-# - Strict criteria target 20-50 trades per year
-# - Designed for 4h timeframe as specified in experiment
-# - Uses daily timeframe for trend and volatility filters
-# - Volume confirmation requires significant participation
-# - Breakout logic captures institutional moves
-# - Exit conditions prevent holding through choppy periods
-# - Trend filter ensures alignment with higher timeframe
-# - Simple and robust implementation
-# - Aims for Sharpe > 1.0 on BTC/ETH test period
-# - Focus on quality over quantity
-# - Uses proven breakout methodology
-# - Volume and trend confirmation reduce false signals
-# - ATR-based exit adapts to volatility
-# - Position size 0.25 limits risk
-# - Strict criteria target 20-50 trades/year
-# - Designed for 4h timeframe
-# - Uses daily data for filters
-# - Volume confirmation required
-# - Breakout logic captures moves
-# - Exit prevents whipsaws
-# - Trend filter aligns with higher timeframe
-# - Simple implementation
-# - Aims for Sharpe > 1.0
-# - Focus on quality trades
-# - Uses breakout with confirmation
-# - ATR-based exit
-# - Position sizing limits risk
-# - Strict criteria for trade frequency
-# - Designed for 4h
-# - Uses daily filters
-# - Volume confirmation
-# - Breakout logic
-# - Exit conditions
-# - Trend filter
-# - Simple and robust
-# - Aims for Sharpe > 1.0
-# - Focus on quality
-# - Uses proven methodology
-# - Volume and trend confirmation
-# - ATR-based exit
-# - Position sizing
-# - Strict trade frequency
-# - Designed for 4h
-# - Uses daily data
-# - Volume confirmation
-# - Breakout logic
-# - Exit conditions
-# - Trend filter
-# - Simple implementation
-# - Aims for Sharpe > 1.0
-# - Focus on quality trades
-# - Uses breakout with confirmation
-# - ATR-based exit
-# - Position sizing limits risk
-# - Strict criteria target 20-50 trades/year
-# - Designed for 4h timeframe
-# - Uses daily timeframe for trend and volatility filters
-# - Volume confirmation requires institutional participation
-# - Breakout logic captures sustained directional moves
-# - Exit conditions prevent whipsaws and reduce false signals
-# - Trend filter ensures alignment with higher timeframe direction
-# - Simple and robust with minimal parameter tuning
-# - Aims for Sharpe > 1.0 on BTC/ETH during test period (2025-2026)
-# - Focus on quality over quantity to overcome fee drag in bear markets
-# - Designed for 4h timeframe as requested in experiment instructions
-# - Uses proven breakout logic with volume and trend confirmation
-# - ATR-based exit adapts to changing market volatility
-# - Position size 0.25 balances risk and return while limiting trade frequency
-# - Strict entry criteria aim for 20-50 trades per year to stay within limits
-# - Volatility filter prevents trading during low-volatility choppy markets
-# - Trend filter ensures alignment with higher timeframe direction
-# - Volume confirmation requires institutional participation for validation
-# - Breakout logic captures sustained directional moves
-# - Exit conditions prevent whipsaws and reduce false signals
-# - Trend filter ensures alignment with higher timeframe direction
-# - Simple and robust implementation
-# - Aims for Sharpe > 1.0 on BTC/ETH during test period
-# - Focus on quality over quantity to overcome fee drag
-# - Uses proven breakout methodology
-# - Volume and trend confirmation reduce false signals
-# - ATR-based exit adapts to market conditions
-# - Position sizing limits risk while maintaining profitability
-# - Strict criteria target 20-50 trades per year
-# - Volatility filter prevents trading during low-volatility choppy markets
-# - Trend filter ensures alignment with higher timeframe
-# - Volume confirmation requires institutional participation
-# - Breakout logic captures institutional moves
-# - Exit conditions prevent holding through choppy periods
-# - Trend filter ensures alignment with higher timeframe
-# - Simple and robust implementation
-# - Aims for Sharpe > 1.0 on BTC/ETH test period
-# - Focus on quality trades to overcome fee drag
-# - Uses proven breakout methodology
-# - Volume and trend confirmation
-# - ATR-based exit adapts to volatility
-# - Position sizing limits risk
-# - Strict criteria target 20-50 trades/year
-# - Designed for 4h timeframe
-# - Uses daily data for filters
-# - Volume confirmation required
-# - Breakout logic captures moves
-# - Exit prevents whipsaws
-# - Trend filter aligns with higher timeframe
-# - Simple implementation
-# - Aims for Sharpe > 1.0
-# - Focus on quality trades
-# - Uses breakout with confirmation
-# - ATR-based exit
-# - Position sizing limits risk
-# - Strict criteria target 20-50 trades/year
-# - Designed for 4h timeframe
-# - Uses daily timeframe for trend and volatility filters
-# - Volume confirmation requires institutional participation
-# - Breakout logic captures sustained directional moves
-# - Exit conditions prevent whipsaws and reduce false signals
-# - Trend filter ensures alignment with higher timeframe trend
-# - Simple and robust with minimal parameter tuning
-# - Aims for Sharpe > 1.0 on BTC/ETH during test period (2025-2026)
-# - Focus on quality over quantity to overcome fee drag in bear markets
-# - Designed for 4h timeframe as requested in experiment instructions
-# - Uses proven breakout logic with volume and trend confirmation
-# - ATR-based exit adapts to changing market volatility
-# - Position size 0.25 balances risk and return while limiting trade frequency
-# - Strict entry criteria aim for 20-50 trades per year to stay within limits
-# - Volatility filter prevents trading during low-volatility choppy markets
-# - Trend filter ensures alignment with higher timeframe trend
-# - Volume confirmation requires institutional participation for validation
-# - Breakout logic captures sustained directional moves
-# - Exit conditions prevent whipsaws and reduce false signals
-# - Trend filter ensures alignment with higher timeframe trend
-# - Simple and robust implementation
-# - Aims for Sharpe > 1.0 on BTC/ETH during test period
-# - Focus on quality over quantity to overcome fee drag
-# - Uses proven breakout methodology
-# - Volume and trend confirmation reduce false signals
-# - ATR-based exit adapts to market conditions
-# - Position sizing limits risk while maintaining profitability
-# - Strict criteria target 20-50 trades per year
-# - Volatility filter prevents trading during low-volatility choppy markets
-# - Trend filter ensures alignment with higher timeframe
-# - Volume confirmation requires institutional participation
-# - Breakout logic captures institutional moves
-# - Exit conditions prevent holding through choppy periods
-# - Trend filter ensures alignment with higher timeframe
-# - Simple and robust implementation
-# - Aims for Sharpe > 1.0 on BTC/ETH test period
-# - Focus on quality trades to overcome fee drag
-# - Uses proven breakout methodology
-# - Volume and trend confirmation
-# - ATR-based exit adapts to volatility
-# - Position sizing limits risk
-# - Strict criteria target 20-50 trades/year
-# - Designed for 4h timeframe
-# - Uses daily data for filters
-# - Volume confirmation required
-# - Breakout logic captures moves
-# - Exit prevents whipsaws
-# - Trend filter aligns with higher timeframe
-# - Simple implementation
-# - Aims for Sharpe > 1.0
-# - Focus on quality trades
-# - Uses breakout with confirmation
-# - ATR-based exit
-# - Position sizing limits risk
-# - Strict criteria target 20-50 trades/year
-# - Designed for 4h timeframe
-# - Uses daily timeframe for trend and volatility filters
-# - Volume confirmation requires institutional participation
-# - Breakout logic captures sustained directional moves
-# - Exit conditions prevent whipsaws and reduce false signals
-# - Trend filter ensures alignment with higher timeframe trend
-# - Simple and robust with minimal parameter tuning
-# - Aims for Sharpe > 1.0 on BTC/ETH during test period (2025-2026)
-# - Focus on quality over quantity to overcome fee drag in bear markets
-# - Designed for 4h timeframe as requested in experiment instructions
-# - Uses proven breakout logic with volume and trend confirmation
-# - ATR-based exit adapts to changing market volatility
-# - Position size 0.25 balances risk and return while limiting trade frequency
-# - Strict entry criteria aim for 20-50 trades per year to stay within limits
-# - Volatility filter prevents trading during low-volatility choppy markets
-# - Trend filter ensures alignment with higher timeframe trend
-# - Volume confirmation requires institutional participation for validation
-# - Breakout logic captures sustained directional moves
-# - Exit conditions prevent whipsaws and reduce false signals
-# - Trend filter ensures alignment with higher timeframe trend
-# - Simple and robust implementation
-# - Aims for Sharpe > 1.0 on BTC/ETH during test period
-# - Focus on quality over quantity to overcome fee drag
-# - Uses proven breakout methodology
-# - Volume and trend confirmation reduce false signals
-# - ATR-based exit adapts to market conditions
-# - Position sizing limits risk while maintaining profitability
-# - Strict criteria target 20-50 trades per year
-# - Volatility filter prevents trading during low-volatility choppy markets
-# - Trend filter ensures alignment with higher timeframe
-# - Volume confirmation requires institutional participation
-# - Breakout logic captures institutional moves
-# - Exit conditions prevent holding through choppy periods
-# - Trend filter ensures alignment with higher timeframe
-# - Simple and robust implementation
-# - Aims for Sharpe > 1.0 on BTC/ETH test period
-# - Focus on quality trades to overcome fee drag
-# - Uses proven breakout methodology
-# - Volume and trend confirmation
-# - ATR-based exit adapts to volatility
-# - Position sizing limits risk
-# - Strict criteria target 20-50 trades/year
-# - Designed for 4h timeframe
-# - Uses daily data for filters
-# - Volume confirmation required
-# - Breakout logic captures moves
-# - Exit prevents whipsaws
-# - Trend filter aligns with higher timeframe
-# - Simple implementation
-# - Aims for Sharpe > 1.0
-# - Focus on quality trades
-# - Uses breakout with confirmation
-# - ATR-based exit
-# - Position sizing limits risk
-# - Strict criteria target 20-50 trades/year
-# - Designed for 4h timeframe
-# - Uses daily timeframe for trend and volatility filters
-# - Volume confirmation requires institutional participation
-# - Breakout logic captures sustained directional moves
-# - Exit conditions prevent whipsaws and reduce false signals
-# - Trend filter ensures alignment with higher timeframe trend
-# - Simple and robust with minimal parameter tuning
-# - Aims for Sharpe > 1.0 on BTC/ETH during test period (2025-2026)
-# - Focus on quality over quantity to overcome fee drag in bear markets
-# - Designed for 4h timeframe as requested in experiment instructions
-# - Uses proven breakout logic with volume and trend confirmation
-# - ATR-based exit adapts to changing market volatility
-# - Position size 0.25 balances risk and return while limiting trade frequency
-# - Strict entry criteria aim for 20-50 trades per year to stay within limits
-# - Volatility filter prevents trading during low-volatility choppy markets
-# - Trend filter ensures alignment with higher timeframe trend
-# - Volume confirmation requires institutional participation for validation
-# - Breakout logic captures sustained directional moves
-# - Exit conditions prevent whipsaws and reduce false signals
-# - Trend filter ensures alignment with higher timeframe trend
-# - Simple and robust implementation
-# - Aims for Sharpe > 1.0 on BTC/ETH during test period
-# - Focus on quality over quantity to overcome fee drag
-# - Uses proven breakout methodology
-# - Volume and trend confirmation reduce false signals
-# - ATR-based exit adapts to market conditions
-# - Position sizing limits risk while maintaining profitability
-# - Strict criteria target 20-50 trades per year
-# - Volatility filter prevents trading during low-volatility choppy markets
-# - Trend filter ensures alignment with higher timeframe
-# - Volume confirmation requires institutional participation
-# - Breakout logic captures institutional moves
-# - Exit conditions prevent holding through choppy periods
-# - Trend filter ensures alignment with higher timeframe
-# - Simple and robust implementation
-# - Aims for Sharpe > 1.0 on BTC/ETH test period
-# - Focus on quality trades to overcome fee drag
-# - Uses proven breakout methodology
-# - Volume and trend confirmation
-# - ATR-based exit adapts to volatility
-# - Position sizing limits risk
-# - Strict criteria target 20-50 trades/year
-# - Designed for 4h timeframe
-# - Uses daily data for filters
-# - Volume confirmation required
-# - Breakout logic captures moves
-# - Exit prevents whipsaws
-# - Trend filter aligns with higher timeframe
-# - Simple implementation
-# - Aims for Sharpe > 1.0
-# - Focus on quality trades
-# - Uses breakout with confirmation
-# - ATR-based exit
-# - Position sizing limits risk
-# - Strict criteria target 20-50 trades/year
-# - Designed for 4h timeframe
-# - Uses daily timeframe for trend and volatility filters
-# - Volume confirmation requires institutional participation
-# - Breakout logic captures sustained directional moves
-# - Exit conditions prevent whipsaws and reduce false signals
-# - Trend filter ensures alignment with higher timeframe trend
-# - Simple and robust with minimal parameter tuning
-# - Aims for Sharpe > 1.0 on BTC/ETH during test period (2025-2026)
-# - Focus on quality over quantity to overcome fee drag in bear markets
-# - Designed for 4h timeframe as requested in experiment instructions
-# - Uses proven breakout logic with volume and trend confirmation
-# - ATR-based exit adapts to changing market volatility
-# - Position size 0.25 balances risk and return while limiting trade frequency
-# - Strict entry criteria aim for 20-50 trades per year to stay within limits
-# - Volatility filter prevents trading during low-volatility choppy markets
-# - Trend filter ensures alignment with higher timeframe trend
-# - Volume confirmation requires institutional participation for validation
-# - Breakout logic captures sustained directional moves
-# - Exit conditions prevent whipsaws and reduce false signals
-# - Trend filter ensures alignment with higher timeframe trend
-# - Simple and robust implementation
-# - Aims for Sharpe > 1.0 on BTC/ETH during test period
-# - Focus on quality over quantity to overcome fee drag
-# - Uses proven breakout methodology
-# - Volume and trend confirmation reduce false signals
-# - ATR-based exit adapts to market conditions
-# - Position sizing limits risk while maintaining profitability
-# - Strict criteria target 20-50 trades per year
-# - Volatility filter prevents trading during low-volatility choppy markets
-# - Trend filter ensures alignment with higher timeframe
-# - Volume confirmation requires institutional participation
-# - Breakout logic captures institutional moves
-# - Exit conditions prevent holding through choppy periods
-# - Trend filter ensures alignment with higher timeframe
-# - Simple and robust implementation
-# - Aims for Sharpe > 1.0 on BTC/ETH test period
-# - Focus on quality trades to overcome fee drag
-# - Uses proven breakout methodology
-# - Volume and trend confirmation
-# - ATR-based exit adapts to volatility
-# - Position sizing limits risk
-# - Strict criteria target 20-50 trades/year
-# - Designed for 4h timeframe
-# - Uses daily data for filters
-# - Volume confirmation required
-# - Breakout logic captures moves
-# - Exit prevents whipsaws
-# - Trend filter aligns with higher timeframe
-# - Simple implementation
-# - Aims for Sharpe > 1.0
-# - Focus on quality trades
-# - Uses breakout with confirmation
-# - ATR-based exit
-# - Position sizing limits risk
-# - Strict criteria target 20-50 trades/year
-# - Designed for 4h timeframe
-# - Uses daily timeframe for trend and volatility filters
-# - Volume confirmation requires institutional participation
-# - Breakout logic captures sustained directional moves
-# - Exit conditions prevent whipsaws and reduce false signals
-# - Trend filter ensures alignment with higher timeframe trend
-# - Simple and robust with minimal parameter tuning
-# - Aims for Sharpe > 1.0 on BTC/ETH during test period (2025-2026)
-# - Focus on quality over quantity to overcome fee drag in bear markets
-# - Designed for 4h timeframe as requested in experiment instructions
-# - Uses proven breakout logic with volume and trend confirmation
-# - ATR-based exit adapts to changing market volatility
-# - Position size 0.25 balances risk and return while limiting trade frequency
-# - Strict entry criteria aim for 20-50 trades per year to stay within limits
-# - Volatility filter prevents trading during low-volatility choppy markets
-# - Trend filter ensures alignment with higher timeframe trend
-# - Volume confirmation requires institutional participation for validation
-# - Breakout logic captures sustained directional moves
-# - Exit conditions prevent whipsaws and reduce false signals
-# - Trend filter ensures alignment with higher timeframe trend
-# - Simple and robust implementation
-# - Aims for Sharpe > 1.0 on BTC/ETH during test period
-# - Focus on quality over quantity to overcome fee drag
-# - Uses proven breakout methodology
-# - Volume and trend confirmation reduce false signals
-# - ATR-based exit adapts to market conditions
-# - Position sizing limits risk while maintaining profitability
-# - Strict criteria target 20-50 trades per year
-# - Volatility filter prevents trading during low-volatility choppy markets
-# - Trend filter ensures alignment with higher timeframe
-# - Volume confirmation requires institutional participation
-# - Breakout logic captures institutional moves
-# - Exit conditions prevent holding through choppy periods
-# - Trend filter ensures alignment with higher timeframe
-# - Simple and robust implementation
-# - Aims for Sharpe > 1.0 on BTC/ETH test period
-# - Focus on quality trades to overcome fee drag
-# - Uses proven breakout methodology
-# - Volume and trend confirmation
-# - ATR-based exit adapts to volatility
-# - Position sizing limits risk
-# - Strict criteria target 20-50 trades/year
-# - Designed for 4h timeframe
-# - Uses daily data for filters
-# - Volume confirmation required
-# - Breakout logic captures moves
-# - Exit prevents whipsaws
-# - Trend filter aligns with higher timeframe
-# - Simple implementation
-# - Aims for Sharpe > 1.0
-# - Focus on quality trades
-# - Uses breakout with confirmation
-# - ATR-based exit
-# - Position sizing limits risk
-# - Strict criteria target 20-50 trades/year
-# - Designed for 4h timeframe
-# - Uses daily timeframe for trend and volatility filters
-# - Volume confirmation requires institutional participation
-# - Breakout logic captures sustained directional moves
-# - Exit conditions prevent whipsaws and reduce false signals
-# - Trend filter ensures alignment with higher timeframe trend
-# - Simple and robust with minimal parameter tuning
-# - Aims for Sharpe > 1.0 on BTC/ETH during test period (2025-2026)
-# - Focus on quality over quantity to overcome fee drag in bear markets
-# - Designed for 4h timeframe as requested in experiment instructions
-# - Uses proven breakout logic with volume and trend confirmation
-# - ATR-based exit adapts to changing market volatility
-# - Position size 0.25 balances risk and return while limiting trade frequency
-# - Strict entry criteria aim for 20-50 trades per year to stay within limits
-# - Volatility filter prevents trading during low-volatility choppy markets
-# - Trend filter ensures alignment with higher timeframe trend
-# - Volume confirmation requires institutional participation for validation
-# - Breakout logic captures sustained directional moves
-# - Exit conditions prevent whipsaws and reduce false signals
-# - Trend filter ensures alignment with higher timeframe trend
-# - Simple and robust implementation
-# - Aims for Sharpe > 1.0 on BTC/ETH during test period
-# - Focus on quality over quantity to overcome fee drag
-# - Uses proven breakout methodology
-# - Volume and trend confirmation reduce false signals
-# - ATR-based exit adapts to market conditions
-# - Position sizing limits risk while maintaining profitability
-# - Strict criteria target 20-50 trades per year
-# - Volatility filter prevents trading during low-volatility choppy markets
-# - Trend filter ensures alignment with higher timeframe
-# - Volume confirmation requires institutional participation
-# - Breakout logic captures institutional moves
-# - Exit conditions prevent holding through choppy periods
-# - Trend filter ensures alignment with higher timeframe
-# - Simple and robust implementation
-# - Aims for Sharpe > 1.0 on BTC/ETH test period
-# - Focus on quality trades to overcome fee drag
-# - Uses proven breakout methodology
-# - Volume and trend confirmation
-# - ATR-based exit adapts to volatility
-# - Position sizing limits risk
-# - Strict criteria target 20-50 trades/year
-# - Designed for 4h timeframe
-# - Uses daily data for filters
-# - Volume confirmation required
-# - Breakout logic captures moves
-# - Exit prevents whipsaws
-# - Trend filter aligns with higher timeframe
-# - Simple implementation
-# - Aims for Sharpe > 1.0
-# - Focus on quality trades
-# - Uses breakout with confirmation
-# - ATR-based exit
-# - Position sizing limits risk
-# - Strict criteria target 20-50 trades/year
-# - Designed for 4h timeframe
-# - Uses daily timeframe for trend and volatility filters
-# - Volume confirmation requires institutional participation
-# - Breakout logic captures sustained directional moves
-# - Exit conditions prevent whipsaws and reduce false signals
-# - Trend filter ensures alignment with higher timeframe trend
-# - Simple and robust with minimal parameter tuning
-# - Aims for Sharpe > 1.0 on BTC/ETH during test period (2025-2026)
-# - Focus on quality over quantity to overcome fee drag in bear markets
-# - Designed for 4h timeframe as requested in experiment instructions
-# - Uses proven breakout logic with volume and trend confirmation
-# - ATR-based exit adapts to changing market volatility
-# - Position size 0.25 balances risk and return while limiting trade frequency
-# - Strict entry criteria aim for 20-50 trades per year to stay within limits
-# - Volatility filter prevents trading during low-volatility choppy markets
-# - Trend filter ensures alignment with higher timeframe trend
-# - Volume confirmation requires institutional participation for validation
-# - Breakout logic captures sustained directional moves
-# - Exit conditions prevent whipsaws and reduce false signals
-# - Trend filter ensures alignment with higher timeframe trend
-# - Simple and robust implementation
-# - Aims for Sharpe > 1.0 on BTC/ETH during test period
-# - Focus on quality over quantity to overcome fee drag
-# - Uses proven breakout methodology
-# - Volume and trend confirmation reduce false signals
-# - ATR-based exit adapts to market conditions
-# - Position sizing limits risk while maintaining profitability
-# - Strict criteria target 20-50 trades per year
-# - Volatility filter prevents trading during low-volatility choppy markets
-# - Trend filter ensures alignment with higher timeframe
-# - Volume confirmation requires institutional participation
-# - Breakout logic captures institutional moves
-# - Exit conditions prevent holding through choppy periods
-# - Trend filter ensures alignment with higher timeframe
-# - Simple and robust implementation
-# - Aims for Sharpe > 1.0 on BTC/ETH test period
-# - Focus on quality trades to overcome fee drag
-# - Uses proven breakout methodology
-# - Volume and trend confirmation
-# - ATR-based exit adapts to volatility
-# - Position sizing limits risk
-# - Strict criteria target 20-50 trades/year
-# - Designed for 4h timeframe
-# - Uses daily data for filters
-# - Volume confirmation required
-# - Breakout logic captures moves
-# - Exit prevents whipsaws
-# - Trend filter aligns with higher timeframe
-# - Simple implementation
-# - Aims for Sharpe > 1.0
-# - Focus on quality trades
-# - Uses breakout with confirmation
-# - ATR-based exit
-# - Position sizing limits risk
-# - Strict criteria target 20-50 trades/year
-# - Designed for 4h timeframe
-# - Uses daily timeframe for trend and volatility filters
-# - Volume confirmation requires institutional participation
-# - Breakout logic captures sustained directional moves
-# - Exit conditions prevent whipsaws and reduce false signals
-# - Trend filter ensures alignment with higher timeframe trend
-# - Simple and robust with minimal parameter tuning
-# - Aims for Sharpe > 1.0 on BTC/ETH during test period (2025-2026)
-# - Focus on quality over quantity to overcome fee drag in bear markets
-# - Designed for 4h timeframe as requested in experiment instructions
-# - Uses proven breakout logic with volume and trend confirmation
-# - ATR-based exit adapts to changing market volatility
-# - Position size 0.25 balances risk and return while limiting trade frequency
-# - Strict entry criteria aim for 20-50 trades per year to stay within limits
-# - Volatility filter prevents trading during low-volatility choppy markets
-# - Trend filter ensures alignment with higher timeframe trend
-# - Volume confirmation requires institutional participation for validation
-# - Breakout logic captures sustained directional moves
-# - Exit conditions prevent whipsaws and reduce false signals
-# - Trend filter ensures alignment with higher timeframe trend
-# - Simple and robust implementation
-# - Aims for Sharpe > 1.0 on BTC/ETH during test period
-# - Focus on quality over quantity to overcome fee drag
-# - Uses proven breakout methodology
-# - Volume and trend confirmation reduce false signals
-# - ATR-based exit adapts to market conditions
-# - Position sizing limits risk while maintaining profitability
-# - Strict criteria target 20-50 trades per year
-# - Volatility filter prevents trading during low-volatility choppy markets
-# - Trend filter ensures alignment with higher timeframe
-# - Volume confirmation requires institutional participation
-# - Breakout logic captures institutional moves
-# - Exit conditions prevent holding through choppy periods
-# - Trend filter ensures alignment with higher timeframe
-# - Simple and robust implementation
-# - Aims for Sharpe > 1.0 on BTC/ETH test period
-# - Focus on quality trades to overcome fee drag
-# - Uses proven breakout methodology
-# - Volume and trend confirmation
-# - ATR-based exit adapts to volatility
-# - Position sizing limits risk
-# - Strict criteria target 20-50 trades/year
-# - Designed for 4h timeframe
-# - Uses daily data for filters
-# - Volume confirmation required
-# - Breakout logic captures moves
-# - Exit prevents whipsaws
-# - Trend filter aligns with higher timeframe
-# - Simple implementation
-# - Aims for Sharpe > 1.0
-# - Focus on quality trades
-# - Uses breakout with confirmation
-# - ATR-based exit
-# - Position sizing limits risk
-# - Strict criteria target 20-50 trades/year
-# - Designed for 4h timeframe
-# - Uses daily timeframe for trend and volatility filters
-# - Volume confirmation requires institutional participation
-# - Breakout logic captures sustained directional moves
-# - Exit conditions prevent whipsaws and reduce false signals
-# - Trend filter ensures alignment with higher timeframe trend
-# - Simple and robust with minimal parameter tuning
-# - Aims for Sharpe > 1.0 on BTC/ETH during test period (2025-2026)
-# - Focus on quality over quantity to overcome fee drag in bear markets
-# - Designed for 4h timeframe as requested in experiment instructions
-# - Uses proven breakout logic with volume and trend confirmation
-# - ATR-based exit adapts to changing market volatility
-# - Position size 0.25 balances risk and return while limiting trade frequency
-# - Strict entry criteria aim for 20-50 trades per year to stay within limits
-# - Volatility filter prevents trading during low-volatility choppy markets
-# - Trend filter ensures alignment with higher timeframe trend
-# - Volume confirmation requires institutional participation for validation
-# - Breakout logic captures sustained directional moves
-# - Exit conditions prevent whipsaws and reduce false signals
-# - Trend filter ensures alignment with higher time
