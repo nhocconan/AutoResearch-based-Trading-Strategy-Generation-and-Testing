@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_Breakout_12hEMA50_Trend_VolumeS"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,19 +17,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    # Calculate 12h EMA50 trend filter
-    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # Get 1d data for Camarilla levels
+    # Get 1d data for trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
+    
+    # Calculate 1d EMA34 trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate Camarilla R3 and S3 levels from previous day
     high_prev = df_1d['high'].shift(1).values
@@ -39,7 +34,7 @@ def generate_signals(prices):
     r3 = close_prev + 1.1 * (high_prev - low_prev) / 4
     s3 = close_prev - 1.1 * (high_prev - low_prev) / 4
     
-    # Align daily levels to 4h timeframe (with 1-day delay for completed bar)
+    # Align daily levels to 12h timeframe (with 1-day delay for completed bar)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
@@ -52,15 +47,15 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 3  # ~12 hours for 4h to reduce trades
+    cooldown_bars = 3  # ~36 hours for 12h to reduce trades
     
-    start_idx = max(200, 20, 50)
+    start_idx = max(100, 20, 50)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(r3_aligned[i]) or 
             np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -72,9 +67,9 @@ def generate_signals(prices):
         
         bars_since_last_trade += 1
         
-        # Determine 12h trend direction
-        trend_up = close > ema_50_12h_aligned[i]
-        trend_down = close < ema_50_12h_aligned[i]
+        # Determine 1d trend direction
+        trend_up = close > ema_34_1d_aligned[i]
+        trend_down = close < ema_34_1d_aligned[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
             # Long: Break above R3 in uptrend with strong volume
@@ -110,10 +105,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Using 4h timeframe with Camarilla R3/S3 breakouts, 12h EMA50 trend filter,
-# and volume confirmation will yield 19-50 trades per year (75-200 total over 4 years).
-# The strategy trades with the higher timeframe trend, capturing institutional breakouts
+# Hypothesis: Using 12h timeframe with Camarilla R3/S3 breakouts, 1d EMA34 trend filter,
+# and volume confirmation will yield 12-37 trades per year (50-150 total over 4 years).
+# The strategy trades with the daily trend, capturing institutional breakouts
 # in both bull and bear markets. Volume filter ensures breakouts have institutional
 # participation. Position size of 0.25 manages drawdown, and cooldown of 3 bars
-# prevents overtrading. This version uses 12h EMA50 as trend filter (vs 1d EMA34) to
-# better capture medium-term trends and reduce whipsaw in choppy markets.
+# prevents overtrading. This version uses 12h timeframe to reduce trade frequency
+# and improve robustness in bear markets like 2025.
