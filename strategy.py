@@ -1,6 +1,12 @@
+# 6H_Camarilla_R1_S1_Breakout_1dTrend_VolumeS_v2
+# Hypothesis: 6h timeframe with Camarilla R1/S1 breakouts aligned with 1d trend and volume confirmation
+# Targets 15-25 trades per year per symbol (60-100 total over 4 years) to minimize fee drag
+# Works in bull/bear: uses 1d trend filter to avoid counter-trend trades, volume spike to confirm momentum
+# Uses 6h candles for better signal quality vs lower timeframes
+
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
-timeframe = "4h"
+name = "6H_Camarilla_R1_S1_Breakout_1dTrend_VolumeS_v2"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -36,7 +42,7 @@ def generate_signals(prices):
     r1 = pivot + (range_hl * 1.1 / 12)   # R1 level
     s1 = pivot - (range_hl * 1.1 / 12)   # S1 level
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 6h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
