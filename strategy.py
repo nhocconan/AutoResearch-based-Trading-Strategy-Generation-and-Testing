@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Spike_v3"
-timeframe = "12h"
+name = "4h_Bollinger_Squeeze_Momentum_200EMA"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,108 +17,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h and 1d data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Load daily data ONCE before loop for Bollinger Bands and 200 EMA
     df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_12h) < 10 or len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d Camarilla levels: R3, S3 from previous day
-    # Camarilla: R3 = close + (high - low) * 1.1/2, S3 = close - (high - low) * 1.1/2
-    prev_close_1d = df_1d['close'].shift(1).values
-    prev_high_1d = df_1d['high'].shift(1).values
-    prev_low_1d = df_1d['low'].shift(1).values
-    camarilla_r3_1d = prev_close_1d + (prev_high_1d - prev_low_1d) * 1.1 / 2
-    camarilla_s3_1d = prev_close_1d - (prev_high_1d - prev_low_1d) * 1.1 / 2
-    
-    # Align 1d Camarilla levels to 12h timeframe
-    camarilla_r3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
-    camarilla_s3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
-    
-    # 1d ADX for trend filter (ADX > 25 indicates strong trend)
-    def calculate_adx(high, low, close, period=14):
-        plus_dm = np.zeros_like(high)
-        minus_dm = np.zeros_like(high)
-        tr = np.zeros_like(high)
-        
-        for i in range(1, len(high)):
-            plus_dm[i] = max(0, high[i] - high[i-1])
-            minus_dm[i] = max(0, low[i-1] - low[i])
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        # Smooth using Wilder's smoothing (alpha = 1/period)
-        atr = np.zeros_like(tr)
-        plus_dm_smooth = np.zeros_like(plus_dm)
-        minus_dm_smooth = np.zeros_like(minus_dm)
-        
-        atr[period] = np.nansum(tr[1:period+1])
-        plus_dm_smooth[period] = np.nansum(plus_dm[1:period+1])
-        minus_dm_smooth[period] = np.nansum(plus_dm[1:period+1])
-        
-        for i in range(period+1, len(tr)):
-            atr[i] = atr[i-1] - (atr[i-1] / period) + tr[i]
-            plus_dm_smooth[i] = plus_dm_smooth[i-1] - (plus_dm_smooth[i-1] / period) + plus_dm[i]
-            minus_dm_smooth[i] = minus_dm_smooth[i-1] - (minus_dm_smooth[i-1] / period) + minus_dm[i]
-        
-        # Avoid division by zero
-        plus_di = np.where(atr != 0, 100 * plus_dm_smooth / atr, 0)
-        minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
-        dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-        
-        # Smooth DX to get ADX
-        adx = np.zeros_like(dx)
-        adx[2*period] = np.nansum(dx[period+1:2*period+1]) / period
-        for i in range(2*period+1, len(dx)):
-            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Daily Bollinger Bands (20, 2.0)
     close_1d = df_1d['close'].values
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    sma20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma20 + 2.0 * std20
+    lower_bb = sma20 - 2.0 * std20
     
-    # 12h volume spike: > 3.0x 20-period average (stricter filter)
-    vol_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike_12h = volume > 3.0 * vol_ma_12h
+    # Daily 200 EMA for trend filter
+    ema200 = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    
+    # Align daily indicators to 4h timeframe
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
+    ema200_aligned = align_htf_to_ltf(prices, df_1d, ema200)
+    
+    # 4h Bollinger Band width for squeeze detection
+    sma20_4h = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std20_4h = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb_4h = sma20_4h + 2.0 * std20_4h
+    lower_bb_4h = sma20_4h - 2.0 * std20_4h
+    bb_width = (upper_bb_4h - lower_bb_4h) / sma20_4h
+    
+    # Bollinger Band width percentile (20-period) for squeeze
+    bb_width_percentile = pd.Series(bb_width).rolling(window=20, min_periods=20).rank(pct=True).values
+    
+    # 4h volume confirmation (above 1.5x 20-period average)
+    vol_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > 1.5 * vol_ma_4h
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 34)  # Wait for ADX and volume MA
+    start_idx = 50  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
-        if (np.isnan(camarilla_r3_1d_aligned[i]) or np.isnan(camarilla_s3_1d_aligned[i]) or 
-            np.isnan(adx_1d_aligned[i])):
+        if (np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or 
+            np.isnan(ema200_aligned[i]) or np.isnan(bb_width_percentile[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Break above R3 with volume spike, strong trend (ADX > 25), and price above EMA20
-            ema20_12h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-            if (close[i] > camarilla_r3_1d_aligned[i] and vol_spike_12h[i] and 
-                adx_1d_aligned[i] > 25 and close[i] > ema20_12h[i]):
+            # Bollinger Band squeeze: low volatility percentile
+            squeeze_condition = bb_width_percentile[i] < 0.2
+            
+            # Long: Price breaks above upper BB with volume, during squeeze, above daily 200 EMA
+            if (squeeze_condition and close[i] > upper_bb_4h[i] and vol_confirm[i] and 
+                close[i] > ema200_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S3 with volume spike, strong trend (ADX > 25), and price below EMA20
-            elif (close[i] < camarilla_s3_1d_aligned[i] and vol_spike_12h[i] and 
-                  adx_1d_aligned[i] > 25 and close[i] < ema20_12h[i]):
+            # Short: Price breaks below lower BB with volume, during squeeze, below daily 200 EMA
+            elif (squeeze_condition and close[i] < lower_bb_4h[i] and vol_confirm[i] and 
+                  close[i] < ema200_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Price below S3 or trend weakening (ADX < 20)
-            if close[i] < camarilla_s3_1d_aligned[i] or adx_1d_aligned[i] < 20:
+            # Exit: Price returns to middle BB or volatility expands
+            middle_bb_4h = sma20_4h[i]
+            if close[i] < middle_bb_4h or bb_width_percentile[i] > 0.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price above R3 or trend weakening (ADX < 20)
-            if close[i] > camarilla_r3_1d_aligned[i] or adx_1d_aligned[i] < 20:
+            # Exit: Price returns to middle BB or volatility expands
+            middle_bb_4h = sma20_4h[i]
+            if close[i] > middle_bb_4h or bb_width_percentile[i] > 0.8:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -126,6 +97,7 @@ def generate_signals(prices):
     
     return signals
 
-# Note: Uses 1d Camarilla levels for stronger S/R, 3x volume filter, and ADX trend filter.
-# Position size 0.25 limits risk. Target 15-30 trades/year to minimize fee drift.
-# Exit on retrace to S3/R3 or trend weakening (ADX < 20).
+# Bollinger squeeze strategy: enters during low volatility breakouts with volume confirmation
+# Uses daily 200 EMA for trend filter and daily Bollinger Bands for dynamic S/R
+# Position size 0.25 limits risk. Target ~20-40 trades/year to minimize fee drag.
+# Exit on return to middle Bollinger Band or volatility expansion.
