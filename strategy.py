@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 4H_Camarilla_R3_S3_1DTrend_VolumeSpike_v6
+# 4H_Camarilla_R3_S3_1DTrend_VolumeSpike_v7
 # Hypothesis: 4-hour Camarilla R3/S3 breakout with daily trend filter and volume spike.
 # Uses daily trend to avoid counter-trend trades in both bull and bear markets.
 # Volume spike ensures momentum confirmation. Targets 20-30 trades/year to minimize fee drag.
 # Uses discrete position sizing (0.25). Added hysteresis to reduce whipsaw.
+# Modified: Reduced frequency by increasing volume threshold to 2.5x and requiring price to close beyond level for confirmation.
 
-name = "4H_Camarilla_R3_S3_1DTrend_VolumeSpike_v6"
+name = "4H_Camarilla_R3_S3_1DTrend_VolumeSpike_v7"
 timeframe = "4h"
 leverage = 1.0
 
@@ -44,7 +45,7 @@ def generate_signals(prices):
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Volume filter: current volume > 2.0x average volume (20-period)
+    # Volume filter: current volume > 2.5x average volume (20-period) - increased threshold
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Volatility filter: avoid low volatility periods (ATR < 0.3% of price)
@@ -70,17 +71,17 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Volume filter: spike confirmation (2.0x average volume)
-        volume_filter = volume[i] > 2.0 * vol_ma[i]
+        # Volume filter: spike confirmation (2.5x average volume) - increased threshold
+        volume_filter = volume[i] > 2.5 * vol_ma[i]
         
         if position == 0:
-            # Long: Price breaks above R3 + daily uptrend + volume spike
+            # Long: Price closes above R3 + daily uptrend + volume spike
             if (close[i] > r3_aligned[i] and 
                 close[i] > ema_34_1d_aligned[i] and   # Daily uptrend filter
                 volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S3 + daily downtrend + volume spike
+            # Short: Price closes below S3 + daily downtrend + volume spike
             elif (close[i] < s3_aligned[i] and 
                   close[i] < ema_34_1d_aligned[i] and   # Daily downtrend filter
                   volume_filter):
