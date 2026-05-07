@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# 4h_R1_S1_Breakout_Volume_Confirm_TrendFilter
-# Hypothesis: Uses daily Camarilla R1/S1 levels with 4h breakout, volume confirmation (2x 30-bar average), and 1-day EMA34 trend filter.
-# Requires price to close beyond R1/S1 and stay beyond EMA34 for exit. Minimum 3-bar hold to reduce whipsaw.
-# Designed for low trade frequency (<30/year) to minimize fee drag while capturing trends in bull/bear markets.
+# 1d_WeeklyPivot_Pullback_Trend_Filter
+# Hypothesis: On daily timeframe, trade pullbacks to weekly pivot points (R1/S1) in direction of weekly trend.
+# Uses weekly EMA50 as trend filter, weekly pivot levels (R1/S1) from prior week, and requires price to
+# close back into the weekly range after touching the pivot level. Designed for low frequency (10-25 trades/year)
+# to work in both bull and bear markets by fading extreme moves toward value.
+# Maximum 2 positions at once to manage risk.
 
-name = "4h_R1_S1_Breakout_Volume_Confirm_TrendFilter"
-timeframe = "4h"
+name = "1d_WeeklyPivot_Pullback_Trend_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -20,84 +22,74 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for calculations
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    # Get weekly data for calculations
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Camarilla pivot levels: R1, S1
-    camarilla_range = high_1d - low_1d
-    r1 = close_1d + 1.1 * camarilla_range / 12
-    s1 = close_1d - 1.1 * camarilla_range / 12
+    # Calculate weekly EMA50 for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Get 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate weekly pivot points (R1, S1, PP) from prior week
+    # Using prior week's H, L, C to avoid look-ahead
+    pp_1w = (high_1w + low_1w + close_1w) / 3.0
+    r1_1w = 2 * pp_1w - low_1w
+    s1_1w = 2 * pp_1w - high_1w
     
-    # Align all indicators to 4h timeframe
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
-    ema_34_1d_4h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align all weekly indicators to daily timeframe
+    ema_50_1w_d = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    pp_1w_d = align_htf_to_ltf(prices, df_1w, pp_1w)
+    r1_1w_d = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_d = align_htf_to_ltf(prices, df_1w, s1_1w)
     
-    # Volume spike filter on 4h (30-period average)
-    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_spike = volume > (2.0 * vol_ma_30)
+    # Daily range for entry confirmation
+    daily_range = high - low
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_entry = 0
     
     for i in range(50, n):
         # Skip if any critical value is NaN
-        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or 
-            np.isnan(ema_34_1d_4h[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(ema_50_1w_d[i]) or np.isnan(r1_1w_d[i]) or 
+            np.isnan(s1_1w_d[i]) or np.isnan(pp_1w_d[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             continue
         
-        bars_since_entry += 1
-        
         if position == 0:
-            # Long: Price > R1, above 1d EMA34 trend, volume spike
-            if close[i] > r1_4h[i] and close[i] > ema_34_1d_4h[i] and volume_spike[i]:
+            # Long: Price touches or crosses R1 then pulls back into weekly range
+            # and weekly trend is up (price > weekly EMA50)
+            if (low[i] <= r1_1w_d[i] and  # Touched or went through R1
+                close[i] > pp_1w_d[i] and  # Closed back above pivot point
+                close[i] > ema_50_1w_d[i]):  # Above weekly trend
                 signals[i] = 0.25
                 position = 1
-                bars_since_entry = 0
-            # Short: Price < S1, below 1d EMA34 trend, volume spike
-            elif close[i] < s1_4h[i] and close[i] < ema_34_1d_4h[i] and volume_spike[i]:
+            # Short: Price touches or crosses S1 then pulls back into weekly range
+            # and weekly trend is down (price < weekly EMA50)
+            elif (high[i] >= s1_1w_d[i] and  # Touched or went through S1
+                  close[i] < pp_1w_d[i] and  # Closed back below pivot point
+                  close[i] < ema_50_1w_d[i]):  # Below weekly trend
                 signals[i] = -0.25
                 position = -1
-                bars_since_entry = 0
         elif position == 1:
-            # Exit conditions: require minimum 3 bars held
-            if bars_since_entry >= 3:
-                if close[i] < r1_4h[i] or close[i] < ema_34_1d_4h[i]:
-                    signals[i] = 0.0
-                    position = 0
-                    bars_since_entry = 0
-                else:
-                    signals[i] = 0.25
+            # Exit long: price closes below weekly pivot or trend changes
+            if close[i] < pp_1w_d[i] or close[i] < ema_50_1w_d[i]:
+                signals[i] = 0.0
+                position = 0
             else:
-                # Hold position for minimum period
                 signals[i] = 0.25
         elif position == -1:
-            # Exit conditions: require minimum 3 bars held
-            if bars_since_entry >= 3:
-                if close[i] > s1_4h[i] or close[i] > ema_34_1d_4h[i]:
-                    signals[i] = 0.0
-                    position = 0
-                    bars_since_entry = 0
-                else:
-                    signals[i] = -0.25
+            # Exit short: price closes above weekly pivot or trend changes
+            if close[i] > pp_1w_d[i] or close[i] > ema_50_1w_d[i]:
+                signals[i] = 0.0
+                position = 0
             else:
-                # Hold position for minimum period
                 signals[i] = -0.25
     
     return signals
