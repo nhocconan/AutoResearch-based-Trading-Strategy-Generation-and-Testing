@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_PriceChannel_Breakout_Trend_Volume
-Hypothesis: On 4h timeframe, price breaking above/below Donchian(20) channels with 4h EMA50 trend filter and volume confirmation captures institutional breakouts while avoiding false signals. Works in bull markets (breakouts above upper band) and bear markets (breakdowns below lower band). Volume surge confirms institutional participation, and EMA50 filter ensures alignment with intermediate-term trend. Target 25-40 trades/year to minimize fee drag.
+4h_Camarilla_R3_S3_Breakout_1dEMA34_Volume_v1
+Hypothesis: Breaking above Camarilla R3 or below S3 from the prior 1d period, with 1d EMA34 trend filter and volume confirmation, captures high-probability momentum moves. Uses 4h timeframe for better trade frequency control (target 20-50 trades/year) to reduce fee drag and improve generalization in both bull and bear markets.
 """
-name = "4h_PriceChannel_Breakout_Trend_Volume"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -21,45 +21,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period high/low)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Get 1d data for Camarilla levels and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # 4h EMA50 for trend filter
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 1d Camarilla R3/S3 levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Volume filter: current volume > 2.0 * 20-period average
+    range_1d = high_1d - low_1d
+    r3_1d = close_1d + (1.1666 * range_1d * 1.1) / 2
+    s3_1d = close_1d - (1.1666 * range_1d * 1.1) / 2
+    
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align all to 4h timeframe
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume filter: current volume > 1.5 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_avg * 2.0)
+    volume_filter = volume > (vol_avg * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    bars_since_entry = 0
     
-    start_idx = 50
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
+        # Skip if any data is not ready
+        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_avg[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+                bars_since_entry = 0
+            continue
+        
+        bars_since_entry += 1
+        
         if position == 0:
-            # Long: price breaks above upper Donchian + EMA50 uptrend + volume surge
-            if close[i] > high_roll[i] and close[i] > ema_50[i] and volume_filter[i]:
+            # Long: price breaks above R3 + 1d uptrend + volume
+            if close[i] > r3_1d_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Donchian + EMA50 downtrend + volume surge
-            elif close[i] < low_roll[i] and close[i] < ema_50[i] and volume_filter[i]:
+                bars_since_entry = 0
+            # Short: price breaks below S3 + 1d downtrend + volume
+            elif close[i] < s3_1d_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
-        elif position == 1:
-            # Long exit: price closes below EMA50 (trend change) or opposite Donchian band
-            if close[i] < ema_50[i] or close[i] < low_roll[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        else:  # position == -1
-            # Short exit: price closes above EMA50 (trend change) or opposite Donchian band
-            if close[i] > ema_50[i] or close[i] > high_roll[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+                bars_since_entry = 0
+        elif position != 0:
+            # Minimum holding period of 3 bars to reduce trade frequency
+            if bars_since_entry < 3:
+                signals[i] = 0.25 if position == 1 else -0.25
+                continue
+            
+            # Exit: price crosses back through the opposite S3/R3 level
+            if position == 1:
+                if close[i] < s3_1d_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                else:
+                    signals[i] = 0.25
+            else:  # position == -1
+                if close[i] > r3_1d_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
