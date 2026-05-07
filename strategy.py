@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Ichimoku_Cloud_Filter_1dTrend"
-timeframe = "6h"
+name = "4h_KAMA_Direction_RSI_Chop_Filter_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,53 +17,89 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d trend filter
+    # 1d trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 26:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema26_1d = pd.Series(close_1d).ewm(span=26, adjust=False, min_periods=26).mean().values
-    ema26_1d_aligned = align_htf_to_ltf(prices, df_1d, ema26_1d)
-    trend_up = close > ema26_1d_aligned
-    trend_down = close < ema26_1d_aligned
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    trend_up = close > ema34_1d_aligned
+    trend_down = close < ema34_1d_aligned
     
-    # Ichimoku components (9, 26, 52 periods)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan = (high_9 + low_9) / 2
+    # KAMA calculation
+    er = np.zeros(n)
+    change = np.abs(close[10:] - close[:-10])
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)
+    volatility = np.concatenate([np.zeros(10), volatility])
+    er[10:] = change / volatility
+    er[volatility == 0] = 0
+    er = np.clip(er, 0, 1)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun = (high_26 + low_26) / 2
+    fast_sc = 2 / (2 + 1)
+    slow_sc = 2 / (30 + 1)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
+    kama_dir = np.zeros(n)
+    kama_dir[1:] = np.sign(kama[1:] - kama[:-1])
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    high_52 = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    low_52 = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = (high_52 + low_52) / 2
+    # RSI
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    avg_gain[14] = np.mean(gain[1:15])
+    avg_loss[14] = np.mean(loss[1:15])
+    for i in range(15, n):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi[:14] = 50
     
-    # Align Ichimoku components to 6h timeframe (no look-ahead)
-    # Since Ichimoku is calculated on 6h data, we need to align the components
-    # but we'll use the current values directly as they are based on past data
-    # For Senkou Span, we need to shift forward by 26 periods (but we'll handle this in logic)
+    # Choppiness Index (14-period)
+    atr = np.zeros(n)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[0], tr])
+    atr = np.zeros(n)
+    atr[14] = np.mean(tr[1:15])
+    for i in range(15, n):
+        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    highest = np.zeros(n)
+    lowest = np.zeros(n)
+    highest[0] = high[0]
+    lowest[0] = low[0]
+    for i in range(1, n):
+        highest[i] = max(highest[i-1], high[i])
+        lowest[i] = min(lowest[i-1], low[i])
+    chop = np.zeros(n)
+    for i in range(13, n):
+        sum_atr = np.sum(atr[i-13:i+1])
+        if highest[i] == lowest[i]:
+            chop[i] = 100
+        else:
+            chop[i] = 100 * np.log10(sum_atr / (highest[i] - lowest[i])) / np.log10(14)
+    chop[:13] = 50
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0
     bars_since_last_trade = 0
-    cooldown_bars = 4  # ~1 day (4 * 6h)
+    cooldown_bars = 3  # ~12 hours
     
-    start_idx = 52  # Ensure Ichimoku calculation is valid
+    start_idx = max(30, 14, 13)
     
     for i in range(start_idx, n):
-        # Skip if any data not ready
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
-            np.isnan(senkou_a[i]) or np.isnan(senkou_b[i]) or
-            np.isnan(ema26_1d_aligned[i])):
+        if (np.isnan(kama_dir[i]) or np.isnan(rsi[i]) or 
+            np.isnan(chop[i]) or np.isnan(ema34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,34 +110,28 @@ def generate_signals(prices):
         
         bars_since_last_trade += 1
         
-        # Determine cloud top and bottom
-        cloud_top = max(senkou_a[i], senkou_b[i])
-        cloud_bottom = min(senkou_a[i], senkou_b[i])
-        
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: TK cross above AND price above cloud AND 1d uptrend
-            if (tenkan[i-1] <= kijun[i-1] and tenkan[i] > kijun[i] and 
-                close[i] > cloud_top and trend_up[i]):
+            # Long: KAMA up, RSI > 50, chop < 61.8 (trending)
+            if kama_dir[i] > 0 and rsi[i] > 50 and chop[i] < 61.8 and trend_up[i]:
                 signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: TK cross below AND price below cloud AND 1d downtrend
-            elif (tenkan[i-1] >= kijun[i-1] and tenkan[i] < kijun[i] and 
-                  close[i] < cloud_bottom and trend_down[i]):
+            # Short: KAMA down, RSI < 50, chop < 61.8 (trending)
+            elif kama_dir[i] < 0 and rsi[i] < 50 and chop[i] < 61.8 and trend_down[i]:
                 signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit: TK cross below OR price below cloud OR trend turns down
-            if (tenkan[i] < kijun[i] or close[i] < cloud_bottom or not trend_up[i]):
+            # Exit: KAMA down OR chop > 61.8 (range) OR trend down
+            if kama_dir[i] < 0 or chop[i] > 61.8 or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: TK cross above OR price above cloud OR trend turns up
-            if (tenkan[i] > kijun[i] or close[i] > cloud_top or not trend_down[i]):
+            # Exit: KAMA up OR chop > 61.8 (range) OR trend up
+            if kama_dir[i] > 0 or chop[i] > 61.8 or not trend_down[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
@@ -110,9 +140,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Ichimoku Cloud system with TK cross signals and 1d trend filter
-# Long when Tenkan crosses above Kijun, price is above cloud, and 1d trend is up
-# Short when Tenkan crosses below Kijun, price is below cloud, and 1d trend is down
-# The cloud acts as dynamic support/resistance, reducing false signals
-# Cooldown of 4 bars limits trades to ~20-50 per year. Position size 0.25 manages risk.
-# Works in bull markets (captures uptrend continuations above cloud) and bear markets (captures downtrends below cloud)
+# Hypothesis: KAMA direction + RSI + Chop filter on 4h with 1d trend filter.
+# KAMA adapts to market noise, reducing false signals in choppy markets.
+# RSI > 50 for long, < 50 for short ensures momentum alignment.
+# Chop < 61.8 filters for trending markets only, avoiding whipsaws in ranges.
+# 1d EMA34 trend filter ensures alignment with higher timeframe trend.
+# Works in bull markets (captures uptrends) and bear markets (captures downtrends).
+# Target: 20-50 trades/year to minimize fee drag. Position size 0.25 manages risk.
