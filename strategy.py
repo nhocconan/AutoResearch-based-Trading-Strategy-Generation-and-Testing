@@ -1,10 +1,14 @@
-#!/usr/bin/env python3
+# #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: Use 1d CAMARILLA pivot levels (R1/S1) with trend filter from 1d EMA34 and volume confirmation. Enter long when price breaks above R1 in uptrend with volume spike, short when price breaks below S1 in downtrend with volume spike. Exit when price returns to pivot point (PP). Designed for 4h timeframe to capture multi-day moves while minimizing trade frequency. Works in bull/bear via trend filter.
+4h_R1S1_Breakout_1dEMA34_Trend_Filter
+Hypothesis: Uses daily CAMARILLA pivot levels (R1/S1) with 1d EMA34 trend filter and volume confirmation.
+Enters long when price breaks above R1 in uptrend with volume > 2x average, short when breaks below S1 in downtrend with volume > 2x average.
+Exits when price returns to the pivot point (PP). This design captures multi-day moves while maintaining low trade frequency
+(~20-40 trades/year) to avoid fee drag. The trend filter ensures alignment with higher timeframe direction, working in both
+bull and bear markets by only taking trades in the direction of the daily trend.
 """
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike"
+name = "4h_R1S1_Breakout_1dEMA34_Trend_Filter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -47,6 +51,9 @@ def generate_signals(prices):
     ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
+    # Daily close for trend determination (aligned)
+    daily_close_aligned = align_htf_to_ltf(prices, df_1d, df_1d['close'].values)
+    
     # Volume confirmation: 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.divide(volume, vol_ma20, out=np.zeros_like(volume), where=vol_ma20!=0)
@@ -59,20 +66,13 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema_34_aligned[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(pp_aligned[i])):
+            np.isnan(vol_ratio[i]) or np.isnan(pp_aligned[i]) or np.isnan(daily_close_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Daily trend determination using EMA34
-        daily_close_aligned = align_htf_to_ltf(prices, df_1d, df_1d['close'].values)
-        if np.isnan(daily_close_aligned[i]):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-            
         daily_trend_up = daily_close_aligned[i] > ema_34_aligned[i]
         daily_trend_down = daily_close_aligned[i] < ema_34_aligned[i]
         
