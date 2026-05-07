@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_Trend_Breakout
-Hypothesis: Enter long/short when price breaks above/below weekly pivot-based resistance/support levels on 6h timeframe with volume confirmation (>2x 20-bar average) and in direction of daily EMA34 trend. Uses weekly pivots for structure, daily EMA for trend filter, and volume for confirmation. Designed to work in both bull and bear markets by aligning with daily trend while using weekly structure for breakout validation. Target: 15-30 trades/year to minimize fee drag.
+12h_WeeklyPivot_Trend_Breakout_v2
+Hypothesis: Enter long/short when price breaks above/below weekly pivot-based resistance/support levels on 12h timeframe with volume confirmation (>2x 20-bar average) and in direction of daily EMA34 trend. Uses weekly pivots for structure, daily EMA for trend filter, and volume for confirmation. Designed to work in both bull and bear markets by aligning with daily trend while using weekly structure for breakout validation. Target: 15-30 trades/year to minimize fee drag.
 """
 
-name = "6h_WeeklyPivot_Trend_Breakout"
-timeframe = "6h"
+name = "12h_WeeklyPivot_Trend_Breakout_v2"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -41,7 +41,7 @@ def generate_signals(prices):
     prev_weekly_low = df_1w['low'].shift(1).values
     prev_weekly_close = df_1w['close'].shift(1).values
     
-    # Align previous week's OHLC to 6h timeframe
+    # Align previous week's OHLC to 12h timeframe
     prev_weekly_high_aligned = align_htf_to_ltf(prices, df_1w, prev_weekly_high)
     prev_weekly_low_aligned = align_htf_to_ltf(prices, df_1w, prev_weekly_low)
     prev_weekly_close_aligned = align_htf_to_ltf(prices, df_1w, prev_weekly_close)
