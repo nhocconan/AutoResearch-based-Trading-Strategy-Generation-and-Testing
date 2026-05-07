@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-4H_KAMA_Trend_R1_S1_Breakout_12H_Trend_Filter_v1
-Hypothesis: Use 4h KAMA (ER=10) for trend direction and 12h Camarilla R1/S1 levels for entry.
-Long when price crosses above 4h KAMA and touches 12h R1 level; 
-Short when price crosses below 4h KAMA and touches 12h S1 level.
-Volume confirmation: current volume > 1.5x 20-period average volume.
-This combines adaptive trend-following with pivot point precision to reduce false signals and work in both bull and bear markets.
+1D_Weekly_Pivot_Reversion_Mean
+Hypothesis: In ranging markets, price tends to revert from weekly pivot resistance/support levels.
+Long when price closes below weekly S1 with bullish engulfing candle and RSI < 40.
+Short when price closes above weekly R1 with bearish engulfing candle and RSI > 60.
+Uses 1d timeframe with 1h pivot confirmation to avoid false breaks. Designed for mean reversion in both bull and bear markets.
 """
-name = "4H_KAMA_Trend_R1_S1_Breakout_12H_Trend_Filter_v1"
-timeframe = "4h"
+name = "1D_Weekly_Pivot_Reversion_Mean"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,96 +16,79 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
+    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 4h data for KAMA trend
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 10:
+    # Get weekly data for pivot levels
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 1:
         return np.zeros(n)
     
-    # Calculate 4h KAMA (ER=10)
-    close_4h = pd.Series(df_4h['close'])
-    change = abs(close_4h.diff(10))
-    volatility = close_4h.diff().abs().rolling(window=10).sum()
-    er = change / volatility.replace(0, 1e-10)
-    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
-    kama = [close_4h.iloc[0]]
-    for i in range(1, len(close_4h)):
-        kama.append(kama[-1] + sc.iloc[i] * (close_4h.iloc[i] - kama[-1]))
-    kama = np.array(kama)
-    kama_aligned = align_htf_to_ltf(prices, df_4h, kama)
+    # Calculate weekly pivot points (R1, S1, PP)
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
+    close_weekly = df_weekly['close'].values
+    pp = (high_weekly + low_weekly + close_weekly) / 3
+    range_weekly = high_weekly - low_weekly
+    r1 = pp + (range_weekly * 1.1 / 12)
+    s1 = pp - (range_weekly * 1.1 / 12)
+    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1)
     
-    # Get 12h data for Camarilla levels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 1:
-        return np.zeros(n)
+    # RSI(14) for momentum filter
+    close_series = pd.Series(close)
+    delta = close_series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
-    # Calculate 12h Camarilla levels (R1, S1)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    pivot = (high_12h + low_12h + close_12h) / 3
-    range_12h = high_12h - low_12h
-    r1 = pivot + (range_12h * 1.1 / 12)
-    s1 = pivot - (range_12h * 1.1 / 12)
-    r1_aligned = align_htf_to_ltf(prices, df_12h, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_12h, s1)
-    
-    # Volume filter: current volume > 1.5 * 20-period average volume
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_avg * 1.5)
+    # Engulfing candle detection
+    bullish_engulf = (close > open_price) & (open_price > close.shift(1)) & (close > close.shift(1)) & (open_price < open_price.shift(1))
+    bearish_engulf = (close < open_price) & (open_price < close.shift(1)) & (close < close.shift(1)) & (open_price > open_price.shift(1))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_exit = 0  # bars since last exit to prevent overtrading
     
-    start_idx = max(10, 20)  # Ensure sufficient warmup
+    start_idx = 14  # RSI warmup
     
     for i in range(start_idx, n):
-        bars_since_exit += 1
-        
-        # Skip if any data is not ready
-        if (np.isnan(kama_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(vol_avg[i])):
+        # Skip if pivot data not ready
+        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(rsi_values[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                bars_since_exit = 0
             continue
         
         if position == 0:
-            # Minimum 12 bars between trades (2 days on 4h TF) to reduce frequency
-            if bars_since_exit < 12:
-                continue
-                
-            # Long: price crosses above KAMA and touches R1 level
-            if (close[i] > kama_aligned[i] and close[i-1] <= kama_aligned[i-1] and 
-                low[i] <= r1_aligned[i]):
+            # Long setup: price below S1, bullish engulf, oversold RSI
+            if (close[i] < s1_aligned[i] and 
+                bullish_engulf[i] and 
+                rsi_values[i] < 40):
                 signals[i] = 0.25
                 position = 1
-                bars_since_exit = 0
-            # Short: price crosses below KAMA and touches S1 level
-            elif (close[i] < kama_aligned[i] and close[i-1] >= kama_aligned[i-1] and 
-                  high[i] >= s1_aligned[i]):
+            # Short setup: price above R1, bearish engulf, overbought RSI
+            elif (close[i] > r1_aligned[i] and 
+                  bearish_engulf[i] and 
+                  rsi_values[i] > 60):
                 signals[i] = -0.25
                 position = -1
-                bars_since_exit = 0
         elif position != 0:
-            # Exit: price returns to opposite KAMA side
-            if position == 1 and close[i] < kama_aligned[i]:
+            # Exit conditions: RSI mean reversion or opposite engulfing
+            if position == 1 and (rsi_values[i] > 60 or bearish_engulf[i]):
                 signals[i] = 0.0
                 position = 0
-                bars_since_exit = 0
-            elif position == -1 and close[i] > kama_aligned[i]:
+            elif position == -1 and (rsi_values[i] < 40 or bullish_engulf[i]):
                 signals[i] = 0.0
                 position = 0
-                bars_since_exit = 0
             else:
                 # Hold position
                 signals[i] = 0.25 if position == 1 else -0.25
