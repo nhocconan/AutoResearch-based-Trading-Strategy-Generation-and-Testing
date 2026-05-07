@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_4h1d_Trend_Follow_With_Volume_Filter"
-timeframe = "1h"
+name = "6h_WeeklyPivot_RangeReversal"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 300:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,97 +17,100 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h and 1d data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_4h) < 50 or len(df_1d) < 50:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 4h EMA(50) for trend direction
-    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Weekly high/low/close from daily data (last completed week)
+    # Use 5 trading days of daily data (approximates a week)
+    window_days = 5
+    weekly_high = pd.Series(high).rolling(window=window_days*24//6, min_periods=window_days*24//6).max().values
+    weekly_low = pd.Series(low).rolling(window=window_days*24//6, min_periods=window_days*24//6).min().values
+    weekly_close = pd.Series(close).rolling(window=window_days*24//6, min_periods=window_days*24//6).mean().values
     
-    # 1d EMA(100) for higher timeframe trend filter
-    ema_100_1d = pd.Series(df_1d['close']).ewm(span=100, adjust=False, min_periods=100).mean().values
-    ema_100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_100_1d)
+    # Weekly pivot points
+    pp = (weekly_high + weekly_low + weekly_close) / 3
+    r1 = 2 * pp - weekly_low
+    s1 = 2 * pp - weekly_high
+    r2 = pp + (weekly_high - weekly_low)
+    s2 = pp - (weekly_high - weekly_low)
     
-    # 1h volume spike detection: 24-period average (1 day)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Align weekly pivot levels to 6h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
-    # 1h ATR(14) for volatility filter
-    tr = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])))
-    tr = np.concatenate([[np.inf], tr])
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Daily trend filter: EMA(34) on daily close
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Range detection: Bollinger Bands width percentile (20-period)
+    close_series = pd.Series(close)
+    sma_20 = close_series.rolling(window=20, min_periods=20).mean().values
+    std_20 = close_series.rolling(window=20, min_periods=20).std().values
+    bb_upper = sma_20 + 2 * std_20
+    bb_lower = sma_20 - 2 * std_20
+    bb_width = (bb_upper - bb_lower) / sma_20
+    bb_width_percentile = pd.Series(bb_width).rolling(window=100, min_periods=50).rank(pct=True).values
+    
+    # Volume filter: above average volume
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 100, 24, 14)
+    start_idx = max(20*24//6, 20, 34)  # Wait for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(ema_100_1d_aligned[i]) or 
-            np.isnan(vol_ma_24[i]) or np.isnan(atr_14[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(pp_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(bb_width_percentile[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Session filter: 08-20 UTC
-        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
-        in_session = 8 <= hour <= 20
-        
-        if not in_session:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Volatility filter: avoid extremely low volatility periods
-        vol_filter = atr_14[i] > 0.01 * close[i]  # At least 1% of price
+        # Range condition: low volatility environment (BB width < 30th percentile)
+        is_range = bb_width_percentile[i] < 0.30
+        vol_filter = volume[i] > vol_ma_20[i] * 1.2
         
         if position == 0:
-            # Long: 4h uptrend + 1d uptrend + volume spike
-            trend_4h = ema_50_4h_aligned[i] > ema_50_4h_aligned[i-1]
-            trend_1d = ema_100_1d_aligned[i] > ema_100_1d_aligned[i-1]
-            vol_condition = volume[i] > vol_ma_24[i] * 1.8
-            
-            if trend_4h and trend_1d and vol_condition and vol_filter:
-                signals[i] = 0.20
-                position = 1
-            # Short: 4h downtrend + 1d downtrend + volume spike
-            elif not trend_4h and not trend_1d and vol_condition and vol_filter:
-                signals[i] = -0.20
-                position = -1
+            if is_range and vol_filter:
+                # Long near S1 support with rejection
+                if close[i] > s1_aligned[i] and close[i-1] <= s1_aligned[i-1]:
+                    signals[i] = 0.25
+                    position = 1
+                # Short near R1 resistance with rejection
+                elif close[i] < r1_aligned[i] and close[i-1] >= r1_aligned[i-1]:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Exit: 4h trend breaks or volume drops significantly
-            trend_4h = ema_50_4h_aligned[i] > ema_50_4h_aligned[i-1]
-            vol_condition = volume[i] > vol_ma_24[i] * 1.2
-            
-            if not trend_4h or not vol_condition:
+            # Exit: price reaches P-P or R1, or range breaks down
+            if (close[i] >= pp_aligned[i] or close[i] >= r1_aligned[i] or 
+                bb_width_percentile[i] > 0.70):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: 4h trend breaks or volume drops significantly
-            trend_4h = ema_50_4h_aligned[i] > ema_50_4h_aligned[i-1]
-            vol_condition = volume[i] > vol_ma_24[i] * 1.2
-            
-            if trend_4h or not vol_condition:
+            # Exit: price reaches P-P or S1, or range breaks down
+            if (close[i] <= pp_aligned[i] or close[i] <= s1_aligned[i] or 
+                bb_width_percentile[i] > 0.70):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-# Hypothesis: 1h trend following with 4h/1d trend alignment and volume confirmation
-# - Uses 4h EMA(50) for intermediate trend direction
-# - Uses 1d EMA(100) for higher timeframe trend filter (avoid counter-trend trades)
-# - Requires volume spike (1.8x average) for entry confirmation
-# - Session filter (08-20 UTC) to focus on active trading hours
-# - Volatility filter to avoid choppy markets
-# - Position size 0.20 to manage risk and reduce trade frequency
-# - Designed to work in both bull (follow uptrends) and bear (follow downtrends) markets
-# - Target: 15-30 trades/year per symbol to avoid fee drag while capturing trends
+# Hypothesis: 6s weekly pivot range reversal in low volatility environments
+# - Weekly pivot S1/R1 act as strong support/resistance in ranging markets
+# - Enter long at S1 bounce, short at R1 rejection during low volatility (BB width < 30th percentile)
+# - Volume filter ensures institutional participation (1.2x average volume)
+# - Exit at weekly pivot (PP) or opposite pivot level, or when volatility expands
+# - Works in both bull/bear: ranges occur in all markets, pivot levels provide structure
+# - Position size 0.25 targets 50-100 trades/year, avoiding excessive fee drag
+# - Weekly pivot from daily data provides reliable structure that adapts to regimes
