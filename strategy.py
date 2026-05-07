@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_Weekly_Camarilla_Pivot_Volume"
-timeframe = "1d"
+name = "6h_HeikinAshi_BullBearPower_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,93 +15,78 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    open_price = prices['open'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
+    # Calculate Heikin Ashi close for current bar (only needs current bar data)
+    ha_close = (open_price + high + low + close) / 4
+    
+    # Get 1d data for Bull/Bear Power and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 26:
         return np.zeros(n)
     
-    # Calculate weekly Camarilla pivot levels (based on previous week's high, low, close)
-    # Camarilla levels: 
-    # H4 = close + 1.1*(high-low)/2
-    # H3 = close + 1.1*(high-low)/4
-    # H2 = close + 1.1*(high-low)/6
-    # H1 = close + 1.1*(high-low)/12
-    # L1 = close - 1.1*(high-low)/12
-    # L2 = close - 1.1*(high-low)/6
-    # L3 = close - 1.1*(high-low)/4
-    # L4 = close - 1.1*(high-low)/2
+    # Calculate 1d EMA13 for trend filter
+    close_1d = df_1d['close'].values
+    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
     
-    # Shift by 1 to use previous week's data (no look-ahead)
-    high_1w = df_1w['high'].shift(1).values
-    low_1w = df_1w['low'].shift(1).values
-    close_1w = df_1w['close'].shift(1).values
+    # Calculate 1d EMA26 for Bull/Bear Power
+    ema_26_1d = pd.Series(close_1d).ewm(span=26, adjust=False, min_periods=26).mean().values
+    ema_26_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_26_1d)
     
-    # Calculate Camarilla levels
-    H4 = close_1w + 1.1 * (high_1w - low_1w) / 2
-    H3 = close_1w + 1.1 * (high_1w - low_1w) / 4
-    H2 = close_1w + 1.1 * (high_1w - low_1w) / 6
-    H1 = close_1w + 1.1 * (high_1w - low_1w) / 12
-    L1 = close_1w - 1.1 * (high_1w - low_1w) / 12
-    L2 = close_1w - 1.1 * (high_1w - low_1w) / 6
-    L3 = close_1w - 1.1 * (high_1w - low_1w) / 4
-    L4 = close_1w - 1.1 * (high_1w - low_1w) / 2
+    # Calculate Bull Power (high - EMA26) and Bear Power (EMA26 - low)
+    # Use 1d high/low for power calculation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    bull_power_1d = high_1d - ema_26_1d
+    bear_power_1d = ema_26_1d - low_1d
     
-    # Align weekly levels to daily timeframe (wait for weekly bar to close)
-    H4_aligned = align_htf_to_ltf(prices, df_1w, H4)
-    H3_aligned = align_htf_to_ltf(prices, df_1w, H3)
-    H2_aligned = align_htf_to_ltf(prices, df_1w, H2)
-    H1_aligned = align_htf_to_ltf(prices, df_1w, H1)
-    L1_aligned = align_htf_to_ltf(prices, df_1w, L1)
-    L2_aligned = align_htf_to_ltf(prices, df_1w, L2)
-    L3_aligned = align_htf_to_ltf(prices, df_1w, L3)
-    L4_aligned = align_htf_to_ltf(prices, df_1w, L4)
-    
-    # Calculate weekly volume average for volume confirmation
-    vol_1w = df_1w['volume'].shift(1).values  # Previous week's volume
-    vol_ma4 = pd.Series(vol_1w).rolling(window=4, min_periods=4).mean().values  # 4-week average
-    vol_ma4_aligned = align_htf_to_ltf(prices, df_1w, vol_ma4)
-    
-    # Daily volume for comparison
-    vol_ma4_daily = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    # Align Bull/Bear Power to 6t timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure sufficient warmup for weekly data
+    start_idx = 100  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any data is not ready
-        if (np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or 
-            np.isnan(vol_ma4_aligned[i]) or np.isnan(vol_ma4_daily[i])):
+        if (np.isnan(ema_13_1d_aligned[i]) or 
+            np.isnan(bull_power_aligned[i]) or 
+            np.isnan(bear_power_aligned[i]) or
+            np.isnan(ha_close[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume condition: current 4-day average volume > 4-week average volume
-        volume_condition = vol_ma4_daily[i] > vol_ma4_aligned[i]
-        
         if position == 0:
-            # Long: price touches or goes below L3 level with volume confirmation
-            if (low[i] <= L3_aligned[i] and volume_condition):
+            # Long: HA close up, Bull Power positive, price above EMA13 (uptrend)
+            if (ha_close[i] > open_price[i] and 
+                bull_power_aligned[i] > 0 and 
+                close[i] > ema_13_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price touches or goes above H3 level with volume confirmation
-            elif (high[i] >= H3_aligned[i] and volume_condition):
+            # Short: HA close down, Bear Power positive, price below EMA13 (downtrend)
+            elif (ha_close[i] < open_price[i] and 
+                  bear_power_aligned[i] > 0 and 
+                  close[i] < ema_13_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses above H3 level (reversal signal)
-            if high[i] >= H3_aligned[i]:
+            # Exit long: HA close down OR price crosses below EMA13
+            if (ha_close[i] < open_price[i] or 
+                close[i] < ema_13_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses below L3 level (reversal signal)
-            if low[i] <= L3_aligned[i]:
+            # Exit short: HA close up OR price crosses above EMA13
+            if (ha_close[i] > open_price[i] or 
+                close[i] > ema_13_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
