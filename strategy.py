@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 1H_Camarilla_R3_S3_1DTrend_Volume_Pullback
-# Hypothesis: Uses daily Camarilla R3/S3 levels for breakout entries on 1h timeframe,
-# confirmed by daily EMA34 trend and volume spike. Enters on pullback to EMA34 after breakout
-# to reduce false breakouts. Works in both bull and bear by only taking long breaks above R3
-# in uptrend and short breaks below S3 in downtrend. Target: 15-30 trades/year.
+# 4H_Chaikin_Money_Flow_Touch_1D_Trend
+# Hypothesis: Chaikin Money Flow (CMF) at 4h detects accumulation/distribution.
+# Long when CMF crosses above 0.25 in 1d uptrend (close > EMA34), short when CMF crosses below -0.25 in 1d downtrend.
+# Uses volume-weighted accumulation to identify institutional interest, works in both bull/bear via 1d trend filter.
+# Target: 25-40 trades/year with size 0.25 to avoid fee drag.
 
-name = "1H_Camarilla_R3_S3_1DTrend_Volume_Pullback"
-timeframe = "1h"
+name = "4H_Chaikin_Money_Flow_Touch_1D_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,81 +23,62 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 35:
         return np.zeros(n)
     
-    # Calculate daily OHLC for Camarilla pivots
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Camarilla levels: R3 = close + (high - low) * 1.1/4, S3 = close - (high - low) * 1.1/4
-    rng = high_1d - low_1d
-    camarilla_r3 = close_1d + rng * 1.1 / 4
-    camarilla_s3 = close_1d - rng * 1.1 / 4
-    
-    # 1-day EMA34 for trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align Camarilla levels and EMA to 1h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume filter: current volume > 2.0x average volume (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Chaikin Money Flow (CMF) = (Sum of Money Flow Volume over N) / (Sum of Volume over N)
+    # Money Flow Multiplier = [(Close - Low) - (High - Close)] / (High - Low)
+    # Money Flow Volume = Money Flow Multiplier * Volume
+    mfm = ((close - low) - (high - close)) / (high - low)
+    mfm = np.where(high == low, 0, mfm)  # avoid division by zero
+    mfv = mfm * volume
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # 20-period CMF
+    cmf_num = pd.Series(mfv).rolling(window=20, min_periods=20).sum().values
+    cmf_den = pd.Series(volume).rolling(window=20, min_periods=20).sum().values
+    cmf = np.where(cmf_den != 0, cmf_num / cmf_den, 0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure we have volume MA data
+    start_idx = 20  # Ensure we have CMF data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema34_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(cmf[i]) or np.isnan(ema34_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume filter: spike confirmation
-        volume_filter = volume[i] > 2.0 * vol_ma[i]
-        
         if position == 0:
-            # Long: Price breaks above R3 + Uptrend (price > EMA34) + volume spike
-            if (close[i] > r3_aligned[i] and 
-                close[i] > ema34_aligned[i] and
-                volume_filter and
-                session_filter[i]):
-                signals[i] = 0.20
+            # Long: CMF crosses above 0.25 + Uptrend (close > EMA34)
+            if cmf[i] > 0.25 and cmf[i-1] <= 0.25 and close[i] > ema34_aligned[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S3 + Downtrend (price < EMA34) + volume spike
-            elif (close[i] < s3_aligned[i] and 
-                  close[i] < ema34_aligned[i] and
-                  volume_filter and
-                  session_filter[i]):
-                signals[i] = -0.20
+            # Short: CMF crosses below -0.25 + Downtrend (close < EMA34)
+            elif cmf[i] < -0.25 and cmf[i-1] >= -0.25 and close[i] < ema34_aligned[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Price falls back below EMA34 or trend turns down
-            if close[i] < ema34_aligned[i] or close[i] < r3_aligned[i]:
+            # Exit: CMF falls back below 0 or trend turns down
+            if cmf[i] < 0 or close[i] < ema34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: Price rises back above EMA34 or trend turns up
-            if close[i] > ema34_aligned[i] or close[i] > s3_aligned[i]:
+            # Exit: CMF rises back above 0 or trend turns up
+            if cmf[i] > 0 or close[i] > ema34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
