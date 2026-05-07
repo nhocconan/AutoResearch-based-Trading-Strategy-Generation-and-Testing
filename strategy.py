@@ -1,10 +1,6 @@
-# 12h_1W_Pivot_R1S1_Breakout_1DTrend_Volume
-# Hypothesis: Breakouts above weekly S1 in daily uptrend or below weekly R1 in daily downtrend with volume confirmation capture institutional participation. Weekly pivot provides structure; daily trend filters direction; volume confirms strength. Designed for 12h timeframe to limit trades (12-37/year) and avoid fee drag. Works in bull (buy S1 breaks) and bear (sell R1 breaks).
-# Timeframe: 12h, Target trades: 50-150 total over 4 years
-
 #!/usr/bin/env python3
-name = "12h_1W_Pivot_R1S1_Breakout_1DTrend_Volume"
-timeframe = "12h"
+name = "4h_WaterLevel_R1S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -13,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,65 +22,62 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Weekly pivot points from daily data (use last completed week)
-    # Approximate week as 7 days of daily data
-    weekly_high = pd.Series(high).rolling(window=7, min_periods=7).max().values
-    weekly_low = pd.Series(low).rolling(window=7, min_periods=7).min().values
-    weekly_close = pd.Series(close).rolling(window=7, min_periods=7).mean().values
-    
-    # Pivot levels
-    pp = (weekly_high + weekly_low + weekly_close) / 3
-    r1 = 2 * pp - weekly_low
-    s1 = 2 * pp - weekly_high
-    
-    # Align weekly pivot levels to 12h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp.values)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
-    
-    # Daily trend filter: EMA(34) on daily close
+    # Daily EMA(34) trend filter
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume spike detection: 2-period average (24h of 12h bars)
-    vol_ma_2 = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
+    # Daily price range for water level calculation
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
+    
+    # Water Level = (Daily High + Daily Low) / 2
+    water_level = (daily_high + daily_low) / 2
+    water_level_aligned = align_htf_to_ltf(prices, df_1d, water_level)
+    
+    # 1-period change in water level to detect expansion/contraction
+    water_level_change = np.abs(np.diff(water_level, prepend=water_level[0]))
+    water_level_change_aligned = align_htf_to_ltf(prices, df_1d, water_level_change)
+    
+    # Volume spike detection: 6-period average (1.5 days of 4h bars)
+    vol_ma_6 = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 2, 7)  # Wait for all indicators
+    start_idx = max(34, 6)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(pp_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(vol_ma_2[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(water_level_aligned[i]) or 
+            np.isnan(water_level_change_aligned[i]) or np.isnan(vol_ma_6[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Volume condition: current volume > 1.5x average
+        vol_condition = volume[i] > vol_ma_6[i] * 1.5
+        
         if position == 0:
-            # Long: price above S1 with volume and daily uptrend
-            vol_condition = volume[i] > vol_ma_2[i] * 2.0
-            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
-            
-            if close[i] > s1_aligned[i] and vol_condition and uptrend:
+            # Long: water level expanding AND price above water level in daily uptrend
+            expanding = water_level_change_aligned[i] > water_level_change_aligned[i-1]
+            if expanding and close[i] > water_level_aligned[i] and vol_condition and ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below R1 with volume and daily downtrend
-            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
+            # Short: water level expanding AND price below water level in daily downtrend
+            elif expanding and close[i] < water_level_aligned[i] and vol_condition and ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below S1 or volume drops
-            if close[i] < s1_aligned[i] or volume[i] < vol_ma_2[i] * 1.5:
+            # Exit: price back below water level or volume drops
+            if close[i] < water_level_aligned[i] or volume[i] < vol_ma_6[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above R1 or volume drops
-            if close[i] > r1_aligned[i] or volume[i] < vol_ma_2[i] * 1.5:
+            # Exit: price back above water level or volume drops
+            if close[i] > water_level_aligned[i] or volume[i] < vol_ma_6[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -92,4 +85,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Breakouts above weekly S1 in daily uptrend or below weekly R1 in daily downtrend with volume confirmation capture institutional participation. Weekly pivot provides structure; daily trend filters direction; volume confirms strength. Designed for 12h timeframe to limit trades (12-37/year) and avoid fee drag. Works in bull (buy S1 breaks) and bear (sell R1 breaks).
+# Hypothesis: Water level (midpoint of daily range) acts as dynamic support/resistance
+# - Water level expansion indicates increasing volatility and potential breakout
+# - Break above/below water level with volume in direction of daily trend = entry
+# - Works in bull markets (buy water level breaks in uptrend) and bear markets (sell water level breaks in downtrend)
+# - Volume confirmation (1.5x average) filters false breakouts
+# - Exit when price returns to water level or volume diminishes
+# - Position size 0.25 targets ~30-50 trades/year, avoiding fee drag
+# - Water level provides cleaner signal than pivot points in ranging markets
