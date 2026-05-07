@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_1w_1d_WaveTrend_Oscillator_v1"
-timeframe = "6h"
+name = "12h_Donchian_Breakout_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,80 +17,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop for WaveTrend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
-    # Load daily data ONCE before loop for trend filter
+    # Load daily data ONCE before loop for Donchian and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate WaveTrend (WT) oscillator on weekly
-    # WT1 = EMA(EMA(hlc3, n1), n2)
-    # WT2 = SMA(WT1, n3)
-    hlc3 = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
-    esa = pd.Series(hlc3).ewm(span=10, adjust=False, min_periods=10).mean()
-    d = pd.Series(abs(hlc3 - esa)).ewm(span=10, adjust=False, min_periods=10).mean()
-    ei = pd.Series(np.where(d != 0, (hlc3 - esa) / d, 0)).ewm(span=10, adjust=False, min_periods=10).mean()
-    wt1 = pd.Series(ei).ewm(span=21, adjust=False, min_periods=21).mean()
-    wt2 = pd.Series(wt1).rolling(window=4, min_periods=4).mean()
+    # Load 12h data ONCE before loop for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
+        return np.zeros(n)
     
-    wt1_values = wt1.values
-    wt2_values = wt2.values
+    # Daily Donchian channels (20-period)
+    donch_high = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
     
-    # Align weekly WT to 6h
-    wt1_aligned = align_htf_to_ltf(prices, df_1w, wt1_values)
-    wt2_aligned = align_htf_to_ltf(prices, df_1w, wt2_values)
+    # Align daily Donchian to 12h timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
     
-    # Daily EMA(50) for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # 12h EMA(34) for trend filter
+    ema_34_12h = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # Volume spike detection: 4-period average (1 day of 6h bars)
-    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    # Volume spike detection: 2-period average (24h of 12h bars)
+    vol_ma_2 = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 4)  # Wait for EMA and volume MA
+    start_idx = max(20, 34, 2)  # Wait for Donchian, EMA, and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(wt1_aligned[i]) or np.isnan(wt2_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_4[i])):
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
+            np.isnan(ema_34_12h_aligned[i]) or np.isnan(vol_ma_2[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: WT crosses above -50 (oversold recovery) with volume and daily uptrend
-            wt_cross_up = wt1_aligned[i] > wt2_aligned[i] and wt1_aligned[i-1] <= wt2_aligned[i-1]
-            wt_oversold = wt1_aligned[i] < -50
-            vol_condition = volume[i] > vol_ma_4[i] * 1.5
-            uptrend = ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1]
+            # Long: price breaks above daily Donchian high with volume and 12h uptrend
+            vol_condition = volume[i] > vol_ma_2[i] * 2.0
+            uptrend = ema_34_12h_aligned[i] > ema_34_12h_aligned[i-1]
             
-            if wt_cross_up and wt_oversold and vol_condition and uptrend:
+            if close[i] > donch_high_aligned[i] and vol_condition and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: WT crosses below 50 (overbought rejection) with volume and daily downtrend
-            elif wt1_aligned[i] < wt2_aligned[i] and wt1_aligned[i-1] >= wt2_aligned[i-1] and \
-                 wt1_aligned[i] > 50 and vol_condition and not uptrend:
+            # Short: price breaks below daily Donchian low with volume and 12h downtrend
+            elif close[i] < donch_low_aligned[i] and vol_condition and not uptrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: WT crosses below 0 or volume drops
-            wt_cross_down = wt1_aligned[i] < wt2_aligned[i] and wt1_aligned[i-1] >= wt2_aligned[i-1]
-            if wt_cross_down or volume[i] < vol_ma_4[i] * 1.2:
+            # Exit: price back below daily Donchian low or volume drops
+            if close[i] < donch_low_aligned[i] or volume[i] < vol_ma_2[i] * 0.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: WT crosses above 0 or volume drops
-            wt_cross_up = wt1_aligned[i] > wt2_aligned[i] and wt1_aligned[i-1] <= wt2_aligned[i-1]
-            if wt_cross_up or volume[i] < vol_ma_4[i] * 1.2:
+            # Exit: price back above daily Donchian high or volume drops
+            if close[i] > donch_high_aligned[i] or volume[i] < vol_ma_2[i] * 0.8:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -98,15 +84,15 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 6h WaveTrend oscillator from weekly + daily trend + volume confirmation
-# - WaveTrend (WT) identifies overbought/oversold conditions on weekly timeframe
-# - Long when WT crosses above -50 from oversold (< -50) with volume in daily uptrend
-# - Short when WT crosses below 50 from overbought (> 50) with volume in daily downtrend
-# - Volume spike (1.5x average) confirms institutional participation
-# - Works in BOTH bull (buy oversold bounces in uptrend) and bear (sell overbought rejections in downtrend)
-# - Exit when WT crosses zero line or volume weakens
-# - Position size 0.25 targets ~30-80 trades/year, avoiding fee drag
-# - Novel: WT oscillator not recently tried on 6h; combines weekly oscillator with daily trend
-# - Uses actual weekly data (no resampling) via mtf_data for proper alignment
-# - WT provides early reversal signals vs lagging indicators like RSI/MACD
-# - Aims for 50-150 total trades over 4 years (12-37/year) to stay within limits
+# Hypothesis: 12h Donchian breakout from daily channels with volume confirmation
+# - Daily Donchian(20) breakout captures major support/resistance breaks
+# - Volume spike (2x average) confirms institutional participation
+# - 12h EMA(34) trend filter ensures trades align with intermediate trend
+# - Works in bull markets (buy breaks above Donchian high in uptrend)
+# - Works in bear markets (sell breaks below Donchian low in downtrend)
+# - Exit when price returns to opposite Donchian band or volume weakens
+# - Position size 0.25 targets ~20-40 trades/year, avoiding fee drag
+# - Uses actual daily Donchian levels (not intraday) for structure
+# - Volume confirmation reduces false breakouts in ranging markets
+# - Designed for low trade frequency to minimize 0.10% round-trip costs
+# - Aims for 50-150 total trades over 4 years (12-37/year) as per 12h targets
