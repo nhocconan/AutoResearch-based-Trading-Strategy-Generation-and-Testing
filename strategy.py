@@ -1,8 +1,7 @@
-#3
 #!/usr/bin/env python3
 
-name = "4h_Camarilla_R3_S3_Pullback_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -11,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -37,7 +36,7 @@ def generate_signals(prices):
     R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
     S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
@@ -50,7 +49,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 6  # Prevent overtrading (approx 1 day)
+    cooldown_bars = 2  # Prevent overtrading (approx 1 day for 12h)
     
     start_idx = max(20, 34)  # Warmup for volume MA and EMA
     
@@ -76,31 +75,31 @@ def generate_signals(prices):
         trend_1d_down = close_1d_aligned[i] < ema_34_1d_aligned[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: pullback to S3 in 1d uptrend with volume filter
-            if (close[i] <= S3_aligned[i] * 1.005 and  # Allow 0.5% tolerance
+            # Long: breakout above R3 in 1d uptrend with volume filter
+            if (close[i] >= R3_aligned[i] * 0.995 and  # Allow 0.5% tolerance
                 trend_1d_up and 
                 vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: pullback to R3 in 1d downtrend with volume filter
-            elif (close[i] >= R3_aligned[i] * 0.995 and  # Allow 0.5% tolerance
+            # Short: breakdown below S3 in 1d downtrend with volume filter
+            elif (close[i] <= S3_aligned[i] * 1.005 and  # Allow 0.5% tolerance
                   trend_1d_down and 
                   vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit conditions: price crosses above R3 OR trend change
-            if (close[i] >= R3_aligned[i] * 0.995 or not trend_1d_up):
+            # Exit conditions: price closes below S3 OR trend change
+            if (close[i] <= S3_aligned[i] * 1.005 or not trend_1d_up):
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit conditions: price crosses below S3 OR trend change
-            if (close[i] <= S3_aligned[i] * 1.005 or not trend_1d_down):
+            # Exit conditions: price closes above R3 OR trend change
+            if (close[i] >= R3_aligned[i] * 0.995 or not trend_1d_down):
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
