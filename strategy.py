@@ -1,13 +1,6 @@
-# 1h_Camarilla_R3S3_Breakout_1dTrend_Volume with Session Filter
-# Target: 15-37 trades/year on 1h timeframe using 1d for direction/trend
-# Session filter: 08-20 UTC to avoid low-volume Asian session noise
-# Uses 1d Camarilla levels and trend filter, enters on 1h breakout with volume confirmation
-# Position size: 0.20 for controlled risk
-# Works in bull markets (breakouts in uptrend) and bear markets (breakdowns in downtrend)
-
 #!/usr/bin/env python3
-name = "1h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "1h"
+name = "6h_Aroon_Trend_1wFilter_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,90 +17,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Pre-compute session filter (08-20 UTC) - avoid low liquidity periods
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Load daily data ONCE for Camarilla pivot and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Load weekly data ONCE for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 25:
         return np.zeros(n)
     
-    # Camarilla pivot levels from previous day (standard formula)
-    c_high = df_1d['high'].values
-    c_low = df_1d['low'].values
-    c_close = df_1d['close'].values
+    # Weekly Aroon indicator (25-period) for trend strength
+    # Aroon Up = ((25 - days since 25-period high) / 25) * 100
+    # Aroon Down = ((25 - days since 25-period low) / 25) * 100
+    high_25 = pd.Series(df_1w['high']).rolling(window=25, min_periods=25).apply(lambda x: np.argmax(x), raw=True)
+    low_25 = pd.Series(df_1w['low']).rolling(window=25, min_periods=25).apply(lambda x: np.argmin(x), raw=True)
+    aroon_up = ((24 - high_25) / 24) * 100
+    aroon_down = ((24 - low_25) / 24) * 100
+    # Handle NaN from insufficient data
+    aroon_up = aroon_up.fillna(0).values
+    aroon_down = aroon_down.fillna(0).values
     
-    pivot = (c_high + c_low + c_close) / 3
-    range_val = c_high - c_low
-    r3 = pivot + (range_val * 1.1 / 4)
-    s3 = pivot - (range_val * 1.1 / 4)
+    # Aroon Oscillator: Aroon Up - Aroon Down
+    aroon_osc = aroon_up - aroon_down
     
-    # Align pivot levels to 1h timeframe
-    r3_1h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_1h = align_htf_to_ltf(prices, df_1d, s3)
+    # Align Aroon oscillator to 6h timeframe
+    aroon_osc_6h = align_htf_to_ltf(prices, df_1w, aroon_osc)
     
-    # Daily EMA34 for trend filter
-    ema_34_1d = pd.Series(c_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume spike detection (2x 24-period average on 1h)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume spike detection (1.5x 20-period average on 6h)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 24)
+    start_idx = 20
     
     for i in range(start_idx, n):
-        # Skip if outside trading session
-        if not in_session[i]:
+        if (np.isnan(aroon_osc_6h[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        if (np.isnan(r3_1h[i]) or np.isnan(s3_1h[i]) or 
-            np.isnan(ema_34_1h[i]) or np.isnan(vol_ma_24[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        vol_condition = volume[i] > vol_ma_24[i] * 2.0
+        vol_condition = volume[i] > vol_ma_20[i] * 1.5
         
         if position == 0:
-            # Long: break above R3 in daily uptrend with volume
-            if close[i] > r3_1h[i] and ema_34_1h[i] > ema_34_1h[i-1] and vol_condition:
-                signals[i] = 0.20
+            # Long: strong uptrend (Aroon Oscillator > 50) with volume
+            if aroon_osc_6h[i] > 50 and vol_condition:
+                signals[i] = 0.25
                 position = 1
-            # Short: break below S3 in daily downtrend with volume
-            elif close[i] < s3_1h[i] and ema_34_1h[i] < ema_34_1h[i-1] and vol_condition:
-                signals[i] = -0.20
+            # Short: strong downtrend (Aroon Oscillator < -50) with volume
+            elif aroon_osc_6h[i] < -50 and vol_condition:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price returns to pivot or trend reverses
-            pivot_1h = align_htf_to_ltf(prices, df_1d, pivot)
-            if close[i] < pivot_1h[i] or ema_34_1h[i] < ema_34_1h[i-1]:
+            # Exit: trend weakening (Aroon Oscillator < 0) or volume fade
+            if aroon_osc_6h[i] < 0 or volume[i] < vol_ma_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: price returns to pivot or trend reverses
-            pivot_1h = align_htf_to_ltf(prices, df_1d, pivot)
-            if close[i] > pivot_1h[i] or ema_34_1h[i] > ema_34_1h[i-1]:
+            # Exit: trend weakening (Aroon Oscillator > 0) or volume fade
+            if aroon_osc_6h[i] > 0 or volume[i] < vol_ma_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-# Hypothesis: 1h Camarilla R3/S3 breakouts with daily trend filter and volume confirmation
-# - Uses 1d timeframe for structure (Camarilla levels) and trend filter (EMA34)
-# - 1h timeframe only for entry timing precision, reducing false signals
-# - Session filter (08-20 UTC) avoids low-volume Asian session noise
-# - Volume confirmation (2x average) reduces false breakouts
-# - Position size 0.20 targets ~15-37 trades/year to avoid fee drag
-# - Works in bull markets (breakouts in uptrend) and bear markets (breakdowns in downtrend)
+# Hypothesis: Aroon oscillator on weekly timeframe detects strong trends, 
+# with volume confirmation on 6h for entry timing. Aroon >50 indicates strong uptrend,
+# Aroon <-50 indicates strong downtrend. Works in bull (catch uptrends) and bear 
+# (catch downtrends). Volume filter reduces false signals. Target 50-150 trades over 4 years.
