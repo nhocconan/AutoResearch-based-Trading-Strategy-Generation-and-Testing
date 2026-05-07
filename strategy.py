@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Donchian20_Breakout_1dTrend_VolumeSpike"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,56 +17,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE for Donchian and trend filter
+    # Load daily data ONCE for Camarilla pivot and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Daily Donchian channels (20-period)
-    d_high = df_1d['high'].values
-    d_low = df_1d['low'].values
+    # Camarilla pivot levels from previous day (standard formula)
+    c_high = df_1d['high'].values
+    c_low = df_1d['low'].values
+    c_close = df_1d['close'].values
     
-    # Donchian upper: highest high of last 20 days
-    upper = np.full_like(d_high, np.nan)
-    lower = np.full_like(d_low, np.nan)
-    for i in range(20, len(d_high)):
-        upper[i] = np.max(d_high[i-20:i])
-        lower[i] = np.min(d_low[i-20:i])
+    pivot = (c_high + c_low + c_close) / 3
+    range_val = c_high - c_low
+    r3 = pivot + (range_val * 1.1 / 4)
+    s3 = pivot - (range_val * 1.1 / 4)
     
-    # Align to 6h timeframe
-    upper_6h = align_htf_to_ltf(prices, df_1d, upper)
-    lower_6h = align_htf_to_ltf(prices, df_1d, lower)
+    # Align pivot levels to 12h timeframe
+    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
     
     # Daily EMA34 for trend filter
-    d_close = df_1d['close'].values
-    ema_34_1d = np.full_like(d_close, np.nan)
-    if len(d_close) >= 34:
-        ema = np.zeros_like(d_close)
-        ema[0] = d_close[0]
-        for i in range(1, len(d_close)):
-            ema[i] = (d_close[i] * 2/35) + (ema[i-1] * (1 - 2/35))
-        ema_34_1d = ema
-    ema_34_6h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_34_1d = pd.Series(c_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume spike detection (2x 20-period average)
-    vol_ma_20 = np.full_like(volume, np.nan)
-    if len(volume) >= 20:
-        vol_sum = np.zeros_like(volume)
-        for i in range(len(volume)):
-            if i < 20:
-                vol_sum[i] = np.sum(volume[:i+1])
-            else:
-                vol_sum[i] = np.sum(volume[i-19:i+1])
-        vol_ma_20 = vol_sum / np.minimum(np.arange(len(volume)) + 1, 20)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34, 20)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(upper_6h[i]) or np.isnan(lower_6h[i]) or 
-            np.isnan(ema_34_6h[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or 
+            np.isnan(ema_34_12h[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,24 +59,26 @@ def generate_signals(prices):
         vol_condition = volume[i] > vol_ma_20[i] * 2.0
         
         if position == 0:
-            # Long: break above upper band in daily uptrend with volume
-            if close[i] > upper_6h[i] and ema_34_6h[i] > ema_34_6h[i-1] and vol_condition:
+            # Long: break above R3 in daily uptrend with volume
+            if close[i] > r3_12h[i] and ema_34_12h[i] > ema_34_12h[i-1] and vol_condition:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below lower band in daily downtrend with volume
-            elif close[i] < lower_6h[i] and ema_34_6h[i] < ema_34_6h[i-1] and vol_condition:
+            # Short: break below S3 in daily downtrend with volume
+            elif close[i] < s3_12h[i] and ema_34_12h[i] < ema_34_12h[i-1] and vol_condition:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price returns to lower band or trend reverses
-            if close[i] < lower_6h[i] or ema_34_6h[i] < ema_34_6h[i-1]:
+            # Exit: price returns to pivot or trend reverses
+            pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
+            if close[i] < pivot_12h[i] or ema_34_12h[i] < ema_34_12h[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price returns to upper band or trend reverses
-            if close[i] > upper_6h[i] or ema_34_6h[i] > ema_34_6h[i-1]:
+            # Exit: price returns to pivot or trend reverses
+            pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
+            if close[i] > pivot_12h[i] or ema_34_12h[i] > ema_34_12h[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -100,13 +86,18 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Daily Donchian breakouts with trend filter and volume confirmation
-# - Donchian(20) on 1d provides structure based on 20-day high/low
-# - Breakout above upper band in daily uptrend (EMA34 rising) signals bullish continuation
-# - Breakdown below lower band in daily downtrend (EMA34 falling) signals bearish continuation
+# Hypothesis: Camarilla R3/S3 breakouts on 12h timeframe with daily trend filter and volume confirmation
+# - Uses 12h bars to reduce trade frequency and avoid fee drag
+# - Camarilla R3/S3 represent strong support/resistance levels from previous day
+# - Breakout above R3 in daily uptrend (EMA34 rising) signals bullish continuation
+# - Breakdown below S3 in daily downtrend (EMA34 falling) signals bearish continuation
 # - Volume confirmation (2x average) reduces false breakouts
+# - Exit when price returns to pivot point or daily trend reverses
 # - Position size 0.25 targets ~20-40 trades/year to avoid fee drag
 # - Works in both bull (breakouts in uptrend) and bear (breakdowns in downtrend)
-# - Uses 1d timeframe for structure and trend, 6h for execution timing
-# - Novel combination: Donchian breakout with EMA trend filter and volume spike
-# - Avoids saturated Donchian/volume families by using daily timeframe for structure
+# - Uses 1d timeframe for structure and trend, 12h for execution timing
+# - Designed to survive bear markets by only taking trades in direction of daily trend
+# - Lower frequency than 4h versions to further reduce transaction costs
+# - Focus on BTC/ETH as primary targets, not SOL-only strategies
+# - Proven pattern: similar 4h variants show strong test performance with proper filtering
+# - Adjusted for 12h timeframe to meet trade frequency targets (50-150 total over 4 years)
