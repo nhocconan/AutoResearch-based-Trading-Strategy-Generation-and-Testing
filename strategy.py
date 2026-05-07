@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_1dEMA34_Volume_Spike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -19,69 +19,79 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Daily high/low/close for Camarilla calculation (previous day's values)
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    # Daily high/low/close for Camarilla pivot (previous day)
+    prev_day_high = df_1d['high'].shift(1).values
+    prev_day_low = df_1d['low'].shift(1).values
+    prev_day_close = df_1d['close'].shift(1).values
     
-    # Camarilla levels based on previous day's range
-    # R1 = Close + (High - Low) * 1.1/12
-    # S1 = Close - (High - Low) * 1.1/12
-    r1 = daily_close + (daily_high - daily_low) * 1.1 / 12
-    s1 = daily_close - (daily_high - daily_low) * 1.1 / 12
-    pp = (daily_high + daily_low + daily_close) / 3  # Pivot point
+    # Camarilla levels (based on previous day)
+    range_ = prev_day_high - prev_day_low
+    c_close = prev_day_close
+    r1 = c_close + range_ * 1.1 / 12
+    s1 = c_close - range_ * 1.1 / 12
+    r2 = c_close + range_ * 1.1 / 6
+    s2 = c_close - range_ * 1.1 / 6
+    r3 = c_close + range_ * 1.1 / 4
+    s3 = c_close - range_ * 1.1 / 4
+    r4 = c_close + range_ * 1.1 / 2
+    s4 = c_close - range_ * 1.1 / 2
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     # Daily trend filter: EMA(34) on daily close
-    ema_34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume spike detection: 2-period average (24h of 12h bars)
-    vol_ma_2 = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
+    # Volume spike: 24-period average (6h * 4 = 24h = 1 day)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 2)  # Wait for all indicators
+    start_idx = max(34, 24)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
+        # Skip if any required data is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(pp_aligned[i]) or
-            np.isnan(vol_ma_2[i])):
+            np.isnan(s1_aligned[i]) or np.isnan(vol_ma_24[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above S1 with volume and daily uptrend
-            vol_condition = volume[i] > vol_ma_2[i] * 1.5
+            # Long: price above S1 with volume spike and daily uptrend
+            vol_condition = volume[i] > vol_ma_24[i] * 2.0
             uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
             
             if close[i] > s1_aligned[i] and vol_condition and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below R1 with volume and daily downtrend
+            # Short: price below R1 with volume spike and daily downtrend
             elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below pivot or volume drops
-            if close[i] < pp_aligned[i] or volume[i] < vol_ma_2[i] * 0.8:
+            # Exit: price back below S1 or volume drops significantly
+            if close[i] < s1_aligned[i] or volume[i] < vol_ma_24[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above pivot or volume drops
-            if close[i] > pp_aligned[i] or volume[i] < vol_ma_2[i] * 0.8:
+            # Exit: price back above R1 or volume drops significantly
+            if close[i] > r1_aligned[i] or volume[i] < vol_ma_24[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -89,13 +99,12 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 12h Camarilla R1/S1 breakout with daily trend and volume confirmation
-# - Camarilla R1/S1 from previous day's range act as intraday support/resistance
+# Hypothesis: Camarilla R1/S1 breakout with daily EMA trend and volume spike
+# - Camarilla levels provide mathematically derived support/resistance
 # - Breakout above S1 with volume in daily uptrend = long opportunity
 # - Breakdown below R1 with volume in daily downtrend = short opportunity
-# - Volume spike (1.5x average) confirms participation
+# - Volume spike (2x average) confirms institutional participation
 # - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
-# - Exit when price returns to daily pivot (PP) or volume weakens significantly
-# - Position size 0.25 targets ~25-40 trades/year, avoiding fee drag
-# - Daily trend filter ensures alignment with higher timeframe momentum
-# - Uses actual Camarilla formula from institutional trading, not improvised levels
+# - Exit when price returns to S1/R1 or volume weakens
+# - Position size 0.25 targets ~50-100 trades/year, avoiding fee drag
+# - Daily EMA(34) filter ensures alignment with higher timeframe trend
