@@ -1,7 +1,6 @@
-# 1
 #!/usr/bin/env python3
-name = "1d_1wPivot_R1S1_Breakout_Trend_Filter_v4"
-timeframe = "1d"
+name = "6h_Keltner_Breakout_1dTrend_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -10,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,92 +17,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for weekly pivot calculation
+    # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate weekly pivot points using Monday's OHLC (start of week)
-    # For each day, use the Monday of that week's OHLC
-    days = pd.to_datetime(df_1d.index)
-    week_start = days - pd.to_timedelta(days.weekday, unit='D')
-    unique_weeks = week_start.unique()
+    # Calculate daily ATR(10) for Keltner channels
+    tr = np.maximum(df_1d['high'].values - df_1d['low'].values,
+                    np.maximum(np.abs(df_1d['high'].values - df_1d['close'].shift(1).values),
+                               np.abs(df_1d['low'].values - df_1d['close'].shift(1).values)))
+    tr[0] = df_1d['high'].values[0] - df_1d['low'].values[0]  # first TR
+    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Arrays to store weekly pivot levels for each day
-    weekly_pivot = np.full(len(df_1d), np.nan)
-    weekly_r1 = np.full(len(df_1d), np.nan)
-    weekly_s1 = np.full(len(df_1d), np.nan)
+    # Calculate daily EMA(20) for Keltner center
+    ema_20 = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    for week in unique_weeks:
-        week_mask = week_start == week
-        if np.sum(week_mask) == 0:
-            continue
-        # Get Monday (first day of week)
-        monday_idx = np.where(week_mask)[0][0]
-        if monday_idx >= len(df_1d):
-            continue
-        # Use Monday's OHLC for weekly pivot
-        monday_high = df_1d['high'].iloc[monday_idx]
-        monday_low = df_1d['low'].iloc[monday_idx]
-        monday_close = df_1d['close'].iloc[monday_idx]
-        
-        pivot = (monday_high + monday_low + monday_close) / 3
-        range_val = monday_high - monday_low
-        
-        r1 = pivot + (range_val * 1.1 / 12)
-        s1 = pivot - (range_val * 1.1 / 12)
-        
-        # Assign to all days in this week
-        weekly_pivot[week_mask] = pivot
-        weekly_r1[week_mask] = r1
-        weekly_s1[week_mask] = s1
+    # Keltner channels: upper = EMA + 2*ATR, lower = EMA - 2*ATR
+    keltner_upper = ema_20 + 2.0 * atr
+    keltner_lower = ema_20 - 2.0 * atr
     
-    # Calculate daily EMA(34) for trend filter
-    ema_34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Daily EMA(50) for trend filter
+    ema_50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align weekly pivot levels and daily EMA to daily timeframe
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_1d, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_1d, weekly_s1)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # Align Keltner channels and daily EMA to 6h timeframe
+    keltner_upper_aligned = align_htf_to_ltf(prices, df_1d, keltner_upper)
+    keltner_lower_aligned = align_htf_to_ltf(prices, df_1d, keltner_lower)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Volume spike detection (24-period average on daily - approx 1 month)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume spike detection (20-period average on 6h)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 24  # Wait for volume MA
+    start_idx = 20  # Wait for volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(weekly_r1_aligned[i]) or np.isnan(weekly_s1_aligned[i]) or np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(keltner_upper_aligned[i]) or np.isnan(keltner_lower_aligned[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above weekly R1 with volume and in uptrend
-            vol_condition = volume[i] > vol_ma[i] * 2.0
-            uptrend = close[i] > ema_34_aligned[i]
+            # Long: break above Keltner upper with volume and in uptrend
+            vol_condition = volume[i] > vol_ma[i] * 1.8
+            uptrend = close[i] > ema_50_aligned[i]
             
-            if close[i] > weekly_r1_aligned[i] and vol_condition and uptrend:
+            if close[i] > keltner_upper_aligned[i] and vol_condition and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below weekly S1 with volume and in downtrend
-            elif close[i] < weekly_s1_aligned[i] and vol_condition and not uptrend:
+            # Short: break below Keltner lower with volume and in downtrend
+            elif close[i] < keltner_lower_aligned[i] and vol_condition and not uptrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below weekly pivot or volume drops
-            if close[i] < weekly_pivot_aligned[i] or volume[i] < vol_ma[i] * 1.5:
+            # Exit: price back below EMA(20) or volume drops
+            if close[i] < ema_50_aligned[i] or volume[i] < vol_ma[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above weekly pivot or volume drops
-            if close[i] > weekly_pivot_aligned[i] or volume[i] < vol_ma[i] * 1.5:
+            # Exit: price back above EMA(20) or volume drops
+            if close[i] > ema_50_aligned[i] or volume[i] < vol_ma[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -111,9 +88,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Daily timeframe weekly pivot strategy using Monday's OHLC for pivot calculation.
-# Weekly pivot from Monday's OHLC provides significant weekly support/resistance.
-# Breaks above R1 or below S1 with 2x volume indicate institutional interest.
-# Daily EMA(34) ensures trades align with daily trend direction.
-# Works in bull (buy R1 breaks in uptrend) and bear (sell S1 breaks in downtrend).
-# Position size 0.25 balances risk and keeps trade frequency ~15-25/year.
+# Hypothesis: 6h Keltner breakout with daily trend filter and volume confirmation
+# Keltner channels (EMA + ATR) adapt to volatility, providing dynamic support/resistance.
+# Breaks above upper channel with volume in uptrend indicate strong momentum.
+# Breaks below lower channel with volume in downtrend indicate strong selling pressure.
+# Daily EMA(50) ensures trades align with intermediate-term trend.
+# Works in bull (buy upper breaks in uptrend) and bear (sell lower breaks in downtrend).
+# Position size 0.25 balances risk and keeps trade frequency ~15-35/year.
