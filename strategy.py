@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_RSI_Div_Volume_1dTrend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,62 +17,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1-day data ONCE for pivot calculation and trend filter
+    # Load 1d data ONCE for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous day
-    # R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
-    prev_close = df_1d['close'].values
-    prev_high = df_1d['high'].values
-    prev_low = df_1d['low'].values
-    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 2
-    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    # RSI calculation (14-period)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Align pivot levels to 12h timeframe (available after daily close)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # 1d EMA200 for trend filter
+    ema_200_1d = pd.Series(df_1d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Daily EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume spike detection (2x 20-period average)
+    # Volume MA20 for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Ensure EMA34 and volume MA are ready
+    start_idx = 100  # Ensure RSI and other indicators are stable
     
     for i in range(start_idx, n):
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(rsi[i]) or np.isnan(rsi[i-1]) or np.isnan(rsi[i-2]) or 
+            np.isnan(ema_200_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Bullish RSI divergence: price makes lower low, RSI makes higher low
+        bullish_div = (low[i] < low[i-1] and low[i-1] < low[i-2]) and \
+                      (rsi[i] > rsi[i-1] and rsi[i-1] > rsi[i-2])
+        # Bearish RSI divergence: price makes higher high, RSI makes lower high
+        bearish_div = (high[i] > high[i-1] and high[i-1] > high[i-2]) and \
+                      (rsi[i] < rsi[i-1] and rsi[i-1] < rsi[i-2])
+        
+        vol_condition = volume[i] > vol_ma_20[i] * 1.5
+        
         if position == 0:
-            # Long: Break above R3 in daily uptrend with volume spike
-            if close[i] > r3_aligned[i] and ema_34_aligned[i] > ema_34_aligned[i-1] and volume[i] > vol_ma_20[i] * 2.0:
+            # Long: bullish RSI divergence + price above 1d EMA200 + volume confirmation
+            if bullish_div and close[i] > ema_200_1d_aligned[i] and vol_condition:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S3 in daily downtrend with volume spike
-            elif close[i] < s3_aligned[i] and ema_34_aligned[i] < ema_34_aligned[i-1] and volume[i] > vol_ma_20[i] * 2.0:
+            # Short: bearish RSI divergence + price below 1d EMA200 + volume confirmation
+            elif bearish_div and close[i] < ema_200_1d_aligned[i] and vol_condition:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Price returns below S3 or trend reverses
-            if close[i] < s3_aligned[i] or ema_34_aligned[i] < ema_34_aligned[i-1]:
+            # Exit: bearish RSI divergence or price below 1d EMA200
+            if bearish_div or close[i] < ema_200_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price returns above R3 or trend reverses
-            if close[i] > r3_aligned[i] or ema_34_aligned[i] > ema_34_aligned[i-1]:
+            # Exit: bullish RSI divergence or price above 1d EMA200
+            if bullish_div or close[i] > ema_200_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -80,17 +86,15 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with daily trend filter and volume confirmation
-# - Uses Camarilla pivot levels (R3/S3) from previous day as key support/resistance
-# - Long when price breaks above R3 in daily uptrend (EMA34 rising) with volume confirmation
-# - Short when price breaks below S3 in daily downtrend (EMA34 falling) with volume confirmation
-# - Exits when price returns to opposite level (S3 for longs, R3 for shorts) or trend reverses
-# - Volume confirmation (2x average) reduces false breakouts
-# - Position size 0.25 targets ~20-50 trades/year to stay within limits
-# - Works in both bull (breakouts in uptrend) and bear (breakdowns in downtrend)
-# - Daily trend filter ensures alignment with higher timeframe trend
-# - Proven pattern: Similar to top performers (e.g., 4H_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_Dyn)
-# - Expected trades: ~40-80 total over 4 years (10-20/year) to avoid fee drag
-# - Camarilla levels provide mathematical structure based on previous day's range
-# - Daily EMA34 trend filter reduces whipsaws vs same-timeframe signals
-# - Novel combination: Camarilla R3/S3 + daily trend + volume spike on 12h timeframe
+# Hypothesis: 4h RSI divergence with 1d trend filter and volume confirmation
+# - Bullish divergence: price makes lower low while RSI makes higher low (momentum weakening)
+# - Bearish divergence: price makes higher high while RSI makes lower high (momentum weakening)
+# - Works in both bull and bear markets: divergences signal reversals regardless of trend
+# - 1d EMA200 filter ensures trades align with higher timeframe trend
+# - Volume confirmation (1.5x average) reduces false signals
+# - Exits on opposite divergence or trend violation to capture mean reversion
+# - Position size 0.25 limits risk and keeps trade frequency ~20-50/year
+# - RSI divergence is a robust reversal signal effective in ranging and trending markets
+# - Aims for 80-150 total trades over 4 years (20-38/year) to stay within limits
+# - Combines classical momentum divergence with trend filtering for robustness
+# - Avoids overtrading by requiring multiple confluence factors for entry
