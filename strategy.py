@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
-# Long when price breaks above Donchian high (20) AND price > 1d EMA34 AND volume > 1.5x 20-period average.
-# Short when price breaks below Donchian low (20) AND price < 1d EMA34 AND volume > 1.5x 20-period average.
-# Exit when price returns to Donchian midline (10-period average of high/low) or volume drops below average.
-# Designed for 12h timeframe with low trade frequency (target: 15-30/year) to avoid fee drag.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
+# Long when price breaks above Donchian upper band AND price > 1d EMA34 AND volume > 1.5x 20-period average.
+# Short when price breaks below Donchian lower band AND price < 1d EMA34 AND volume > 1.5x 20-period average.
+# Exit when price crosses back through Donchian middle band or volume drops below average.
+# Designed for 4h timeframe with moderate trade frequency (target: 20-50/year) to avoid fee drag.
 # Uses 1d EMA34 for trend filter to avoid counter-trend trades in strong trends.
 # Volume filter ensures participation and avoids low-conviction moves.
-name = "12h_Donchian20_1dEMA34_VolumeFilter"
-timeframe = "12h"
+
+name = "4h_Donchian_20_1dEMA34_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,13 +25,10 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    high_max20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    # Donchian midline (10-period average of high/low)
-    high_avg10 = pd.Series(high).rolling(window=10, min_periods=10).mean().values
-    low_avg10 = pd.Series(low).rolling(window=10, min_periods=10).mean().values
-    donchian_mid = (high_avg10 + low_avg10) / 2
+    # Donchian(20)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    mid_20 = (high_20 + low_20) / 2
     
     # 1d EMA34 for trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -51,7 +49,7 @@ def generate_signals(prices):
     start_idx = 34  # Sufficient warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(high_max20[i]) or np.isnan(low_min20[i]) or np.isnan(donchian_mid[i]) or 
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(mid_20[i]) or 
             np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -59,10 +57,10 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: price breaks above Donchian high, price > 1d EMA34, volume filter
-            long_cond = (close[i] > high_max20[i]) and (close[i] > ema34_1d_aligned[i]) and volume_filter[i]
-            # Short conditions: price breaks below Donchian low, price < 1d EMA34, volume filter
-            short_cond = (close[i] < low_min20[i]) and (close[i] < ema34_1d_aligned[i]) and volume_filter[i]
+            # Long conditions: break above upper band, price > 1d EMA34, volume filter
+            long_cond = (close[i] > high_20[i]) and (close[i] > ema34_1d_aligned[i]) and volume_filter[i]
+            # Short conditions: break below lower band, price < 1d EMA34, volume filter
+            short_cond = (close[i] < low_20[i]) and (close[i] < ema34_1d_aligned[i]) and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -71,15 +69,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price returns to Donchian midline OR volume filter fails
-            if (close[i] <= donchian_mid[i]) or (not volume_filter[i]):
+            # Long exit: price crosses below mid band OR volume filter fails
+            if close[i] < mid_20[i] or not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price returns to Donchian midline OR volume filter fails
-            if (close[i] >= donchian_mid[i]) or (not volume_filter[i]):
+            # Short exit: price crosses above mid band OR volume filter fails
+            if close[i] > mid_20[i] or not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
