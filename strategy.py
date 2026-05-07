@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_Spike_v15"
-timeframe = "4h"
+name = "1d_1w_Trend_Continuation_With_Volume_Confirmation"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,110 +17,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h and 1d data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Load 1d and 1w data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_4h) < 20 or len(df_1d) < 20:
+    if len(df_1d) < 20 or len(df_1w) < 20:
         return np.zeros(n)
     
-    # 1d Camarilla levels: R3, S3 from previous day
-    # Camarilla: R3 = close + (high - low) * 1.1/2, S3 = close - (high - low) * 1.1/2
-    prev_close_1d = df_1d['close'].shift(1).values
-    prev_high_1d = df_1d['high'].shift(1).values
-    prev_low_1d = df_1d['low'].shift(1).values
-    camarilla_r3_1d = prev_close_1d + (prev_high_1d - prev_low_1d) * 1.1 / 2
-    camarilla_s3_1d = prev_close_1d - (prev_high_1d - prev_low_1d) * 1.1 / 2
+    # 1w EMA34 for trend filter (only trade in direction of weekly trend)
+    ema34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Align 1d Camarilla levels to 4h timeframe
-    camarilla_r3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
-    camarilla_s3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
+    # 1d ATR(14) for volatility filter and stoploss
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]  # first bar
+    atr = np.zeros_like(tr)
+    atr[14] = np.mean(tr[1:15])
+    for i in range(15, len(tr)):
+        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
     
-    # 1d ADX for trend filter (ADX > 25 indicates strong trend)
-    def calculate_adx(high, low, close, period=14):
-        plus_dm = np.zeros_like(high)
-        minus_dm = np.zeros_like(high)
-        tr = np.zeros_like(high)
-        
-        for i in range(1, len(high)):
-            plus_dm[i] = max(0, high[i] - high[i-1])
-            minus_dm[i] = max(0, low[i-1] - low[i])
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        # Smooth using Wilder's smoothing (alpha = 1/period)
-        atr = np.zeros_like(tr)
-        plus_dm_smooth = np.zeros_like(plus_dm)
-        minus_dm_smooth = np.zeros_like(minus_dm)
-        
-        atr[period] = np.nansum(tr[1:period+1])
-        plus_dm_smooth[period] = np.nansum(plus_dm[1:period+1])
-        minus_dm_smooth[period] = np.nansum(plus_dm[1:period+1])
-        
-        for i in range(period+1, len(tr)):
-            atr[i] = atr[i-1] - (atr[i-1] / period) + tr[i]
-            plus_dm_smooth[i] = plus_dm_smooth[i-1] - (plus_dm_smooth[i-1] / period) + plus_dm[i]
-            minus_dm_smooth[i] = minus_dm_smooth[i-1] - (minus_dm_smooth[i-1] / period) + minus_dm[i]
-        
-        # Avoid division by zero
-        plus_di = np.where(atr != 0, 100 * plus_dm_smooth / atr, 0)
-        minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
-        dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-        
-        # Smooth DX to get ADX
-        adx = np.zeros_like(dx)
-        adx[2*period] = np.nansum(dx[period+1:2*period+1]) / period
-        for i in range(2*period+1, len(dx)):
-            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # 4h volume spike: > 2.0x 20-period average (balanced filter)
-    vol_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike_4h = volume > 2.0 * vol_ma_4h
-    
-    # 4h EMA20 for entry filter
-    ema20_4h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # 1d volume spike: > 2x 20-period average
+    vol_ma_1d = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = volume > 2.0 * vol_ma_1d
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 34)  # Wait for ADX and volume MA
+    start_idx = max(34, 20)  # Wait for EMA34 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(camarilla_r3_1d_aligned[i]) or np.isnan(camarilla_s3_1d_aligned[i]) or 
-            np.isnan(adx_1d_aligned[i])):
+        if np.isnan(ema34_1w_aligned[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Break above R3 with volume spike, strong trend (ADX > 25), and price above EMA20
-            if (close[i] > camarilla_r3_1d_aligned[i] and vol_spike_4h[i] and 
-                adx_1d_aligned[i] > 25 and close[i] > ema20_4h[i]):
+            # Long: Close above weekly EMA34 with volume spike
+            if close[i] > ema34_1w_aligned[i] and vol_spike_1d[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S3 with volume spike, strong trend (ADX > 25), and price below EMA20
-            elif (close[i] < camarilla_s3_1d_aligned[i] and vol_spike_4h[i] and 
-                  adx_1d_aligned[i] > 25 and close[i] < ema20_4h[i]):
+            # Short: Close below weekly EMA34 with volume spike
+            elif close[i] < ema34_1w_aligned[i] and vol_spike_1d[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Price below S3 or trend weakening (ADX < 20)
-            if close[i] < camarilla_s3_1d_aligned[i] or adx_1d_aligned[i] < 20:
+            # Exit: Close below weekly EMA34 or ATR-based stop (2x ATR from entry)
+            if close[i] < ema34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price above R3 or trend weakening (ADX < 20)
-            if close[i] > camarilla_r3_1d_aligned[i] or adx_1d_aligned[i] < 20:
+            # Exit: Close above weekly EMA34 or ATR-based stop
+            if close[i] > ema34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -128,6 +78,7 @@ def generate_signals(prices):
     
     return signals
 
-# Note: Uses 1d Camarilla levels for stronger S/R, 2.0x volume filter, and ADX trend filter.
-# Position size 0.25 limits risk. Target 20-40 trades/year to minimize fee drift.
-# Exit on retrace to S3/R3 or trend weakening (ADX < 20).
+# Hypothesis: Weekly trend provides directional bias, daily volume confirms momentum.
+# Works in bull markets (ride the trend) and bear markets (short the trend).
+# Volume spike filters out low-momentum moves. ATR-based exit manages risk.
+# Target: 10-25 trades/year to minimize fee drag. Position size 0.25 limits drawdown.
