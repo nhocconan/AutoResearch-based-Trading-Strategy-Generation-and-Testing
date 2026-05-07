@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_AB_Swing_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_1dTrend_1wFilter_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,88 +17,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE for trend filter
+    # Load daily data for Donchian and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Daily EMA for trend filter
-    ema_20_1d = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    # Load weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
-    # A-B Swing: A = prior swing low/high, B = current swing high/low
-    # We'll use 5-period high/low for swing points
-    roll_high_5 = pd.Series(high).rolling(window=5, min_periods=5).max().values
-    roll_low_5 = pd.Series(low).rolling(window=5, min_periods=5).min().values
+    # Daily Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Swing detection: new high/low in last 3 bars
-    swing_high = (roll_high_5 == high) & (high >= np.roll(high, 1)) & (high >= np.roll(high, 2)) & (high >= np.roll(high, 3))
-    swing_low = (roll_low_5 == low) & (low <= np.roll(low, 1)) & (low <= np.roll(low, 2)) & (low <= np.roll(low, 3))
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Most recent swing points (look back up to 20 bars)
-    def find_most_recent(arr, start_idx):
-        for i in range(start_idx, max(-1, start_idx - 20), -1):
-            if arr[i]:
-                return i
-        return -1
+    # Weekly EMA34 for trend filter
+    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Volume confirmation
-    vol_ma_10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    # Volume spike detection (2x 20-period average)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_20_1d_aligned[i]) or np.isnan(vol_ma_10[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Find most recent swing high/low
-        swing_high_idx = find_most_recent(swing_high, i-1)
-        swing_low_idx = find_most_recent(swing_low, i-1)
+        # Volume condition
+        vol_condition = volume[i] > vol_ma_20[i] * 2.0
         
-        if swing_high_idx == -1 or swing_low_idx == -1:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        swing_high_price = high[swing_high_idx]
-        swing_low_price = low[swing_low_idx]
-        
-        # Avoid division by zero
-        if swing_high_price == swing_low_price:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Calculate where price is in the swing range (0 = low, 1 = high)
-        price_in_range = (close[i] - swing_low_price) / (swing_high_price - swing_low_price)
+        # Trend condition: both daily and weekly EMA34 must agree
+        bullish_trend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and ema_34_1w_aligned[i] > ema_34_1w_aligned[i-1]
+        bearish_trend = ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and ema_34_1w_aligned[i] < ema_34_1w_aligned[i-1]
         
         if position == 0:
-            # Long: price near swing low (0-0.3) in daily uptrend with volume
-            # Short: price near swing high (0.7-1.0) in daily downtrend with volume
-            if price_in_range < 0.3 and ema_20_1d_aligned[i] > ema_20_1d_aligned[i-1] and volume[i] > vol_ma_10[i] * 1.5:
+            # Long: Donchian breakout above upper band in bullish trend with volume
+            if close[i] > donchian_high[i] and bullish_trend and vol_condition:
                 signals[i] = 0.25
                 position = 1
-            elif price_in_range > 0.7 and ema_20_1d_aligned[i] < ema_20_1d_aligned[i-1] and volume[i] > vol_ma_10[i] * 1.5:
+            # Short: Donchian breakdown below lower band in bearish trend with volume
+            elif close[i] < donchian_low[i] and bearish_trend and vol_condition:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price reaches swing high or trend changes
-            if price_in_range > 0.7 or ema_20_1d_aligned[i] < ema_20_1d_aligned[i-1]:
+            # Exit: price back below Donchian middle or trend turns bearish
+            donchian_mid = (donchian_high[i] + donchian_low[i]) / 2
+            if close[i] < donchian_mid or not bullish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price reaches swing low or trend changes
-            if price_in_range < 0.3 or ema_20_1d_aligned[i] > ema_20_1d_aligned[i-1]:
+            # Exit: price back above Donchian middle or trend turns bullish
+            donchian_mid = (donchian_high[i] + donchian_low[i]) / 2
+            if close[i] > donchian_mid or not bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,16 +91,13 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 6h A-B Swing trading with daily trend filter and volume confirmation
-# - Identifies swing highs/lows using 5-period extremes
-# - Enters long near swing lows (0-30% of range) in daily uptrends
-# - Enters short near swing highs (70-100% of range) in daily downtrends
-# - Requires volume confirmation (1.5x average) to avoid false signals
-# - Exits when price reaches opposite swing or trend changes
-# - Works in both bull (buy dips in uptrend) and bear (sell rallies in downtrend)
-# - Position size 0.25 balances risk/reward while limiting trades
-# - Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag
-# - Novel: Pure price action swing trading with institutional trend/volume filters
-# - Avoids lagging indicators; uses actual swing points for precise entries
-# - Daily EMA20 trend filter ensures alignment with higher timeframe momentum
-# - Volume spike requirement reduces whipsaws in choppy markets
+# Hypothesis: 12h Donchian(20) breakouts with daily/weekly EMA34 trend alignment and volume confirmation
+# - Long when price breaks above 20-day Donchian high in bullish trend (both daily and weekly EMA34 rising)
+# - Short when price breaks below 20-day Donchian low in bearish trend (both daily and weekly EMA34 falling)
+# - Volume confirmation (2x average) reduces false breakouts
+# - Exit when price returns to Donchian middle or trend alignment breaks
+# - Position size 0.25 targets ~20-50 trades/year to stay within 12h limits
+# - Dual timeframe trend filter (daily + weekly) reduces whipsaws vs single timeframe
+# - Works in both bull (breakouts in uptrend) and bear (breakdowns in downtrend) markets
+# - Donchian channels provide clear support/resistance with adaptive lookback period
+# - Aims for 80-200 total trades over 4 years (20-50/year) to stay within limits
