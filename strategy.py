@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 
-# 12h_Camarilla_R3S3_Breakout_1wTrend_Volume
+# 12h_Camarilla_R3S3_Breakout_1wTrend_Volume_v2
 # Hypothesis: 12h Camarilla R3/S3 breakout filtered by 1w ADX trend (>25) and volume spike (>2x 10-week average).
 # Designed for low-frequency, high-conviction trades in both bull and bear markets.
 # Target: 15-35 trades/year per symbol to avoid fee drag.
 
-name = "12h_Camarilla_R3S3_Breakout_1wTrend_Volume"
+name = "12h_Camarilla_R3S3_Breakout_1wTrend_Volume_v2"
 timeframe = "12h"
 leverage = 1.0
 
