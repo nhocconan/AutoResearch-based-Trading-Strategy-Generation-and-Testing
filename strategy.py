@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_TRIX_Pivot_Refill_v1"
-timeframe = "12h"
+name = "6h_ADX_Alligator_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,73 +17,108 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for weekly pivot and TRIX
+    # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Weekly pivot points using Monday open, Friday close approximation
-    # Calculate weekly high/low/close from daily data using 5-day windows
-    week_high = pd.Series(high).rolling(window=5, min_periods=5).max().values
-    week_low = pd.Series(low).rolling(window=5, min_periods=5).min().values
-    week_close = pd.Series(close).rolling(window=5, min_periods=5).mean().values
+    # Williams Alligator on daily data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Pivot levels
-    pp = (week_high + week_low + week_close) / 3
-    r1 = 2 * pp - week_low
-    s1 = 2 * pp - week_high
+    # Alligator lines: Jaw (13-period, 8-shift), Teeth (8-period, 5-shift), Lips (5-period, 3-shift)
+    jaw = pd.Series(high_1d).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth = pd.Series(low_1d).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # TRIX on daily close (12-period EMA triple)
-    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
-    trix = 100 * (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1)
-    trix[0] = 0  # first value undefined
+    # Align Alligator lines to 6h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
     
-    # Volume spike detection: 20-period average (10 days of 12h bars)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # ADX on 1d for trend strength
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align all indicators to 12h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    # Directional Movement
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
+    
+    # Smoothed values (14-period Wilder's smoothing)
+    def wilder_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            result[period-1] = np.nansum(data[:period])
+            for i in range(period, len(data)):
+                result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
+    
+    tr14 = wilder_smooth(tr, 14)
+    plus_dm14 = wilder_smooth(plus_dm, 14)
+    minus_dm14 = wilder_smooth(minus_dm, 14)
+    
+    # DI and DX
+    plus_di = np.where(tr14 != 0, 100 * plus_dm14 / tr14, 0)
+    minus_di = np.where(tr14 != 0, 100 * minus_dm14 / tr14, 0)
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = wilder_smooth(dx, 14)
+    
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Volume spike detection: 24-period average (4 days of 6h bars)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(12, 20, 5)  # Wait for all indicators
+    start_idx = max(30, 24)  # Wait for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(pp_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(trix_aligned[i]) or
-            np.isnan(vol_ma_20_aligned[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_24[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above S1 with TRIX positive and volume spike
-            vol_condition = volume[i] > vol_ma_20_aligned[i] * 1.8
-            if close[i] > s1_aligned[i] and trix_aligned[i] > 0 and vol_condition:
+            # Alligator alignment: Lips > Teeth > Jaw = bullish, Lips < Teeth < Jaw = bearish
+            bullish_alignment = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]
+            bearish_alignment = lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaw_aligned[i]
+            
+            vol_condition = volume[i] > vol_ma_24[i] * 1.8
+            strong_trend = adx_aligned[i] > 25
+            
+            # Long: bullish alignment + volume + strong trend
+            if bullish_alignment and vol_condition and strong_trend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below R1 with TRIX negative and volume spike
-            elif close[i] < r1_aligned[i] and trix_aligned[i] < 0 and vol_condition:
+            # Short: bearish alignment + volume + strong trend
+            elif bearish_alignment and vol_condition and strong_trend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below pivot or TRIX turns negative
-            if close[i] < pp_aligned[i] or trix_aligned[i] < 0:
+            # Exit: alignment breaks or ADX weakens
+            if not (lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]) or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above pivot or TRIX turns positive
-            if close[i] > pp_aligned[i] or trix_aligned[i] > 0:
+            # Exit: alignment breaks or ADX weakens
+            if not (lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaw_aligned[i]) or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -91,16 +126,12 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: TRIX + Weekly Pivot with volume confirmation for 12h timeframe
-# - TRIX (triple EMA crossover) filters momentum direction
-# - Weekly pivot S1/R1 act as dynamic support/resistance levels
-# - Long when price breaks above S1 with TRIX>0 and volume spike
-# - Short when price breaks below R1 with TRIX<0 and volume spike
-# - Exit when price returns to weekly pivot or TRIX reverses
-# - Works in bull/bear: TRIX filters false breakouts, pivot provides structure
-# - Volume confirmation ensures institutional participation
-# - Position size 0.25 targets 15-35 trades/year, avoiding fee drag
-# - Weekly pivot from daily data provides weekly structure without look-ahead
-# - TRIX calculated on daily close with proper alignment avoids look-ahead
-# - Max 2 conditions for entry reduces overtrading risk
-# - Designed for BTC/ETH primary focus with applicability to SOL
+# Hypothesis: 6s Williams Alligator + ADX trend filter with volume confirmation
+# - Alligator identifies trend direction via jaw/teeth/lips alignment
+# - ADX > 25 ensures strong trend, < 20 signals weakening for exit
+# - Volume spike (1.8x average) confirms institutional participation
+# - Works in bull markets (buy on bullish alignment) and bear markets (sell on bearish alignment)
+# - Exit when alignment breaks or trend weakens
+# - Position size 0.25 targets 20-40 trades/year, avoiding fee drag
+# - Combines trend-following (Alligator) with trend-strength filter (ADX) for robustness
+# - Volume filter reduces false signals during low-participation periods
