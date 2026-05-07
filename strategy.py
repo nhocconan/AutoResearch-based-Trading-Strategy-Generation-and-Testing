@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_WR_Extreme_1wTrend
-Williams %R (14) > 0 oversold and < -80 oversold with 1-week EMA trend filter.
-Extreme readings in trending markets yield high-probability reversals.
-Designed for 1d timeframe with 1-week trend filter to reduce whipsaw and capture swings.
-Target: 15-25 trades/year to minimize fee drag.
+6h_Donchian20_WeeklyPivotDirection_VolumeConfirmation
+Hypothesis: Price breaks Donchian(20) on 6h with weekly pivot direction (from 1w close) and volume >1.5x average. Uses weekly pivot for long-term bias to work in both bull/bear markets. Targets 15-25 trades/year to minimize fee drag.
 """
 
-name = "1d_WR_Extreme_1wTrend"
-timeframe = "1d"
+name = "6h_Donchian20_WeeklyPivotDirection_VolumeConfirmation"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,54 +20,86 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Weekly data for trend filter
+    # Weekly data for pivot direction and Donchian context
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Weekly EMA trend (34-period)
-    ema_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Previous week's OHLC for pivot calculation
+    prev_week_high = df_1w['high'].shift(1).values
+    prev_week_low = df_1w['low'].shift(1).values
+    prev_week_close = df_1w['close'].shift(1).values
+    prev_week_open = df_1w['open'].shift(1).values
     
-    # Williams %R (14-period) on daily
-    lookback = 14
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    # Avoid division by zero
-    rr = highest_high - lowest_low
-    wr = np.where(rr != 0, -100 * (highest_high - close) / rr, -50)
+    # Weekly pivot point and key levels
+    weekly_pivot = (prev_week_high + prev_week_low + prev_week_close) / 3.0
+    weekly_r1 = 2 * weekly_pivot - prev_week_low
+    weekly_s1 = 2 * weekly_pivot - prev_week_high
+    weekly_r2 = weekly_pivot + (prev_week_high - prev_week_low)
+    weekly_s2 = weekly_pivot - (prev_week_high - prev_week_low)
+    
+    # Weekly bias: bullish if close > pivot, bearish if close < pivot
+    weekly_bullish = prev_week_close > weekly_pivot
+    weekly_bearish = prev_week_close < weekly_pivot
+    
+    # Align weekly bias and pivot levels to 6h timeframe
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
+    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
+    weekly_r2_aligned = align_htf_to_ltf(prices, df_1w, weekly_r2)
+    weekly_s2_aligned = align_htf_to_ltf(prices, df_1w, weekly_s2)
+    
+    # Donchian channels (20-period) on 6h data
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume confirmation: current volume > 1.5 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(lookback, n):
-        if (np.isnan(ema_1w_aligned[i]) or np.isnan(wr[i]) or
-            np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
+    for i in range(20, n):
+        # Skip if any critical value is NaN
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_r1_aligned[i]) or
+            np.isnan(weekly_s1_aligned[i]) or np.isnan(weekly_r2_aligned[i]) or
+            np.isnan(weekly_s2_aligned[i]) or np.isnan(weekly_bullish_aligned[i]) or
+            np.isnan(weekly_bearish_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: WR oversold (< -80) in weekly uptrend
-            if wr[i] < -80 and close[i] > ema_1w_aligned[i]:
+            # Long: Donchian breakout above weekly pivot in bullish weekly context
+            if (high[i] > donchian_high[i] and 
+                close[i] > weekly_pivot_aligned[i] and 
+                weekly_bullish_aligned[i] > 0.5 and
+                volume[i] > 1.5 * vol_ma[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: WR overbought (> -20) in weekly downtrend
-            elif wr[i] > -20 and close[i] < ema_1w_aligned[i]:
+            # Short: Donchian breakout below weekly pivot in bearish weekly context
+            elif (low[i] < donchian_low[i] and 
+                  close[i] < weekly_pivot_aligned[i] and 
+                  weekly_bearish_aligned[i] > 0.5 and
+                  volume[i] > 1.5 * vol_ma[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: WR returns above -50 or trend changes
-            if wr[i] > -50 or close[i] < ema_1w_aligned[i]:
+            # Exit: price closes below weekly pivot or Donchian low
+            if close[i] < weekly_pivot_aligned[i] or close[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: WR returns below -50 or trend changes
-            if wr[i] < -50 or close[i] > ema_1w_aligned[i]:
+            # Exit: price closes above weekly pivot or Donchian high
+            if close[i] > weekly_pivot_aligned[i] or close[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
