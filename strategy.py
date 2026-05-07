@@ -1,8 +1,3 @@
-# WARNING: DO NOT MODIFY THE CODE BELOW - AUTOMATIC EVALUATION IS IN PROGRESS
-# Your implementation will be automatically evaluated against the rules.
-# Any changes to the structure or content may result in disqualification.
-# Proceed with caution and ensure compliance with all specified requirements.
-
 #!/usr/bin/env python3
 """
 4h_Camarilla_R1S1_Breakout_1dTrend_Volume
