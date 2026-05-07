@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_KAMA_Direction_RSI_Chop
-Hypothesis: KAMA trend direction on 12h combined with RSI and Choppiness index for regime filtering. 
-Works in bull markets by capturing trends and in bear markets by avoiding false signals via chop filter.
-Designed for 15-25 trades/year per symbol with strict entry conditions to minimize fee drag.
+6h_MultiTimeframe_Breakout_Retest_V1
+Hypothesis: Breakouts from 6h Donchian(20) confirmed by weekly trend and retested with volume.
+Works in bull/bear by using weekly trend filter and requiring volume confirmation on breakout and retest.
+Target: 20-40 trades/year per symbol with strict entry conditions.
 """
-name = "12h_KAMA_Direction_RSI_Chop"
-timeframe = "12h"
+name = "6h_MultiTimeframe_Breakout_Retest_V1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,91 +15,35 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Choppiness index (regime filter)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate Choppiness Index (14-period)
+    # Get daily data for breakout context
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Calculate weekly EMA20 for trend filter
+    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    
+    # Calculate daily Donchian(20) for breakout levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with indices
-    
-    # ATR(14)
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Sum of true ranges over 14 periods
-    sum_tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    
-    # Highest high and lowest low over 14 periods
-    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    
-    # Chop = 100 * log10(sum_tr_14 / (hh_14 - ll_14)) / log10(14)
-    # Avoid division by zero
-    range_14 = hh_14 - ll_14
-    chop = np.where(range_14 > 0, 100 * np.log10(sum_tr_14 / range_14) / np.log10(14), 50)
-    chop = np.concatenate([[np.nan] * 13, chop[13:]])  # align with 1d index
-    
-    # Align Chop to 12h timeframe with 1-bar delay (ensure previous day's chop is used)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # Get 12h data for KAMA and RSI
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
-        return np.zeros(n)
-    
-    close_12h = df_12h['close'].values
-    
-    # KAMA parameters
-    er_len = 10
-    fast_sc = 2 / (2 + 1)  # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    
-    # Efficiency Ratio
-    change = np.abs(np.concatenate([[np.nan], np.diff(close_12h)]))
-    sum_abs_change = pd.Series(change).rolling(window=er_len, min_periods=er_len).sum().values
-    er = np.where(sum_abs_change > 0, np.abs(np.concatenate([[np.nan] * (er_len-1), np.diff(close_12h[er_len-1:])])) / sum_abs_change, 0)
-    
-    # Smoothing Constant
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # KAMA
-    kama = np.full_like(close_12h, np.nan)
-    kama[er_len] = close_12h[er_len]  # seed
-    for i in range(er_len + 1, len(close_12h)):
-        kama[i] = kama[i-1] + sc[i] * (close_12h[i] - kama[i-1])
-    
-    # Align KAMA to 12h timeframe (no additional delay needed as it's based on current bar)
-    kama_aligned = align_htf_to_ltf(prices, df_12h, kama)
-    
-    # RSI(14) on 12h
-    delta = np.concatenate([[np.nan], np.diff(close_12h)])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = np.concatenate([[np.nan] * 14, rsi[14:]])  # align
-    
-    # Align RSI to 12h timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_12h, rsi)
+    donchian_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donchian_high_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_20)
+    donchian_low_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_20)
     
     # Volume filter: current volume > 1.5 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -107,43 +51,65 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    breakout_high = 0.0
+    breakout_low = 0.0
+    in_breakout_setup = False
     
-    start_idx = 50  # sufficient warmup
+    start_idx = 50  # Sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any data is not ready
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(chop_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(donchian_high_20_aligned[i]) or 
+            np.isnan(donchian_low_20_aligned[i]) or np.isnan(vol_avg[i]) or 
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price > KAMA (uptrend), RSI > 50, Chop < 61.8 (trending market)
-            if (close[i] > kama_aligned[i] and 
-                rsi_aligned[i] > 50 and 
-                chop_aligned[i] < 61.8 and 
-                volume_filter[i]):
-                signals[i] = 0.25
-                position = 1
-            # Short: price < KAMA (downtrend), RSI < 50, Chop < 61.8 (trending market)
-            elif (close[i] < kama_aligned[i] and 
-                  rsi_aligned[i] < 50 and 
-                  chop_aligned[i] < 61.8 and 
-                  volume_filter[i]):
-                signals[i] = -0.25
-                position = -1
-        elif position != 0:
-            # Exit: opposite condition
+            # Check for new breakout setup
+            if not in_breakout_setup:
+                if close[i] > donchian_high_20_aligned[i] and volume_filter[i]:
+                    # Bullish breakout
+                    in_breakout_setup = True
+                    breakout_high = donchian_high_20_aligned[i]
+                    breakout_low = None
+                elif close[i] < donchian_low_20_aligned[i] and volume_filter[i]:
+                    # Bearish breakout
+                    in_breakout_setup = True
+                    breakout_high = None
+                    breakout_low = donchian_low_20_aligned[i]
+            
+            # Enter on retest of breakout level with volume
+            if in_breakout_setup:
+                if breakout_high is not None and close[i] <= breakout_high * 1.005 and close[i] >= breakout_high * 0.995:
+                    if volume_filter[i] and close[i] > ema_20_1w_aligned[i]:
+                        signals[i] = 0.25
+                        position = 1
+                        in_breakout_setup = False  # Reset after entry
+                elif breakout_low is not None and close[i] >= breakout_low * 0.995 and close[i] <= breakout_low * 1.005:
+                    if volume_filter[i] and close[i] < ema_20_1w_aligned[i]:
+                        signals[i] = -0.25
+                        position = -1
+                        in_breakout_setup = False  # Reset after entry
+            
+            # Reset breakout setup if price moves too far without entry
+            if in_breakout_setup:
+                if breakout_high is not None and close[i] > breakout_high * 1.02:
+                    in_breakout_setup = False
+                elif breakout_low is not None and close[i] < breakout_low * 0.98:
+                    in_breakout_setup = False
+        else:
+            # Exit conditions: weekly trend reversal or opposite Donchian break
             if position == 1:
-                if close[i] <= kama_aligned[i] or rsi_aligned[i] < 40:
+                if close[i] < ema_20_1w_aligned[i] or close[i] < donchian_low_20_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] >= kama_aligned[i] or rsi_aligned[i] > 60:
+                if close[i] > ema_20_1w_aligned[i] or close[i] > donchian_high_20_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
