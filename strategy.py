@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Fractal Breakout with 1d trend filter and volume confirmation.
-# Bullish fractal: lowest low with two higher lows on each side.
-# Bearish fractal: highest high with two lower highs on each side.
-# Long when price breaks above bearish fractal (resistance) AND 1d EMA50 up trending AND volume > 1.5x 20-period average.
-# Short when price breaks below bullish fractal (support) AND 1d EMA50 down trending AND volume > 1.5x 20-period average.
-# Exit when price returns inside the fractal level or volume drops below average.
-# Designed for 6h timeframe with moderate trade frequency (target: 15-30/year) to avoid fee drag.
-# Uses 1d EMA50 for trend filter to avoid counter-trend trades in strong trends.
-# Volume filter ensures participation and avoids low-conviction moves.
-name = "6h_WilliamsFractal_Breakout_1dEMA50_VolumeFilter"
-timeframe = "6h"
+# Hypothesis: 1d Weekly RSI Divergence with 1w EMA50 Trend Filter and Volume Confirmation
+# Long when: Weekly RSI bullish divergence (price makes lower low, RSI makes higher low) AND price > weekly EMA50 AND volume > 1.5x 20-day average
+# Short when: Weekly RSI bearish divergence (price makes higher high, RSI makes lower high) AND price < weekly EMA50 AND volume > 1.5x 20-day average
+# Exit when weekly RSI returns to neutral zone (40-60) or volume drops below average
+# Designed for 1d timeframe with low trade frequency (target: 10-25/year) to minimize fee drag
+# Uses weekly timeframe for divergence detection to capture major reversals
+# Volume filter ensures institutional participation
+# RSI divergence works in both bull and bear markets by identifying exhaustion
+
+name = "1d_WeeklyRSI_Divergence_EMA50_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,88 +26,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Williams Fractals: need 5-point window (2 left, center, 2 right)
-    # Bearish fractal: highest high with two lower highs on each side
-    # Bullish fractal: lowest low with two higher lows on each side
-    n_fractal = 5
-    half = n_fractal // 2  # 2
-    
-    bearish_fractal = np.full(n, np.nan)
-    bullish_fractal = np.full(n, np.nan)
-    
-    # Start from index 2 to n-3 to have 2 left and 2 right
-    for i in range(half, n - half):
-        # Check for bearish fractal: current high is highest in window
-        window_high = high[i - half:i + half + 1]
-        if high[i] == np.max(window_high):
-            # Ensure it's strictly higher than neighbors (not equal)
-            if high[i] > high[i - 2] and high[i] > high[i - 1] and \
-               high[i] > high[i + 1] and high[i] > high[i + 2]:
-                bearish_fractal[i] = high[i]
-        
-        # Check for bullish fractal: current low is lowest in window
-        window_low = low[i - half:i + half + 1]
-        if low[i] == np.min(window_low):
-            # Ensure it's strictly lower than neighbors
-            if low[i] < low[i - 2] and low[i] < low[i - 1] and \
-               low[i] < low[i + 1] and low[i] < low[i + 2]:
-                bullish_fractal[i] = low[i]
-    
-    # 1d EMA50 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Weekly EMA50 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # EMA50 direction (trend)
-    ema50_rising = np.zeros_like(ema50_1d_aligned, dtype=bool)
-    ema50_falling = np.zeros_like(ema50_1d_aligned, dtype=bool)
-    ema50_rising[1:] = ema50_1d_aligned[1:] > ema50_1d_aligned[:-1]
-    ema50_falling[1:] = ema50_1d_aligned[1:] < ema50_1d_aligned[:-1]
+    # Weekly RSI for divergence detection
+    rsi_period = 14
+    delta = pd.Series(close_1w).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
+    avg_loss = loss.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_values)
     
-    # Volume filter: current volume > 1.5x 20-period average
+    # Volume filter: current volume > 1.5x 20-day average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Sufficient warmup for indicators
+    start_idx = 50  # Sufficient warmup for weekly indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(bearish_fractal[i]) or np.isnan(bullish_fractal[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(ema50_rising[i]) or 
-            np.isnan(ema50_falling[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(rsi_1w_aligned[i]) or 
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price breaks above bearish fractal (resistance), EMA50 rising, volume filter
-            long_cond = (close[i] > bearish_fractal[i]) and ema50_rising[i] and volume_filter[i]
-            # Short conditions: price breaks below bullish fractal (support), EMA50 falling, volume filter
-            short_cond = (close[i] < bullish_fractal[i]) and ema50_falling[i] and volume_filter[i]
-            
-            if long_cond:
-                signals[i] = 0.25
-                position = 1
-            elif short_cond:
-                signals[i] = -0.25
-                position = -1
+            # Need at least 2 weekly points for divergence check
+            if i >= 50 + 16:  # Need 2 weekly bars (approximately 16 daily bars per week)
+                # Get current and previous weekly aligned values
+                rsi_now = rsi_1w_aligned[i]
+                rsi_prev = rsi_1w_aligned[i-16] if i-16 >= 0 else rsi_1w_aligned[0]
+                price_now = close[i]
+                price_prev = close[i-16] if i-16 >= 0 else close[0]
+                
+                # Bullish divergence: price makes lower low, RSI makes higher low
+                bull_div = (price_now < price_prev) and (rsi_now > rsi_prev)
+                # Bearish divergence: price makes higher high, RSI makes lower high
+                bear_div = (price_now > price_prev) and (rsi_now < rsi_prev)
+                
+                if bull_div and (price_now > ema50_1w_aligned[i]) and volume_filter[i]:
+                    signals[i] = 0.25
+                    position = 1
+                elif bear_div and (price_now < ema50_1w_aligned[i]) and volume_filter[i]:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Long exit: price returns below bearish fractal OR EMA50 falls OR volume filter fails
-            if (close[i] < bearish_fractal[i]) or (not ema50_rising[i]) or (not volume_filter[i]):
+            # Long exit: RSI returns to neutral (>50) or volume filter fails
+            if rsi_1w_aligned[i] > 50 or not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price returns above bullish fractal OR EMA50 rises OR volume filter fails
-            if (close[i] > bullish_fractal[i]) or (not ema50_falling[i]) or (not volume_filter[i]):
+            # Short exit: RSI returns to neutral (<50) or volume filter fails
+            if rsi_1w_aligned[i] < 50 or not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
