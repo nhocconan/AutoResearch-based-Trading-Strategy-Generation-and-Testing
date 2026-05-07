@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_TRIX_Signal_Crossover_12hTrend"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,46 +17,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h trend filter (HTF)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # 1d trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    ema34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
-    trend_up = close > ema34_12h_aligned
-    trend_down = close < ema34_12h_aligned
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    trend_up = close > ema34_1d_aligned
+    trend_down = close < ema34_1d_aligned
     
-    # TRIX calculation (15-period triple EMA)
-    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
+    # Volume spike filter (volume > 1.5x 20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (vol_ma * 1.5)
     
-    # TRIX = (ema3 - ema3_prev) / ema3_prev * 100
-    trix = np.zeros(n)
-    trix[1:] = (ema3[1:] - ema3[:-1]) / ema3[:-1] * 100
-    trix[0] = 0
+    # Camarilla pivot levels from 1d OHLC
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Signal line (9-period EMA of TRIX)
-    signal_line = pd.Series(trix).ewm(span=9, adjust=False, min_periods=9).mean().values
+    # Calculate Camarilla levels for each 1d bar
+    camarilla_high = high_1d + (high_1d - low_1d) * 1.1 / 12  # R3 level
+    camarilla_low = low_1d - (high_1d - low_1d) * 1.1 / 12   # S3 level
     
-    # Histogram (TRIX - signal)
-    hist = trix - signal_line
+    camarilla_high_aligned = align_htf_to_ltf(prices, df_1d, camarilla_high)
+    camarilla_low_aligned = align_htf_to_ltf(prices, df_1d, camarilla_low)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 2  # ~12 hours
+    cooldown_bars = 3  # ~12 hours
     
-    start_idx = max(15*3, 9)  # Ensure TRIX calculation is valid
+    start_idx = 20  # Ensure volume MA is valid
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema34_12h_aligned[i]) or 
-            np.isnan(trix[i]) or 
-            np.isnan(signal_line[i]) or 
-            np.isnan(hist[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(camarilla_high_aligned[i]) or 
+            np.isnan(camarilla_low_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,38 +68,39 @@ def generate_signals(prices):
         bars_since_last_trade += 1
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: TRIX crosses above signal line AND 12h uptrend
-            if hist[i-1] <= 0 and hist[i] > 0 and trend_up[i]:
-                signals[i] = 0.25
+            # Long: Price breaks above R3 level AND 1d uptrend AND volume spike
+            if close[i] > camarilla_high_aligned[i] and trend_up[i] and vol_spike[i]:
+                signals[i] = 0.30
                 position = 1
                 bars_since_last_trade = 0
-            # Short: TRIX crosses below signal line AND 12h downtrend
-            elif hist[i-1] >= 0 and hist[i] < 0 and trend_down[i]:
-                signals[i] = -0.25
+            # Short: Price breaks below S3 level AND 1d downtrend AND volume spike
+            elif close[i] < camarilla_low_aligned[i] and trend_down[i] and vol_spike[i]:
+                signals[i] = -0.30
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit: TRIX crosses below signal line OR trend turns down
-            if hist[i] < 0 or not trend_up[i]:
+            # Exit: Price closes below camarilla low OR trend turns down
+            if close[i] < camarilla_low_aligned[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit: TRIX crosses above signal line OR trend turns up
-            if hist[i] > 0 or not trend_down[i]:
+            # Exit: Price closes above camarilla high OR trend turns up
+            if close[i] > camarilla_high_aligned[i] or not trend_down[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-# Hypothesis: TRIX (triple exponential average) momentum oscillator with signal line crossovers
-# and 12h trend filter captures momentum shifts in both bull and bear markets.
-# Long when TRIX crosses above signal line in 12h uptrend, short when crosses below in downtrend.
-# The triple smoothing reduces noise while maintaining responsiveness to trend changes.
-# Cooldown of 2 bars limits trades to ~30-80 per year. Position size 0.25 manages risk.
-# Works in bull markets (captures uptrend continuations) and bear markets (captures downtrends).
+# Hypothesis: Camarilla R3/S3 breakout with 1d trend filter and volume spike captures
+# institutional breakouts in both bull and bear markets. The Camarilla levels
+# (R3/S3) act as magnet levels where price often accelerates after breaking through.
+# Volume spike confirms institutional participation. 1d trend filter ensures we
+# trade in the direction of the higher timeframe trend. Cooldown prevents overtrading.
+# Position size 0.30 balances risk and return. Works in bull markets (breaks above R3
+# in uptrend) and bear markets (breaks below S3 in downtrend). Target: 20-50 trades/year.
