@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Adaptive_Pivot_Trend_12h"
-timeframe = "4h"
+name = "6h_RSI2_Overbought_Oversold_1wTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,70 +17,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE for pivot levels and trend
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 10:
+    # Load weekly data ONCE for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
         return np.zeros(n)
     
-    # Calculate 12h pivot levels (using previous period's high/low/close)
-    prev_high_12h = df_12h['high'].shift(1).values
-    prev_low_12h = df_12h['low'].shift(1).values
-    prev_close_12h = df_12h['close'].shift(1).values
+    # 6h RSI(2)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
+    avg_loss = loss.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
+    rs = avg_gain / avg_loss
+    rs = rs.replace([np.inf, -np.inf], 100)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
-    pivot_12h = (prev_high_12h + prev_low_12h + prev_close_12h) / 3.0
-    r1_12h = 2 * pivot_12h - prev_low_12h
-    s1_12h = 2 * pivot_12h - prev_high_12h
-    r2_12h = pivot_12h + (prev_high_12h - prev_low_12h)
-    s2_12h = pivot_12h - (prev_high_12h - prev_low_12h)
+    # Weekly EMA(34) for trend filter
+    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Align pivot levels to 4h timeframe
-    pivot_12h_aligned = align_htf_to_ltf(prices, df_12h, pivot_12h)
-    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
-    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
-    r2_12h_aligned = align_htf_to_ltf(prices, df_12h, r2_12h)
-    s2_12h_aligned = align_htf_to_ltf(prices, df_12h, s2_12h)
-    
-    # 12h EMA for trend filter
-    ema_20_12h = pd.Series(df_12h['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
-    
-    # 4h volume spike detection
-    vol_ma_10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    # Volume spike detection (2x 20-period average)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 10)
+    start_idx = max(100, 34)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_20_12h_aligned[i]) or np.isnan(pivot_12h_aligned[i]) or 
-            np.isnan(r1_12h_aligned[i]) or np.isnan(s1_12h_aligned[i]) or np.isnan(vol_ma_10[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_condition = volume[i] > vol_ma_10[i] * 1.5
-        
         if position == 0:
-            # Long: price breaks above S1 with volume in 12h uptrend
-            if close[i] > s1_12h_aligned[i] and vol_condition and ema_20_12h_aligned[i] > ema_20_12h_aligned[i-1]:
+            # Long: RSI(2) < 10 (oversold) in weekly uptrend with volume spike
+            if rsi[i] < 10 and ema_34_1w_aligned[i] > ema_34_1w_aligned[i-1] and volume[i] > vol_ma_20[i] * 2.0:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below R1 with volume in 12h downtrend
-            elif close[i] < r1_12h_aligned[i] and vol_condition and ema_20_12h_aligned[i] < ema_20_12h_aligned[i-1]:
+            # Short: RSI(2) > 90 (overbought) in weekly downtrend with volume spike
+            elif rsi[i] > 90 and ema_34_1w_aligned[i] < ema_34_1w_aligned[i-1] and volume[i] > vol_ma_20[i] * 2.0:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price crosses back below pivot or trend changes
-            if close[i] < pivot_12h_aligned[i] or ema_20_12h_aligned[i] < ema_20_12h_aligned[i-1]:
+            # Exit: RSI(2) > 50 (mean reversion) or trend change
+            if rsi[i] > 50 or ema_34_1w_aligned[i] < ema_34_1w_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price crosses back above pivot or trend changes
-            if close[i] > pivot_12h_aligned[i] or ema_20_12h_aligned[i] > ema_20_12h_aligned[i-1]:
+            # Exit: RSI(2) < 50 (mean reversion) or trend change
+            if rsi[i] < 50 or ema_34_1w_aligned[i] > ema_34_1w_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -88,16 +79,16 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 4h Camarilla pivot breakouts with 12h trend and volume filter
-# - Uses 12h pivot levels (R1, S1, pivot) from previous period for structure
-# - Long when price breaks above S1 with volume spike in 12h uptrend
-# - Short when price breaks below R1 with volume spike in 12h downtrend
-# - Exit when price returns to pivot level or 12h trend changes
-# - Volume confirmation (1.5x average) reduces false breakouts
-# - Position size 0.25 balances return and risk
-# - Designed for 15-35 trades/year to avoid fee drag
-# - Works in bull markets (buying S1 breaks in uptrend) and bear markets (selling R1 breaks in downtrend)
-# - Pivot levels provide objective support/resistance based on prior 12h action
-# - 12h trend filter ensures alignment with higher timeframe momentum
-# - Novel: Combines pivot breakouts with volume and trend on 4h/12h timeframe not recently tried
-# - Aims for 60-140 total trades over 4 years to stay within limits
+# Hypothesis: 6s RSI(2) extreme readings with weekly trend filter and volume confirmation
+# - RSI(2) < 10 indicates extreme oversold conditions (potential mean reversion long)
+# - RSI(2) > 90 indicates extreme overbought conditions (potential mean reversion short)
+# - Weekly EMA(34) trend filter ensures we only trade in direction of higher timeframe trend
+# - Volume spike (2x 20-period average) confirms institutional interest at extremes
+# - Works in both bull (buy oversold dips in uptrend) and bear (sell overbought rallies in downtrend)
+# - Exit when RSI returns to neutral (50) or trend changes
+# - Position size 0.25 targets ~50-150 trades over 4 years (12-37/year) to avoid fee drag
+# - RSI(2) is highly sensitive and captures short-term exhaustion moves
+# - Weekly filter prevents counter-trend trading during strong moves
+# - Volume confirmation reduces false signals from low-liquidity periods
+# - Simple, robust logic with clear entry/exit conditions
+# - Aims for 60-120 total trades over 4 years (15-30/year) to stay within limits
