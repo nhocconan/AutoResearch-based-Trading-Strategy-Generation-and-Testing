@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_Camarilla_H4_Trend_Volume_Spike_v1"
-timeframe = "1d"
+name = "6h_FisherTransform_1dTrend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,63 +17,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # 1w EMA50 trend filter
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # 1d EMA34 trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla levels from previous day (using daily OHLC)
-    # Need to shift by 1 to avoid look-ahead
-    prev_close = np.roll(close, 1)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close[0] = np.nan
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
+    # Fisher Transform on 6h close prices (period=9)
+    # Calculate median price
+    median_price = (high + low) / 2
     
-    # Camarilla R3, S3 levels
-    R3 = prev_close + 1.1 * (prev_high - prev_low) / 6
-    S3 = prev_close - 1.1 * (prev_high - prev_low) / 6
+    # Normalize to [-1, 1] range over lookback period
+    lookback = 9
+    highest = pd.Series(median_price).rolling(window=lookback, min_periods=lookback).max().values
+    lowest = pd.Series(median_price).rolling(window=lookback, min_periods=lookback).min().values
     
-    # Volume filter: current volume > 2.0 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > (vol_ma * 2.0)
+    # Avoid division by zero
+    range_val = highest - lowest
+    range_val = np.where(range_val == 0, 1e-10, range_val)
+    
+    # Normalize and bound to [-0.999, 0.999] to avoid infinity
+    value = 2 * ((median_price - lowest) / range_val - 0.5)
+    value = np.clip(value, -0.999, 0.999)
+    
+    # Fisher Transform formula: 0.5 * ln((1+value)/(1-value))
+    fisher = 0.5 * np.log((1 + value) / (1 - value))
+    
+    # Smooth with 3-period EMA
+    fisher_smooth = pd.Series(fisher).ewm(span=3, adjust=False, min_periods=3).mean().values
+    
+    # Volume filter: current volume > 1.8 * 30-period average
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_ok = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need at least 20 for volume MA
+    start_idx = max(lookback + 2, 31)  # Fisher needs lookback + smoothing, volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(R3[i]) or np.isnan(S3[i]):
+        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(fisher_smooth[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above Camarilla R3 + above weekly EMA50 + volume spike
-            if close[i] > R3[i] and close[i] > ema_50_1w_aligned[i] and volume_ok[i]:
+            # Long: Fisher crosses above -1.5 + above daily EMA34 + volume spike
+            if fisher_smooth[i] > -1.5 and fisher_smooth[i-1] <= -1.5 and close[i] > ema_34_1d_aligned[i] and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below Camarilla S3 + below weekly EMA50 + volume spike
-            elif close[i] < S3[i] and close[i] < ema_50_1w_aligned[i] and volume_ok[i]:
+            # Short: Fisher crosses below +1.5 + below daily EMA34 + volume spike
+            elif fisher_smooth[i] < 1.5 and fisher_smooth[i-1] >= 1.5 and close[i] < ema_34_1d_aligned[i] and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: price returns to Camarilla range or breaks in opposite direction
+            # Exit: Fisher crosses zero or trend reverses
             if position == 1:
-                if close[i] < S3[i] or close[i] < ema_50_1w_aligned[i]:
+                if fisher_smooth[i] < 0 or close[i] < ema_34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > R3[i] or close[i] > ema_50_1w_aligned[i]:
+                if fisher_smooth[i] > 0 or close[i] > ema_34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
