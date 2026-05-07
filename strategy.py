@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Donchian20_Breakout_1dTrend_VolumeSpike_v2"
-timeframe = "4h"
+name = "1d_KAMA_Direction_RSI_ChopFilter_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,43 +17,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    # Calculate 1-day KAMA (Kaufman Adaptive Moving Average)
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close, prepend=close[0]))[:10])
+    er = np.zeros(n)
+    er[9:] = change[9:] / np.maximum(volatility, 1e-10)
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # Calculate 14-period RSI
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Calculate 14-period Choppiness Index
+    atr = np.zeros(n)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[0], tr])
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
+    
+    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = np.zeros(n)
+    for i in range(13, n):
+        if atr[i] > 0 and (max_high[i] - min_low[i]) > 0:
+            chop[i] = 100 * np.log10(np.sum(tr[i-13:i+1]) / np.log(14) / (max_high[i] - min_low[i]))
+        else:
+            chop[i] = 50
+    
+    # Load 1-week trend filter (EMA50)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    # 1d EMA50 trend
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    trend_up = close > ema_50_1d_aligned
-    trend_down = close < ema_50_1d_aligned
-    
-    # Donchian(20) channels on 4h
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
-    
-    # Volume spike: current volume > 2.5x 20-period average (~3.3 days)
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma_20[i] = np.mean(volume[i-20:i])
-    vol_spike = volume > (2.5 * vol_ma_20)
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    trend_up = close > ema_50_1w_aligned
+    trend_down = close < ema_50_1w_aligned
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 4  # ~2.67 days (4*4h) to prevent overtrading
+    cooldown_bars = 3  # 3 days to prevent overtrading
     
-    start_idx = max(20, 50)  # Ensure enough data for Donchian and EMA
+    start_idx = max(30, 14)  # Ensure enough data for KAMA and indicators
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or 
-            np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(kama[i]) or 
+            np.isnan(rsi[i]) or 
+            np.isnan(chop[i]) or 
+            np.isnan(ema_50_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,31 +94,33 @@ def generate_signals(prices):
         trending_down = trend_down[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: Price breaks above Donchian high with volume spike in 1d uptrend
-            if (close[i] > donchian_high[i] and 
-                trending_up and 
-                vol_spike[i]):
+            # Long: Price above KAMA, RSI < 30 (oversold), Chop > 61.8 (ranging) in 1w uptrend
+            if (close[i] > kama[i] and 
+                rsi[i] < 30 and 
+                chop[i] > 61.8 and 
+                trending_up):
                 signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: Price breaks below Donchian low with volume spike in 1d downtrend
-            elif (close[i] < donchian_low[i] and 
-                  trending_down and 
-                  vol_spike[i]):
+            # Short: Price below KAMA, RSI > 70 (overbought), Chop > 61.8 (ranging) in 1w downtrend
+            elif (close[i] < kama[i] and 
+                  rsi[i] > 70 and 
+                  chop[i] > 61.8 and 
+                  trending_down):
                 signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit: Price falls back below Donchian low or 1d trend changes to down
-            if close[i] < donchian_low[i] or not trending_up:
+            # Exit: Price crosses below KAMA or RSI > 70
+            if close[i] < kama[i] or rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price rises back above Donchian high or 1d trend changes to up
-            if close[i] > donchian_high[i] or not trending_down:
+            # Exit: Price crosses above KAMA or RSI < 30
+            if close[i] > kama[i] or rsi[i] < 30:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
@@ -101,5 +128,3 @@ def generate_signals(prices):
                 signals[i] = -0.25
     
     return signals
-
-# Hypothesis: On 4h timeframe, price breaking above/below Donchian(20) channels with volume spike confirmation and 1d EMA50 trend filter captures institutional breakout momentum. Donchian channels represent dynamic support/resistance, reducing false breakouts. 1d trend filter ensures alignment with higher timeframe momentum. Volume spike filter (2.5x 20-period average) confirms institutional participation. Cooldown period prevents overtrading. Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag. Works in bull markets (breakouts above Donchian high in 1d uptrend) and bear markets (breakdowns below Donchian low in 1d downtrend). Uses discrete position sizing (0.25) to balance risk and reward while reducing fee churn. This strategy avoids saturated Camarilla patterns and focuses on proven Donchian breakout with volume/trend confluence, which has shown strong performance in DB (e.g., 4h_Donchian20_Breakout_12hTrend_Volume with 0.573 avg Sharpe). Increased volume threshold and cooldown bars to reduce trade frequency and improve generalization.
