@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with volume confirmation and 1d trend filter.
-# Uses 20-period Donchian channel breakouts confirmed by volume spikes and 1d EMA trend.
+# Hypothesis: 12h Donchian(20) breakout with volume confirmation and 1d trend filter.
+# Uses 12h Donchian channel breakouts confirmed by volume spikes and 1d EMA trend.
 # Designed to work in both bull and bear markets by following the 1d trend direction.
-# Target: 20-50 trades/year per symbol to avoid excessive fee drag.
-name = "4h_Donchian_20_Volume_1dTrend"
-timeframe = "4h"
+# Target: 12-37 trades/year per symbol to avoid excessive fee drag.
+name = "12h_Donchian20_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,26 +30,22 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 20-period Donchian channels (upper/lower)
-    lookback = 20
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    for i in range(lookback, n):
-        donchian_high[i] = np.max(high[i-lookback:i])
-        donchian_low[i] = np.min(low[i-lookback:i])
+    # 12h Donchian channel (20 periods)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 4h volume average for spike detection
-    vol_ema_4h = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike = np.where(vol_ema_4h > 0, volume / vol_ema_4h, 1.0) > 1.5
+    # 12h volume average for spike detection
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = np.where(vol_ma > 0, volume / vol_ma, 1.0) > 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(lookback, 34)  # Ensure sufficient warmup
+    start_idx = 20  # Sufficient warmup for Donchian and volume calculations
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_spike[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
