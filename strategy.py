@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSurge"
-timeframe = "4h"
+name = "6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_HT"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -36,20 +36,20 @@ def generate_signals(prices):
     camarilla_r3 = daily_close + (daily_high - daily_low) * 1.1 / 4
     camarilla_s3 = daily_close - (daily_high - daily_low) * 1.1 / 4
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 6h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Volume surge filter: current volume > 2.0x 6-period average (3-day equivalent in 4h)
+    # Volume spike filter: current volume > 2.0x 6-period average (1-day equivalent in 6h)
     vol_ma_6 = np.full(n, np.nan)
     for i in range(6, n):
         vol_ma_6[i] = np.mean(volume[i-6:i])
-    vol_surge = volume > (2.0 * vol_ma_6)
+    vol_spike = volume > (2.0 * vol_ma_6)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 4  # ~2 days (4*4h) to prevent overtrading
+    cooldown_bars = 2  # ~1 day (2*6h) to prevent overtrading
     
     start_idx = max(6, 34)  # Ensure enough data for volume MA and EMA
     
@@ -73,17 +73,17 @@ def generate_signals(prices):
         trending_down = trend_down[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: Price breaks above Camarilla R3 with volume surge in daily uptrend
+            # Long: Price breaks above Camarilla R3 with volume spike in daily uptrend
             if (close[i] > r3_aligned[i] and 
                 trending_up and 
-                vol_surge[i]):
+                vol_spike[i]):
                 signals[i] = 0.28
                 position = 1
                 bars_since_last_trade = 0
-            # Short: Price breaks below Camarilla S3 with volume surge in daily downtrend
+            # Short: Price breaks below Camarilla S3 with volume spike in daily downtrend
             elif (close[i] < s3_aligned[i] and 
                   trending_down and 
-                  vol_surge[i]):
+                  vol_spike[i]):
                 signals[i] = -0.28
                 position = -1
                 bars_since_last_trade = 0
@@ -106,4 +106,4 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: On 4h timeframe, price breaking above/below Camarilla R3/S3 levels with volume surge confirmation and daily EMA34 trend filter captures institutional breakout momentum. Camarilla R3/S3 represent stronger support/resistance, reducing false breakouts. Daily trend filter ensures alignment with higher timeframe momentum. Volume surge filter (2.0x 6-period average) confirms institutional participation. Cooldown period prevents overtrading. Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag. Works in bull markets (breakouts above R3 in daily uptrend) and bear markets (breakdowns below S3 in daily downtrend). Uses discrete position sizing (0.28) to balance risk and reward while reducing fee churn.
+# Hypothesis: On 6h timeframe, price breaking above/below Camarilla R3/S3 levels with volume spike confirmation and daily EMA34 trend filter captures institutional breakout momentum. Camarilla R3/S3 represent stronger support/resistance, reducing false breakouts. Daily trend filter ensures alignment with higher timeframe momentum. Volume spike filter (2.0x 6-period average) confirms institutional participation. Cooldown period prevents overtrading. Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag. Works in bull markets (breakouts above R3 in daily uptrend) and bear markets (breakdowns below S3 in daily downtrend). Uses discrete position sizing (0.28) to balance risk and reward while reducing fee churn.
