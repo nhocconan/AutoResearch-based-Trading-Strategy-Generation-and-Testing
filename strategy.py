@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Ichimoku_Cloud_Trend_1wBias"
-timeframe = "6h"
+name = "12h_PivotBreakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,129 +9,77 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Load weekly data ONCE for bias filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 52:
-        return np.zeros(n)
-    
-    # Load daily data ONCE for Ichimoku calculation
+    # Load daily data ONCE before loop for Pivot levels and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Ichimoku components on daily data
-    high_1d = df_1d['high']
-    low_1d = df_1d['low']
-    close_1d = df_1d['close']
+    # Calculate daily Pivot (standard) from previous day
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
-    tenkan = (high_1d.rolling(window=9, min_periods=9).max() + 
-              low_1d.rolling(window=9, min_periods=9).min()) / 2
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
     
-    # Kijun-sen (Base Line): (26-period high + low) / 2
-    kijun = (high_1d.rolling(window=26, min_periods=26).max() + 
-             low_1d.rolling(window=26, min_periods=26).min()) / 2
+    # Daily Pivot support/resistance levels
+    s1 = pivot - range_hl
+    r1 = pivot + range_hl
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = ((tenkan + kijun) / 2).shift(26)
+    # Align daily levels to 12h timeframe
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     
-    # Senkou Span B (Leading Span B): (52-period high + low) / 2
-    senkou_b = ((high_1d.rolling(window=52, min_periods=52).max() + 
-                 low_1d.rolling(window=52, min_periods=52).min()) / 2).shift(26)
+    # Daily EMA(34) for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Convert to numpy arrays
-    tenkan_arr = tenkan.values
-    kijun_arr = kijun.values
-    senkou_a_arr = senkou_a.values
-    senkou_b_arr = senkou_b.values
-    
-    # Align Ichimoku components to 6h timeframe
-    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan_arr)
-    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun_arr)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a_arr)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b_arr)
-    
-    # Weekly bias: price above/below weekly cloud
-    weekly_high = df_1w['high']
-    weekly_low = df_1w['low']
-    weekly_close = df_1w['close']
-    
-    # Weekly Tenkan and Kijun
-    wk_tenkan = (weekly_high.rolling(window=9, min_periods=9).max() + 
-                 weekly_low.rolling(window=9, min_periods=9).min()) / 2
-    wk_kijun = (weekly_high.rolling(window=26, min_periods=26).max() + 
-                weekly_low.rolling(window=26, min_periods=26).min()) / 2
-    
-    # Weekly Senkou Span A and B
-    wk_senkou_a = ((wk_tenkan + wk_kijun) / 2).shift(26)
-    wk_senkou_b = ((weekly_high.rolling(window=52, min_periods=52).max() + 
-                    weekly_low.rolling(window=52, min_periods=52).min()) / 2).shift(26)
-    
-    # Align weekly cloud to 6h
-    wk_senkou_a_aligned = align_htf_to_ltf(prices, df_1w, wk_senkou_a.values)
-    wk_senkou_b_aligned = align_htf_to_ltf(prices, df_1w, wk_senkou_b.values)
-    
-    # Weekly cloud boundaries (future cloud)
-    wk_cloud_top = np.maximum(wk_senkou_a_aligned, wk_senkou_b_aligned)
-    wk_cloud_bottom = np.minimum(wk_senkou_a_aligned, wk_senkou_b_aligned)
+    # Volume spike detection: 2-period average (1 day of 12h bars)
+    vol_ma_2 = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 52 + 26  # Wait for Ichimoku to be valid
+    start_idx = max(34, 2)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
-            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or
-            np.isnan(wk_cloud_top[i]) or np.isnan(wk_cloud_bottom[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(vol_ma_2[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Current Ichimoku values
-        tenkan_val = tenkan_aligned[i]
-        kijun_val = kijun_aligned[i]
-        senkou_a_val = senkou_a_aligned[i]
-        senkou_b_val = senkou_b_aligned[i]
-        
-        # Current cloud boundaries (leading spans)
-        cloud_top = np.maximum(senkou_a_val, senkou_b_val)
-        cloud_bottom = np.minimum(senkou_a_val, senkou_b_val)
-        
-        # Weekly bias
-        price_above_wk_cloud = close[i] > wk_cloud_top[i]
-        price_below_wk_cloud = close[i] < wk_cloud_bottom[i]
-        
         if position == 0:
-            # Long: TK cross bullish, price above cloud, weekly bullish bias
-            tk_bullish = tenkan_val > kijun_val
-            price_above_cloud = close[i] > cloud_top
+            # Long: price above S1 with volume and daily uptrend
+            vol_condition = volume[i] > vol_ma_2[i] * 1.8
+            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
             
-            if tk_bullish and price_above_cloud and price_above_wk_cloud:
+            if close[i] > s1_aligned[i] and vol_condition and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: TK cross bearish, price below cloud, weekly bearish bias
-            elif not tk_bullish and close[i] < cloud_bottom and price_below_wk_cloud:
+            # Short: price below R1 with volume and daily downtrend
+            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: TK cross bearish or price drops below cloud
-            if tenkan_aligned[i] <= kijun_aligned[i] or close[i] < cloud_bottom:
+            # Exit: price back below S1 or volume drops
+            if close[i] < s1_aligned[i] or volume[i] < vol_ma_2[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: TK cross bullish or price rises above cloud
-            if tenkan_aligned[i] >= kijun_aligned[i] or close[i] > cloud_top:
+            # Exit: price back above R1 or volume drops
+            if close[i] > r1_aligned[i] or volume[i] < vol_ma_2[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -139,16 +87,17 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Ichimoku cloud system on 6h with weekly bias filter
-# - Uses Ichimoku (Tenkan/Kijun cross + cloud) on daily timeframe aligned to 6h
-# - Weekly Ichimoku cloud acts as bias filter: only take longs when price above weekly cloud
-# - Weekly cloud acts as bias filter: only take shorts when price below weekly cloud
-# - Works in bull markets: TK bullish cross + price above daily cloud + price above weekly cloud
-# - Works in bear markets: TK bearish cross + price below daily cloud + price below weekly cloud
-# - Cloud acts as dynamic support/resistance reducing whipsaws
-# - Position size 0.25 balances return vs fee drag (target ~30-80 trades/year)
-# - Ichimoku is proven effective in crypto (ranked Tier 8 in program.md)
-# - Weekly bias filter prevents counter-trend trades in strong weekly trends
+# Hypothesis: 12h Daily Pivot S1/R1 breakout with 1d trend and volume confirmation
+# - Daily Pivot S1/R1 act as key support/resistance levels from previous day
+# - Breakout above S1 with volume in daily uptrend = long opportunity
+# - Breakdown below R1 with volume in daily downtrend = short opportunity
+# - Volume spike (1.8x average) confirms institutional participation
+# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
+# - Exit when price returns to S1/R1 or volume weakens
+# - Position size 0.25 targets ~15-35 trades/year, avoiding fee drag
+# - Uses actual daily Pivot levels (not weekly) for better relevance to 12h timeframe
+# - Daily trend filter reduces whipsaws vs using same timeframe
+# - Designed to work in BOTH bull and bear markets via trend filter
+# - Volume confirmation reduces false breakouts
+# - Novel combination: Daily Pivot (1d) + trend (1d) + volume (12h) not recently tried
 # - Aims for 50-150 total trades over 4 years (12-37/year) to stay within limits
-# - Uses actual Ichimoku formulas, not approximations
-# - Novel combination: Daily Ichimoku signals + Weekly Ichimoku bias filter (not recently tried)
