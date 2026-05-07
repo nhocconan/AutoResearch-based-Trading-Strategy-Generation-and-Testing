@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_KAMA_Trend_VolumeSpike_1dTrend
-Hypothesis: 12h KAMA trend direction filtered by 1d ADX trend (>25) and volume spike (>2x 20-day average).
-KAMA adapts to market noise, reducing whipsaws in choppy markets. Volume spike confirms institutional interest.
-Designed for low-frequency, high-conviction trades in both bull and bear markets.
+4h_Camarilla_R3S3_Breakout_1dTrend_Volume
+Hypothesis: 4h Camarilla R3/S3 breakout filtered by 1d ADX trend (>25) and volume spike (>2x 20-day average).
+Exits on opposite Camarilla level (R2/S2) touch. Designed for low-frequency, high-conviction trades in both bull and bear markets.
+Target: 20-50 trades/year per symbol to avoid fee drag.
 """
 
-name = "12h_KAMA_Trend_VolumeSpike_1dTrend"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -29,31 +29,24 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate KAMA (2, 10, 30) - ER smoothing, 10 fast, 30 slow
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, n=10))  # 10-period net change
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # 10-period sum of absolute changes
-    # Pad volatility to match length
-    volatility_padded = np.concatenate([np.full(9, np.nan), volatility])
-    er = np.where(volatility_padded != 0, change / volatility_padded, 0)
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # 2-period EMA
-    slow_sc = 2 / (30 + 1)  # 30-period EMA
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    # KAMA calculation
-    kama = np.full(n, np.nan)
-    kama[9] = close[9]  # Start after 10 periods
-    for i in range(10, n):
-        if not np.isnan(sc[i]) and not np.isnan(kama[i-1]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
+    # Calculate 4h Camarilla levels (R3, S3, R2, S2) using previous 4h candle
+    camarilla_R3 = np.full(n, np.nan)
+    camarilla_S3 = np.full(n, np.nan)
+    camarilla_R2 = np.full(n, np.nan)
+    camarilla_S2 = np.full(n, np.nan)
     
-    # KAMA trend direction
-    kama_up = kama > np.roll(kama, 1)
-    kama_down = kama < np.roll(kama, 1)
-    kama_up[0] = False
-    kama_down[0] = False
+    for i in range(1, n):
+        # Previous period's OHLC
+        ph = high[i-1]
+        pl = low[i-1]
+        pc = close[i-1]
+        
+        # Camarilla calculations
+        range_val = ph - pl
+        camarilla_R3[i] = pc + (range_val * 1.1000 / 4)
+        camarilla_S3[i] = pc - (range_val * 1.1000 / 4)
+        camarilla_R2[i] = pc + (range_val * 1.1000 / 6)
+        camarilla_S2[i] = pc - (range_val * 1.1000 / 6)
     
     # 1d ADX for trend filter (14-period)
     high_1d = df_1d['high'].values
@@ -102,29 +95,28 @@ def generate_signals(prices):
     for i in range(20, len(vol_1d)):
         vol_ma_1d[i] = np.mean(vol_1d[i-20:i])
     
-    # Align 1d indicators to 12h
+    # Align 1d indicators to 4h
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)  # KAMA is already 12h, but align for safety
     
-    # Volume spike condition: current 12h volume > 2x 20-period average of 12h volume
-    vol_ma_12h = np.full_like(volume, np.nan)
-    for i in range(20, len(volume)):
-        vol_ma_12h[i] = np.mean(volume[i-20:i])
-    vol_spike = volume > (2 * vol_ma_12h)
+    # Volume spike condition: current 1d volume > 2x 20-day average
+    vol_spike = vol_1d > (2 * vol_ma_1d)
+    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 4  # Prevent overtrading (48 hours)
+    cooldown_bars = 6  # Prevent overtrading (approx 1 day)
     
     start_idx = max(20, 30)  # Warmup
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(kama[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(vol_ma_12h[i]) or np.isnan(vol_ma_1d_aligned[i])):
+        if (np.isnan(camarilla_R3[i]) or np.isnan(camarilla_S3[i]) or 
+            np.isnan(camarilla_R2[i]) or np.isnan(camarilla_S2[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
+            np.isnan(close_1d_aligned[i]) or np.isnan(vol_spike_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -149,31 +141,31 @@ def generate_signals(prices):
             trend_1d_down = False
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: KAMA upward in 1d uptrend with volume spike
-            if (kama_up[i] and 
+            # Long: Camarilla R3 breakout in 1d uptrend with volume spike
+            if (close[i] > camarilla_R3[i] and 
                 trend_1d_up and 
-                vol_spike[i]):
+                vol_spike_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: KAMA downward in 1d downtrend with volume spike
-            elif (kama_down[i] and 
+            # Short: Camarilla S3 breakdown in 1d downtrend with volume spike
+            elif (close[i] < camarilla_S3[i] and 
                   trend_1d_down and 
-                  vol_spike[i]):
+                  vol_spike_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit long: KAMA turns downward
-            if kama_down[i]:
+            # Exit long: price crosses below camarilla S2
+            if close[i] < camarilla_S2[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: KAMA turns upward
-            if kama_up[i]:
+            # Exit short: price crosses above camarilla R2
+            if close[i] > camarilla_R2[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
