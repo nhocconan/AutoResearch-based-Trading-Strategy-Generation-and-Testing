@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_1d_PivotBreakout_RangeFilter_Volume"
-timeframe = "4h"
+name = "6h_Weekly_Pivot_Reversion_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,81 +17,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for Pivot and trend
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
+        return np.zeros(n)
+    
+    # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Daily Pivot (standard) from previous day
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Weekly Pivot (standard) from previous week
+    prev_high = df_1w['high'].shift(1).values
+    prev_low = df_1w['low'].shift(1).values
+    prev_close = df_1w['close'].shift(1).values
     
     pivot = (prev_high + prev_low + prev_close) / 3
     range_hl = prev_high - prev_low
     
-    # Daily Pivot support/resistance levels
+    # Weekly Pivot S1/R1 levels
     s1 = pivot - range_hl
     r1 = pivot + range_hl
     
-    # Align daily levels to 4h timeframe
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    # Align weekly levels to 6h timeframe
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
     
-    # Daily EMA(50) for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Daily EMA(34) for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Daily RSI(14) for range filter
-    delta = pd.Series(df_1d['close']).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_14_1d = (100 - (100 / (1 + rs))).values
-    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
+    # Weekly RSI(14) for overbought/oversold
+    delta = pd.Series(df_1w['close']).diff().values
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_14 = 100 - (100 / (1 + rs))
+    rsi_14_aligned = align_htf_to_ltf(prices, df_1w, rsi_14)
     
-    # Volume spike detection: 6-period average (1.5 days of 4h bars)
-    vol_ma_6 = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
+    # Volume spike detection: 4-period average (1 day of 6h bars)
+    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 6)  # Wait for EMA and volume MA
+    start_idx = max(34, 14, 4)  # Wait for EMA, RSI, and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(rsi_14_1d_aligned[i]) or 
-            np.isnan(vol_ma_6[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(rsi_14_aligned[i]) or np.isnan(vol_ma_4[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above S1 with volume, uptrend, and not overbought
-            vol_condition = volume[i] > vol_ma_6[i] * 1.5
-            uptrend = ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1]
-            not_overbought = rsi_14_1d_aligned[i] < 70
+            # Mean reversion long: price below S1, oversold weekly RSI, volume spike, and daily uptrend
+            vol_condition = volume[i] > vol_ma_4[i] * 1.8
+            rsi_oversold = rsi_14_aligned[i] < 30
+            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
             
-            if close[i] > s1_aligned[i] and vol_condition and uptrend and not_overbought:
+            if close[i] < s1_aligned[i] and rsi_oversold and vol_condition and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below R1 with volume, downtrend, and not oversold
-            elif close[i] < r1_aligned[i] and vol_condition and not uptrend and rsi_14_1d_aligned[i] > 30:
+            # Mean reversion short: price above R1, overbought weekly RSI, volume spike, and daily downtrend
+            elif close[i] > r1_aligned[i] and rsi_14_aligned[i] > 70 and vol_condition and not uptrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below S1 or momentum fades
-            if close[i] < s1_aligned[i] or rsi_14_1d_aligned[i] > 70:
+            # Exit: price back above S1 or RSI normalizes
+            if close[i] > s1_aligned[i] or rsi_14_aligned[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above R1 or momentum fades
-            if close[i] > r1_aligned[i] or rsi_14_1d_aligned[i] < 30:
+            # Exit: price back below R1 or RSI normalizes
+            if close[i] < r1_aligned[i] or rsi_14_aligned[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -99,19 +103,14 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 4h Daily Pivot S1/R1 breakout with 1d trend filter and range filter
-# - Daily Pivot S1/R1 act as key support/resistance levels from prior day
-# - Breakout above S1 with volume in daily uptrend (not overbought) = long opportunity
-# - Breakdown below R1 with volume in daily downtrend (not oversold) = short opportunity
-# - Volume spike (1.5x average) confirms institutional participation
-# - RSI filter (30-70) prevents entries in extreme conditions, reducing whipsaws
-# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
-# - Exit when price returns to S1/R1 or RSI reaches extreme levels
-# - Position size 0.25 targets ~30-60 trades/year, avoiding fee drag
-# - Uses actual daily Pivot levels for stability and relevance
-# - Daily trend filter reduces whipsaws vs using same timeframe
-# - Range filter avoids overextended moves
-# - Volume confirmation reduces false breakouts
-# - Designed for 4h timeframe with daily context for better signal quality
-# - Aims for 120-240 total trades over 4 years (30-60/year) to stay within limits
-# - Focus on BTC/ETH as primary targets with volume and trend confirmation
+# Hypothesis: 6h Weekly Pivot S1/R1 mean reversion with weekly RSI extremes and daily trend
+# - Weekly Pivot S1/R1 act as strong support/resistance from prior week
+# - Long when price breaks below S1 with weekly RSI <30 (oversold) + volume spike + daily uptrend
+# - Short when price breaks above R1 with weekly RSI >70 (overbought) + volume spike + daily downtrend
+# - Weekly RSI adds momentum exhaustion filter to avoid catching falling knives
+# - Daily trend filter ensures trades align with higher timeframe momentum
+# - Volume spike (1.8x average) confirms institutional interest at extremes
+# - Exit when price returns to S1/R1 or RSI normalizes (>50 for longs, <50 for shorts)
+# - Position size 0.25 targets 50-150 total trades over 4 years (12-37/year)
+# - Works in bull markets (buy S1 bounces in uptrend) and bear markets (sell R1 bounces in downtrend)
+# - Novel: Weekly Pivot + Weekly RSI + Daily Trend + Volume confirmation on 6h timeframe
