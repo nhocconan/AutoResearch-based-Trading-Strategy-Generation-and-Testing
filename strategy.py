@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSurge"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSurge"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -49,7 +49,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 3  # ~6 hours (3*4h) to reduce trade frequency
+    cooldown_bars = 5  # ~60 hours (5*12h) to reduce trade frequency
     
     start_idx = max(20, 1)  # Ensure enough data for volume and Camarilla
     
@@ -111,5 +111,5 @@ def generate_signals(prices):
 # In bull markets: 1d trend up, breakouts above R1 capture continuation.
 # In bear markets: 1d trend down, breakdowns below S1 capture continuation.
 # Volume surge confirms institutional participation. Using R1/S1 (tighter than R2/S2) increases signal quality.
-# Reduced cooldown to 3 bars (6 hours) and position size 0.25 to target 75-200 trades over 4 years.
-# 4h timeframe balances responsiveness with trade frequency control.
+# Reduced cooldown to 5 bars (60 hours) and position size 0.25 to target 50-150 trades over 4 years.
+# 12h timeframe balances responsiveness with trade frequency control.
