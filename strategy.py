@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_1d_Triple_Confirmation_Breakout"
-timeframe = "4h"
+name = "1d_1w_Camarilla_Pivot_Breakout_Trend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,78 +17,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # Calculate daily ATR for volatility filter
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_10 = tr.rolling(window=10, min_periods=10).mean().values
+    # Calculate weekly Camarilla pivot levels from previous week
+    prev_high = df_1w['high'].shift(1).values
+    prev_low = df_1w['low'].shift(1).values
+    prev_close = df_1w['close'].shift(1).values
     
-    # Daily Donchian channels (20-period)
-    donch_high_20 = df_1d['high'].rolling(window=20, min_periods=20).max().values
-    donch_low_20 = df_1d['low'].rolling(window=20, min_periods=20).min().values
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
     
-    # Daily EMA(50) for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Weekly Camarilla levels (S1 and R1)
+    s1 = prev_close - (range_hl * 1.08 / 2)
+    r1 = prev_close + (range_hl * 1.08 / 2)
     
-    # Align daily indicators to 4h timeframe
-    donch_high_20_aligned = align_htf_to_ltf(prices, df_1d, donch_high_20)
-    donch_low_20_aligned = align_htf_to_ltf(prices, df_1d, donch_low_20)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    atr_10_aligned = align_htf_to_ltf(prices, df_1d, atr_10)
+    # Align weekly levels to daily timeframe
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
     
-    # 4h volume confirmation: volume spike detection
+    # Weekly trend filter: EMA(34) on weekly close
+    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Daily volume spike detection: 10-period average (~10 days)
     vol_ma_10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20, 10)  # Wait for EMA50, Donchian20, VolMA10
+    start_idx = max(34, 10)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(donch_high_20_aligned[i]) or np.isnan(donch_low_20_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_10_aligned[i]) or
-            np.isnan(vol_ma_10[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(vol_ma_10[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above Donchian high + above EMA50 + volume spike + ATR filter
+            # Long: price above S1 with volume and weekly uptrend
             vol_condition = volume[i] > vol_ma_10[i] * 2.0
-            above_ema = close[i] > ema_50_1d_aligned[i]
-            atr_filter = atr_10_aligned[i] > 0  # Ensure volatility exists
+            uptrend = ema_34_1w_aligned[i] > ema_34_1w_aligned[i-1]
             
-            if (close[i] > donch_high_20_aligned[i] and 
-                above_ema and 
-                vol_condition and 
-                atr_filter):
+            if close[i] > s1_aligned[i] and vol_condition and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian low + below EMA50 + volume spike + ATR filter
-            elif (close[i] < donch_low_20_aligned[i] and 
-                  not above_ema and 
-                  vol_condition and 
-                  atr_filter):
+            # Short: price below R1 with volume and weekly downtrend
+            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Price closes below Donchian low or volume drops significantly
-            if close[i] < donch_low_20_aligned[i] or volume[i] < vol_ma_10[i] * 0.5:
+            # Exit: price back below S1 or volume drops
+            if close[i] < s1_aligned[i] or volume[i] < vol_ma_10[i] * 1.3:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price closes above Donchian high or volume drops significantly
-            if close[i] > donch_high_20_aligned[i] or volume[i] < vol_ma_10[i] * 0.5:
+            # Exit: price back above R1 or volume drops
+            if close[i] > r1_aligned[i] or volume[i] < vol_ma_10[i] * 1.3:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -96,12 +87,13 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 4h Donchian breakout with daily trend and volume confirmation
-# - Uses daily Donchian channels (20-period) as dynamic support/resistance
-# - Requires price to be above/below daily EMA(50) for trend alignment
-# - Volume spike (2x 10-period average) confirms institutional participation
-# - ATR filter ensures sufficient volatility for meaningful moves
-# - Works in both bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend)
-# - Position size 0.25 targets ~25-40 trades/year, minimizing fee drag
-# - Simple 3-condition entry reduces overfitting and improves robustness
-# - Exit on reverse Donchian break or volume collapse prevents whipsaws
+# Hypothesis: Daily Camarilla S1/R1 breakout with weekly trend and volume confirmation
+# - Weekly Camarilla S1/R1 act as strong support/resistance levels
+# - Breakout above S1 with volume in weekly uptrend = long opportunity
+# - Breakdown below R1 with volume in weekly downtrend = short opportunity
+# - Volume spike (2.0x average) confirms institutional participation
+# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
+# - Exit when price returns to S1/R1 or volume weakens
+# - Position size 0.25 targets ~15-25 trades/year, avoiding fee drag
+# - Uses weekly Camarilla levels for stronger, more reliable signals
+# - Designed to work in BOTH bull and bear markets via weekly trend filter
