@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_1dTrend_4hMomentum_Session"
-timeframe = "1h"
+name = "6h_Alligator_ElderRay_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,85 +17,105 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for trend filter (1d)
+    # Williams Alligator (Jaws, Teeth, Lips) - 13, 8, 5 SMAs with future shifts
+    # Jaws: 13-period SMA shifted 8 bars forward
+    jaws = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values
+    # Teeth: 8-period SMA shifted 5 bars forward
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values
+    # Lips: 5-period SMA shifted 3 bars forward
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
+    
+    # Elder Ray Components
+    # Bull Power = High - EMA(13)
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema_13
+    # Bear Power = Low - EMA(13)
+    bear_power = low - ema_13
+    
+    # Load daily trend filter ONCE
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Load 4h data for momentum signal
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
+    # Daily EMA for trend filter
+    ema_20_1d = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
-    # Daily EMA50 for trend filter (trend = price > EMA50)
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # 4h RSI for momentum
-    delta = pd.Series(df_4h['close']).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    rs = avg_gain / avg_loss
-    rsi_14_4h = (100 - (100 / (1 + rs))).values
-    rsi_14_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_14_4h)
-    
-    # 1h EMA21 for entry timing
-    ema_21_1h = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    
-    # Pre-compute session hours (UTC 8-20)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    # Volume confirmation
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 21)
+    start_idx = max(30, 20)  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(rsi_14_4h_aligned[i]) or 
-            np.isnan(ema_21_1h[i])):
+        # Check for NaN values
+        if (np.isnan(jaws[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(ema_20_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
+        # Alligator conditions
+        # Alligator sleeping (no trend): jaws, teeth, lips intertwined
+        alligator_sleeping = (
+            abs(jaws[i] - teeth[i]) < (close[i] * 0.005) and
+            abs(teeth[i] - lips[i]) < (close[i] * 0.005) and
+            abs(lips[i] - jaws[i]) < (close[i] * 0.005)
+        )
+        
+        # Alligator awakening (trending): clear separation
+        alligator_long = (lips[i] > teeth[i]) and (teeth[i] > jaws[i])
+        alligator_short = (lips[i] < teeth[i]) and (teeth[i] < jaws[i])
+        
+        # Elder Ray conditions
+        strong_bull_power = bull_power[i] > 0 and bull_power[i] > bull_power[i-1]
+        strong_bear_power = bear_power[i] < 0 and bear_power[i] < bear_power[i-1]
+        
+        # Volume condition
+        vol_condition = volume[i] > vol_ma_20[i] * 1.5
+        
+        # Trend filter from daily
+        daily_uptrend = ema_20_1d_aligned[i] > ema_20_1d_aligned[i-1]
+        daily_downtrend = ema_20_1d_aligned[i] < ema_20_1d_aligned[i-1]
         
         if position == 0:
-            # Long: 1d uptrend (price > EMA50) + 4h RSI > 50 + price > EMA21
-            if in_session and close[i] > ema_50_1d_aligned[i] and rsi_14_4h_aligned[i] > 50 and close[i] > ema_21_1h[i]:
-                signals[i] = 0.20
+            # Long: Alligator awakening upwards + strong bull power + daily uptrend + volume
+            if (alligator_long and strong_bull_power and daily_uptrend and vol_condition and not alligator_sleeping):
+                signals[i] = 0.25
                 position = 1
-            # Short: 1d downtrend (price < EMA50) + 4h RSI < 50 + price < EMA21
-            elif in_session and close[i] < ema_50_1d_aligned[i] and rsi_14_4h_aligned[i] < 50 and close[i] < ema_21_1h[i]:
-                signals[i] = -0.20
+            # Short: Alligator awakening downwards + strong bear power + daily downtrend + volume
+            elif (alligator_short and strong_bear_power and daily_downtrend and vol_condition and not alligator_sleeping):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: 1d trend reversal or price < EMA21
-            if close[i] < ema_50_1d_aligned[i] or close[i] < ema_21_1h[i]:
+            # Exit: Alligator starts sleeping or bull power weakens
+            if alligator_sleeping or (bull_power[i] <= 0) or (bull_power[i] < bull_power[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: 1d trend reversal or price > EMA21
-            if close[i] > ema_50_1d_aligned[i] or close[i] > ema_21_1h[i]:
+            # Exit: Alligator starts sleeping or bear power weakens
+            if alligator_sleeping or (bear_power[i] >= 0) or (bear_power[i] > bear_power[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-# Hypothesis: 1h trend following with 1d EMA50 trend filter and 4h RSI momentum
-# - Uses 1d EMA50 to determine market trend (bullish if price > EMA50, bearish if price < EMA50)
-# - Uses 4h RSI(14) for momentum confirmation (>50 bullish, <50 bearish)
-# - Uses 1h EMA21 for entry timing and exit signals
-# - Session filter (08-20 UTC) to avoid low-volume Asian session noise
-# - Position size 0.20 to manage drawdown and reduce fee churn
-# - Works in both bull and bear markets by following the 1d trend
-# - Multi-timeframe alignment ensures no look-ahead bias
-# - Target: 15-30 trades/year to stay within fee limits
-# - Simple, robust logic with clear exit conditions
+# Hypothesis: 6h Williams Alligator + Elder Ray with Daily Trend Filter
+# - Williams Alligator identifies trend vs ranging markets (sleeping vs awakening)
+# - Elder Ray measures bull/bear power relative to EMA13
+# - Daily EMA20 provides higher timeframe trend filter
+# - Volume confirmation (1.5x average) reduces false signals
+# - Works in bull markets: Alligator long + rising bull power + daily uptrend
+# - Works in bear markets: Alligator short + falling bear power + daily downtrend
+# - Avoids whipsaws by requiring Alligator to be awake (clear trend separation)
+# - Position size 0.25 targets ~50-150 total trades over 4 years (12-37/year)
+# - Novel combination: Alligator + Elder Ray + daily trend + volume filter
+# - Not recently tried in 6h timeframe according to experiment history
