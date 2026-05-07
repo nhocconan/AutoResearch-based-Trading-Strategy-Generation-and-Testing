@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSurge"
-timeframe = "4h"
+name = "1d_Keltner_Channel_Breakout_1wTrend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,47 +17,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Weekly trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    # 1d EMA34 trend
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    trend_up = close > ema_34_1d_aligned
-    trend_down = close < ema_34_1d_aligned
+    close_1w = df_1w['close'].values
+    # Weekly EMA50 trend
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    trend_up = close > ema_50_1w_aligned
+    trend_down = close < ema_50_1w_aligned
     
-    # Camarilla levels from previous 1d
-    close_prev_1d = df_1d['close'].values
-    high_prev_1d = df_1d['high'].values
-    low_prev_1d = df_1d['low'].values
-    range_prev_1d = high_prev_1d - low_prev_1d
-    # R3 and S3 levels
-    r3 = close_prev_1d + range_prev_1d * 1.1 / 4
-    s3 = close_prev_1d - range_prev_1d * 1.1 / 4
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Daily Keltner Channel (20, 2.0)
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    atr = np.zeros(n)
+    tr = np.maximum(high - low, np.absolute(high - np.concatenate([[np.nan], close[:-1]])), np.absolute(low - np.concatenate([[np.nan], close[:-1]])))
+    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    kc_upper = ema_20 + 2.0 * atr
+    kc_lower = ema_20 - 2.0 * atr
     
-    # Volume surge: current volume > 2.0x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-20:i])
-    vol_surge = volume > (2.0 * vol_ma_20)
+    vol_surge = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 4  # ~2 days (4*4h) to reduce trade frequency
+    cooldown_bars = 3  # ~3 days to reduce trade frequency
     
-    start_idx = max(20, 1)  # Ensure enough data for volume and Camarilla
+    start_idx = max(20, 1)
     
     for i in range(start_idx, n):
-        # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or 
+        if (np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(kc_upper[i]) or 
+            np.isnan(kc_lower[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -69,36 +65,35 @@ def generate_signals(prices):
         
         bars_since_last_trade += 1
         
-        # Determine trend direction
         trending_up = trend_up[i]
         trending_down = trend_down[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: price breaks above R3 with volume surge in 1d uptrend
-            if (close[i] > r3_aligned[i] and 
+            # Long: price breaks above Keltner upper with volume surge in weekly uptrend
+            if (close[i] > kc_upper[i] and 
                 trending_up and 
                 vol_surge[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: price breaks below S3 with volume surge in 1d downtrend
-            elif (close[i] < s3_aligned[i] and 
+            # Short: price breaks below Keltner lower with volume surge in weekly downtrend
+            elif (close[i] < kc_lower[i] and 
                   trending_down and 
                   vol_surge[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit: price breaks below S3 or 1d trend changes to down
-            if close[i] < s3_aligned[i] or not trending_up:
+            # Exit: price breaks below Keltner lower or weekly trend changes to down
+            if close[i] < kc_lower[i] or not trending_up:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price breaks above R3 or 1d trend changes to up
-            if close[i] > r3_aligned[i] or not trending_down:
+            # Exit: price breaks above Keltner upper or weekly trend changes to up
+            if close[i] > kc_upper[i] or not trending_down:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
@@ -107,10 +102,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R3/S3 breakout captures institutional breakout moves in both bull and bear markets.
-# Long when price breaks above 1d Camarilla R3 with volume surge and 1d uptrend.
-# Short when price breaks below 1d Camarilla S3 with volume surge and 1d downtrend.
-# Works in bull markets (sustained uptrend with breakouts above R3) and bear markets (sustained downtrend with breakdowns below S3).
-# Volume surge confirms institutional participation. 4h timeframe balances signal quality and trade frequency.
-# Discrete position sizing (0.25) balances risk and minimizes fee churn.
-# Target: 75-200 total trades over 4 years (19-50/year) to avoid fee drag.
+# Hypothesis: Keltner Channel breakout with weekly trend filter captures trending moves while avoiding whipsaws.
+# Long when price breaks above daily Keltner upper band with volume surge and weekly uptrend.
+# Short when price breaks below daily Keltner lower band with volume surge and weekly downtrend.
+# Weekly trend filter ensures we only trade in the direction of the higher timeframe trend.
+# Volume surge confirms institutional participation in the breakout.
+# Keltner Channel (ATR-based) adapts to volatility better than fixed percentage bands.
+# Target: 30-100 total trades over 4 years (7-25/year) to avoid fee drag.
