@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 6h_Camarilla_R3_S3_Breakout_1dTrend_Volume
-# Hypothesis: Use Camarilla pivot levels from daily timeframe (R3/S3 for reversal, R4/S4 for breakout)
-# combined with daily trend filter (EMA34) and volume confirmation to capture both reversal and breakout moves.
-# Works in bull markets via breakouts and in bear markets via reversals at extreme levels.
-# Targets 15-30 trades/year to avoid fee drag while maintaining edge.
+# 6h_Keltner_Channel_RSI_Pullback_v1
+# Hypothesis: Combines 6h Keltner Channel (20, 2) with RSI(14) pullback and 1d trend filter.
+# Enters long when price touches lower KC band during uptrend (1d EMA50 up) with RSI<40,
+# enters short when price touches upper KC band during downtrend (1d EMA50 down) with RSI>60.
+# Uses volume confirmation to avoid false breakouts. Designed for 60-100 trades/year.
 
-name = "6h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+name = "6h_Keltner_Channel_RSI_Pullback_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -23,63 +23,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and trend
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate previous day's Camarilla pivot levels
-    # Using previous day's data to avoid look-ahead
-    pp = np.zeros(len(high_1d))  # Pivot Point
-    r4 = np.zeros(len(high_1d))  # Resistance 4
-    r3 = np.zeros(len(high_1d))  # Resistance 3
-    s3 = np.zeros(len(high_1d))  # Support 3
-    s4 = np.zeros(len(high_1d))  # Support 4
+    # Calculate Keltner Channel (20, 2) on 6h
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    atr = pd.Series(np.maximum(
+        np.maximum(high - low, np.abs(high - np.roll(close, 1))),
+        np.abs(low - np.roll(close, 1))
+    )).ewm(span=20, adjust=False, min_periods=20).mean().values
+    kc_upper = ema_20 + 2 * atr
+    kc_lower = ema_20 - 2 * atr
     
-    for i in range(1, len(high_1d)):
-        # Use previous day's OHLC
-        high_prev = high_1d[i-1]
-        low_prev = low_1d[i-1]
-        close_prev = close_1d[i-1]
-        
-        # Calculate pivot point
-        pp[i] = (high_prev + low_prev + close_prev) / 3.0
-        
-        # Calculate ranges
-        range_prev = high_prev - low_prev
-        
-        # Camarilla levels
-        r4[i] = pp[i] + range_prev * 1.1 / 2.0
-        r3[i] = pp[i] + range_prev * 1.1 / 4.0
-        s3[i] = pp[i] - range_prev * 1.1 / 4.0
-        s4[i] = pp[i] - range_prev * 1.1 / 2.0
+    # Calculate RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate daily EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Volume confirmation: volume > 24-period average (24*6h = 4 days)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    
-    # Align 1d indicators to 6h timeframe
-    pp_6h = align_htf_to_ltf(prices, df_1d, pp)
-    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
-    r4_6h = align_htf_to_ltf(prices, df_1d, r4)
-    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
-    s4_6h = align_htf_to_ltf(prices, df_1d, s4)
-    ema_34_6h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Volume confirmation: volume > 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if any critical value is NaN
-        if (np.isnan(pp_6h[i]) or np.isnan(r3_6h[i]) or np.isnan(r4_6h[i]) or 
-            np.isnan(s3_6h[i]) or np.isnan(s4_6h[i]) or np.isnan(ema_34_6h[i]) or 
-            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(kc_upper[i]) or 
+            np.isnan(kc_lower[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -88,44 +68,28 @@ def generate_signals(prices):
         if position == 0:
             vol_ok = volume[i] > vol_ma[i]
             
-            # Long reversal: price at S3 with bullish trend
-            if (close[i] <= s3_6h[i] * 1.005 and  # Allow small buffer
-                close[i] > s4_6h[i] and          # Above S4 to avoid extreme
-                ema_34_6h[i] > close[i] * 0.98 and  # Uptrend filter (price near EMA)
-                vol_ok):
+            # Long: price at lower KC band, uptrend (1d EMA50 rising), RSI oversold
+            if (close[i] <= kc_lower[i] * 1.001 and  # allow small tolerance
+                ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1] and
+                rsi[i] < 40 and vol_ok):
                 signals[i] = 0.25
                 position = 1
-            # Short reversal: price at R3 with bearish trend
-            elif (close[i] >= r3_6h[i] * 0.995 and   # Allow small buffer
-                  close[i] < r4_6h[i] and            # Below R4 to avoid extreme
-                  ema_34_6h[i] < close[i] * 1.02 and # Downtrend filter
-                  vol_ok):
-                signals[i] = -0.25
-                position = -1
-            # Long breakout: price breaks R4 with bullish trend
-            elif (close[i] > r4_6h[i] and 
-                  ema_34_6h[i] > close[i] * 0.95 and  # Strong uptrend
-                  vol_ok):
-                signals[i] = 0.25
-                position = 1
-            # Short breakdown: price breaks S4 with bearish trend
-            elif (close[i] < s4_6h[i] and 
-                  ema_34_6h[i] < close[i] * 1.05 and  # Strong downtrend
-                  vol_ok):
+            # Short: price at upper KC band, downtrend (1d EMA50 falling), RSI overbought
+            elif (close[i] >= kc_upper[i] * 0.999 and  # allow small tolerance
+                  ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1] and
+                  rsi[i] > 60 and vol_ok):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price reaches R3 (take profit) or breaks S4 (stop reversal)
-            if (close[i] >= r3_6h[i] * 0.995 or  # Near R3 for profit
-                close[i] < s4_6h[i]):            # Breakdown below S4
+            # Exit: price crosses above EMA20 or RSI overbought
+            if (close[i] >= ema_20[i] or rsi[i] > 70):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price reaches S3 (take profit) or breaks R4 (stop reversal)
-            if (close[i] <= s3_6h[i] * 1.005 or  # Near S3 for profit
-                close[i] > r4_6h[i]):            # Breakout above R4
+            # Exit: price crosses below EMA20 or RSI oversold
+            if (close[i] <= ema_20[i] or rsi[i] < 30):
                 signals[i] = 0.0
                 position = 0
             else:
