@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Donchian20_12hTrend_1dVolumeSpike"
-timeframe = "6h"
+name = "4h_KAMA_Breakout_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,69 +17,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    # Load 1d data ONCE before loop
+    # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    # Calculate Donchian channels (20) on 6h data
-    # Highest high of last 20 periods (including current)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate KAMA (Kaufman Adaptive Moving Average) on daily close
+    close_1d = df_1d['close'].values
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    volatility = np.abs(np.diff(close_1d))
+    er = np.divide(change, volatility, out=np.zeros_like(change), where=volatility!=0)
+    er = np.nan_to_num(er, nan=0.0)
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    kama = np.nan_to_num(kama, nan=close_1d[0])
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
     
-    # Calculate 12h EMA(50) for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # 4h Donchian channel (20-period)
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 1d volume spike (volume > 2x 20-period average)
-    vol_ma_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = df_1d['volume'].values > (vol_ma_1d * 2.0)
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
+    # Volume spike detection (20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Wait for Donchian calculation
+    start_idx = 20  # Wait for Donchian and volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or \
-           np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_spike_1d_aligned[i]):
+        if np.isnan(kama_aligned[i]) or np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: breakout above Donchian upper band, above 12h EMA50, with 1d volume spike
-            if (close[i] > highest_high[i] and 
-                close[i] > ema_50_12h_aligned[i] and 
-                vol_spike_1d_aligned[i] > 0.5):
+            # Long: price breaks above Donchian high, above daily KAMA, volume spike
+            if (close[i] > high_roll[i] and 
+                close[i] > kama_aligned[i] and 
+                volume[i] > vol_ma[i] * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: breakdown below Donchian lower band, below 12h EMA50, with 1d volume spike
-            elif (close[i] < lowest_low[i] and 
-                  close[i] < ema_50_12h_aligned[i] and 
-                  vol_spike_1d_aligned[i] > 0.5):
+            # Short: price breaks below Donchian low, below daily KAMA, volume spike
+            elif (close[i] < low_roll[i] and 
+                  close[i] < kama_aligned[i] and 
+                  volume[i] > vol_ma[i] * 1.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price re-enters Donchian channel (below upper band) or below EMA50
-            if (close[i] < highest_high[i] or 
-                close[i] < ema_50_12h_aligned[i]):
+            # Exit: price breaks below Donchian low or below daily KAMA
+            if (close[i] < low_roll[i] or 
+                close[i] < kama_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price re-enters Donchian channel (above lower band) or above EMA50
-            if (close[i] > lowest_low[i] or 
-                close[i] > ema_50_12h_aligned[i]):
+            # Exit: price breaks above Donchian high or above daily KAMA
+            if (close[i] > high_roll[i] or 
+                close[i] > kama_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -87,8 +87,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 6h Donchian(20) breakout with 12h trend filter and 1d volume spike confirmation.
-# Donchian breakouts capture momentum bursts; 12h EMA50 ensures alignment with higher timeframe trend.
-# 1d volume spike confirms institutional participation, reducing false breakouts.
-# Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
-# Position size 0.25 balances risk and keeps trade frequency ~15-30 trades/year.
+# Hypothesis: 4h KAMA breakout with volume confirmation.
+# KAMA adapts to market noise - slows in ranging markets, speeds in trends.
+# Breakout above 4h Donchian high with volume and price > daily KAMA signals bullish momentum.
+# Breakdown below 4h Donchian low with volume and price < daily KAMA signals bearish momentum.
+# Works in bull markets (buy breakouts above Donchian high in uptrend) and bear markets 
+# (sell breakdowns below Donchian low in downtrend).
+# Position size 0.25 balances risk and keeps trade frequency manageable (~15-30 trades/year).
