@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Choppiness Index regime filter + Donchian(20) breakout + volume confirmation
-# Long when price breaks above Donchian high (20) in trending regime (CHOP < 38.2) with volume spike
-# Short when price breaks below Donchian low (20) in trending regime (CHOP < 38.2) with volume spike
-# Uses 1d ATR for Choppiness Index to filter choppy markets and avoid false breakouts
-# Volume spike confirms momentum. Designed for ~30-50 trades/year to minimize fee drag.
-# Works in both bull and bear markets by only trading in clear trends.
-name = "4h_Choppiness_Donchian20_Volume"
+# Hypothesis: 4h Donchian channel breakout with 1d trend filter and volume confirmation.
+# Long when price breaks above Donchian upper band AND price > 1d EMA50 with volume spike.
+# Short when price breaks below Donchian lower band AND price < 1d EMA50 with volume spike.
+# Uses 1d EMA50 trend filter to align with higher timeframe trend and avoid counter-trend trades.
+# Volume spike filter ensures momentum confirmation. Designed for fewer trades (target: 20-30/year) to reduce fee drag.
+# Works in both bull and bear markets by following the 1d trend direction.
+name = "4h_Donchian20_1dEMA50_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,42 +23,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for Choppiness Index calculation
+    # Load 1d data for trend filter and Donchian channels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d True Range for Choppiness Index
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 1d trend filter: 50-period EMA on close
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with original array
+    # Donchian channels (20-period) from 1d high/low
+    high_20 = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
     
-    # ATR(14) for denominator
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Align Donchian levels to 4h timeframe
+    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
     
-    # Sum of TRUE RANGE over 14 periods for numerator
-    tr_sum_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    
-    # Choppiness Index: CHOP = 100 * log10(tr_sum_14 / (atr_14 * 14)) / log10(14)
-    chop_raw = 100 * np.log10(tr_sum_14 / (atr_14 * 14)) / np.log10(14)
-    
-    # Align Choppiness Index to 4h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_raw)
-    
-    # Donchian channels (20-period) on 4h data
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume spike detection (20-period EMA)
-    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike = np.where(vol_ema_20 > 0, volume / vol_ema_20, 1.0) > 1.5
+    # 4h volume average for spike detection
+    vol_ema_4h = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_spike = np.where(vol_ema_4h > 0, volume / vol_ema_4h, 1.0) > 1.8
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -66,21 +50,22 @@ def generate_signals(prices):
     start_idx = 60  # Sufficient warmup for calculations
     
     for i in range(start_idx, n):
-        if (np.isnan(chop_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(vol_spike[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(high_20_aligned[i]) or 
+            np.isnan(low_20_aligned[i]) or np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trending regime: Choppiness Index < 38.2
-        trending = chop_aligned[i] < 38.2
+        # Trend filter: price above/below 1d EMA50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
         if position == 0:
-            # Long condition: break above Donchian high, trending regime, volume spike
-            long_condition = (close[i] > highest_high[i]) and trending and vol_spike[i]
-            # Short condition: break below Donchian low, trending regime, volume spike
-            short_condition = (close[i] < lowest_low[i]) and trending and vol_spike[i]
+            # Long condition: break above Donchian upper band, in uptrend with volume spike
+            long_condition = (close[i] > high_20_aligned[i]) and uptrend and vol_spike[i]
+            # Short condition: break below Donchian lower band, in downtrend with volume spike
+            short_condition = (close[i] < low_20_aligned[i]) and downtrend and vol_spike[i]
             
             if long_condition:
                 signals[i] = 0.25
@@ -89,15 +74,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price breaks below Donchian low or regime turns choppy
-            if (close[i] < lowest_low[i]) or (not trending):
+            # Exit: price breaks below Donchian lower band or trend turns down
+            if (close[i] < low_20_aligned[i]) or (not uptrend):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price breaks above Donchian high or regime turns choppy
-            if (close[i] > highest_high[i]) or (not trending):
+            # Exit: price breaks above Donchian upper band or trend turns up
+            if (close[i] > high_20_aligned[i]) or (not downtrend):
                 signals[i] = 0.0
                 position = 0
             else:
