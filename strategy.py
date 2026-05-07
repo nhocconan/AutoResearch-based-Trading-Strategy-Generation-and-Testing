@@ -1,7 +1,6 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-name = "6h_Donchian20_WeeklyPivotDir_Volume"
-timeframe = "6h"
+name = "4h_4h_Trend_RSI_MeanReversion"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -18,85 +17,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period) - breakout detection
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Weekly data for pivot points and trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Load 1d data ONCE for regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly pivot points
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    # 4h RSI for mean reversion signals
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    pivot = (weekly_high + weekly_low + weekly_close) / 3
-    r1 = 2 * pivot - weekly_low
-    s1 = 2 * pivot - weekly_high
-    r2 = pivot + (weekly_high - weekly_low)
-    s2 = pivot - (weekly_high - weekly_low)
-    r3 = weekly_high + 2 * (pivot - weekly_low)
-    s3 = weekly_low - 2 * (weekly_high - pivot)
+    # 4h EMA20 for trend filter
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align weekly pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    # 1d ADX for regime filter (trending vs ranging)
+    plus_dm = np.where((df_1d['high'].values[1:] - df_1d['high'].values[:-1]) > (df_1d['low'].values[:-1] - df_1d['low'].values[1:]), 
+                       np.maximum(df_1d['high'].values[1:] - df_1d['high'].values[:-1], 0), 0)
+    minus_dm = np.where((df_1d['low'].values[:-1] - df_1d['low'].values[1:]) > (df_1d['high'].values[1:] - df_1d['high'].values[:-1]), 
+                        np.maximum(df_1d['low'].values[:-1] - df_1d['low'].values[1:], 0), 0)
+    plus_dm = np.insert(plus_dm, 0, 0)
+    minus_dm = np.insert(minus_dm, 0, 0)
+    tr = np.maximum(
+        np.maximum(df_1d['high'].values - df_1d['low'].values, np.abs(df_1d['high'].values - np.roll(df_1d['close'].values, 1))),
+        np.abs(df_1d['low'].values - np.roll(df_1d['close'].values, 1))
+    )
+    tr[0] = df_1d['high'].values[0] - df_1d['low'].values[0]
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / (atr + 1e-10)
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / (atr + 1e-10)
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Weekly EMA for trend filter (21-period)
-    weekly_ema21 = pd.Series(weekly_close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    weekly_ema21_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema21)
-    
-    # Volume spike detection (20-period average)
+    # Volume spike confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(weekly_ema21_aligned[i]) or 
+        if (np.isnan(rsi[i]) or np.isnan(ema_20[i]) or np.isnan(adx_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume condition: at least 1.5x average
+        # Mean reversion conditions
+        rsi_oversold = rsi[i] < 30
+        rsi_overbought = rsi[i] > 70
+        
         vol_condition = volume[i] > vol_ma_20[i] * 1.5
         
         if position == 0:
-            # Long: break above Donchian high with weekly uptrend and above weekly R3
-            if (close[i] > donch_high[i] and 
-                weekly_ema21_aligned[i] > weekly_ema21_aligned[i-1] and
-                close[i] > r3_aligned[i] and 
-                vol_condition):
+            # Long: RSI oversold in uptrend (ADX > 25) or ranging market
+            if rsi_oversold and vol_condition and (adx_aligned[i] > 25 and close[i] > ema_20[i] or adx_aligned[i] <= 25):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below Donchian low with weekly downtrend and below weekly S3
-            elif (close[i] < donch_low[i] and 
-                  weekly_ema21_aligned[i] < weekly_ema21_aligned[i-1] and
-                  close[i] < s3_aligned[i] and 
-                  vol_condition):
+            # Short: RSI overbought in downtrend (ADX > 25) or ranging market
+            elif rsi_overbought and vol_condition and (adx_aligned[i] > 25 and close[i] < ema_20[i] or adx_aligned[i] <= 25):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below Donchian median or weekly trend turns down
-            donch_mid = (donch_high[i] + donch_low[i]) / 2
-            if close[i] < donch_mid or weekly_ema21_aligned[i] < weekly_ema21_aligned[i-1]:
+            # Exit: RSI returns to neutral or reversal signal
+            if rsi[i] > 50 or rsi[i] > 60:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above Donchian median or weekly trend turns up
-            donch_mid = (donch_high[i] + donch_low[i]) / 2
-            if close[i] > donch_mid or weekly_ema21_aligned[i] > weekly_ema21_aligned[i-1]:
+            # Exit: RSI returns to neutral or reversal signal
+            if rsi[i] < 50 or rsi[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -104,15 +101,13 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 6h Donchian(20) breakouts filtered by weekly pivot levels and trend
-# - Long: Price breaks above Donchian(20) high in weekly uptrend (EMA21 rising) and above weekly R3
-# - Short: Price breaks below Donchian(20) low in weekly downtrend (EMA21 falling) and below weekly S3
-# - Volume confirmation (1.5x 20-period average) reduces false breakouts
-# - Weekly pivot levels provide institutional support/resistance from higher timeframe
-# - Weekly EMA21 trend filter ensures alignment with multi-timeframe trend
-# - Exit when price returns to Donchian midpoint or weekly trend reverses
-# - Position size 0.25 targets ~60-120 trades over 4 years (15-30/year) to avoid fee drag
-# - Works in both bull (breakouts above R3 in uptrend) and bear (breakdowns below S3 in downtrend)
-# - Novel combination: Donchian breakouts + weekly pivot direction + volume filter not recently tried on 6h
-# - Uses proper MTF data loading: weekly data loaded once, aligned with proper delay
-# - Designed for BTC/ETH: avoids overtrading while capturing significant moves with institutional levels
+# Hypothesis: 4h RSI mean reversion with ADX regime filter and volume confirmation
+# - In ranging markets (ADX <= 25): trade RSI extremes ( <30 long, >70 short) with volume spike
+# - In trending markets (ADX > 25): trade RSI extremes only in direction of trend (4h EMA20)
+# - Volume confirmation (1.5x average) reduces false signals
+# - Exit when RSI returns to neutral levels (50 for long, 40 for short) to avoid overstay
+# - Works in both bull and bear markets via regime adaptation
+# - Position size 0.25 limits drawdown during trends
+# - Target: 20-50 trades/year to avoid fee drag while capturing mean reversion edges
+# - Combines proven mean reversion (RSI) with regime filtering (ADX) for robustness
+# - Avoids overtrading by requiring volume confirmation and regime alignment
