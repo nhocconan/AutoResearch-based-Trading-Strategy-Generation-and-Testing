@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian breakout with weekly trend filter and volume confirmation.
-# Long when price breaks above 20-day high AND weekly EMA34 rising AND volume > 2x 20-day average.
-# Short when price breaks below 20-day low AND weekly EMA34 falling AND volume > 2x 20-day average.
-# Exit when price crosses back inside the 20-day range.
-# This strategy captures momentum breakouts aligned with weekly trend and institutional volume.
-# Designed for low trade frequency (target: 15-25 trades/year) to minimize fee drag.
-# Works in both bull and bear markets by following the weekly trend direction.
+# Hypothesis: 12h Williams %R reversal with 1d trend filter and volume confirmation.
+# Long when Williams %R < -80 (oversold) AND 1d EMA50 rising AND volume > 1.5x 20-period average.
+# Short when Williams %R > -20 (overbought) AND 1d EMA50 falling AND volume > 1.5x 20-period average.
+# Exit when Williams %R crosses back above -50 (for longs) or below -50 (for shorts).
+# Williams %R identifies overbought/oversold conditions; 1d EMA50 ensures trend alignment.
+# Volume filter confirms institutional participation. Target: 15-30 trades/year (60-120 total) to minimize fee drag.
+# Works in both bull and bear markets by following the 1d trend direction and fading extremes.
 
-name = "1d_DonchianBreakout_WeeklyEMA34_Volume"
-timeframe = "1d"
+name = "12h_WilliamsR_Reversal_1dEMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,48 +25,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Daily data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 20-day Donchian channels (using daily high/low)
-    high_max20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 14-period Williams %R: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
     
-    # Weekly EMA34 for trend filter
-    ema34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Weekly EMA34 direction
-    ema34_rising = np.zeros_like(ema34_1w_aligned, dtype=bool)
-    ema34_falling = np.zeros_like(ema34_1w_aligned, dtype=bool)
-    ema34_rising[1:] = ema34_1w_aligned[1:] > ema34_1w_aligned[:-1]
-    ema34_falling[1:] = ema34_1w_aligned[1:] < ema34_1w_aligned[:-1]
+    # 1d EMA50 direction
+    ema50_rising = np.zeros_like(ema50_1d_aligned, dtype=bool)
+    ema50_falling = np.zeros_like(ema50_1d_aligned, dtype=bool)
+    ema50_rising[1:] = ema50_1d_aligned[1:] > ema50_1d_aligned[:-1]
+    ema50_falling[1:] = ema50_1d_aligned[1:] < ema50_1d_aligned[:-1]
     
-    # Volume filter: current volume > 2x 20-day average
+    # Volume filter: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (2.0 * vol_ma20)
+    volume_filter = volume > (1.5 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Sufficient warmup for weekly EMA34 and Donchian
+    start_idx = max(50, 20, 14)  # Sufficient warmup for EMA50, volume MA, and Williams %R
     
     for i in range(start_idx, n):
-        if (np.isnan(high_max20[i]) or np.isnan(low_min20[i]) or 
-            np.isnan(ema34_1w_aligned[i]) or np.isnan(ema34_rising[i]) or 
-            np.isnan(ema34_falling[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(ema50_rising[i]) or np.isnan(ema50_falling[i]) or 
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price breaks above 20-day high, weekly EMA34 rising, volume filter
-            long_cond = (close[i] > high_max20[i]) and ema34_rising[i] and volume_filter[i]
-            # Short conditions: price breaks below 20-day low, weekly EMA34 falling, volume filter
-            short_cond = (close[i] < low_min20[i]) and ema34_falling[i] and volume_filter[i]
+            # Long conditions: Williams %R < -80 (oversold), 1d EMA50 rising, volume filter
+            long_cond = (williams_r[i] < -80) and ema50_rising[i] and volume_filter[i]
+            # Short conditions: Williams %R > -20 (overbought), 1d EMA50 falling, volume filter
+            short_cond = (williams_r[i] > -20) and ema50_falling[i] and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -75,15 +76,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses back below 20-day low
-            if close[i] < low_min20[i]:
+            # Long exit: Williams %R crosses back above -50
+            if williams_r[i] > -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses back above 20-day high
-            if close[i] > high_max20[i]:
+            # Short exit: Williams %R crosses back below -50
+            if williams_r[i] < -50:
                 signals[i] = 0.0
                 position = 0
             else:
