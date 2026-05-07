@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_Pivot_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: Price breaking above/below Camarilla R1/S1 levels from daily pivots, with 1d EMA trend filter and volume confirmation, captures institutional breakouts while avoiding false signals. Works in bull/bear by following higher timeframe trend. Low frequency via 4h timeframe and strict entry criteria.
-Target: 75-200 total trades over 4 years (19-50/year).
+12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: Price breaking above/below Camarilla R1/S1 levels from daily pivots, with 1d EMA trend filter and volume confirmation, captures institutional breakouts while avoiding false signals. Works in bull/bear by following higher timeframe trend. Low frequency via 12h timeframe and strict entry criteria.
+Target: 50-150 total trades over 4 years (12-37/year).
 """
-name = "4h_Camarilla_Pivot_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -39,7 +39,7 @@ def generate_signals(prices):
     r1 = pivot + 1.1 * (prev_high - prev_low) / 12
     s1 = pivot - 1.1 * (prev_high - prev_low) / 12
     
-    # Align to 4h timeframe (values available after daily bar closes)
+    # Align to 12h timeframe (values available after daily bar closes)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
