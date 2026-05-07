@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 4h_Camarilla_R3S3_Breakout_1dTrend_VolumeS
-Hypothesis: Price breaking above Camarilla R3 or below S3 levels from the prior 1d, combined with 1d EMA50 trend filter and volume confirmation, captures high-probability momentum moves. The 1d trend filter ensures alignment with higher timeframe momentum, reducing false breakouts in choppy conditions. This version uses 1d HTF (not 12h) to reduce trade frequency and improve generalization in bear markets.
+Hypothesis: On 4h timeframe, price breaking above Camarilla R3 or below S3 levels from the prior 1d period, combined with 1d EMA34 trend filter and volume confirmation, captures high-probability momentum moves in both bull and bear markets. The 1d trend filter ensures alignment with higher timeframe momentum, reducing false breakouts in choppy conditions.
 """
 name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeS"
 timeframe = "4h"
@@ -35,13 +35,13 @@ def generate_signals(prices):
     r3_1d = close_1d + 1.1666 * range_1d * 1.1 / 2
     s3_1d = close_1d - 1.1666 * range_1d * 1.1 / 2
     
-    # 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # Align all to 4h timeframe
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume filter: current volume > 1.5 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -55,7 +55,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any data is not ready
         if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg[i])):
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,11 +63,11 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: price breaks above R3 + 1d uptrend + volume
-            if close[i] > r3_1d_aligned[i] and close[i] > ema_50_1d_aligned[i] and volume_filter[i]:
+            if close[i] > r3_1d_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.30
                 position = 1
             # Short: price breaks below S3 + 1d downtrend + volume
-            elif close[i] < s3_1d_aligned[i] and close[i] < ema_50_1d_aligned[i] and volume_filter[i]:
+            elif close[i] < s3_1d_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.30
                 position = -1
         elif position != 0:
