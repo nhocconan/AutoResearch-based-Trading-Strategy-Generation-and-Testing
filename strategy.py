@@ -1,6 +1,6 @@
-#!/usr/bin/env python3
-name = "6h_Volume_Weighted_RSI_Pullback_1dTrend"
-timeframe = "6h"
+#/usr/bin/env python3
+name = "12h_Camarilla_R1S1_Breakout_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,76 +17,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and RSI calculation
+    # Get weekly data for trend filter (EMA10) and daily data for Camarilla calculation
+    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1w) < 10 or len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate weekly EMA10 for trend filter
+    close_1w = df_1w['close'].values
+    ema_10_1w = pd.Series(close_1w).ewm(span=10, adjust=False, min_periods=10).mean().values
+    ema_10_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_10_1w)
+    
+    # Calculate Camarilla levels from previous daily candle (R1 and S1)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 1d RSI(14) for overbought/oversold levels
-    delta = pd.Series(close_1d).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_values)
+    # Shift to get previous day's values
+    high_1d_shifted = np.roll(high_1d, 1)
+    low_1d_shifted = np.roll(low_1d, 1)
+    close_1d_shifted = np.roll(close_1d, 1)
     
-    # Calculate volume-weighted RSI(14) for 6s timeframe (more responsive to institutional flow)
-    delta_6h = pd.Series(close).diff()
-    gain_6h = delta_6h.clip(lower=0)
-    loss_6h = -delta_6h.clip(upper=0)
-    # Volume weighting: multiply gains/losses by volume
-    vol_weighted_gain = (gain_6h * volume).ewm(span=14, adjust=False, min_periods=14).mean()
-    vol_weighted_loss = (loss_6h * volume).ewm(span=14, adjust=False, min_periods=14).mean()
-    vol_rs = vol_weighted_gain / vol_weighted_loss
-    vol_rsi = 100 - (100 / (1 + vol_rs))
-    vol_rsi_values = vol_rsi.values
+    # Calculate Camarilla width for R1/S1: (H-L)*1.1/12
+    camarilla_width = (high_1d_shifted - low_1d_shifted) * 1.1 / 12
+    r1 = close_1d_shifted + camarilla_width  # R1 level
+    s1 = close_1d_shifted - camarilla_width  # S1 level
+    
+    # Align Camarilla levels to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Calculate volume confirmation (current volume vs 20-period average)
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ratio = volume / vol_ma20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure sufficient warmup
+    start_idx = 100  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any data is not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(rsi_aligned[i]) or 
-            np.isnan(vol_rsi_values[i])):
+        if (np.isnan(ema_10_1w_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
+            np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: 1d uptrend (price > EMA50), 6h vol-RSI oversold (<30), 1d RSI not overbought (<70)
-            if (close[i] > ema_50_1d_aligned[i] and 
-                vol_rsi_values[i] < 30 and 
-                rsi_aligned[i] < 70):
+            # Long: price breaks above R1 level, weekly uptrend (price > weekly EMA10), volume confirmation
+            if (close[i] > r1_aligned[i] and 
+                close[i] > ema_10_1w_aligned[i] and 
+                volume_ratio[i] > 2.0):
                 signals[i] = 0.25
                 position = 1
-            # Short: 1d downtrend (price < EMA50), 6h vol-RSI overbought (>70), 1d RSI not oversold (>30)
-            elif (close[i] < ema_50_1d_aligned[i] and 
-                  vol_rsi_values[i] > 70 and 
-                  rsi_aligned[i] > 30):
+            # Short: price breaks below S1 level, weekly downtrend (price < weekly EMA10), volume confirmation
+            elif (close[i] < s1_aligned[i] and 
+                  close[i] < ema_10_1w_aligned[i] and 
+                  volume_ratio[i] > 2.0):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: 6h vol-RSI overbought (>70) or 1d trend breaks down
-            if vol_rsi_values[i] > 70 or close[i] < ema_50_1d_aligned[i]:
+            # Exit long: price breaks below S1 level (reversal signal)
+            if close[i] < s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: 6h vol-RSI oversold (<30) or 1d trend breaks up
-            if vol_rsi_values[i] < 30 or close[i] > ema_50_1d_aligned[i]:
+            # Exit short: price breaks above R1 level (reversal signal)
+            if close[i] > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
