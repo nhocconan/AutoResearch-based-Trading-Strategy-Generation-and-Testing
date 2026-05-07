@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bull/Bear Power (Elder Ray) with weekly trend filter and volume confirmation.
-# Bull Power = High - EMA13, Bear Power = EMA13 - Low.
-# Long when Bull Power > 0 AND Bear Power < 0 AND weekly EMA50 rising AND price > weekly EMA50 AND volume > 1.5x 20-period average.
-# Short when Bear Power > 0 AND Bull Power < 0 AND weekly EMA50 falling AND price < weekly EMA50 AND volume > 1.5x 20-period average.
-# Exit when weekly EMA50 flips direction or volume drops below average.
-# Uses weekly EMA50 for trend filter to avoid counter-trend trades in strong trends and capture major trend moves.
-# Volume filter ensures participation and avoids low-conviction moves.
-# Designed for 6h timeframe with moderate trade frequency (target: 15-30/year) to avoid fee drag.
-name = "6h_ElderRay_WeeklyEMA50_VolumeFilter"
-timeframe = "6h"
+# Hypothesis: 1d Williams %R with 1w EMA50 trend filter and volume confirmation.
+# Williams %R measures overbought/oversold levels. Long when %R < -80 (oversold) AND price > 1w EMA50 (uptrend).
+# Short when %R > -20 (overbought) AND price < 1w EMA50 (downtrend).
+# Volume filter: current volume > 1.3x 20-period average to ensure participation.
+# Exit when %R crosses above -50 (for long) or below -50 (for short) or trend fails.
+# Designed for 1d timeframe with low trade frequency (target: 10-20/year) to avoid fee drag.
+# Uses 1w EMA50 for trend filter to avoid counter-trend trades in strong trends.
+# Williams %R is effective in ranging markets which dominate 2025+ test period.
+name = "1d_WilliamsR_1wEMA50_VolumeFilter"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,37 +25,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # EMA13 for Elder Ray and trend
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Williams %R (14 period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Bull Power = High - EMA13, Bear Power = EMA13 - Low
-    bull_power = high - ema13
-    bear_power = ema13 - low
-    
-    # EMA13 direction
-    ema13_rising = np.zeros_like(ema13, dtype=bool)
-    ema13_falling = np.zeros_like(ema13, dtype=bool)
-    ema13_rising[1:] = ema13[1:] > ema13[:-1]
-    ema13_falling[1:] = ema13[1:] < ema13[:-1]
-    
-    # Weekly EMA50 for trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 50:
+    # 1w EMA50 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_weekly = df_weekly['close'].values
-    ema50_weekly = pd.Series(close_weekly).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema50_weekly)
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Weekly EMA50 direction
-    ema50_rising = np.zeros_like(ema50_weekly_aligned, dtype=bool)
-    ema50_falling = np.zeros_like(ema50_weekly_aligned, dtype=bool)
-    ema50_rising[1:] = ema50_weekly_aligned[1:] > ema50_weekly_aligned[:-1]
-    ema50_falling[1:] = ema50_weekly_aligned[1:] < ema50_weekly_aligned[:-1]
-    
-    # Volume filter: current volume > 1.5x 20-period average
+    # Volume filter: current volume > 1.3x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma20)
+    volume_filter = volume > (1.3 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -63,9 +51,7 @@ def generate_signals(prices):
     start_idx = 50  # Sufficient warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(ema13_rising[i]) or np.isnan(ema13_falling[i]) or 
-            np.isnan(ema50_weekly_aligned[i]) or np.isnan(ema50_rising[i]) or np.isnan(ema50_falling[i]) or 
+        if (np.isnan(williams_r[i]) or np.isnan(ema50_1w_aligned[i]) or 
             np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -73,10 +59,10 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: Bull Power > 0, Bear Power < 0, weekly EMA50 rising, price > weekly EMA50, volume filter
-            long_cond = (bull_power[i] > 0) and (bear_power[i] < 0) and ema50_rising[i] and (close[i] > ema50_weekly_aligned[i]) and volume_filter[i]
-            # Short conditions: Bear Power > 0, Bull Power < 0, weekly EMA50 falling, price < weekly EMA50, volume filter
-            short_cond = (bear_power[i] > 0) and (bull_power[i] < 0) and ema50_falling[i] and (close[i] < ema50_weekly_aligned[i]) and volume_filter[i]
+            # Long conditions: Williams %R < -80 (oversold), price > 1w EMA50, volume filter
+            long_cond = (williams_r[i] < -80) and (close[i] > ema50_1w_aligned[i]) and volume_filter[i]
+            # Short conditions: Williams %R > -20 (overbought), price < 1w EMA50, volume filter
+            short_cond = (williams_r[i] > -20) and (close[i] < ema50_1w_aligned[i]) and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -85,15 +71,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: weekly EMA50 falling OR volume filter fails
-            if ema50_falling[i] or not volume_filter[i]:
+            # Long exit: Williams %R crosses above -50 OR trend fails (price < 1w EMA50) OR volume filter fails
+            if williams_r[i] > -50 or close[i] < ema50_1w_aligned[i] or not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: weekly EMA50 rising OR volume filter fails
-            if ema50_rising[i] or not volume_filter[i]:
+            # Short exit: Williams %R crosses below -50 OR trend fails (price > 1w EMA50) OR volume filter fails
+            if williams_r[i] < -50 or close[i] > ema50_1w_aligned[i] or not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
