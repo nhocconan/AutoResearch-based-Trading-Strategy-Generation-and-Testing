@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_True_Range_Channel_With_1d_Trend"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,78 +17,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # 1d True Range (TR) for volatility-based channel
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 12h EMA50 for trend filter
+    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Calculate True Range components
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr2[0] = np.inf  # First value has no previous close
-    tr3[0] = np.inf
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Calculate 4h Camarilla pivot levels from previous 4h bar
+    high_prev = np.roll(high, 1)
+    low_prev = np.roll(low, 1)
+    close_prev = np.roll(close, 1)
+    high_prev[0] = np.nan
+    low_prev[0] = np.nan
+    close_prev[0] = np.nan
     
-    # ATR(10) using Wilder's smoothing
-    atr_1d = np.zeros_like(tr_1d)
-    atr_1d[9] = np.mean(tr_1d[:10])  # Initial SMA
-    for i in range(10, len(tr_1d)):
-        atr_1d[i] = (atr_1d[i-1] * 9 + tr_1d[i]) / 10
+    pivot = (high_prev + low_prev + close_prev) / 3.0
+    range_prev = high_prev - low_prev
     
-    # Upper and Lower Channels (ATR-based)
-    upper_channel_1d = close_1d + 1.5 * atr_1d
-    lower_channel_1d = close_1d - 1.5 * atr_1d
+    # Camarilla levels
+    R1 = close_prev + range_prev * 1.1 / 12
+    S1 = close_prev - range_prev * 1.1 / 12
+    R3 = close_prev + range_prev * 1.1 / 4
+    S3 = close_prev - range_prev * 1.1 / 4
     
-    # Align channels to 6h timeframe
-    upper_channel_aligned = align_htf_to_ltf(prices, df_1d, upper_channel_1d)
-    lower_channel_aligned = align_htf_to_ltf(prices, df_1d, lower_channel_1d)
-    
-    # 1d EMA20 for trend filter
-    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
-    
-    # 6m volume filter: > 1.3x 20-period average (~5 days)
+    # 4h volume spike: > 1.5x 20-period average (~3.3 days)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > 1.3 * vol_ma
+    vol_spike = volume > 1.5 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)  # Wait for volume MA and EMA20
+    start_idx = max(20, 50)  # Wait for volume MA and EMA50
     
     for i in range(start_idx, n):
-        if (np.isnan(upper_channel_aligned[i]) or np.isnan(lower_channel_aligned[i]) or 
-            np.isnan(ema20_1d_aligned[i])):
+        if np.isnan(ema50_12h_aligned[i]) or np.isnan(R1[i]) or np.isnan(S1[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price touches lower channel AND above EMA20 (bullish trend) with volume
-            if low[i] <= lower_channel_aligned[i] and close[i] > ema20_1d_aligned[i] and vol_filter[i]:
+            # Long: Price breaks above R1 with volume spike and 12h uptrend
+            if close[i] > R1[i] and vol_spike[i] and close[i] > ema50_12h_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price touches upper channel AND below EMA20 (bearish trend) with volume
-            elif high[i] >= upper_channel_aligned[i] and close[i] < ema20_1d_aligned[i] and vol_filter[i]:
+            # Short: Price breaks below S1 with volume spike and 12h downtrend
+            elif close[i] < S1[i] and vol_spike[i] and close[i] < ema50_12h_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Price crosses above EMA20 OR touches upper channel
-            if close[i] > ema20_1d_aligned[i] or high[i] >= upper_channel_aligned[i]:
+            # Exit: Price breaks below S1 or 12h trend turns down
+            if close[i] < S1[i] or close[i] < ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price crosses below EMA20 OR touches lower channel
-            if close[i] < ema20_1d_aligned[i] or low[i] <= lower_channel_aligned[i]:
+            # Exit: Price breaks above R1 or 12h trend turns up
+            if close[i] > R1[i] or close[i] > ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -96,11 +85,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 6s mean reversion within a 1d ATR-based channel, filtered by 1d EMA20 trend.
-# Long when price touches/touches lower 1.5*ATR channel while above EMA20 (bullish trend) with volume confirmation.
-# Short when price touches/touches upper channel while below EMA20 (bearish trend) with volume confirmation.
-# Exits when price crosses EMA20 or touches opposite channel.
-# Uses 1d timeframe for channel calculation and trend to avoid whipsaws, 6s for entry timing.
-# Volume filter (>1.3x average) ensures conviction. Discrete 0.25 position size limits risk.
-# Works in trending markets (trend filter) and ranging markets (channel mean reversion).
-# Target: 15-35 trades/year to minimize fee drain while capturing meaningful moves.
+# Hypothesis: Camarilla R1/S1 breakout with 12h EMA50 trend filter and volume confirmation.
+# Long when price breaks above R1 (bullish breakout), 12h EMA50 up, and volume spike confirms.
+# Short when price breaks below S1 (bearish breakdown), 12h EMA50 down, and volume spike confirms.
+# Uses 12h timeframe for trend to avoid whipsaws, 4h for entry timing.
+# Volume spike (>1.5x average) ensures conviction. Discrete 0.25 position size limits risk.
+# Works in bull markets (breakouts with trend) and bear markets (breakdowns with trend).
+# Target: 20-50 trades/year to minimize fee drag while capturing sustained moves.
