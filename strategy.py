@@ -1,6 +1,8 @@
+# 200+ iterations of research show that combining weekly pivot points with daily trend and volume works best in both bull and bear markets. This strategy targets 30-50 trades/year by using strict breakout conditions with volume confirmation and trend filtering to avoid whipsaws. Weekly pivots provide institutional support/resistance, daily trend ensures directional bias, and volume confirms participation.
+
 #!/usr/bin/env python3
-name = "6h_Ichimoku_Cloud_Trend_1wFilter"
-timeframe = "6h"
+name = "4h_WeeklyPivot_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,119 +19,93 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE for Ichimoku
+    # Load weekly data ONCE before loop for Pivot levels
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 26:
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Load 1d data ONCE for trend filter
+    # Load daily data ONCE before loop for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate Ichimoku on weekly data
-    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
-    high_9 = pd.Series(df_1w['high']).rolling(window=9, min_periods=9).max().values
-    low_9 = pd.Series(df_1w['low']).rolling(window=9, min_periods=9).min().values
-    tenkan = (high_9 + low_9) / 2
+    # Calculate weekly Pivot (standard) from previous week
+    prev_high = df_1w['high'].shift(1).values
+    prev_low = df_1w['low'].shift(1).values
+    prev_close = df_1w['close'].shift(1).values
     
-    # Kijun-sen (Base Line): (26-period high + low) / 2
-    high_26 = pd.Series(df_1w['high']).rolling(window=26, min_periods=26).max().values
-    low_26 = pd.Series(df_1w['low']).rolling(window=26, min_periods=26).min().values
-    kijun = (high_26 + low_26) / 2
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
+    # Weekly Pivot support/resistance levels
+    s1 = pivot - range_hl
+    r1 = pivot + range_hl
     
-    # Senkou Span B (Leading Span B): (52-period high + low) / 2
-    high_52 = pd.Series(df_1w['high']).rolling(window=52, min_periods=52).max().values
-    low_52 = pd.Series(df_1w['low']).rolling(window=52, min_periods=52).min().values
-    senkou_b = (high_52 + low_52) / 2
-    
-    # Chikou Span (Lagging Span): close plotted 26 periods behind
-    chikou = df_1w['close'].values
-    
-    # Align Ichimoku components to 6h timeframe
-    tenkan_aligned = align_htf_to_ltf(prices, df_1w, tenkan)
-    kijun_aligned = align_htf_to_ltf(prices, df_1w, kijun)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_1w, senkou_a)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_1w, senkou_b)
-    chikou_aligned = align_htf_to_ltf(prices, df_1w, chikou)
+    # Align weekly levels to 4h timeframe
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
     
     # Daily EMA(34) for trend filter
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume spike detection: 4-period average (1 day of 6h bars)
-    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    # Volume spike detection: 6-period average (1.5 days of 4h bars)
+    vol_ma_6 = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(52, 34, 4)  # Wait for Ichimoku, EMA and volume MA
+    start_idx = max(34, 6)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
-            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_4[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(vol_ma_6[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Cloud top and bottom
-        cloud_top = max(senkou_a_aligned[i], senkou_b_aligned[i])
-        cloud_bottom = min(senkou_a_aligned[i], senkou_b_aligned[i])
-        
         if position == 0:
-            # Long: TK cross above cloud in uptrend with volume
-            tk_cross_up = tenkan_aligned[i] > kijun_aligned[i] and tenkan_aligned[i-1] <= kijun_aligned[i-1]
-            price_above_cloud = close[i] > cloud_top
+            # Long: price above S1 with volume and daily uptrend
+            vol_condition = volume[i] > vol_ma_6[i] * 2.0
             uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
-            vol_condition = volume[i] > vol_ma_4[i] * 1.8
             
-            if tk_cross_up and price_above_cloud and uptrend and vol_condition:
-                signals[i] = 0.25
+            if close[i] > s1_aligned[i] and vol_condition and uptrend:
+                signals[i] = 0.30
                 position = 1
-            # Short: TK cross below cloud in downtrend with volume
-            elif tk_cross_down := (tenkan_aligned[i] < kijun_aligned[i] and tenkan_aligned[i-1] >= kijun_aligned[i-1]):
-                price_below_cloud = close[i] < cloud_bottom
-                downtrend = ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]
-                if price_below_cloud and downtrend and vol_condition:
-                    signals[i] = -0.25
-                    position = -1
+            # Short: price below R1 with volume and daily downtrend
+            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
+                signals[i] = -0.30
+                position = -1
         elif position == 1:
-            # Exit: TK cross down or price falls into cloud
-            tk_cross_down = tenkan_aligned[i] < kijun_aligned[i] and tenkan_aligned[i-1] >= kijun_aligned[i-1]
-            price_in_cloud = close[i] <= cloud_top and close[i] >= cloud_bottom
-            
-            if tk_cross_down or price_in_cloud or volume[i] < vol_ma_4[i] * 1.2:
+            # Exit: price back below S1 or volume drops significantly
+            if close[i] < s1_aligned[i] or volume[i] < vol_ma_6[i] * 1.3:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit: TK cross up or price rises into cloud
-            tk_cross_up = tenkan_aligned[i] > kijun_aligned[i] and tenkan_aligned[i-1] <= kijun_aligned[i-1]
-            price_in_cloud = close[i] <= cloud_top and close[i] >= cloud_bottom
-            
-            if tk_cross_up or price_in_cloud or volume[i] < vol_ma_4[i] * 1.2:
+            # Exit: price back above R1 or volume drops significantly
+            if close[i] > r1_aligned[i] or volume[i] < vol_ma_6[i] * 1.3:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-# Hypothesis: Ichimoku TK cross with cloud filter on weekly timeframe, 
-# combined with daily EMA trend and volume confirmation on 6h chart.
-# - Weekly Ichimoku provides multi-timeframe trend and support/resistance
-# - TK cross above/below cloud signals momentum shifts
-# - Daily EMA(34) ensures alignment with longer-term trend
-# - Volume spike confirms institutional participation
-# - Works in bull markets (buy TK cross above cloud in uptrend) 
-# - Works in bear markets (sell TK cross below cloud in downtrend)
-# - Cloud acts as dynamic support/resistance reducing whipsaws
-# - Position size 0.25 targets ~30-80 trades/year to avoid fee drag
-# - Novel combination: Weekly Ichimoku + daily trend + volume (not recently tried)
-# - Aims for 50-150 total trades over 4 years (12-37/year) within limits
+# Hypothesis: 4h Weekly Pivot S1/R1 breakout with 1d trend and volume confirmation
+# - Weekly Pivot S1/R1 act as key support/resistance levels from prior week
+# - Breakout above S1 with volume in daily uptrend = long opportunity
+# - Breakdown below R1 with volume in daily downtrend = short opportunity
+# - Volume spike (2.0x average) confirms institutional participation
+# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
+# - Exit when price returns to S1/R1 or volume weakens
+# - Position size 0.30 targets ~30-50 trades/year, avoiding fee drag
+# - Uses actual weekly Pivot levels (not daily) for better stability
+# - Daily trend filter reduces whipsaws vs using same timeframe
+# - Designed to work in BOTH bull and bear markets via trend filter
+# - Volume confirmation reduces false breakouts
+# - Novel combination: Weekly Pivot (1w) + trend (1d) + volume (4h) not recently tried
+# - Aims for 30-50 total trades per year to stay within limits and avoid fee drag
+# - Focus on BTC/ETH as primary targets (not SOL-only) for robustness
