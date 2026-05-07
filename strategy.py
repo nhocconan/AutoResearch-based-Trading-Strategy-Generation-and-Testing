@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_Volume_Trend_1d"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,72 +19,56 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Daily close for trend
     close_1d = df_1d['close'].values
+    # Daily EMA(20) for trend filter
+    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_high = np.concatenate([[high_1d[0]], high_1d[:-1]])
-    prev_low = np.concatenate([[low_1d[0]], low_1d[:-1]])
-    prev_close = np.concatenate([[close_1d[0]], close_1d[:-1]])
+    # Donchian channel (20-period) on 4h
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate pivot and ranges
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_val = prev_high - prev_low
-    
-    # Camarilla levels
-    r1 = pivot + (range_val * 1.1 / 12)
-    s1 = pivot - (range_val * 1.1 / 12)
-    
-    # Calculate daily EMA(34) for trend
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
-    
-    # Volume spike detection (20-period average on 12h)
+    # Volume spike detection (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Wait for volume MA
+    start_idx = 20  # Wait for Donchian and volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(ema_20_1d_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above R1 with volume and in uptrend
+            # Long: break above Donchian high with volume and in daily uptrend
             vol_condition = volume[i] > vol_ma[i] * 1.5
-            uptrend = close[i] > ema_34_aligned[i]
+            daily_uptrend = close[i] > ema_20_1d_aligned[i]
             
-            if close[i] > r1_aligned[i] and vol_condition and uptrend:
+            if high[i] > high_20[i] and vol_condition and daily_uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 with volume and in downtrend
-            elif close[i] < s1_aligned[i] and vol_condition and not uptrend:
+            # Short: break below Donchian low with volume and in daily downtrend
+            elif low[i] < low_20[i] and vol_condition and not daily_uptrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below EMA or volume drops
-            if close[i] < ema_34_aligned[i] or volume[i] < vol_ma[i]:
+            # Exit: price back below Donchian low or volume drops
+            if low[i] < low_20[i] or volume[i] < vol_ma[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above EMA or volume drops
-            if close[i] > ema_34_aligned[i] or volume[i] < vol_ma[i]:
+            # Exit: price back above Donchian high or volume drops
+            if high[i] > high_20[i] or volume[i] < vol_ma[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -92,9 +76,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 12h Camarilla R1/S1 breakout with daily EMA(34) trend filter and volume confirmation.
-# Uses daily Camarilla pivot levels for key support/resistance and EMA(34) for trend direction.
-# Breaks above R1 or below S1 with volume indicate institutional interest.
-# Trend filter ensures trades align with daily direction.
-# Works in bull (buy R1 breaks in uptrend) and bear (sell S1 breaks in downtrend).
-# Position size 0.25 balances risk and keeps trade frequency ~12-30/year.
+# Hypothesis: 4h Donchian(20) breakout with daily EMA(20) trend filter and volume confirmation.
+# Uses Donchian channel breakouts for trend continuation and institutional interest signals.
+# Daily EMA(20) ensures trades align with higher timeframe trend direction.
+# Volume confirmation (1.5x average) filters false breakouts.
+# Works in bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend).
+# Position size 0.25 balances risk and keeps trade frequency ~20-50/year.
