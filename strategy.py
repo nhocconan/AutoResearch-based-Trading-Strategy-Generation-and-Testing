@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "4h"
+name = "1d_KAMA_Direction_RSI_Chop_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,87 +17,131 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels from previous day
-    prev_high = np.concatenate([[np.nan], high[:-1]])
-    prev_low = np.concatenate([[np.nan], low[:-1]])
-    prev_close = np.concatenate([[np.nan], close[:-1]])
+    # KAMA parameters
+    fast_sc = 2 / (2 + 1)  # EMA(2)
+    slow_sc = 2 / (30 + 1) # EMA(30)
     
-    range_hl = prev_high - prev_low
-    R1 = prev_close + range_hl * 1.1 / 12
-    S1 = prev_close - range_hl * 1.1 / 12
+    # Calculate Efficiency Ratio and Smoothing Constant
+    change = np.abs(np.diff(close, n=10))  # 10-period change
+    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)  # 10-period volatility
     
-    # 1-day trend filter (EMA34)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Vectorized ER calculation
+    er = np.zeros(n)
+    er[10:] = change[10:] / np.maximum(volatility[10:], 1e-10)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Calculate KAMA
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # Weekly trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    daily_up = close > ema34_1d_aligned
-    daily_down = close < ema34_1d_aligned
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    weekly_up = close > ema_50_1w_aligned
+    weekly_down = close < ema_50_1w_aligned
     
-    # Volume filter: volume > 1.5x 20-period SMA
-    vol_sma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_sma20 * 1.5)
+    # Daily RSI
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / np.maximum(avg_loss, 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Weekly Choppiness Index
+    df_1w_chop = get_htf_data(prices, '1w')
+    if len(df_1w_chop) < 14:
+        return np.zeros(n)
+    
+    high_1w = df_1w_chop['high'].values
+    low_1w = df_1w_chop['low'].values
+    close_1w = df_1w_chop['close'].values
+    
+    atr_1w = np.zeros(len(high_1w))
+    tr1 = np.abs(high_1w[1:] - low_1w[1:])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1w[1:] = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    max_high = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
+    
+    chop = np.zeros(len(high_1w))
+    for i in range(14, len(high_1w)):
+        if atr_1w[i] > 0 and (max_high[i] - min_low[i]) > 0:
+            chop[i] = 100 * np.log10(np.sum(atr_1w[i-13:i+1]) / np.maximum(max_high[i] - min_low[i], 1e-10)) / np.log10(14)
+        else:
+            chop[i] = 50
+    
+    chop_aligned = align_htf_to_ltf(prices, df_1w_chop, chop)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_last_trade = 0
-    cooldown_bars = 2  # ~8 hours to reduce trade frequency
     
-    start_idx = max(20, 34)  # Ensure enough data for volume SMA and daily EMA
+    start_idx = max(100, 14)  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(R1[i]) or np.isnan(S1[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(vol_sma20[i])):
+        if (np.isnan(kama[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(rsi[i]) or 
+            np.isnan(chop_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                bars_since_last_trade = 0
-            else:
-                bars_since_last_trade += 1
             continue
         
-        bars_since_last_trade += 1
-        
-        if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: Price breaks above R1, daily uptrend, volume spike
-            if close[i] > R1[i] and daily_up[i] and volume_spike[i]:
+        if position == 0:
+            # Long: KAMA up, weekly up, RSI > 50, chop < 61.8 (trending)
+            if (close[i] > kama[i] and 
+                weekly_up[i] and 
+                rsi[i] > 50 and 
+                chop_aligned[i] < 61.8):
                 signals[i] = 0.25
                 position = 1
-                bars_since_last_trade = 0
-            # Short: Price breaks below S1, daily downtrend, volume spike
-            elif close[i] < S1[i] and daily_down[i] and volume_spike[i]:
+            # Short: KAMA down, weekly down, RSI < 50, chop < 61.8 (trending)
+            elif (close[i] < kama[i] and 
+                  weekly_down[i] and 
+                  rsi[i] < 50 and 
+                  chop_aligned[i] < 61.8):
                 signals[i] = -0.25
                 position = -1
-                bars_since_last_trade = 0
         elif position == 1:
-            # Exit: Price breaks below S1 OR daily trend turns down
-            if close[i] < S1[i] or not daily_up[i]:
+            # Exit: KAMA down OR weekly down OR RSI < 40 OR chop > 61.8 (choppy)
+            if (close[i] < kama[i] or 
+                not weekly_up[i] or 
+                rsi[i] < 40 or 
+                chop_aligned[i] > 61.8):
                 signals[i] = 0.0
                 position = 0
-                bars_since_last_trade = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price breaks above R1 OR daily trend turns up
-            if close[i] > R1[i] or not daily_down[i]:
+            # Exit: KAMA up OR weekly up OR RSI > 60 OR chop > 61.8 (choppy)
+            if (close[i] > kama[i] or 
+                not weekly_down[i] or 
+                rsi[i] > 60 or 
+                chop_aligned[i] > 61.8):
                 signals[i] = 0.0
                 position = 0
-                bars_since_last_trade = 0
             else:
                 signals[i] = -0.25
     
     return signals
 
-# Hypothesis: Camarilla R1/S1 levels act as intraday support/resistance. 
-# Breakouts with volume confirmation and daily trend filter capture momentum moves.
-# Long when price breaks above R1 in daily uptrend with volume spike.
-# Short when price breaks below S1 in daily downtrend with volume spike.
-# Exit when price reverses to opposite level or trend changes.
-# This strategy avoids counter-trend trades and uses volume to confirm breakout strength.
-# Position size 0.25 manages risk, cooldown of 2 bars (~8h) limits trades to ~20-40/year.
-# Works in bull markets (captures uptrend continuations) and bear markets (captures downtrend continuations).
+# Hypothesis: KAMA direction with weekly trend filter, RSI momentum, and chop regime filter
+# captures trends in both bull and bear markets while avoiding whipsaws in choppy conditions.
+# KAMA adapts to market efficiency, providing timely trend signals.
+# Weekly trend filter ensures alignment with higher timeframe momentum.
+# RSI filters for momentum strength, chop filter avoids ranging markets.
+# This combination should work in BTC/ETH across market regimes with controlled trade frequency.
