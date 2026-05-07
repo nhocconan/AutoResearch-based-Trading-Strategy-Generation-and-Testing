@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
-name = "12h_KAMA_Direction_RSI_Chop_Filter"
-timeframe = "12h"
+# 4h_DonchianBreakout_VolumeTrend
+# Hypothesis: 4-hour Donchian(20) breakout with volume confirmation and 12h EMA trend filter
+# Works in bull markets via breakout momentum and in bear markets via short breakdowns
+# Volume filter reduces false breakouts, trend filter avoids counter-trend trades
+# Target: 20-50 trades per year (~80-200 over 4 years) with position size 0.25
+
+name = "4h_DonchianBreakout_VolumeTrend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,86 +23,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average) on 12h close
-    # Parameters: ER length 10, Fast SC 2, Slow SC 30
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close, prepend=close[0]))[:, np.newaxis], axis=1)
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (2/2 - 1/30) + 1/30) ** 2
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # Calculate RSI(14) on 12h close
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Calculate Choppy Index (CHOP) on 1d data for regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Load 12h data ONCE for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # True Range for CHOP
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = np.abs(df_1d['high'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
-    tr3 = np.abs(df_1d['low'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # ATR(14) and highest/lowest close over 14 periods
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    highest_close = pd.Series(df_1d['close']).rolling(window=14, min_periods=14).max().values
-    lowest_close = pd.Series(df_1d['close']).rolling(window=14, min_periods=14).min().values
+    # Donchian channels (20-period)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Chop = 100 * log10(sum(ATR14) / (HH14 - LL14)) / log10(14)
-    sum_atr = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
-    chop = 100 * np.log10(sum_atr / (highest_close - lowest_close + 1e-10)) / np.log10(14)
-    
-    # Align 1d indicators to 12h timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop, additional_delay_bars=0)
+    # Volume ratio: current volume / 20-period average volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = np.where(vol_ma > 0, volume / vol_ma, 1.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 14  # Wait for CHOP calculation
+    start_idx = 20  # Need 20 periods for Donchian
     
     for i in range(start_idx, n):
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(high_max[i]) or 
+            np.isnan(low_min[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Chop regime: CHOP > 61.8 = ranging market (mean revert)
-        in_range = chop_aligned[i] > 61.8
+        # Breakout conditions
+        breakout_up = close[i] > high_max[i-1]  # Break above previous period's high
+        breakout_down = close[i] < low_min[i-1]  # Break below previous period's low
+        
+        # Volume confirmation: volume > 1.5x average
+        volume_confirm = vol_ratio[i] > 1.5
+        
+        # Trend filter from 12h EMA50
+        uptrend = close[i] > ema_50_12h_aligned[i]
+        downtrend = close[i] < ema_50_12h_aligned[i]
         
         if position == 0:
-            # Long: Price above KAMA AND RSI < 40 (oversold) in ranging market
-            if close[i] > kama_aligned[i] and rsi_aligned[i] < 40 and in_range:
+            # Long: upward breakout + volume + uptrend
+            if breakout_up and volume_confirm and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price below KAMA AND RSI > 60 (overbought) in ranging market
-            elif close[i] < kama_aligned[i] and rsi_aligned[i] > 60 and in_range:
+            # Short: downward breakout + volume + downtrend
+            elif breakout_down and volume_confirm and downtrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Price crosses below KAMA OR RSI > 60
-            if close[i] < kama_aligned[i] or rsi_aligned[i] > 60:
+            # Exit: price breaks below Donchian low or trend reversal
+            if close[i] < low_min[i-1] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price crosses above KAMA OR RSI < 40
-            if close[i] > kama_aligned[i] or rsi_aligned[i] < 40:
+            # Exit: price breaks above Donchian high or trend reversal
+            if close[i] > high_max[i-1] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
