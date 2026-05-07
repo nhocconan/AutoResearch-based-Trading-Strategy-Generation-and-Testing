@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_v4"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Camarilla calculation
+    # Get 1d data for trend filter (EMA50) and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -42,7 +42,7 @@ def generate_signals(prices):
     r1 = close_1d_shifted + camarilla_width  # R1 level
     s1 = close_1d_shifted - camarilla_width  # S1 level
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
@@ -53,7 +53,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure sufficient warmup
+    start_idx = 100  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any data is not ready
@@ -70,14 +70,14 @@ def generate_signals(prices):
             # Long: price breaks above R1 level, uptrend (price > EMA50), volume confirmation
             if (close[i] > r1_aligned[i] and 
                 close[i] > ema_50_1d_aligned[i] and 
-                volume_ratio[i] > 2.0):
-                signals[i] = 0.25
+                volume_ratio[i] > 2.5):
+                signals[i] = 0.30
                 position = 1
             # Short: price breaks below S1 level, downtrend (price < EMA50), volume confirmation
             elif (close[i] < s1_aligned[i] and 
                   close[i] < ema_50_1d_aligned[i] and 
-                  volume_ratio[i] > 2.0):
-                signals[i] = -0.25
+                  volume_ratio[i] > 2.5):
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
             # Exit long: price breaks below S1 level (reversal signal)
@@ -85,13 +85,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
             # Exit short: price breaks above R1 level (reversal signal)
             if close[i] > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
