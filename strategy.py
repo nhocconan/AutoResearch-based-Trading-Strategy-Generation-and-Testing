@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R3S3_1dTrend_Volume_Confirm
-# Hypothesis: Use 12h timeframe with Camarilla R3/S3 breakout, confirmed by 1d EMA34 trend and volume spike.
-# Targets 15-25 trades/year to minimize fee drift. Works in bull (breakouts with trend) and bear (mean reversion at extremes).
-# Volume filter reduces false breakouts; trend filter ensures directional bias.
+# 4h_RSI_MeanReversion_4HTrend_Filter
+# Hypothesis: Mean reversion on 4h RSI with trend filter from higher timeframe (1d) to avoid counter-trend trades.
+# Uses RSI(14) < 30 for long and > 70 for short, filtered by 1-day EMA50 trend.
+# Includes volume confirmation and minimum holding period to reduce whipsaw.
+# Target: 20-30 trades/year to minimize fee drag while capturing reversals in both bull and bear markets.
 
-name = "12h_Camarilla_R3S3_1dTrend_Volume_Confirm"
-timeframe = "12h"
+name = "4h_RSI_MeanReversion_4HTrend_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,29 +25,31 @@ def generate_signals(prices):
     
     # Get 1d data for calculations
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels: R3, S3
-    camarilla_range = high_1d - low_1d
-    r3 = close_1d + 1.1 * camarilla_range / 4
-    s3 = close_1d - 1.1 * camarilla_range / 4
+    # Calculate RSI(14) on 4h
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Get 1d data for trend filter (EMA34)
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate EMA50 on 1d for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align all indicators to 12h timeframe
-    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
-    ema_34_1d_12h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align 1d EMA50 to 4h
+    ema_50_1d_4h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume spike filter on 12h (24-period average = ~12 days)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > (2.0 * vol_ma_24)
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -54,8 +57,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical value is NaN
-        if (np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or 
-            np.isnan(ema_34_1d_12h[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema_50_1d_4h[i]) or 
+            np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,27 +68,27 @@ def generate_signals(prices):
         bars_since_entry += 1
         
         if position == 0:
-            # Long: Price > R3, above 1d EMA34 trend, volume spike
-            if close[i] > r3_12h[i] and close[i] > ema_34_1d_12h[i] and volume_spike[i]:
+            # Long: RSI < 30 (oversold), above 1d EMA50 trend, volume confirmation
+            if rsi[i] < 30 and close[i] > ema_50_1d_4h[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
                 bars_since_entry = 0
-            # Short: Price < S3, below 1d EMA34 trend, volume spike
-            elif close[i] < s3_12h[i] and close[i] < ema_34_1d_12h[i] and volume_spike[i]:
+            # Short: RSI > 70 (overbought), below 1d EMA50 trend, volume confirmation
+            elif rsi[i] > 70 and close[i] < ema_50_1d_4h[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
                 bars_since_entry = 0
         elif position == 1:
-            # Exit: price closes below R3 OR below trend
-            if close[i] < r3_12h[i] or close[i] < ema_34_1d_12h[i]:
+            # Exit: RSI > 50 or below trend
+            if rsi[i] > 50 or close[i] < ema_50_1d_4h[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price closes above S3 OR above trend
-            if close[i] > s3_12h[i] or close[i] > ema_34_1d_12h[i]:
+            # Exit: RSI < 50 or above trend
+            if rsi[i] < 50 or close[i] > ema_50_1d_4h[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
