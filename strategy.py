@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "1h_4hDonchian_1dTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -17,89 +17,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Load 4h data ONCE before loop for Donchian channels
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop for Camarilla levels
+    # Load daily data ONCE before loop for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 12h EMA(50) for trend filter
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # 4h Donchian channels (20-period)
+    high_20_4h = pd.Series(df_4h['high']).rolling(window=20, min_periods=20).max().values
+    low_20_4h = pd.Series(df_4h['low']).rolling(window=20, min_periods=20).min().values
     
-    # Calculate Camarilla levels from previous day
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Align Donchian levels to 1h timeframe
+    upper_4h = align_htf_to_ltf(prices, df_4h, high_20_4h)
+    lower_4h = align_htf_to_ltf(prices, df_4h, low_20_4h)
     
-    # Camarilla R3, S3 levels
-    r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
-    s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    # Daily EMA(50) for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # Volume spike detection: 3-period average (3*4h = 12h)
-    vol_ma_3 = pd.Series(volume).rolling(window=3, min_periods=3).mean().values
+    # 1h volume spike detection (24-period average = 1 day)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 3)  # Wait for EMA and volume MA
+    start_idx = max(50, 24)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(vol_ma_3[i])):
+        if (np.isnan(upper_4h[i]) or np.isnan(lower_4h[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_24[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above S3 with volume and 12h uptrend
-            vol_condition = volume[i] > vol_ma_3[i] * 2.0
-            uptrend = ema_50_12h_aligned[i] > ema_50_12h_aligned[i-1]
+            # Long: break above 4h upper Donchian with volume and daily uptrend
+            vol_condition = volume[i] > vol_ma_24[i] * 1.5
+            uptrend = ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1]
             
-            if close[i] > s3_aligned[i] and vol_condition and uptrend:
-                signals[i] = 0.25
+            if close[i] > upper_4h[i] and vol_condition and uptrend:
+                signals[i] = 0.20
                 position = 1
-            # Short: price below R3 with volume and 12h downtrend
-            elif close[i] < r3_aligned[i] and vol_condition and not uptrend:
-                signals[i] = -0.25
+            # Short: break below 4h lower Donchian with volume and daily downtrend
+            elif close[i] < lower_4h[i] and vol_condition and not uptrend:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit: price back below S3 or volume drops
-            if close[i] < s3_aligned[i] or volume[i] < vol_ma_3[i] * 1.5:
+            # Exit: price back below 4h lower Donchian or volume drops
+            if close[i] < lower_4h[i] or volume[i] < vol_ma_24[i] * 0.8:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit: price back above R3 or volume drops
-            if close[i] > r3_aligned[i] or volume[i] < vol_ma_3[i] * 1.5:
+            # Exit: price back above 4h upper Donchian or volume drops
+            if close[i] > upper_4h[i] or volume[i] < vol_ma_24[i] * 0.8:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 12h trend and volume confirmation
-# - Camarilla R3/S3 act as strong support/resistance levels from previous day
-# - Breakout above S3 with volume in 12h uptrend = long opportunity
-# - Breakdown below R3 with volume in 12h downtrend = short opportunity
-# - Volume spike (2.0x average) confirms institutional participation
-# - 12h EMA(50) trend filter reduces whipsaws vs using same timeframe
-# - Works in both bull (buy S3 breaks in uptrend) and bear (sell R3 breaks in downtrend)
-# - Exit when price returns to S3/R3 or volume weakens
-# - Position size 0.25 targets ~30-60 trades/year, avoiding fee drag
-# - Uses actual daily Camarilla levels (not intraday) for better stability
-# - Designed to work in BOTH bull and bear markets via trend filter
-# - Volume confirmation reduces false breakouts
-# - Novel combination: Camarilla R3/S3 (1d) + trend (12h) + volume (4h) not recently tried
-# - Aims for 80-150 total trades over 4 years (20-38/year) to stay within limits
+# Hypothesis: 1h Donchian breakout with 4h structure and 1d trend filter
+# - Uses 4h Donchian channels (20-period) for structural support/resistance
+# - Enters on 1h breakouts with volume confirmation (1.5x average volume)
+# - Trend filter: daily EMA(50) slope ensures alignment with higher timeframe trend
+# - Exits when price returns to opposite Donchian band or volume weakens
+# - Position size 0.20 limits risk while allowing meaningful participation
+# - Designed for low frequency: targets 15-30 trades/year to avoid fee drag
+# - Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend)
+# - Volume confirmation reduces false breakouts during low participation periods
+# - Multi-timeframe alignment: 4b structure + 1d trend + 1h execution timing
