@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 """
-12h_Alligator_Top_Bottom_Reversal
-Hypothesis: Williams Alligator identifies trends on 1d chart. When price crosses below Alligator's teeth (red line) in a downtrend,
-it signals a potential short-term top for mean-reversion short. When price crosses above teeth in an uptrend,
-it signals a potential short-term bottom for mean-reversion long. Uses 12h chart for entry timing with volume confirmation.
-Designed for low trade frequency (~15-30/year) to minimize fee drag and work in both bull and bear markets by fading
-short-term extremes within the longer-term trend context.
+6h_Pivot_Fade_Trend
+Hypothesis: Fade extreme daily pivot levels (R4/S4) with 1w trend filter on 6h chart.
+In ranging markets, price tends to revert from extreme pivot levels (R4/S4).
+In trending markets, only take fades in direction of 1w trend to avoid counter-trend trades.
+Uses daily Camarilla pivot levels calculated from prior day's OHLC.
+Targets 15-30 trades/year to minimize fee drag while capturing mean reversion edge.
+Works in both bull/bear markets via trend filter and pivot-based mean reversion.
 """
-timeframe = "12h"
-name = "12h_Alligator_Top_Bottom_Reversal"
-leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+name = "6h_Pivot_Fade_Trend"
+timeframe = "6h"
+leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
@@ -23,71 +25,79 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    open_price = prices['open'].values
     volume = prices['volume'].values
     
-    # 1d data for Alligator indicator (Williams Alligator: Jaw=13, Teeth=8, Lips=5, all shifted)
+    # Daily data for pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Alligator components (smoothed medians with shift)
-    close_1d = df_1d['close'].values
-    # Jaw: 13-period SMMA shifted 8 bars
-    jaw = pd.Series(close_1d).rolling(window=13, min_periods=13).mean()
-    jaw = jaw.shift(8)
-    # Teeth: 8-period SMMA shifted 5 bars  
-    teeth = pd.Series(close_1d).rolling(window=8, min_periods=8).mean()
-    teeth = teeth.shift(5)
-    # Lips: 5-period SMMA shifted 3 bars
-    lips = pd.Series(close_1d).rolling(window=5, min_periods=5).mean()
-    lips = lips.shift(3)
+    # Weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
+        return np.zeros(n)
     
-    jaw_vals = jaw.values
-    teeth_vals = teeth.values
-    lips_vals = lips.values
+    # Calculate daily Camarilla pivot levels (R4, S4) from prior day
+    # R4 = close + 1.5 * (high - low)
+    # S4 = close - 1.5 * (high - low)
+    # Using prior day's values to avoid look-ahead
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Align to 12h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw_vals)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth_vals)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips_vals)
+    # Calculate pivot levels
+    R4 = prev_close + 1.5 * (prev_high - prev_low)
+    S4 = prev_close - 1.5 * (prev_high - prev_low)
     
-    # Volume confirmation: current volume > 1.5 * 20-period average
+    # Align pivot levels to 6h timeframe (each 6h bar gets prior day's levels)
+    R4_6h = align_htf_to_ltf(prices, df_1d, R4)
+    S4_6h = align_htf_to_ltf(prices, df_1d, S4)
+    
+    # Weekly trend filter: 21-period EMA
+    ema_1w = pd.Series(df_1w['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    
+    # Volume filter: current volume > 1.3 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Wait for warmup
+    for i in range(30, n):  # Wait for warmup
         # Skip if any critical value is NaN
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or 
-            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(R4_6h[i]) or np.isnan(S4_6h[i]) or 
+            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Determine trend direction: Lips above Teeth = uptrend, Lips below Teeth = downtrend
-            is_uptrend = lips_aligned[i] > teeth_aligned[i]
-            
-            # Long: price crosses above Teeth in uptrend (potential bottom) + volume confirmation
-            if close[i] > teeth_aligned[i] and close[i-1] <= teeth_aligned[i-1] and is_uptrend and volume[i] > 1.5 * vol_ma[i]:
+            # Long: price touches or goes below S4 (support) + weekly uptrend + volume
+            if (close[i] <= S4_6h[i] and 
+                ema_1w_aligned[i] > ema_1w_aligned[i-1] and 
+                volume[i] > 1.3 * vol_ma[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price crosses below Teeth in downtrend (potential top) + volume confirmation
-            elif close[i] < teeth_aligned[i] and close[i-1] >= teeth_aligned[i-1] and not is_uptrend and volume[i] > 1.5 * vol_ma[i]:
+            # Short: price touches or goes above R4 (resistance) + weekly downtrend + volume
+            elif (close[i] >= R4_6h[i] and 
+                  ema_1w_aligned[i] < ema_1w_aligned[i-1] and 
+                  volume[i] > 1.3 * vol_ma[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price crosses below Lips (end of short-term move) or trend changes
-            if close[i] < lips_aligned[i] or lips_aligned[i] < teeth_aligned[i]:
+            # Exit: price returns to midpoint (pivot) or weekly trend turns down
+            pivot = (R4_6h[i] + S4_6h[i]) / 2  # Midpoint between R4 and S4
+            if close[i] >= pivot or ema_1w_aligned[i] < ema_1w_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price crosses above Lips (end of short-term move) or trend changes
-            if close[i] > lips_aligned[i] or lips_aligned[i] > teeth_aligned[i]:
+            # Exit: price returns to midpoint or weekly trend turns up
+            pivot = (R4_6h[i] + S4_6h[i]) / 2
+            if close[i] <= pivot or ema_1w_aligned[i] > ema_1w_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
