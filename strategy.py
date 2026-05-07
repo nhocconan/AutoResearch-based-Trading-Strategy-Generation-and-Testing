@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-4H_Camarilla_R1_S1_Breakout_1D_Trend_Volume_v2
-Hypothesis: Use 1d trend (close > SMA50) for direction and 4h Camarilla R1/S1 for entries.
-Long when 1d trend is up and price breaks above 4h R1; short when 1d trend is down and price breaks below 4h S1.
-Volume filter: current volume > 1.5x 20-period average volume to avoid low-probability breakouts.
-This combines higher-timeframe trend direction with lower-timeframe precision entries to reduce false signals.
-Designed to work in both bull and bear markets by following the 1d trend only.
+1D_Williams_Alligator_Trend_Filter_v1
+Hypothesis: Use weekly Williams Alligator (3 SMAs: Jaw-Teeth-Lips) for trend direction and daily price action for entries.
+Long when price > Alligator Teeth and price > previous day's high (breakout); 
+Short when price < Alligator Teeth and price < previous day's low (breakdown).
+Volume confirmation: current volume > 1.3x 20-day average volume.
+Williams Alligator smooths noise and identifies strong trends, reducing whipsaws in both bull and bear markets.
 """
-name = "4H_Camarilla_R1_S1_Breakout_1D_Trend_Volume_v2"
-timeframe = "4h"
+name = "1D_Williams_Alligator_Trend_Filter_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -25,81 +25,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend (SMA50)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for Williams Alligator
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 13:
         return np.zeros(n)
     
-    # Calculate 1d SMA50 for trend
-    close_1d = pd.Series(df_1d['close'])
-    sma50_1d = close_1d.rolling(window=50, min_periods=50).mean().values
-    sma50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma50_1d)
+    # Calculate Williams Alligator (3 SMAs: 13, 8, 5 periods with future shifts)
+    close_1w = pd.Series(df_1w['close'])
+    # Jaw: 13-period SMA, shifted 8 bars forward
+    jaw = close_1w.rolling(window=13, min_periods=13).mean().shift(8)
+    # Teeth: 8-period SMA, shifted 5 bars forward
+    teeth = close_1w.rolling(window=8, min_periods=8).mean().shift(5)
+    # Lips: 5-period SMA, shifted 3 bars forward
+    lips = close_1w.rolling(window=5, min_periods=5).mean().shift(3)
     
-    # Get 4h data for Camarilla levels (R1, S1)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
-        return np.zeros(n)
+    # Align to daily timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1w, jaw.values)
+    teeth_aligned = align_htf_to_ltf(prices, df_1w, teeth.values)
+    lips_aligned = align_htf_to_ltf(prices, df_1w, lips.values)
     
-    # Calculate 4h Camarilla levels (R1, S1)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    pivot_4h = (high_4h + low_4h + close_4h) / 3
-    range_4h = high_4h - low_4h
-    r1_4h = pivot_4h + (range_4h * 1.1 / 12)
-    s1_4h = pivot_4h - (range_4h * 1.1 / 12)
-    r1_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
-    s1_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
-    
-    # Volume filter: current volume > 1.5 * 20-period average volume
+    # Volume filter: current volume > 1.3 * 20-day average volume
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_avg * 1.5)
+    volume_filter = volume > (vol_avg * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_exit = 0  # bars since last exit to prevent overtrading
     
-    start_idx = max(50, 20)  # Ensure sufficient warmup
+    start_idx = max(20, 13+8)  # Ensure sufficient warmup for Alligator
     
     for i in range(start_idx, n):
-        bars_since_exit += 1
-        
         # Skip if any data is not ready
-        if (np.isnan(sma50_1d_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(vol_avg[i])):
+        if (np.isnan(teeth_aligned[i]) or np.isnan(vol_avg[i]) or 
+            np.isnan(jaw_aligned[i]) or np.isnan(lips_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                bars_since_exit = 0
             continue
         
         if position == 0:
-            # Minimum 24 bars between trades (4 days on 4h TF) to reduce frequency
-            if bars_since_exit < 24:
-                continue
-                
-            # Long: 1d trend up (close > SMA50) and price breaks above R1
-            if (close[i] > sma50_1d_aligned[i] and 
-                high[i] > r1_aligned[i]):
+            # Long: price > Teeth and breakout above previous day's high
+            if (close[i] > teeth_aligned[i] and 
+                high[i] > high[i-1] and 
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-                bars_since_exit = 0
-            # Short: 1d trend down (close < SMA50) and price breaks below S1
-            elif (close[i] < sma50_1d_aligned[i] and 
-                  low[i] < s1_aligned[i]):
+            # Short: price < Teeth and breakdown below previous day's low
+            elif (close[i] < teeth_aligned[i] and 
+                  low[i] < low[i-1] and 
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
-                bars_since_exit = 0
         elif position != 0:
-            # Exit: price returns to opposite side of Camarilla levels
-            if position == 1 and low[i] < s1_aligned[i]:
+            # Exit: price crosses Teeth in opposite direction
+            if position == 1 and close[i] < teeth_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-                bars_since_exit = 0
-            elif position == -1 and high[i] > r1_aligned[i]:
+            elif position == -1 and close[i] > teeth_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-                bars_since_exit = 0
             else:
                 # Hold position
                 signals[i] = 0.25 if position == 1 else -0.25
