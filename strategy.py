@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1S1_Breakout_1wTrend_Volume_Spike"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Spike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,17 +17,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1w EMA20 trend filter
-    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # 1d EMA50 trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Get 1d data for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 5:
         return np.zeros(n)
     
@@ -39,13 +38,17 @@ def generate_signals(prices):
     # Calculate Camarilla levels
     range_ = prev_high - prev_low
     R1 = prev_close + range_ * 1.1 / 12
+    R2 = prev_close + range_ * 1.1 / 6
+    R3 = prev_close + range_ * 1.1 / 4
     S1 = prev_close - range_ * 1.1 / 12
+    S2 = prev_close - range_ * 1.1 / 6
+    S3 = prev_close - range_ * 1.1 / 4
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # Volume filter: current volume > 2.0x 24-period average (12 days for 12h)
+    # Volume filter: current volume > 2.0x 24-period average (4 days for 4h)
     vol_ma_24 = np.full(n, np.nan)
     for i in range(24, n):
         vol_ma_24[i] = np.mean(volume[i-24:i])
@@ -54,13 +57,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 4  # ~2 days for 12h to reduce trades
+    cooldown_bars = 12  # ~2 days for 4h to reduce trades
     
-    start_idx = max(100, 24, 20)
+    start_idx = max(100, 24, 50)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_20_1w_aligned[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(R1_aligned[i]) or 
             np.isnan(S1_aligned[i]) or 
             np.isnan(vol_ma_24[i])):
@@ -74,9 +77,9 @@ def generate_signals(prices):
         
         bars_since_last_trade += 1
         
-        # Determine 1w trend direction
-        trend_up = close > ema_20_1w_aligned[i]
-        trend_down = close < ema_20_1w_aligned[i]
+        # Determine 1d trend direction
+        trend_up = close > ema_50_1d_aligned[i]
+        trend_down = close < ema_50_1d_aligned[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
             # Long: Price breaks above R1 with volume in uptrend
@@ -112,8 +115,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R1/S1 breakout with 1w EMA20 trend filter and volume spike.
+# Hypothesis: Camarilla R1/S1 breakout with 1d EMA50 trend filter and volume spike.
 # Long when price breaks above R1 in uptrend with volume confirmation.
 # Short when price breaks below S1 in downtrend with volume confirmation.
-# Uses 12h timeframe for low trade frequency (target: 50-150 total trades over 4 years).
+# Uses 1d trend filter for better alignment with institutional timeframes.
+# Increased cooldown to 12 bars (~2 days) to reduce trade frequency and fee drag.
+# Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
 # Works in bull markets (breakouts in uptrend) and bear markets (breakdowns in downtrend).
