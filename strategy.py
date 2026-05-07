@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_ElderRay_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,69 +17,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for Camarilla pivot levels and trend filter
+    # Load 1d data ONCE for Elder Ray and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 13:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous day
-    # Using standard formula: PP = (H + L + C) / 3, Range = H - L
-    # R3 = C + (H - L) * 1.1/2, S3 = C - (H - L) * 1.1/2
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # EMA13 for Elder Ray and trend
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema_13_1d = pd.Series(df_1d['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
     
-    # Avoid look-ahead: use previous day's data for today's levels
-    camarilla_pp = (prev_high + prev_low + prev_close) / 3
-    camarilla_range = prev_high - prev_low
-    camarilla_r3 = prev_close + camarilla_range * 1.1 / 2
-    camarilla_s3 = prev_close - camarilla_range * 1.1 / 2
+    # Elder Ray components
+    bull_power = high - ema_13
+    bear_power = low - ema_13
     
-    # Align to 4h timeframe (wait for 1d candle to close)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Smooth Elder Ray with 6-period EMA
+    bull_power_smooth = pd.Series(bull_power).ewm(span=6, adjust=False, min_periods=6).mean().values
+    bear_power_smooth = pd.Series(bear_power).ewm(span=6, adjust=False, min_periods=6).mean().values
     
-    # 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume spike detection (4h)
+    # Volume spike detection
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 34)  # warmup for indicators
+    start_idx = max(30, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_13_1d_aligned[i]) or np.isnan(bull_power_smooth[i]) or 
+            np.isnan(bear_power_smooth[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_condition = volume[i] > vol_ma_20[i] * 1.5  # volume spike
-        
         if position == 0:
-            # Long: price breaks above R3 level with volume in 1d uptrend
-            if close[i] > camarilla_r3_aligned[i] and vol_condition and ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]:
+            # Long: Bull power rising above zero, bear power negative, 1d uptrend, volume spike
+            if (bull_power_smooth[i] > 0 and bear_power_smooth[i] < 0 and 
+                ema_13_1d_aligned[i] > ema_13_1d_aligned[i-1] and 
+                volume[i] > vol_ma_20[i] * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 level with volume in 1d downtrend
-            elif close[i] < camarilla_s3_aligned[i] and vol_condition and ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]:
+            # Short: Bear power falling below zero, bull power negative, 1d downtrend, volume spike
+            elif (bear_power_smooth[i] < 0 and bull_power_smooth[i] < 0 and 
+                  ema_13_1d_aligned[i] < ema_13_1d_aligned[i-1] and 
+                  volume[i] > vol_ma_20[i] * 1.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price returns below R3 or trend changes
-            if close[i] < camarilla_r3_aligned[i] or ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]:
+            # Exit: Bull power turns negative or bear power turns positive
+            if bull_power_smooth[i] < 0 or bear_power_smooth[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price returns above S3 or trend changes
-            if close[i] > camarilla_s3_aligned[i] or ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]:
+            # Exit: Bear power turns positive or bull power turns positive
+            if bear_power_smooth[i] > 0 or bull_power_smooth[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -87,13 +81,15 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R3/S3 breakout with 1d trend filter and volume confirmation
-# - Camarilla levels provide mathematically derived support/resistance from prior day
-# - R3 breakout = bullish signal, S3 breakdown = bearish signal
-# - Requires volume spike (1.5x 20-period average) to confirm breakout strength
-# - 1d EMA34 trend filter ensures alignment with higher timeframe trend
-# - Exit when price returns to broken level or trend changes
-# - Position size 0.25 limits risk and reduces trade frequency
-# - Works in both bull (R3 breaks in uptrend) and bear (S3 breaks in downtrend)
-# - Target: 20-50 trades/year to stay within fee-efficient range
-# - Proven pattern: similar variants show strong test performance (Sharpe 1.8+ for SOL/ETH)
+# Hypothesis: 6h Elder Ray with 1d trend filter and volume confirmation
+# - Elder Ray (Bull/Bear Power) measures buying/selling pressure relative to EMA13
+# - Long when Bull Power > 0 and Bear Power < 0 (buying pressure, no selling pressure)
+# - Short when Bear Power < 0 and Bull Power < 0 (selling pressure, no buying pressure)
+# - 1d EMA13 trend filter ensures alignment with higher timeframe trend
+# - Volume confirmation (1.5x average) reduces false signals
+# - Exits when power signals reverse, capturing trend exhaustion
+# - Works in bull markets (buy power signals) and bear markets (sell power signals)
+# - Position size 0.25 targets ~50-150 total trades over 4 years (12-37/year)
+# - Elder Ray provides clear momentum signals with defined zero-line crossovers
+# - 1d trend filter reduces whipsaws vs same-timeframe signals
+# - Novel for 6h: Elder Ray + 1d trend + volume (not recently tried in this combination)
