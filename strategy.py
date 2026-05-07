@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
 """
-1d_Weekly_Pivot_Breakout_Trend_Filter
-Hypothesis: Weekly pivot points provide strong support/resistance levels.
-In bull markets (price above weekly pivot), buy breakouts above R1 with volume confirmation.
-In bear markets (price below weekly pivot), sell breakdowns below S1 with volume confirmation.
-Weekly pivot calculated from prior week's OHLC. Uses 1d timeframe for execution with 1w trend filter.
-Target: 20-30 trades per year (~80-120 over 4 years) with position size 0.25.
+4h_Fractal_Pullback_Trend_Filter
+Hypothesis: In trending markets, price often pulls back to the 50-period EMA before continuing.
+Williams fractals identify swing points; we enter on pullbacks to EMA50 after a fractal forms,
+with volume confirmation and ADX trend filter. Works in both bull (buy pullbacks) and bear (sell rallies).
+Target: 20-40 trades per year (~80-160 over 4 years) with position size 0.25.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
 
-name = "1d_Weekly_Pivot_Breakout_Trend_Filter"
-timeframe = "1d"
+name = "4h_Fractal_Pullback_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,83 +25,106 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE for weekly pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Load 1-day data ONCE for fractals and EMA
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    # Calculate weekly pivot from prior week's OHLC
-    # Weekly high = max of high over last 7 days (weekly)
-    # Weekly low = min of low over last 7 days (weekly)
-    # Weekly close = close of 1 week ago (previous week's close)
-    weekly_high = pd.Series(df_1w['high']).rolling(window=1, min_periods=1).max().shift(1).values
-    weekly_low = pd.Series(df_1w['low']).rolling(window=1, min_periods=1).min().shift(1).values
-    weekly_close = df_1w['close'].shift(1).values
+    # Williams fractals need 2-bar confirmation after the center bar
+    bearish_fractal, bullish_fractal = compute_williams_fractals(
+        df_1d['high'].values,
+        df_1d['low'].values,
+    )
+    # Additional 2-bar delay for fractal confirmation (total 3 bars after center)
+    bearish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1d, bearish_fractal, additional_delay_bars=2
+    )
+    bullish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1d, bullish_fractal, additional_delay_bars=2
+    )
     
-    # Weekly pivot point = (H + L + C) / 3
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    # 1-day EMA50 for trend and pullback reference
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Weekly R1 = (2 * P) - L
-    weekly_r1 = (2 * weekly_pivot) - weekly_low
-    # Weekly S1 = (2 * P) - H
-    weekly_s1 = (2 * weekly_pivot) - weekly_high
+    # ADX(14) on 1-day for trend strength filter
+    # Calculate +DM, -DM, TR
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align weekly levels to 1d timeframe
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
+    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    tr = np.maximum(
+        high_1d[1:] - low_1d[1:],
+        np.maximum(np.abs(high_1d[1:] - close_1d[:-1]), np.abs(low_1d[1:] - close_1d[:-1]))
+    )
+    # Pad to same length
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
+    tr = np.concatenate([[0], tr])
     
-    # 1-week EMA50 for trend filter (using weekly data)
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Smoothed values
+    atr_14 = pd.Series(tr).ewm(span=14, adjust=False).mean().values
+    plus_di_14 = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False).mean().values / atr_14
+    minus_di_14 = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False).mean().values / atr_14
+    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14 + 1e-10)
+    adx_14 = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
     
-    # Volume ratio: current volume / 20-period average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume ratio: current volume / 50-period average
+    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
     vol_ratio = np.where(vol_ma > 0, volume / vol_ma, 1.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need sufficient warmup for calculations
+    start_idx = 100  # Sufficient warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_r1_aligned[i]) or 
-            np.isnan(weekly_s1_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or 
+        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(adx_14_aligned[i]) or 
             np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine market regime from 1-week EMA50
-        uptrend_regime = close[i] > ema_50_1w_aligned[i]
-        downtrend_regime = close[i] < ema_50_1w_aligned[i]
+        # Trend filter: ADX > 25 indicates trending market
+        trending = adx_14_aligned[i] > 25
         
-        # Volume confirmation: volume > 1.3x average
-        volume_confirm = vol_ratio[i] > 1.3
+        # Volume confirmation: volume > 1.5x average
+        volume_confirm = vol_ratio[i] > 1.5
         
-        if position == 0:
-            # Long: price breaks above weekly R1 in uptrend regime + volume
-            long_entry = (close[i] > weekly_r1_aligned[i]) and uptrend_regime and volume_confirm
-            # Short: price breaks below weekly S1 in downtrend regime + volume
-            short_entry = (close[i] < weekly_s1_aligned[i]) and downtrend_regime and volume_confirm
+        # Price relative to EMA50
+        price_above_ema = close[i] > ema_50_1d_aligned[i]
+        price_below_ema = close[i] < ema_50_1d_aligned[i]
+        
+        if position == 0 and trending and volume_confirm:
+            # Long: bullish fractal formed AND price pulling back to EMA50 from above
+            # Bullish fractal = low point, wait for pullback to EMA
+            long_setup = bullish_fractal_aligned[i] and price_above_ema and (close[i] <= ema_50_1d_aligned[i] * 1.02)
+            # Short: bearish fractal formed AND price pulling back to EMA50 from below
+            short_setup = bearish_fractal_aligned[i] and price_below_ema and (close[i] >= ema_50_1d_aligned[i] * 0.98)
             
-            if long_entry:
+            if long_setup:
                 signals[i] = 0.25
                 position = 1
-            elif short_entry:
+            elif short_setup:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price crosses below weekly pivot or regime changes to downtrend
-            if (close[i] < weekly_pivot_aligned[i]) or (not uptrend_regime):
+            # Exit: price crosses below EMA50 or trend weakens
+            if (close[i] < ema_50_1d_aligned[i]) or (adx_14_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price crosses above weekly pivot or regime changes to uptrend
-            if (close[i] > weekly_pivot_aligned[i]) or (not downtrend_regime):
+            # Exit: price crosses above EMA50 or trend weakens
+            if (close[i] > ema_50_1d_aligned[i]) or (adx_14_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
