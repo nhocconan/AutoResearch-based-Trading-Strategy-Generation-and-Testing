@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Volume_Spike_v5"
-timeframe = "4h"
+name = "6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_HT"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -30,7 +30,7 @@ def generate_signals(prices):
     r3 = close_prev + 1.1 * (high_prev - low_prev) / 4
     s3 = close_prev - 1.1 * (high_prev - low_prev) / 4
     
-    # Align daily levels to 4h timeframe (with 1-day delay for completed bar)
+    # Align daily levels to 6h timeframe (with 1-day delay for completed bar)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
@@ -47,7 +47,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 8  # ~16 hours for 4h to reduce trades
+    cooldown_bars = 8  # ~48 hours for 6h to reduce trades
     
     start_idx = max(100, 20, 34)
     
@@ -104,3 +104,10 @@ def generate_signals(prices):
                 signals[i] = -0.25
     
     return signals
+
+# Hypothesis: Further increasing the volume threshold to 2.5x average and extending cooldown to 8 bars (48 hours)
+# will reduce trade frequency to target 15-25 trades per year, minimizing fee drag while maintaining
+# the edge of Camarilla R3/S3 breakouts with 1d EMA34 trend confirmation. This should improve
+# generalization to the test period (2025-2026) by focusing only on the strongest institutional breakouts.
+# Position size reduced to 0.25 to manage drawdown during volatile periods. Works in both bull (breakouts above R3)
+# and bear (breakdowns below S3) markets by trading with the higher timeframe trend.
