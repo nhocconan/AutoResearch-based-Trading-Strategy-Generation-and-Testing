@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4H_Camarilla_R3S3_1DTrend_VolumeSpike_v21"
-timeframe = "4h"
+name = "1D_Weekly_HMA_Trend_Filter_Strategy"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,38 +17,37 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for structure (R3/S3 levels)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # Get weekly data for higher timeframe trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
-        return np.zeros(n)
+    # Calculate weekly HMA (Hull Moving Average) for trend filter
+    # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
+    def wma(arr, n):
+        if len(arr) < n:
+            return np.full_like(arr, np.nan)
+        weights = np.arange(1, n + 1)
+        return np.convolve(arr, weights/weights.sum(), mode='valid')
     
-    # Calculate daily EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    def hma(arr, n):
+        if len(arr) < n:
+            return np.full_like(arr, np.nan)
+        half_n = n // 2
+        sqrt_n = int(np.sqrt(n))
+        wma_half = wma(arr, half_n)
+        wma_full = wma(arr, n)
+        # Pad wma_half to same length as wma_full for subtraction
+        wma_half_padded = np.full_like(wma_full, np.nan)
+        wma_half_padded[-len(wma_half):] = wma_half
+        raw_hma = 2 * wma_half_padded - wma_full
+        return wma(raw_hma, sqrt_n)
     
-    # Calculate previous 4h bar's high, low, close for Camarilla levels
-    prev_high = df_4h['high'].values
-    prev_low = df_4h['low'].values
-    prev_close = df_4h['close'].values
+    # Calculate weekly HMA(20)
+    hma_20_1w = hma(df_1w['close'].values, 20)
+    hma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_20_1w)
     
-    # Calculate Camarilla levels: R3 and S3 (correct formula)
-    # R3 = C + (H-L) * 1.1/2 * 1.1, S3 = C - (H-L) * 1.1/2 * 1.1
-    range_hl = prev_high - prev_low
-    r3 = prev_close + range_hl * 1.1 / 2 * 1.1
-    s3 = prev_close - range_hl * 1.1 / 2 * 1.1
-    
-    r3_aligned = align_htf_to_ltf(prices, df_4h, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_4h, s3)
-    
-    # Volume filter: current volume > 2.0x average volume (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Volatility filter: avoid low volatility periods (ATR > 0.3% of price)
+    # Daily ATR for volatility filter
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -56,19 +55,21 @@ def generate_signals(prices):
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     vol_filter = atr > 0.003 * close  # ATR > 0.3% of price
     
-    # Session filter: 08:00 - 20:00 UTC (80% of day)
+    # Volume filter: current volume > 1.5x average volume (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Session filter: 08:00 - 20:00 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
     session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)  # Ensure we have volume MA data
+    start_idx = 20  # Ensure we have enough data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(vol_ma[i]) or vol_ma[i] == 0 or
+        if (np.isnan(hma_20_1w_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0 or
             np.isnan(vol_filter[i]) or not vol_filter[i] or
             not session_filter[i]):
             if position != 0:
@@ -76,36 +77,22 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Volume filter: spike confirmation (2.0x average volume)
-        volume_filter = volume[i] > 2.0 * vol_ma[i]
+        # Volume filter: spike confirmation (1.5x average volume)
+        volume_filter = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long: Price breaks above R3 + daily uptrend + volume spike
-            if (close[i] > r3_aligned[i] and 
-                close[i] > ema_34_1d_aligned[i] and   # Daily uptrend filter
-                volume_filter):
+            # Long: Price above weekly HMA + volume spike
+            if (close[i] > hma_20_1w_aligned[i] and volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S3 + daily downtrend + volume spike
-            elif (close[i] < s3_aligned[i] and 
-                  close[i] < ema_34_1d_aligned[i] and   # Daily downtrend filter
-                  volume_filter):
+            # Short: Price below weekly HMA + volume spike
+            elif (close[i] < hma_20_1w_aligned[i] and volume_filter):
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: Price returns to the middle of the prior 4h range (H4/L4)
-            # H4 = close + 1.1*(high-low)*1.1/6, L4 = close - 1.1*(high-low)*1.1/6
-            range_hl = prev_high - prev_low
-            h4 = prev_close + range_hl * 1.1 / 6 * 1.1
-            l4 = prev_close - range_hl * 1.1 / 6 * 1.1
-            h4_aligned = align_htf_to_ltf(prices, df_4h, h4)
-            l4_aligned = align_htf_to_ltf(prices, df_4h, l4)
-            
-            camarilla_mid = (h4_aligned[i] + l4_aligned[i]) / 2
-            range_hl_4h = h4_aligned[i] - l4_aligned[i]
-            at_mid = abs(close[i] - camarilla_mid) < range_hl_4h * 0.25  # Within 25% of range
-            
-            if at_mid:
+            # Exit: Price crosses back over weekly HMA
+            if (position == 1 and close[i] < hma_20_1w_aligned[i]) or \
+               (position == -1 and close[i] > hma_20_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
