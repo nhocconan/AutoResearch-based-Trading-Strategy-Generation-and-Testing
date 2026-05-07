@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 """
-1d_WilliamsAlligator_Vortex_Trend_Filter
-Hypothesis: Daily timeframe with Williams Alligator for trend direction and Vortex for trend strength.
-Williams Alligator uses smoothed medians (Jaw=13, Teeth=8, Lips=5) to filter trend.
-Vortex indicator (VI+ and VI-) identifies trend direction and strength.
-Long when VI+ > VI- and price > Alligator Teeth in bullish Alligator alignment.
-Short when VI- > VI+ and price < Alligator Teeth in bearish Alligator alignment.
-Weekly trend filter (price > weekly EMA20) ensures alignment with higher timeframe.
-Designed for low trade frequency (<25/year) to minimize fee drag.
-Works in bull/bear via trend filters and uses volatility-based position sizing.
+12h_Camarilla_Pivot_1dTrend_Volume_Spike
+Hypothesis: 12h timeframe with daily trend filter (price > 1d EMA34) and daily Camarilla pivot levels (R1/S1).
+Long when price touches or crosses above S1 in daily uptrend with volume spike (12h volume > 1.8x 20-period average).
+Short when price touches or crosses below R1 in daily downtrend with volume spike.
+Designed for 15-35 trades/year to avoid fee drag in 12h timeframe.
+Uses volume confirmation to avoid false breaks and trend filter for bias.
+Works in bull/bear via daily trend filter and mean reversion at key pivot levels.
 """
 
-name = "1d_WilliamsAlligator_Vortex_Trend_Filter"
-timeframe = "1d"
+name = "12h_Camarilla_Pivot_1dTrend_Volume_Spike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -21,133 +19,99 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get daily data for trend filter and Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 35:
         return np.zeros(n)
     
-    # Calculate weekly EMA20 for trend
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Calculate daily EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Williams Alligator: Smoothed medians
-    # Jaw: 13-period smoothed median (SMMA of median)
-    median = (high + low) / 2
-    jaw_raw = pd.Series(median).rolling(window=13, min_periods=13).median().values
-    jaw = pd.Series(jaw_raw).ewm(alpha=1/13, adjust=False, min_periods=13).mean().values
+    # Calculate daily OHLC for Camarilla levels (using prior daily bar)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Teeth: 8-period smoothed median
-    teeth_raw = pd.Series(median).rolling(window=8, min_periods=8).median().values
-    teeth = pd.Series(teeth_raw).ewm(alpha=1/8, adjust=False, min_periods=8).mean().values
+    # Range and Camarilla levels from prior daily bar
+    range_1d = high_1d - low_1d
+    r1_1d = close_1d + 1.1 * (range_1d / 12)  # R1 = C + 1.1*(H-L)/12
+    s1_1d = close_1d - 1.1 * (range_1d / 12)  # S1 = C - 1.1*(H-L)/12
     
-    # Lips: 5-period smoothed median
-    lips_raw = pd.Series(median).rolling(window=5, min_periods=5).median().values
-    lips = pd.Series(lips_raw).ewm(alpha=1/5, adjust=False, min_periods=5).mean().values
+    # Align Camarilla levels to 12h
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Align Alligator components to daily
-    jaw_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high, 'low': low}), jaw)
-    teeth_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high, 'low': low}), teeth)
-    lips_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high, 'low': low}), lips)
-    
-    # Vortex Indicator
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    
-    # Vortex movements
-    vm_plus = np.abs(high - np.roll(low, 1))
-    vm_minus = np.abs(low - np.roll(high, 1))
-    vm_plus[0] = 0
-    vm_minus[0] = 0
-    
-    # Sum over 14 periods
-    vi_plus_sum = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values
-    vi_minus_sum = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    
-    # VI+ and VI-
-    vi_plus = np.divide(vi_plus_sum, tr_sum, out=np.zeros_like(vi_plus_sum), where=tr_sum!=0)
-    vi_minus = np.divide(vi_minus_sum, tr_sum, out=np.zeros_like(vi_minus_sum), where=tr_sum!=0)
-    
-    # Align Vortex components
-    vi_plus_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high, 'low': low, 'close': close}), vi_plus)
-    vi_minus_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high, 'low': low, 'close': close}), vi_minus)
+    # Get 12h volume for confirmation
+    vol_12h = volume
+    vol_ma20_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_12h = np.divide(vol_12h, vol_ma20_12h, out=np.zeros_like(vol_12h), where=vol_ma20_12h!=0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Warmup for indicators
+    start_idx = 60  # Warmup
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_20_1w_aligned[i]) or 
-            np.isnan(jaw_aligned[i]) or 
-            np.isnan(teeth_aligned[i]) or
-            np.isnan(lips_aligned[i]) or
-            np.isnan(vi_plus_aligned[i]) or
-            np.isnan(vi_minus_aligned[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(r1_1d_aligned[i]) or 
+            np.isnan(s1_1d_aligned[i]) or
+            np.isnan(vol_ratio_12h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine weekly trend
-        close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
-        if np.isnan(close_1w_aligned[i]):
+        # Determine daily trend using close vs EMA34
+        close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
+        if np.isnan(close_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
-        weekly_uptrend = close_1w_aligned[i] > ema_20_1w_aligned[i]
-        weekly_downtrend = close_1w_aligned[i] < ema_20_1w_aligned[i]
-        
-        # Alligator alignment
-        bullish_alligator = (jaw_aligned[i] > teeth_aligned[i]) and (teeth_aligned[i] > lips_aligned[i])
-        bearish_alligator = (jaw_aligned[i] < teeth_aligned[i]) and (teeth_aligned[i] < lips_aligned[i])
+        trend_up = close_1d_aligned[i] > ema_34_1d_aligned[i]
+        trend_down = close_1d_aligned[i] < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Long: VI+ > VI-, price > Teeth, bullish Alligator, weekly uptrend
-            if (vi_plus_aligned[i] > vi_minus_aligned[i] and 
-                close[i] > teeth_aligned[i] and 
-                bullish_alligator and 
-                weekly_uptrend):
+            # Long: price touches/crosses above S1 in daily uptrend with volume spike
+            if (low[i] <= s1_1d_aligned[i] and 
+                close[i] > s1_1d_aligned[i] and  # reversal confirmation
+                vol_ratio_12h[i] > 1.8 and 
+                trend_up):
                 signals[i] = 0.25
                 position = 1
-            # Short: VI- > VI+, price < Teeth, bearish Alligator, weekly downtrend
-            elif (vi_minus_aligned[i] > vi_plus_aligned[i] and 
-                  close[i] < teeth_aligned[i] and 
-                  bearish_alligator and 
-                  weekly_downtrend):
+            # Short: price touches/crosses below R1 in daily downtrend with volume spike
+            elif (high[i] >= r1_1d_aligned[i] and 
+                  close[i] < r1_1d_aligned[i] and  # reversal confirmation
+                  vol_ratio_12h[i] > 1.8 and 
+                  trend_down):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: VI- > VI+ or price < Teeth or bearish Alligator or weekly downtrend
-            if (vi_minus_aligned[i] >= vi_plus_aligned[i] or 
-                close[i] <= teeth_aligned[i] or 
-                not bullish_alligator or 
-                not weekly_uptrend):
+            # Exit long: price touches/crosses below S1 or trend turns down
+            if (low[i] <= s1_1d_aligned[i] and 
+                close[i] > s1_1d_aligned[i]) or \
+               not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: VI+ > VI- or price > Teeth or bullish Alligator or weekly uptrend
-            if (vi_plus_aligned[i] >= vi_minus_aligned[i] or 
-                close[i] >= teeth_aligned[i] or 
-                not bearish_alligator or 
-                not weekly_downtrend):
+            # Exit short: price touches/crosses above R1 or trend turns up
+            if (high[i] >= r1_1d_aligned[i] and 
+                close[i] < r1_1d_aligned[i]) or \
+               not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
