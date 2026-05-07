@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3S3_1dTrend_Volume
+4h_Camarilla_R3S3_1dTrend_Volume_Refined
 Hypothesis: On 4h timeframe, buy when price breaks above Camarilla R3 level with daily uptrend (close > EMA34) and volume confirmation; sell when breaks below S3 level with daily downtrend (close < EMA34) and volume confirmation. Uses daily EMA34 for trend filter to avoid whipsaws and volume spike for confirmation. Designed for 4h timeframe with expected 75-200 trades over 4 years to minimize fee drag while capturing trends in both bull and bear markets.
 """
-name = "4h_Camarilla_R3S3_1dTrend_Volume"
+name = "4h_Camarilla_R3S3_1dTrend_Volume_Refined"
 timeframe = "4h"
 leverage = 1.0
 
