@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_MultiFactor_Confluence_v1"
-timeframe = "4h"
+name = "1h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -9,114 +9,99 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    open_ = prices['open'].values
     volume = prices['volume'].values
     
-    # Get 12h data for higher timeframe trend and volatility filters
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 1d data for trend filter (EMA34)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    volume_12h = df_12h['volume'].values
+    # Calculate 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 12h EMA20 for trend filter
-    ema_20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
+    # Get 1d data for volume average (20-day)
+    vol_1d = df_1d['volume'].values
+    vol_ma20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
     
-    # Calculate 12h ATR15 for volatility filter
-    tr_12h = np.maximum(high_12h - low_12h, 
-                        np.maximum(abs(high_12h - np.roll(close_12h, 1)),
-                                   abs(low_12h - np.roll(close_12h, 1))))
-    tr_12h[0] = high_12h[0] - low_12h[0]
-    atr_15_12h = pd.Series(tr_12h).rolling(window=15, min_periods=15).mean().values
-    atr_15_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_15_12h)
+    # Calculate Camarilla levels for previous day
+    # Using previous day's OHLC (already available in df_1d)
+    # Camarilla R3, R4, S3, S4
+    # R3 = close + (high - low) * 1.1/2
+    # S3 = close - (high - low) * 1.1/2
+    # R4 = close + (high - low) * 1.1
+    # S4 = close - (high - low) * 1.1
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 12h volume moving average for volume filter
-    vol_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20_12h)
+    camarilla_width = (high_1d - low_1d) * 1.1 / 2
+    r3 = close_1d + camarilla_width
+    s3 = close_1d - camarilla_width
+    r4 = close_1d + camarilla_width * 2
+    s4 = close_1d - camarilla_width * 2
     
-    # Calculate 4h RSI(14) for momentum
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Calculate 4h Bollinger Bands(20,2) for volatility context
-    bb_middle = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    bb_std = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
+    # Calculate 1h volume average (20-period)
+    vol_ma20_1h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure sufficient warmup
+    start_idx = 100  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any data is not ready
-        if (np.isnan(ema_20_12h_aligned[i]) or 
-            np.isnan(atr_15_12h_aligned[i]) or 
-            np.isnan(vol_ma_20_12h_aligned[i]) or
-            np.isnan(rsi[i]) or
-            np.isnan(bb_upper[i]) or
-            np.isnan(bb_lower[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or 
+            np.isnan(r4_aligned[i]) or 
+            np.isnan(s4_aligned[i]) or 
+            np.isnan(vol_ma20_1h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions:
-            # 1. 12h trend up: price above 12h EMA20
-            # 2. Low volatility environment: 12h ATR below its 20-period average
-            # 3. RSI not overbought: below 70
-            # 4. Price near lower Bollinger Band: potential bounce
-            if (close[i] > ema_20_12h_aligned[i] and
-                atr_15_12h_aligned[i] < np.nanmean(atr_15_12h_aligned[max(0, i-20):i]) and
-                rsi[i] < 70 and
-                close[i] <= bb_lower[i] * 1.02):  # Within 2% of lower BB
-                signals[i] = 0.25
+            # Long: price above 1d EMA34 (uptrend), breaks R4 with volume
+            if (close[i] > ema_34_1d_aligned[i] and 
+                close[i] > r4_aligned[i] and 
+                volume[i] > vol_ma20_1h[i] * 1.5):
+                signals[i] = 0.20
                 position = 1
-            # Short conditions:
-            # 1. 12h trend down: price below 12h EMA20
-            # 2. Low volatility environment
-            # 3. RSI not oversold: above 30
-            # 4. Price near upper Bollinger Band: potential rejection
-            elif (close[i] < ema_20_12h_aligned[i] and
-                  atr_15_12h_aligned[i] < np.nanmean(atr_15_12h_aligned[max(0, i-20):i]) and
-                  rsi[i] > 30 and
-                  close[i] >= bb_upper[i] * 0.98):  # Within 2% of upper BB
-                signals[i] = -0.25
+            # Short: price below 1d EMA34 (downtrend), breaks S4 with volume
+            elif (close[i] < ema_34_1d_aligned[i] and 
+                  close[i] < s4_aligned[i] and 
+                  volume[i] > vol_ma20_1h[i] * 1.5):
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: trend reversal or overextension
-            if (close[i] < ema_20_12h_aligned[i] or  # Trend change
-                rsi[i] > 75 or                      # Overbought
-                close[i] >= bb_upper[i]):           # Reached upper BB
+            # Exit long: price crosses below R3 (mean reversion)
+            if close[i] < r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: trend reversal or overextension
-            if (close[i] > ema_20_12h_aligned[i] or  # Trend change
-                rsi[i] < 25 or                      # Oversold
-                close[i] <= bb_lower[i]):           # Reached lower BB
+            # Exit short: price crosses above S3 (mean reversion)
+            if close[i] > s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
