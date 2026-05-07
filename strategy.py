@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_v10"
-timeframe = "4h"
+name = "6h_PivotBreakout_VolumeTrend_1d"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,62 +17,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d EMA34 trend filter
+    # Daily pivot points (classic)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 2:
         return np.zeros(n)
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    pivot = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    r1 = 2 * pivot - df_1d['low']
+    s1 = 2 * pivot - df_1d['high']
+    r2 = pivot + (df_1d['high'] - df_1d['low'])
+    s2 = pivot - (df_1d['high'] - df_1d['low'])
+    r3 = r1 + (df_1d['high'] - df_1d['low'])
+    s3 = s1 - (df_1d['high'] - df_1d['low'])
     
-    # 1d OHLC for Camarilla levels
-    o_1d = df_1d['open'].values
-    h_1d = df_1d['high'].values
-    l_1d = df_1d['low'].values
-    c_1d = df_1d['close'].values
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot.values)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2.values)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2.values)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3.values)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3.values)
     
-    # Camarilla R1 and S1
-    r1 = c_1d + (h_1d - l_1d) * 1.1 / 12
-    s1 = c_1d - (h_1d - l_1d) * 1.1 / 12
-    
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Volume spike: current > 2 * 20-period average
+    # Volume spike filter (volume > 1.5x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (2 * vol_ma)
+    vol_spike = volume > (vol_ma * 1.5)
+    
+    # 6-period price momentum (rate of change)
+    roc = np.zeros_like(close)
+    roc[6:] = (close[6:] - close[:-6]) / close[:-6]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)
+    start_idx = max(20, 6)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(roc[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: close > R1 + above 1d EMA34 + volume spike
-            if close[i] > r1_aligned[i] and close[i] > ema_34_1d_aligned[i] and vol_spike[i]:
+            # Long: Price breaks above R1 with volume spike and positive momentum
+            if close[i] > r1_aligned[i] and vol_spike[i] and roc[i] > 0:
                 signals[i] = 0.25
                 position = 1
-            # Short: close < S1 + below 1d EMA34 + volume spike
-            elif close[i] < s1_aligned[i] and close[i] < ema_34_1d_aligned[i] and vol_spike[i]:
+            # Short: Price breaks below S1 with volume spike and negative momentum
+            elif close[i] < s1_aligned[i] and vol_spike[i] and roc[i] < 0:
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: price crosses back through EMA34
+            # Exit: Price returns to pivot or momentum reverses
             if position == 1:
-                if close[i] < ema_34_1d_aligned[i]:
+                if close[i] < pivot_aligned[i] or roc[i] < 0:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > ema_34_1d_aligned[i]:
+                if close[i] > pivot_aligned[i] or roc[i] > 0:
                     signals[i] = 0.0
                     position = 0
                 else:
