@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dTrend_Volume_v6
+4h_Camarilla_R1S1_Breakout_1dTrend_Volume_v7
 Hypothesis: Trade breakouts of daily Camarilla R1/S1 levels only when aligned with daily trend (EMA200) and confirmed by volume spike, with tighter volume threshold and exit on trend reversal to reduce trade frequency and improve performance in both bull and bear markets.
 """
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_v6"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_v7"
 timeframe = "4h"
 leverage = 1.0
 
@@ -79,13 +79,13 @@ def generate_signals(prices):
             # Long breakout: price breaks above R1 with upward trend and volume spike
             if (close[i] > r1_aligned[i] and 
                 trend_up and 
-                vol_ratio[i] > 3.0):  # Increased threshold to reduce trades
+                vol_ratio[i] > 4.0):  # Increased threshold to reduce trades
                 signals[i] = 0.25
                 position = 1
             # Short breakdown: price breaks below S1 with downward trend and volume spike
             elif (close[i] < s1_aligned[i] and 
                   trend_down and 
-                  vol_ratio[i] > 3.0):  # Increased threshold to reduce trades
+                  vol_ratio[i] > 4.0):  # Increased threshold to reduce trades
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
