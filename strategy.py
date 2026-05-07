@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3_S3_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_12hEMA50_Trend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,14 +17,19 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot and trend filter
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
+    
+    # Calculate 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # Get 1d data for Camarilla pivot
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
-    
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate Camarilla pivot levels from previous 1d bar
     prev_high = df_1d['high'].values
@@ -57,11 +62,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)  # Ensure volume MA and EMA data
+    start_idx = max(20, 50)  # Ensure volume MA and EMA data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN or invalid
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
             np.isnan(vol_ma[i]) or vol_ma[i] == 0 or
             np.isnan(vol_filter[i]) or not vol_filter[i] or not session_filter[i]):
             if position != 0:
@@ -73,16 +78,16 @@ def generate_signals(prices):
         volume_spike = volume[i] > 1.8 * vol_ma[i]
         
         if position == 0:
-            # Long: Price breaks above R3, above 1d EMA34 (uptrend), with volume spike
+            # Long: Price breaks above R3, above 12h EMA50 (uptrend), with volume spike
             buffer = 0.0005 * close[i]  # 0.05% buffer to avoid whipsaws
             if (close[i] > r3_aligned[i] + buffer and 
-                close[i] > ema_34_1d_aligned[i] + buffer and   # 1d uptrend
+                close[i] > ema_50_12h_aligned[i] + buffer and   # 12h uptrend
                 volume_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S3, below 1d EMA34 (downtrend), with volume spike
+            # Short: Price breaks below S3, below 12h EMA50 (downtrend), with volume spike
             elif (close[i] < s3_aligned[i] - buffer and 
-                  close[i] < ema_34_1d_aligned[i] - buffer and   # 1d downtrend
+                  close[i] < ema_50_12h_aligned[i] - buffer and   # 12h downtrend
                   volume_spike):
                 signals[i] = -0.25
                 position = -1
