@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_12h_Ichimoku_Cloud_Twist"
-timeframe = "6h"
+name = "4h_1d_1w_Camarilla_R3S3_Breakout_Trend_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,92 +17,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 52:
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 35:
         return np.zeros(n)
     
-    # Ichimoku components on 12h
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Calculate daily Camarilla pivot levels from previous day
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
-    period9_high = pd.Series(high_12h).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_12h).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
     
-    # Kijun-sen (Base Line): (26-period high + low) / 2
-    period26_high = pd.Series(high_12h).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_12h).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2
+    # Camarilla levels - using R3/S3 for stronger signals
+    s3 = prev_close - (range_hl * 1.26 / 4)
+    r3 = prev_close + (range_hl * 1.26 / 4)
+    s4 = prev_close - (range_hl * 1.50)
+    r4 = prev_close + (range_hl * 1.50)
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
+    # Align daily levels to 4h timeframe
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     
-    # Senkou Span B (Leading Span B): (52-period high + low) / 2
-    period52_high = pd.Series(high_12h).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_12h).rolling(window=52, min_periods=52).min().values
-    senkou_b = (period52_high + period52_low) / 2
+    # Daily trend filter: EMA(34) on daily close
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Align Ichimoku components to 6h timeframe
-    tenkan_aligned = align_htf_to_ltf(prices, df_12h, tenkan)
-    kijun_aligned = align_htf_to_ltf(prices, df_12h, kijun)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_12h, senkou_a)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_12h, senkou_b)
+    # Weekly trend filter: EMA(21) on weekly close
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 22:
+        return np.zeros(n)
+    ema_21_1w = pd.Series(df_1w['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
-    # Cloud twist detection: Senkou A crossing Senkou B
-    # Bullish twist: Senkou A crosses above Senkou B
-    # Bearish twist: Senkou A crosses below Senkou B
-    senkou_a_prev = np.roll(senkou_a_aligned, 1)
-    senkou_b_prev = np.roll(senkou_b_aligned, 1)
-    senkou_a_prev[0] = np.nan
-    senkou_b_prev[0] = np.nan
-    
-    bullish_twist = (senkou_a_aligned > senkou_b_aligned) & (senkou_a_prev <= senkou_b_prev)
-    bearish_twist = (senkou_a_aligned < senkou_b_aligned) & (senkou_a_prev >= senkou_b_prev)
-    
-    # Price relative to cloud
-    cloud_top = np.maximum(senkou_a_aligned, senkou_b_aligned)
-    cloud_bottom = np.minimum(senkou_a_aligned, senkou_b_aligned)
-    price_above_cloud = close > cloud_top
-    price_below_cloud = close < cloud_bottom
-    
-    # Volume confirmation: 4-period average (1 day of 6h bars)
-    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    # Volume spike detection: 6-period average (1.5 days of 4h bars)
+    vol_ma_6 = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(26, 4)  # Wait for Kijun and volume MA
+    start_idx = max(34, 6)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
-            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or 
-            np.isnan(vol_ma_4[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(ema_21_1w_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(vol_ma_6[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: bullish twist + price above cloud + volume
-            if bullish_twist[i] and price_above_cloud[i] and volume[i] > vol_ma_4[i] * 1.5:
+            # Long: price above S3 with volume and daily/weekly uptrend
+            vol_condition = volume[i] > vol_ma_6[i] * 2.0
+            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and ema_21_1w_aligned[i] > ema_21_1w_aligned[i-1]
+            
+            if close[i] > s3_aligned[i] and vol_condition and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish twist + price below cloud + volume
-            elif bearish_twist[i] and price_below_cloud[i] and volume[i] > vol_ma_4[i] * 1.5:
+            # Short: price below R3 with volume and daily/weekly downtrend
+            elif close[i] < r3_aligned[i] and vol_condition and not uptrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: bearish twist or price drops below cloud base
-            if bearish_twist[i] or close[i] < cloud_bottom[i]:
+            # Exit: price back below S3 or volume drops significantly
+            if close[i] < s3_aligned[i] or volume[i] < vol_ma_6[i] * 1.1:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: bullish twist or price rises above cloud top
-            if bullish_twist[i] or close[i] > cloud_top[i]:
+            # Exit: price back above R3 or volume drops significantly
+            if close[i] > r3_aligned[i] or volume[i] < vol_ma_6[i] * 1.1:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -110,13 +99,14 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 6s Ichimoku cloud twist with 12h trend filter
-# - Ichimoku cloud twist (Senkou A/B crossover) signals trend changes
-# - Bullish twist + price above cloud = long opportunity in uptrend
-# - Bearish twist + price below cloud = short opportunity in downtrend
-# - Volume confirmation (1.5x average) filters false signals
-# - Works in both bull and bear markets by capturing trend reversals
-# - Exit on opposite twist or price re-entering cloud
-# - Position size 0.25 targets ~60-120 trades over 4 years (15-30/year)
-# - Uses 12h Ichimoku for stable, noise-resistant signals
-# - Cloud acts as dynamic support/resistance with forward-looking twist signals
+# Hypothesis: 4h Camarilla R3/S3 breakout with daily/weekly trend and volume confirmation
+# - Daily Camarilla R3/S3 act as strong support/resistance levels (stronger than S1/R1)
+# - Breakout above S3 with high volume in both daily and weekly uptrend = long opportunity
+# - Breakdown below R3 with high volume in both daily and weekly downtrend = short opportunity
+# - Volume spike (2.0x average) confirms strong institutional participation
+# - Weekly trend filter ensures alignment with higher timeframe momentum
+# - Tight entry conditions (volume + dual timeframe trend + R3/S3 break) limit trades to ~20-40/year
+# - Position size 0.25 balances return potential with drawdown control
+# - Designed to work in both bull (buy S3 breaks in uptrend) and bear (sell R3 breaks in downtrend) markets
+# - Exit when price returns to S3/R3 or volume weakens significantly
+# - Uses actual daily and weekly Camarilla levels for multi-timeframe confluence
