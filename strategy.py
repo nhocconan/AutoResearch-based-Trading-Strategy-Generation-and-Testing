@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_1d_CCI_Trend_Reversion_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R1S1_Breakout_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,63 +17,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for CCI and trend
+    # Load daily data ONCE before loop for Camarilla
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily CCI(20)
-    tp_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    sma_tp = tp_1d.rolling(window=20, min_periods=20).mean()
-    mad = tp_1d.rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
-    cci_1d = (tp_1d - sma_tp) / (0.015 * mad)
-    cci_1d = cci_1d.values
+    # Load 12h data ONCE before loop for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
+        return np.zeros(n)
     
-    # Calculate daily EMA(50) for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Camarilla from previous day's OHLC
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Align daily indicators to 6h timeframe
-    cci_1d_aligned = align_htf_to_ltf(prices, df_1d, cci_1d)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Camarilla levels
+    r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     
-    # Volume spike detection: 4-period average (1 day of 6h bars)
+    # Align to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # 12h EMA(34) for trend filter
+    ema_34_12h = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    
+    # Volume spike: 4-period average (1 day of 4h bars)
     vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 4)  # Wait for EMA and volume MA
+    start_idx = max(34, 4)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(cci_1d_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(vol_ma_4[i])):
+        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(vol_ma_4[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: CCI oversold (< -100) in daily uptrend with volume confirmation
+            # Long: price above S1 with volume and 12h uptrend
             vol_condition = volume[i] > vol_ma_4[i] * 1.8
-            uptrend = ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1]
+            uptrend = ema_34_12h_aligned[i] > ema_34_12h_aligned[i-1]
             
-            if cci_1d_aligned[i] < -100 and vol_condition and uptrend:
+            if close[i] > s1_aligned[i] and vol_condition and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: CCI overbought (> 100) in daily downtrend with volume confirmation
-            elif cci_1d_aligned[i] > 100 and vol_condition and not uptrend:
+            # Short: price below R1 with volume and 12h downtrend
+            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: CCI returns to neutral or volume drops
-            if cci_1d_aligned[i] > -50 or volume[i] < vol_ma_4[i] * 1.2:
+            # Exit: price back below S1 or volume drops
+            if close[i] < s1_aligned[i] or volume[i] < vol_ma_4[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: CCI returns to neutral or volume drops
-            if cci_1d_aligned[i] < 50 or volume[i] < vol_ma_4[i] * 1.2:
+            # Exit: price back above R1 or volume drops
+            if close[i] > r1_aligned[i] or volume[i] < vol_ma_4[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -81,14 +89,16 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 6s CCI mean reversion with daily trend filter and volume confirmation
-# - Daily CCI(20) identifies overbought/oversold conditions (>100/< -100)
-# - Trade only in direction of daily EMA(50) trend to avoid counter-trend whipsaws
-# - Long when daily CCI < -100 (oversold) + daily uptrend + volume spike
-# - Short when daily CCI > 100 (overbought) + daily downtrend + volume spike
-# - Volume confirmation (1.8x average) filters false signals
-# - Exit when CCI returns toward neutral (-50/50) or volume weakens
-# - Works in both bull (buy dips in uptrend) and bear (sell rallies in downtrend)
+# Hypothesis: 4h Camarilla S1/R1 breakout with 12h trend and volume confirmation
+# - Camarilla S1/R1 act as key support/resistance from prior day
+# - Breakout above S1 with volume in 12h uptrend = long opportunity
+# - Breakdown below R1 with volume in 12h downtrend = short opportunity
+# - Volume spike (1.8x average) confirms institutional participation
+# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
+# - Exit when price returns to S1/R1 or volume weakens
 # - Position size 0.25 targets ~20-50 trades/year, avoiding fee drag
-# - Novel: CCI on higher timeframe with trend filter not recently tried on 6h
-# - Aims for 50-150 total trades over 4 years (12-37/year) to stay within limits
+# - Uses daily Camarilla (not weekly) for better responsiveness
+# - 12h trend filter reduces whipsaws vs same timeframe
+# - Designed to work in BOTH bull and bear markets via trend filter
+# - Volume confirmation reduces false breakouts
+# - Target: 75-200 total trades over 4 years (19-50/year) to stay within limits
