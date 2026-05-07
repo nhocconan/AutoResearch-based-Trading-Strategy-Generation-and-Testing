@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-# 12h_Alligator_Jaw_Teeth_Lips_1dTrend_Volume
-# Hypothesis: 12h chart strategy using Williams Alligator indicator with 1d EMA trend filter and volume confirmation.
-# Alligator uses 3 SMAs (Jaw=13, Teeth=8, Lips=5) to identify trend and avoid sideways markets.
-# Long when Lips > Teeth > Jaw (bullish alignment) with volume spike and price above 1d EMA50.
-# Short when Lips < Teeth < Jaw (bearish alignment) with volume spike and price below 1d EMA50.
-# Designed for low trade frequency (12-37/year) to avoid fee drag in bear markets.
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Bands
+# Hypothesis: 4h chart strategy using Camarilla R1/S1 breakouts with 1d EMA34 trend filter, volume confirmation, and Bollinger Band width filter to avoid low-volatility chop.
+# Designed to reduce false breakouts in sideways markets by requiring expanding volatility (BB width > 20th percentile).
+# Target: 20-40 trades/year per symbol to minimize fee drag while maintaining edge in both bull and bear markets.
 
-name = "12h_Alligator_Jaw_Teeth_Lips_1dTrend_Volume"
-timeframe = "12h"
+timeframe = "4h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Bands"
 leverage = 1.0
 
 import numpy as np
@@ -24,76 +22,90 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA trend filter
+    # Get 1d data for EMA trend filter and Bollinger Bands
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) == 0:
         return np.zeros(n)
     
-    # Calculate EMA50 on 1d closes for trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate EMA34 on 1d closes for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Get 12h data for Williams Alligator calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) == 0:
-        return np.zeros(n)
+    # Calculate Bollinger Bands (20, 2) on 1d closes
+    sma_20_1d = pd.Series(df_1d['close'].values).rolling(window=20, min_periods=20).mean().values
+    std_20_1d = pd.Series(df_1d['close'].values).rolling(window=20, min_periods=20).std().values
+    upper_bb_1d = sma_20_1d + 2 * std_20_1d
+    lower_bb_1d = sma_20_1d - 2 * std_20_1d
+    bb_width_1d = (upper_bb_1d - lower_bb_1d) / sma_20_1d  # Normalized width
     
-    # Calculate Williams Alligator on 12h data
-    # Jaw: 13-period SMMA, Teeth: 8-period SMMA, Lips: 5-period SMMA
-    # Using SMA as approximation for SMMA (Smoothed Moving Average)
-    jaw_12h = pd.Series(df_12h['close'].values).rolling(window=13, min_periods=13).mean().values
-    teeth_12h = pd.Series(df_12h['close'].values).rolling(window=8, min_periods=8).mean().values
-    lips_12h = pd.Series(df_12h['close'].values).rolling(window=5, min_periods=5).mean().values
+    # Align Bollinger Band width to 4h timeframe
+    bb_width_1d_aligned = align_htf_to_ltf(prices, df_1d, bb_width_1d)
     
-    # Align Alligator components to lower timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw_12h)
-    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth_12h)
-    lips_aligned = align_htf_to_ltf(prices, df_12h, lips_12h)
+    # Calculate 20th percentile of BB width for regime filter (using expanding window to avoid look-ahead)
+    bb_width_percentile = np.zeros_like(bb_width_1d_aligned)
+    for i in range(len(bb_width_1d_aligned)):
+        if i < 20:
+            bb_width_percentile[i] = np.nan
+        else:
+            bb_width_percentile[i] = np.percentile(bb_width_1d_aligned[:i+1], 20)
     
-    # Volume spike detection: 2x average volume (2-period = 1 day on 12h chart)
-    vol_ma = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
+    # Get daily data for Camarilla levels
+    d_high = df_1d['high'].values
+    d_low = df_1d['low'].values
+    d_close = df_1d['close'].values
+    
+    camarilla_r1 = d_close + 1.1 * (d_high - d_low) / 12
+    camarilla_s1 = d_close - 1.1 * (d_high - d_low) / 12
+    
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # Volume spike detection: 1.5x average volume (6-period = 1 day on 4h chart)
+    vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 13, 2)  # Ensure we have EMA, Jaw, and volume MA data
+    start_idx = max(34, 20, 6)  # Ensure we have EMA, BB, and volume MA data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(jaw_aligned[i]) or 
-            np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or 
-            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0 or
+            np.isnan(bb_width_1d_aligned[i]) or np.isnan(bb_width_percentile[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Regime filter: only trade when volatility is expanding (BB width > 20th percentile)
+        volatility_expanding = bb_width_1d_aligned[i] > bb_width_percentile[i]
+        
         if position == 0:
-            # Bullish Alligator alignment: Lips > Teeth > Jaw
-            bullish_alignment = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]
-            # Bearish Alligator alignment: Lips < Teeth < Jaw
-            bearish_alignment = lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaw_aligned[i]
-            
-            # Long: bullish alignment + volume spike + price above 1d EMA50
-            if bullish_alignment and volume[i] > 2.0 * vol_ma[i] and close[i] > ema_50_1d_aligned[i]:
+            # Long: close > R1 with volume spike, price above 1d EMA34, and expanding volatility
+            if (close[i] > camarilla_r1_aligned[i] and 
+                volume[i] > 1.5 * vol_ma[i] and 
+                close[i] > ema_34_1d_aligned[i] and 
+                volatility_expanding):
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish alignment + volume spike + price below 1d EMA50
-            elif bearish_alignment and volume[i] > 2.0 * vol_ma[i] and close[i] < ema_50_1d_aligned[i]:
+            # Short: close < S1 with volume spike, price below 1d EMA34, and expanding volatility
+            elif (close[i] < camarilla_s1_aligned[i] and 
+                  volume[i] > 1.5 * vol_ma[i] and 
+                  close[i] < ema_34_1d_aligned[i] and 
+                  volatility_expanding):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Alligator alignment turns bearish or price crosses below EMA50
-            bearish_alignment = lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaw_aligned[i]
-            if bearish_alignment or close[i] < ema_50_1d_aligned[i]:
+            # Exit: touch S1 (opposite level) or trend failure (price below 1d EMA34)
+            if close[i] < camarilla_s1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Alligator alignment turns bullish or price crosses above EMA50
-            bullish_alignment = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]
-            if bullish_alignment or close[i] > ema_50_1d_aligned[i]:
+            # Exit: touch R1 (opposite level) or trend failure (price above 1d EMA34)
+            if close[i] > camarilla_r1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
