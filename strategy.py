@@ -40,6 +40,9 @@ def generate_signals(prices):
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
+    # Daily close for exit reference
+    daily_close_aligned = align_htf_to_ltf(prices, df_1d, daily_close)
+    
     # Volume confirmation: current volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > (vol_ma * 1.5)
@@ -51,7 +54,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(camarilla_s1_aligned[i]) or np.isnan(daily_close_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,7 +71,6 @@ def generate_signals(prices):
                 position = -1
         elif position != 0:
             # Exit: price returns to Camarilla center (daily close) or trend fails
-            daily_close_aligned = align_htf_to_ltf(prices, df_1d, daily_close)
             if position == 1:
                 if close[i] < daily_close_aligned[i] or close[i] < ema_50_12h_aligned[i]:
                     signals[i] = 0.0
