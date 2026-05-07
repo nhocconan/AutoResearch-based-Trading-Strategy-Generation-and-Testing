@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-1D_KAMA_Trend_WeeklyTrend_Filter
-Hypothesis: Daily KAMA trend with weekly EMA50 filter captures strong trends while avoiding whipsaws.
-KAMA adapts to market noise, reducing false signals in choppy markets. Weekly trend filter ensures
-alignment with higher-timeframe momentum. Works in both bull and bear markets by following the
-dominant trend on multiple timeframes. Targets 15-25 trades/year to minimize fee drag.
+1H_Camarilla_R1_S1_Breakout_4hTrend_1dVolume
+Hypothesis: 1h price breaks above/below 4h Camarilla R1/S1 levels with 4h EMA34 trend confirmation and 1d volume spike.
+Works in bull/bear markets: R1/S1 breakouts capture strong moves while avoiding minor retracements.
+EMA34 filter ensures alignment with 4h trend, 1d volume confirmation validates breakout strength.
+Uses 4h for signal direction, 1h only for entry timing. Targets 15-37 trades/year on 1h timeframe.
+Session filter (08-20 UTC) reduces noise trades.
 """
-name = "1D_KAMA_Trend_WeeklyTrend_Filter"
-timeframe = "1d"
+name = "1H_Camarilla_R1_S1_Breakout_4hTrend_1dVolume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -24,46 +25,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Precompute session hours (08-20 UTC)
+    hours = prices.index.hour
+    session_mask = (hours >= 8) & (hours <= 20)
+    
+    # Get 4h data for Camarilla levels and EMA trend
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 34:
         return np.zeros(n)
     
-    # Calculate weekly EMA50 for trend filter
-    close_1w_series = pd.Series(df_1w['close'])
-    ema_50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 4h Camarilla levels (R1, S1)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    pivot_4h = (high_4h + low_4h + close_4h) / 3
+    range_4h = high_4h - low_4h
+    r1_4h = pivot_4h + (range_4h * 1.1 / 6)  # R1 level
+    s1_4h = pivot_4h - (range_4h * 1.1 / 6)  # S1 level
+    r1_4h_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
+    s1_4h_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
     
-    # Calculate daily KAMA
-    # Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close, n=10))  # |close[t] - close[t-10]|
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # sum of |close[t] - close[t-1]| over 10 periods
-    # Avoid division by zero
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
-    # KAMA calculation
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Calculate 4h EMA34 for trend direction
+    close_4h_series = pd.Series(df_4h['close'])
+    ema_34_4h = close_4h_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
     
-    # Volume filter: current volume > 1.5 x 20-day average volume
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_avg * 1.5)
+    # Get 1d data for volume filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    # Calculate 1d volume average (20-period)
+    volume_1d = df_1d['volume'].values
+    vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    
+    # 1d volume filter: current 1h volume > 1.5 x 20-period average 1d volume
+    # Scale 1d average volume to 1h by dividing by 24 (approximate)
+    volume_filter = volume > (vol_avg_1d_aligned / 24 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_exit = 0  # bars since last exit to prevent overtrading
     
-    start_idx = max(30, 20)  # Ensure sufficient warmup for KAMA and volume
+    start_idx = max(34, 20)  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
         bars_since_exit += 1
         
         # Skip if any data is not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(kama[i]) or 
-            np.isnan(vol_avg[i])):
+        if (np.isnan(r1_4h_aligned[i]) or np.isnan(s1_4h_aligned[i]) or 
+            np.isnan(ema_34_4h_aligned[i]) or np.isnan(vol_avg_1d_aligned[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+                bars_since_exit = 0
+            continue
+        
+        # Apply session filter: only trade during 08-20 UTC
+        if not session_mask[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,32 +91,34 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Minimum 20 days between trades to reduce frequency
-            if bars_since_exit < 20:
+            # Minimum 24 bars between trades (1 day on 1h TF) to reduce frequency
+            if bars_since_exit < 24:
                 continue
                 
-            # Long: price above KAMA with weekly uptrend and volume surge
-            if (close[i] > kama[i] and close[i] > ema_50_1w_aligned[i] and volume_filter[i]):
-                signals[i] = 0.25
+            # Long: price breaks above R1 with 4h EMA34 uptrend and 1d volume spike
+            if (close[i] > r1_4h_aligned[i] and close[i-1] <= r1_4h_aligned[i-1] and 
+                close[i] > ema_34_4h_aligned[i] and volume_filter[i]):
+                signals[i] = 0.20
                 position = 1
                 bars_since_exit = 0
-            # Short: price below KAMA with weekly downtrend and volume surge
-            elif (close[i] < kama[i] and close[i] < ema_50_1w_aligned[i] and volume_filter[i]):
-                signals[i] = -0.25
+            # Short: price breaks below S1 with 4h EMA34 downtrend and 1d volume spike
+            elif (close[i] < s1_4h_aligned[i] and close[i-1] >= s1_4h_aligned[i-1] and 
+                  close[i] < ema_34_4h_aligned[i] and volume_filter[i]):
+                signals[i] = -0.20
                 position = -1
                 bars_since_exit = 0
         elif position != 0:
-            # Exit: price crosses KAMA in opposite direction
-            if position == 1 and close[i] < kama[i]:
+            # Exit: price returns to opposite EMA34 side (trend reversal)
+            if position == 1 and close[i] < ema_34_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_exit = 0
-            elif position == -1 and close[i] > kama[i]:
+            elif position == -1 and close[i] > ema_34_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_exit = 0
             else:
                 # Hold position
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.20 if position == 1 else -0.20
     
     return signals
