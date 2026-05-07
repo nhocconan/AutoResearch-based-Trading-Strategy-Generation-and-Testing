@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Donchian20_VolumeTrend_1d"
-timeframe = "12h"
+name = "4h_Donchian20_VolumeTrend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,57 +17,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Donchian(20) breakout
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # 12h trend filter (HTF)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
+    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Donchian channel (20-period) on 12h data
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    
-    # Daily trend filter: EMA(34) on daily close
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume spike detection: 20-period average (10 days of 12h bars)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation (4-period average)
+    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Wait for all indicators
+    start_idx = max(20, 4)  # Wait for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(vol_ma_20[i]):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma_4[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: breakout above upper band with volume and daily uptrend
-            vol_condition = volume[i] > vol_ma_20[i] * 2.0
-            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
+            # Long: break above Donchian high with volume and 12h uptrend
+            vol_condition = volume[i] > vol_ma_4[i] * 1.5
+            uptrend = ema_50_12h_aligned[i] > ema_50_12h_aligned[i-1]
             
-            if close[i] > highest_high[i-1] and vol_condition and uptrend:
+            if close[i] > donchian_high[i] and vol_condition and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakdown below lower band with volume and daily downtrend
-            elif close[i] < lowest_low[i-1] and vol_condition and not uptrend:
+            # Short: break below Donchian low with volume and 12h downtrend
+            elif close[i] < donchian_low[i] and vol_condition and not uptrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below lower band or volume drops
-            if close[i] < lowest_low[i-1] or volume[i] < vol_ma_20[i] * 1.5:
+            # Exit: price back below Donchian low or volume drops
+            if close[i] < donchian_low[i] or volume[i] < vol_ma_4[i] * 0.7:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above upper band or volume drops
-            if close[i] > highest_high[i-1] or volume[i] < vol_ma_20[i] * 1.5:
+            # Exit: price back above Donchian high or volume drops
+            if close[i] > donchian_high[i] or volume[i] < vol_ma_4[i] * 0.7:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -75,10 +73,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 12h Donchian breakout with daily trend and volume confirmation
-# - Donchian(20) breakout captures momentum in both bull and bear markets
-# - Daily EMA(34) ensures alignment with higher timeframe trend
-# - Volume spike (2x average) confirms institutional participation
-# - Exit when price returns to opposite band or volume weakens
-# - Position size 0.25 targets 15-30 trades/year, avoiding fee drag
-# - Works in bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend)
+# Hypothesis: Donchian(20) breakout with 12h EMA trend and volume confirmation
+# - Donchian breakouts capture breakouts from volatility contractions
+# - 12h EMA(50) ensures we trade with higher timeframe trend
+# - Volume confirmation (1.5x average) filters false breakouts
+# - Works in both bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend)
+# - Position size 0.25 targets ~25-40 trades/year, avoiding fee drag
+# - Exit on reversal or volume drying up to avoid whipsaws
+# - Simple, robust, and effective across market regimes
