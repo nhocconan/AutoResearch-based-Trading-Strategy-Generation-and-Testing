@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 # 12h_Camarilla_R3S3_Breakout_1wTrend_Volume
 # Hypothesis: 12h Camarilla R3/S3 breakout filtered by 1w ADX trend (>25) and volume spike (>2x 10-week average).
 # Designed for low-frequency, high-conviction trades in both bull and bear markets.
