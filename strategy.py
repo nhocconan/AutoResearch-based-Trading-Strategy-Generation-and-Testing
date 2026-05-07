@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_WMA_Pullback_Trend_Confirm"
-timeframe = "4h"
+name = "6h_Ichimoku_Cloud_Breakout_12hTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,69 +17,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE for trend filter and ATR
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 12h data for Ichimoku and trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 52:
         return np.zeros(n)
     
-    # Weekly WMA(21) for trend filter
-    weights = np.arange(1, 22)
-    wma_21_1w = np.convolve(df_1w['close'].values, weights, mode='valid')
-    wma_21_1w = np.concatenate([np.full(len(df_1w) - len(wma_21_1w), np.nan), wma_21_1w])
+    # Ichimoku components (standard parameters: 9, 26, 52)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Weekly ATR(14) for volatility filter
-    tr1 = df_1w['high'].values - df_1w['low'].values
-    tr2 = np.abs(df_1w['high'].values - np.concatenate([df_1w['close'].values[:-1], [np.nan]]))
-    tr3 = np.abs(df_1w['low'].values - np.concatenate([df_1w['close'].values[:-1], [np.nan]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(high_12h).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_12h).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2
     
-    # Align weekly indicators to 4h timeframe
-    wma_21_4h = align_htf_to_ltf(prices, df_1w, wma_21_1w)
-    atr_14_4h = align_htf_to_ltf(prices, df_1w, atr_14_1w)
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(high_12h).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_12h).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2
     
-    # 4h EMA(50) for dynamic support/resistance
-    ema_50_4h = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period52_high = pd.Series(high_12h).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_12h).rolling(window=52, min_periods=52).min().values
+    senkou_b = (period52_high + period52_low) / 2
+    
+    # Align Ichimoku components to 6h timeframe
+    tenkan_6h = align_htf_to_ltf(prices, df_12h, tenkan)
+    kijun_6h = align_htf_to_ltf(prices, df_12h, kijun)
+    senkou_a_6h = align_htf_to_ltf(prices, df_12h, senkou_a)
+    senkou_b_6h = align_htf_to_ltf(prices, df_12h, senkou_b)
+    
+    # 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_6h = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # Volume spike detection (2x 20-period average)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 14)
+    start_idx = max(52, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(wma_21_4h[i]) or np.isnan(atr_14_4h[i]) or 
-            np.isnan(ema_50_4h[i])):
+        if (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or 
+            np.isnan(senkou_a_6h[i]) or np.isnan(senkou_b_6h[i]) or
+            np.isnan(ema_50_6h[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Weekly trend: price above/below WMA21
-        weekly_uptrend = close[i] > wma_21_4h[i]
-        weekly_downtrend = close[i] < wma_21_4h[i]
+        vol_condition = volume[i] > vol_ma_20[i] * 2.0
         
-        # Volatility filter: avoid low volatility periods
-        vol_filter = atr_14_4h[i] > 0.01 * close[i]  # ATR > 1% of price
+        # Cloud top and bottom
+        cloud_top = np.maximum(senkou_a_6h[i], senkou_b_6h[i])
+        cloud_bottom = np.minimum(senkou_a_6h[i], senkou_b_6h[i])
         
         if position == 0:
-            # Long: pullback to EMA50 in weekly uptrend with sufficient volatility
-            if weekly_uptrend and close[i] > ema_50_4h[i] * 0.998 and vol_filter:
+            # Long: Tenkan crosses above Kijun, price above cloud, bullish trend, volume
+            if (tenkan_6h[i] > kijun_6h[i] and tenkan_6h[i-1] <= kijun_6h[i-1] and
+                close[i] > cloud_top and ema_50_6h[i] > ema_50_6h[i-1] and vol_condition):
                 signals[i] = 0.25
                 position = 1
-            # Short: pullback to EMA50 in weekly downtrend with sufficient volatility
-            elif weekly_downtrend and close[i] < ema_50_4h[i] * 1.002 and vol_filter:
+            # Short: Tenkan crosses below Kijun, price below cloud, bearish trend, volume
+            elif (tenkan_6h[i] < kijun_6h[i] and tenkan_6h[i-1] >= kijun_6h[i-1] and
+                  close[i] < cloud_bottom and ema_50_6h[i] < ema_50_6h[i-1] and vol_condition):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: weekly trend reversal or price breaks below EMA50
-            if not weekly_uptrend or close[i] < ema_50_4h[i] * 0.995:
+            # Exit: Tenkan crosses below Kijun or price falls below cloud
+            if (tenkan_6h[i] < kijun_6h[i] and tenkan_6h[i-1] >= kijun_6h[i-1]) or close[i] < cloud_top:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: weekly trend reversal or price breaks above EMA50
-            if not weekly_downtrend or close[i] > ema_50_4h[i] * 1.005:
+            # Exit: Tenkan crosses above Kijun or price rises above cloud
+            if (tenkan_6h[i] > kijun_6h[i] and tenkan_6h[i-1] <= kijun_6h[i-1]) or close[i] > cloud_bottom:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -87,11 +106,13 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Weekly trend + 4h EMA pullback strategy
-# - Uses weekly WMA(21) as primary trend filter (superior to EMA in trending markets)
-# - Enters on pullbacks to 4h EMA(50) in direction of weekly trend
-# - Volatility filter (ATR > 1% of price) prevents choppy market entries
-# - Works in both bull (buy pullbacks in uptrend) and bear (sell pullbacks in downtrend)
-# - Position size 0.25 targets ~20-40 trades/year to minimize fee drag
-# - Weekly timeframe for structure, 4h for precise entry timing
-# - Simple, robust logic with minimal parameters to avoid overfitting
+# Hypothesis: Ichimoku TK cross with cloud filter and 12h trend + volume confirmation
+# - TK cross (Tenkan/Kijun) signals momentum shift
+# - Trading in direction of cloud (price above/below) ensures trend alignment
+# - 12h EMA50 trend filter ensures we trade with higher timeframe trend
+# - Volume confirmation (2x average) reduces false signals
+# - Works in bull (TK cross up in bullish cloud) and bear (TK cross down in bearish cloud)
+# - Position size 0.25 targets ~50-100 trades over 4 years to avoid fee drag
+# - Ichimoku is a proven institutional indicator that works across market regimes
+# - Uses 12h for Ichimoku calculation and trend, 6h for execution timing
+# - Similar Ichimoku strategies show promise in backtests when properly filtered
