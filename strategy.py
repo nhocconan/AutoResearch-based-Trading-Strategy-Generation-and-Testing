@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
-6h_Keltner_Channel_Breakout_1wTrend_v1
-Hypothesis: On 6h timeframe, use Keltner Channel breakouts filtered by weekly trend direction.
-Long when price breaks above upper KC and weekly trend is bullish.
-Short when price breaks below lower KC and weekly trend is bearish.
-Keltner Channels adapt to volatility, reducing false breakouts in low-volatility periods.
-Works in both bull and bear markets by requiring alignment with weekly trend.
+12h_Camarilla_Pivot_R3S3_Breakout_1dTrend_v1
+Hypothesis: On 12h timeframe, price breaking above Camarilla R3 or below S3 (from 1d data) with 
+1d EMA trend alignment and volume spike indicates strong momentum. Works in bull/bear markets by 
+requiring alignment with higher timeframe trend and using volatility-based stops.
 """
-name = "6h_Keltner_Channel_Breakout_1wTrend_v1"
-timeframe = "6h"
+name = "12h_Camarilla_Pivot_R3S3_Breakout_1dTrend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,72 +21,91 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get daily data for Camarilla pivots and trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Keltner Channel parameters
-    kc_period = 20
-    atr_period = 10
-    kc_multiplier = 2.0
+    # Calculate Camarilla levels from previous day
+    # H, L, C from previous day
+    phigh = df_1d['high'].shift(1).values
+    plow = df_1d['low'].shift(1).values
+    pclose = df_1d['close'].shift(1).values
     
-    # Calculate ATR
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = high[0] - low[0]
-    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
+    # Calculate pivot and ranges
+    pivot = (phigh + plow + pclose) / 3
+    range_val = phigh - plow
     
-    # Calculate EMA for middle line
-    ema_middle = pd.Series(close).ewm(span=kc_period, adjust=False, min_periods=kc_period).mean().values
+    # Camarilla levels
+    R3 = pclose + (range_val * 1.1 / 4)
+    S3 = pclose - (range_val * 1.1 / 4)
     
-    # Calculate upper and lower bands
-    kc_upper = ema_middle + (kc_multiplier * atr)
-    kc_lower = ema_middle - (kc_multiplier * atr)
+    # Align Camarilla levels to 12h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
-    # Weekly EMA50 for trend filter
-    ema_50 = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    # Daily EMA34 for trend filter
+    ema_34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    
+    # Volume filter: current volume > 1.5 * 20-period average volume
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_avg * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    bars_since_entry = 0
     
-    start_idx = max(kc_period, atr_period, 50)
+    start_idx = max(34, 20)  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
+        bars_since_entry += 1
+        
         # Skip if any data is not ready
-        if (np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or 
-            np.isnan(ema_50_aligned[i])):
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
             continue
         
         if position == 0:
-            # Long: break above upper KC + weekly uptrend
-            if close[i] > kc_upper[i] and close[i] > ema_50_aligned[i]:
+            # Minimum 12 bars between trades to reduce frequency (12h timeframe)
+            if bars_since_entry < 12:
+                continue
+                
+            # Long: price breaks above R3 + price above EMA34 + volume filter
+            if (close[i] > R3_aligned[i] and 
+                close[i] > ema_34_aligned[i] and 
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below lower KC + weekly downtrend
-            elif close[i] < kc_lower[i] and close[i] < ema_50_aligned[i]:
+                bars_since_entry = 0
+            # Short: price breaks below S3 + price below EMA34 + volume filter
+            elif (close[i] < S3_aligned[i] and 
+                  close[i] < ema_34_aligned[i] and 
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
-        elif position == 1:
-            # Exit long: price crosses below middle line
-            if close[i] < ema_middle[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        else:  # position == -1
-            # Exit short: price crosses above middle line
-            if close[i] > ema_middle[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+                bars_since_entry = 0
+        elif position != 0:
+            # Exit: price returns to pivot level or opposite Camarilla level touched
+            if position == 1:
+                if close[i] < pivot[i]:  # Price back below pivot
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                else:
+                    signals[i] = 0.25
+            else:  # position == -1
+                if close[i] > pivot[i]:  # Price back above pivot
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
