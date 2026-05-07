@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-# 1H_Camarilla_R3S3_4HTrend_Volume_Entry
-# Hypothesis: Combine 4h trend direction with 1h entry timing using Camarilla R3/S3 levels from 4h.
-# Use 4h EMA34 for trend filter, and volume spike on 1h for entry confirmation.
-# Target: 15-37 trades/year per symbol by requiring 4h trend alignment + volume spike.
-# Works in bull (trend following) and bear (counter-trend at extremes) via trend filter.
+# 6H_RSI2_EDGE_1DTrend_Volume
+# Hypothesis: Use a 2-period RSI (RSI2) with overbought/oversold thresholds on 6h timeframe, filtered by 1d trend (EMA50) and volume spike (2x average volume). RSI2 captures short-term momentum extremes that often reverse in ranging markets, while the 1d EMA50 filter ensures we only take trades in the direction of the higher timeframe trend. Volume spike confirms conviction. Designed for low trade frequency (15-25 trades/year) to minimize fee drag, effective in both bull and bear markets due to trend filter.
 
-name = "1H_Camarilla_R3S3_4HTrend_Volume_Entry"
-timeframe = "1h"
+name = "6H_RSI2_EDGE_1DTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -18,76 +15,84 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Camarilla pivot calculation and trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) == 0:
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla R3 and S3 levels from 4h OHLC
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    close_1d = df_1d['close'].values
     
-    hl_range_4h = high_4h - low_4h
-    r3_4h = close_4h + 1.1 * hl_range_4h / 2
-    s3_4h = close_4h - 1.1 * hl_range_4h / 2
+    # Calculate 50-period EMA for daily trend
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate EMA34 for trend filter on 4h
-    ema34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 2-period RSI on 6h close
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Align 4h levels and EMA to 1h timeframe
-    r3_4h_aligned = align_htf_to_ltf(prices, df_4h, r3_4h)
-    s3_4h_aligned = align_htf_to_ltf(prices, df_4h, s3_4h)
-    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
+    # Wilder's smoothing (equivalent to RMA)
+    alpha = 1.0 / 2
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[0] = gain[0]
+    avg_loss[0] = loss[0]
     
-    # Volume spike detection: 2.0x average volume (20-period for responsiveness)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    for i in range(1, len(gain)):
+        avg_gain[i] = alpha * gain[i] + (1 - alpha) * avg_gain[i-1]
+        avg_loss[i] = alpha * loss[i] + (1 - alpha) * avg_loss[i-1]
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi2 = 100 - (100 / (1 + rs))
+    
+    # Volume spike: 2x average volume (50-period for stability)
+    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)  # Ensure we have volume MA and EMA34 data
+    start_idx = max(50, 50)  # RSI2 and vol MA warmup
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(r3_4h_aligned[i]) or np.isnan(s3_4h_aligned[i]) or 
-            np.isnan(ema34_4h_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(rsi2[i]) or 
+            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above 4h R3, price above 4h EMA34 (uptrend), volume spike (>2.0x)
-            if (close[i] > r3_4h_aligned[i] and 
-                close[i] > ema34_4h_aligned[i] and 
+            # Long: RSI2 < 15 (oversold), price above daily EMA50 (uptrend), volume spike (>2x)
+            if (rsi2[i] < 15 and 
+                close[i] > ema50_1d_aligned[i] and 
                 volume[i] > 2.0 * vol_ma[i]):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 4h S3, price below 4h EMA34 (downtrend), volume spike (>2.0x)
-            elif (close[i] < s3_4h_aligned[i] and 
-                  close[i] < ema34_4h_aligned[i] and 
+            # Short: RSI2 > 85 (overbought), price below daily EMA50 (downtrend), volume spike (>2x)
+            elif (rsi2[i] > 85 and 
+                  close[i] < ema50_1d_aligned[i] and 
                   volume[i] > 2.0 * vol_ma[i]):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price returns to or below 4h S3 (opposite level)
-            if close[i] <= s3_4h_aligned[i]:
+            # Exit: RSI2 returns to neutral (>45) or price closes below daily EMA50
+            if (rsi2[i] > 45 or close[i] < ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: price returns to or above 4h R3 (opposite level)
-            if close[i] >= r3_4h_aligned[i]:
+            # Exit: RSI2 returns to neutral (<55) or price closes above daily EMA50
+            if (rsi2[i] < 55 or close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
