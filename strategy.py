@@ -123,8 +123,8 @@ def generate_signals(prices):
                 bars_since_entry = 0
         elif position == 1:
             # Exit conditions: price returns to EMA34 or breaks below S1
-            # Minimum holding period of 3 bars to reduce churn
-            if bars_since_entry >= 3 and (close[i] < ema_34_12h[i] or close[i] < s1_12h[i]):
+            # Minimum holding period of 4 bars to reduce churn
+            if bars_since_entry >= 4 and (close[i] < ema_34_12h[i] or close[i] < s1_12h[i]):
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
@@ -132,8 +132,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         elif position == -1:
             # Exit conditions: price returns to EMA34 or breaks above R1
-            # Minimum holding period of 3 bars to reduce churn
-            if bars_since_entry >= 3 and (close[i] > ema_34_12h[i] or close[i] > r1_12h[i]):
+            # Minimum holding period of 4 bars to reduce churn
+            if bars_since_entry >= 4 and (close[i] > ema_34_12h[i] or close[i] > r1_12h[i]):
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
