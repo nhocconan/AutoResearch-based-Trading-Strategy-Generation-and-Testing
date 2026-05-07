@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1wTrend_Volume
-Hypothesis: Price breaking above/below daily Camarilla R1/S1 on 12h timeframe with weekly EMA50 trend filter and volume spike (2x average) captures institutional breakouts with lower trade frequency suitable for 12h. Designed to work in both bull and bear markets by following higher timeframe weekly trend, reducing false breaks during counter-trend moves.
+4h_Camarilla_R1S1_Breakout_1dTrend_Volume_v2
+Hypothesis: Price breaking above/below daily Camarilla R1/S1 on 4h timeframe with 1d EMA34 trend filter and volume spike (1.5x average) captures institutional breakouts. Designed for 4h to balance trade frequency and performance, avoiding excessive trades that cause fee drag while maintaining edge in both bull and bear markets by following higher timeframe trend.
 """
-name = "12h_Camarilla_R1S1_Breakout_1wTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -21,7 +21,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation
+    # Get 1d data for Camarilla pivot calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -37,22 +37,17 @@ def generate_signals(prices):
     r1 = pivot + 1.1 * (prev_high - prev_low) / 12
     s1 = pivot - 1.1 * (prev_high - prev_low) / 12
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
-        return np.zeros(n)
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Weekly EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Volume filter: current volume > 2.0 * 24-period average (stricter)
+    # Volume filter: current volume > 1.5 * 24-period average (balanced)
     vol_avg = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_filter = volume > (vol_avg * 2.0)
+    volume_filter = volume > (vol_avg * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -62,7 +57,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any data is not ready
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_avg[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_avg[i]) or 
             np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -70,12 +65,12 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 + weekly uptrend + volume spike
-            if close[i] > r1_aligned[i] and close[i] > ema_50_1w_aligned[i] and volume_filter[i]:
+            # Long: price breaks above R1 + 1d uptrend + volume spike
+            if close[i] > r1_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + weekly downtrend + volume spike
-            elif close[i] < s1_aligned[i] and close[i] < ema_50_1w_aligned[i] and volume_filter[i]:
+            # Short: price breaks below S1 + 1d downtrend + volume spike
+            elif close[i] < s1_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
