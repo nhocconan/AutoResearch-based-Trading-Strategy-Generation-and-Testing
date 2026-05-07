@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3S3_Breakout_1wTrend_Volume"
-timeframe = "12h"
+name = "4h_KAMA_Trend_With_RSI_Momentum"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,65 +17,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 10:
         return np.zeros(n)
     
-    # 1d Camarilla R3 and S3 levels
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_ = prev_high - prev_low
-    r3 = pivot + (range_ * 1.1 / 2)
-    s3 = pivot - (range_ * 1.1 / 2)
+    # 12h KAMA for trend
+    close_12h = df_12h['close']
+    # Calculate ER and SC for KAMA
+    change = abs(close_12h - close_12h.shift(10))
+    volatility = abs(close_12h.diff()).rolling(window=10).sum()
+    ER = change / volatility
+    ER = ER.fillna(0)
+    SC = (ER * (0.6667 - 0.0645) + 0.0645) ** 2
+    KAMA = [0.0] * len(close_12h)
+    if len(close_12h) > 0:
+        KAMA[0] = close_12h.iloc[0]
+        for i in range(1, len(close_12h)):
+            KAMA[i] = KAMA[i-1] + SC[i] * (close_12h.iloc[i] - KAMA[i-1])
+    kama_12h = np.array(KAMA)
     
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # 12h RSI for momentum
+    delta = close_12h.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_12h = 100 - (100 / (1 + rs))
+    rsi_12h = rsi_12h.fillna(50)
     
-    # 1w EMA34 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    ema34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Align to 4h
+    kama_12h_aligned = align_htf_to_ltf(prices, df_12h, kama_12h)
+    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h.values)
     
-    # 12h volume spike: > 1.5x 24-period average (12 days)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    vol_spike = volume > 1.5 * vol_ma
+    # 4h RSI for entry timing
+    delta_4h = pd.Series(close).diff()
+    gain_4h = delta_4h.where(delta_4h > 0, 0)
+    loss_4h = -delta_4h.where(delta_4h < 0, 0)
+    avg_gain_4h = gain_4h.rolling(window=14, min_periods=14).mean()
+    avg_loss_4h = loss_4h.rolling(window=14, min_periods=14).mean()
+    rs_4h = avg_gain_4h / avg_loss_4h
+    rsi_4h = 100 - (100 / (1 + rs_4h))
+    rsi_4h = rsi_4h.fillna(50).values
+    
+    # 4h volume spike: > 1.5x 20-period average
+    vol_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > 1.5 * vol_ma_4h
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(24, 34)  # Wait for volume MA and weekly EMA
+    start_idx = 20  # Wait for volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(ema34_1w_aligned[i]):
+        if np.isnan(kama_12h_aligned[i]) or np.isnan(rsi_12h_aligned[i]) or np.isnan(rsi_4h[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Close above R3, above weekly EMA34, volume spike
-            if close[i] > r3_aligned[i] and close[i] > ema34_1w_aligned[i] and vol_spike[i]:
+            # Long: Price above KAMA, RSI12h > 50, RSI4h > 50, volume spike
+            if close[i] > kama_12h_aligned[i] and rsi_12h_aligned[i] > 50 and rsi_4h[i] > 50 and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close below S3, below weekly EMA34, volume spike
-            elif close[i] < s3_aligned[i] and close[i] < ema34_1w_aligned[i] and vol_spike[i]:
+            # Short: Price below KAMA, RSI12h < 50, RSI4h < 50, volume spike
+            elif close[i] < kama_12h_aligned[i] and rsi_12h_aligned[i] < 50 and rsi_4h[i] < 50 and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Close below S3 or below weekly EMA34
-            if close[i] < s3_aligned[i] or close[i] < ema34_1w_aligned[i]:
+            # Exit: Price below KAMA or RSI12h < 40
+            if close[i] < kama_12h_aligned[i] or rsi_12h_aligned[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Close above R3 or above weekly EMA34
-            if close[i] > r3_aligned[i] or close[i] > ema34_1w_aligned[i]:
+            # Exit: Price above KAMA or RSI12h > 60
+            if close[i] > kama_12h_aligned[i] or rsi_12h_aligned[i] > 60:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -83,13 +103,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with weekly trend filter and volume confirmation.
-# Long when price breaks above R3 (strong resistance), above weekly EMA34 (bullish trend),
-# and volume spike confirms conviction. Short when price breaks below S3 (strong support),
-# below weekly EMA34 (bearish trend), with volume spike.
-# Uses weekly timeframe for trend to avoid whipsaws, 12h for entry timing.
-# Camarilla R3/S3 are strong institutional levels; breakouts often lead to sustained moves.
-# Volume spike (>1.5x average) ensures institutional participation.
-# Discrete 0.25 position size limits risk and reduces fee churn.
-# Works in bull markets (breakouts above R3) and bear markets (breakdowns below S3).
-# Target: 15-35 trades/year to minimize fee drag while capturing sustained moves.
+# Hypothesis: 4h KAMA trend with 12h RSI momentum filter and 4h RSI timing.
+# Long when price > 12h KAMA, 12h RSI > 50 (bullish momentum), 4h RSI > 50, and volume spike confirms.
+# Short when price < 12h KAMA, 12h RSI < 50, 4h RSI < 50, and volume spike confirms.
+# Uses 12h timeframe for trend/momentum to reduce whipsaws, 4h for entry timing.
+# Volume spike (>1.5x average) ensures conviction. Discrete 0.25 position size limits risk.
+# KAMA adapts to market noise, reducing false signals in ranging markets.
+# Works in bull markets (trend + momentum) and bear markets (reverse criteria).
+# Target: 20-50 trades/year to minimize fee drag while capturing sustained moves.
