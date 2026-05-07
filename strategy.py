@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """
-4h_Weekly_Pivot_Breakout_Trend_Filter
-Hypothesis: Weekly pivot points provide strong support/resistance. In bull markets (price above weekly pivot), buy breakouts above R1 with volume confirmation and price above daily EMA50. In bear markets (price below weekly pivot), sell breakdowns below S1 with volume confirmation and price below daily EMA50. Uses 4h timeframe for execution with 1d trend filter. Target: 20-40 trades per year (80-160 over 4 years) with position size 0.25.
+1d_Weekly_Pivot_Breakout_Trend_Filter
+Hypothesis: Weekly pivot points provide strong support/resistance levels.
+In bull markets (price above weekly pivot), buy breakouts above R1 with volume confirmation.
+In bear markets (price below weekly pivot), sell breakdowns below S1 with volume confirmation.
+Weekly pivot calculated from prior week's OHLC. Uses 1d timeframe for execution with 1w trend filter.
+Target: 20-30 trades per year (~80-120 over 4 years) with position size 0.25.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Weekly_Pivot_Breakout_Trend_Filter"
-timeframe = "4h"
+name = "1d_Weekly_Pivot_Breakout_Trend_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,18 +26,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE for weekly pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    # Load weekly data ONCE for weekly pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
     # Calculate weekly pivot from prior week's OHLC
-    # Weekly high = max of high over last 7 days
-    # Weekly low = min of low over last 7 days
-    # Weekly close = close of 7 days ago (Friday's close)
-    weekly_high = pd.Series(df_1d['high']).rolling(window=7, min_periods=7).max().shift(1).values
-    weekly_low = pd.Series(df_1d['low']).rolling(window=7, min_periods=7).min().shift(1).values
-    weekly_close = df_1d['close'].shift(7).values
+    # Weekly high = max of high over last 7 days (weekly)
+    # Weekly low = min of low over last 7 days (weekly)
+    # Weekly close = close of 1 week ago (previous week's close)
+    weekly_high = pd.Series(df_1w['high']).rolling(window=1, min_periods=1).max().shift(1).values
+    weekly_low = pd.Series(df_1w['low']).rolling(window=1, min_periods=1).min().shift(1).values
+    weekly_close = df_1w['close'].shift(1).values
     
     # Weekly pivot point = (H + L + C) / 3
     weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
@@ -43,14 +47,14 @@ def generate_signals(prices):
     # Weekly S1 = (2 * P) - H
     weekly_s1 = (2 * weekly_pivot) - weekly_high
     
-    # Align weekly levels to 4h timeframe
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_1d, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_1d, weekly_s1)
+    # Align weekly levels to 1d timeframe
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
     
-    # 1-day EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # 1-week EMA50 for trend filter (using weekly data)
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Volume ratio: current volume / 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -63,16 +67,16 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_r1_aligned[i]) or 
-            np.isnan(weekly_s1_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(weekly_s1_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or 
             np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine market regime from 1-day EMA50
-        uptrend_regime = close[i] > ema_50_1d_aligned[i]
-        downtrend_regime = close[i] < ema_50_1d_aligned[i]
+        # Determine market regime from 1-week EMA50
+        uptrend_regime = close[i] > ema_50_1w_aligned[i]
+        downtrend_regime = close[i] < ema_50_1w_aligned[i]
         
         # Volume confirmation: volume > 1.3x average
         volume_confirm = vol_ratio[i] > 1.3
