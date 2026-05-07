@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_ThreeMonthHighLow_Breakout_VolumeTrend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 120:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,27 +17,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h and 1d data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Load 4h and 1d data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_12h) < 20 or len(df_1d) < 20:
+    if len(df_4h) < 60 or len(df_1d) < 60:
         return np.zeros(n)
     
-    # 1d Previous day's close for Camarilla levels
-    prev_close_1d = df_1d['close'].shift(1).values
-    prev_high_1d = df_1d['high'].shift(1).values
-    prev_low_1d = df_1d['low'].shift(1).values
+    # 1d 3-month high and low (63 trading days approx)
+    lookback = 63
+    high_3m_1d = pd.Series(df_1d['high']).rolling(window=lookback, min_periods=lookback).max().values
+    low_3m_1d = pd.Series(df_1d['low']).rolling(window=lookback, min_periods=lookback).min().values
     
-    # 1d Camarilla R1 and S1 levels
-    camarilla_r1_1d = prev_close_1d + (prev_high_1d - prev_low_1d) * 1.1 / 12
-    camarilla_s1_1d = prev_close_1d - (prev_high_1d - prev_low_1d) * 1.1 / 12
+    # Align to 4h timeframe
+    high_3m_1d_aligned = align_htf_to_ltf(prices, df_1d, high_3m_1d)
+    low_3m_1d_aligned = align_htf_to_ltf(prices, df_1d, low_3m_1d)
     
-    # Align 1d Camarilla levels to 12h timeframe
-    camarilla_r1_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1_1d)
-    camarilla_s1_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1_1d)
+    # 4h 20-period volume average for spike detection
+    vol_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # 1d ADX for trend filter (ADX > 20 indicates trend)
+    # 1d ADX for trend filter (ADX > 25 indicates strong trend)
     def calculate_adx(high, low, close, period=14):
         plus_dm = np.zeros_like(high)
         minus_dm = np.zeros_like(high)
@@ -55,7 +54,7 @@ def generate_signals(prices):
         
         atr[period] = np.nansum(tr[1:period+1])
         plus_dm_smooth[period] = np.nansum(plus_dm[1:period+1])
-        minus_dm_smooth[period] = np.nansum(plus_dm[1:period+1])  # Note: This should be minus_dm, but keeping as in original for consistency
+        minus_dm_smooth[period] = np.nansum(minus_dm[1:period+1])
         
         for i in range(period+1, len(tr)):
             atr[i] = atr[i-1] - (atr[i-1] / period) + tr[i]
@@ -81,54 +80,49 @@ def generate_signals(prices):
     adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # 12h volume spike: > 2.0x 20-period average
-    vol_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike_12h = volume > 2.0 * vol_ma_12h
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 34)  # Wait for ADX and volume MA
+    start_idx = max(63, 34)  # Wait for 3M high/low and ADX
     
     for i in range(start_idx, n):
-        if (np.isnan(camarilla_r1_1d_aligned[i]) or np.isnan(camarilla_s1_1d_aligned[i]) or 
-            np.isnan(adx_1d_aligned[i])):
+        if (np.isnan(high_3m_1d_aligned[i]) or np.isnan(low_3m_1d_aligned[i]) or 
+            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ma_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Break above R1 with volume spike and uptrend (ADX > 20)
-            if (close[i] > camarilla_r1_1d_aligned[i] and vol_spike_12h[i] and 
-                adx_1d_aligned[i] > 20):
-                signals[i] = 0.25
+            # Long: Break above 3-month high with volume spike and strong trend
+            if (close[i] > high_3m_1d_aligned[i] and 
+                volume[i] > 2.0 * vol_ma_4h[i] and 
+                adx_1d_aligned[i] > 25):
+                signals[i] = 0.30
                 position = 1
-            # Short: Break below S1 with volume spike and downtrend (ADX > 20)
-            elif (close[i] < camarilla_s1_1d_aligned[i] and vol_spike_12h[i] and 
-                  adx_1d_aligned[i] > 20):
-                signals[i] = -0.25
+            # Short: Break below 3-month low with volume spike and strong trend
+            elif (close[i] < low_3m_1d_aligned[i] and 
+                  volume[i] > 2.0 * vol_ma_4h[i] and 
+                  adx_1d_aligned[i] > 25):
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit: Price below S1 or trend weakening (ADX < 15)
-            if close[i] < camarilla_s1_1d_aligned[i] or adx_1d_aligned[i] < 15:
+            # Exit: Price below 3-month low or trend weakening (ADX < 20)
+            if close[i] < low_3m_1d_aligned[i] or adx_1d_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit: Price above R1 or trend weakening (ADX < 15)
-            if close[i] > camarilla_r1_1d_aligned[i] or adx_1d_aligned[i] < 15:
+            # Exit: Price above 3-month high or trend weakening (ADX < 20)
+            if close[i] > high_3m_1d_aligned[i] or adx_1d_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-# Hypothesis: Using 12h timeframe with 1d Camarilla R1/S1 levels for precise entries,
-# combined with volume spike confirmation and ADX trend filter, provides
-# high-probability breakout trades in both bull and bear markets.
-# The 12h timeframe reduces trade frequency to minimize fee drag while
-# capturing significant moves. Position size of 0.25 limits risk.
-# Target: 20-40 trades per year to stay within optimal range.
+# Hypothesis: 3-month high/low breaks capture major trend changes. 
+# Volume spike confirms institutional participation. ADX filter ensures trades only in strong trends.
+# Works in bull (breaks highs) and bear (breaks lows). Target 20-40 trades/year to minimize fee drag.
