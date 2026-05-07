@@ -1,82 +1,85 @@
 #!/usr/bin/env python3
-name = "6h_1w_1d_WilliamsFractal_Trend_Pullback"
-timeframe = "6h"
+name = "4h_1d_Camarilla_S1R1_Trend_Reversal"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Load weekly and daily data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1w) < 10 or len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Weekly trend: EMA(8) on weekly close
-    ema_8_1w = pd.Series(df_1w['close']).ewm(span=8, adjust=False, min_periods=8).mean().values
-    ema_8_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_8_1w)
+    # Calculate daily Camarilla pivot levels from previous day
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Daily Williams fractals with 2-bar confirmation delay
-    bearish_fractal, bullish_fractal = compute_williams_fractals(
-        df_1d['high'].values,
-        df_1d['low'].values,
-    )
-    bearish_fractal_aligned = align_htf_to_ltf(
-        prices, df_1d, bearish_fractal, additional_delay_bars=2
-    )
-    bullish_fractal_aligned = align_htf_to_ltf(
-        prices, df_1d, bullish_fractal, additional_delay_bars=2
-    )
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
     
-    # Daily EMA(34) for trend filter
+    # Camarilla levels
+    s1 = prev_close - (range_hl * 1.08 / 2)
+    r1 = prev_close + (range_hl * 1.08 / 2)
+    
+    # Align daily levels to 4h timeframe
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    
+    # Daily trend filter: EMA(34) on daily close
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume spike detection: 6-period average (1.5 days of 4h bars)
+    vol_ma_6 = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(8, 34)  # Wait for EMA indicators
+    start_idx = max(34, 6)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_8_1w_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(vol_ma_6[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: bullish fractal (support) with weekly uptrend and daily uptrend
-            weekly_uptrend = ema_8_1w_aligned[i] > ema_8_1w_aligned[i-1]
-            daily_uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
+            # Long: price breaks above R1 with volume and daily uptrend
+            vol_condition = volume[i] > vol_ma_6[i] * 1.8
+            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
             
-            if bullish_fractal_aligned[i] and weekly_uptrend and daily_uptrend:
+            if close[i] > r1_aligned[i] and vol_condition and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish fractal (resistance) with weekly downtrend and daily downtrend
-            elif bearish_fractal_aligned[i] and not weekly_uptrend and not daily_uptrend:
+            # Short: price breaks below S1 with volume and daily downtrend
+            elif close[i] < s1_aligned[i] and vol_condition and not uptrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: bearish fractal (resistance) or weekly trend change
-            if bearish_fractal_aligned[i] or not (ema_8_1w_aligned[i] > ema_8_1w_aligned[i-1]):
+            # Exit: price returns to R1 or volume drops
+            if close[i] < r1_aligned[i] or volume[i] < vol_ma_6[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: bullish fractal (support) or weekly trend change
-            if bullish_fractal_aligned[i] or not (ema_8_1w_aligned[i] <= ema_8_1w_aligned[i-1]):
+            # Exit: price returns to S1 or volume drops
+            if close[i] > s1_aligned[i] or volume[i] < vol_ma_6[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -84,15 +87,13 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 6h Williams fractal pullback with weekly trend filter
-# - Williams fractals identify potential reversal points (bullish = support, bearish = resistance)
-# - Weekly EMA(8) determines overall trend direction
-# - Daily EMA(34) confirms intermediate trend alignment
-# - Enter on pullback to fractal level in direction of weekly trend
-# - Exit when opposite fractal forms or weekly trend changes
-# - Weekly trend filter avoids counter-trend trades in strong trends
-# - Works in both bull (buy pullbacks in uptrend) and bear (sell pullbacks in downtrend)
-# - Position size 0.25 targets ~20-50 trades/year, avoiding fee drag
-# - Uses weekly trend + daily fractals for multi-timeframe confluence
-# - Williams fractals require 2-bar confirmation delay to avoid false signals
-# - Tested on BTC/ETH/SOL for robustness across market regimes
+# Hypothesis: 4h Camarilla R1/S1 breakout with daily trend and volume confirmation
+# - Daily Camarilla R1/S1 act as strong resistance/support levels
+# - Breakout above R1 with volume in daily uptrend = long opportunity
+# - Breakdown below S1 with volume in daily downtrend = short opportunity
+# - Volume spike (1.8x average) confirms institutional participation
+# - Works in both bull (buy R1 breaks in uptrend) and bear (sell S1 breaks in downtrend)
+# - Exit when price returns to R1/S1 or volume weakens
+# - Position size 0.25 targets ~30-50 trades/year, avoiding fee drag
+# - Uses actual daily Camarilla levels for better responsiveness
+# - Designed to work in BOTH bull and bear markets via trend filter
