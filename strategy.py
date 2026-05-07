@@ -1,14 +1,16 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 """
-12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_HT
-Hypothesis: Use 1d EMA34 for trend direction and 12h Camarilla R3/S3 levels for entry.
-Long when price crosses above EMA34 and touches 12h R3 level; short when price crosses below EMA34 and touches 12h S3 level.
-Volume confirmation: current volume > 2x 20-period average volume to filter low-quality breakouts.
-Designed for 12h timeframe to capture multi-day moves with tight entries (target: 12-37 trades/year).
-Works in both bull and bear markets by following higher timeframe trend and using institutional pivot levels.
+1h_RSI_Divergence_4HTrendFilter_v1
+Hypothesis: Use 4h EMA for trend direction and 1h RSI divergence for entry.
+Long when 4h trend up (price > EMA) and bullish RSI divergence (price makes lower low, RSI makes higher low).
+Short when 4h trend down (price < EMA) and bearish RSI divergence (price makes higher high, RSI makes lower high).
+Volume confirmation: current volume > 1.3x 20-period average volume.
+Session filter: 08-20 UTC to avoid low-liquidity hours.
+Position size: 0.20 to limit drawdown.
+This combines trend following with momentum reversal signals to work in both bull and bear markets while controlling trade frequency.
 """
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_HT"
-timeframe = "12h"
+name = "1h_RSI_Divergence_4HTrendFilter_v1"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -24,49 +26,55 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
-    # Get 1d data for EMA34 trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Precompute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(open_time).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # Get 4h data for EMA trend
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA34
-    close_1d = pd.Series(df_1d['close'])
-    ema_34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 4h EMA(20)
+    close_4h = pd.Series(df_4h['close'])
+    ema_4h = close_4h.ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Get 12h data for Camarilla levels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 1:
-        return np.zeros(n)
+    # Calculate 1h RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values  # neutral RSI when no loss
     
-    # Calculate 12h Camarilla levels (R3, S3)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    pivot = (high_12h + low_12h + close_12h) / 3
-    range_12h = high_12h - low_12h
-    r3 = pivot + (range_12h * 1.1 / 4)
-    s3 = pivot - (range_12h * 1.1 / 4)
-    r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
-    
-    # Volume filter: current volume > 2.0 * 20-period average volume
+    # Volume filter: current volume > 1.3 * 20-period average volume
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_avg * 2.0)
+    volume_filter = volume > (vol_avg * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_exit = 0  # bars since last exit to prevent overtrading
     
-    start_idx = max(34, 20)  # Ensure sufficient warmup for EMA34 and volume
+    start_idx = max(30, 20)  # Ensure sufficient warmup for RSI and EMA
     
     for i in range(start_idx, n):
         bars_since_exit += 1
         
         # Skip if any data is not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(vol_avg[i])):
+        if (np.isnan(ema_4h_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_avg[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+                bars_since_exit = 0
+            continue
+        
+        # Apply session filter
+        if not in_session[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,34 +82,52 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Minimum 24 bars between trades (2 days on 12h TF) to reduce frequency
-            if bars_since_exit < 24:
+            # Minimum 8 bars between trades (~8 hours on 1h TF) to reduce frequency
+            if bars_since_exit < 8:
                 continue
                 
-            # Long: price crosses above EMA34 and touches R3 level
-            if (close[i] > ema_34_1d_aligned[i] and close[i-1] <= ema_34_1d_aligned[i-1] and 
-                low[i] <= r3_aligned[i] and volume_filter[i]):
-                signals[i] = 0.25
-                position = 1
-                bars_since_exit = 0
-            # Short: price crosses below EMA34 and touches S3 level
-            elif (close[i] < ema_34_1d_aligned[i] and close[i-1] >= ema_34_1d_aligned[i-1] and 
-                  high[i] >= s3_aligned[i] and volume_filter[i]):
-                signals[i] = -0.25
-                position = -1
-                bars_since_exit = 0
+            # Bullish divergence: price makes lower low, RSI makes higher low
+            # Bearish divergence: price makes higher high, RSI makes lower high
+            lookback = 5  # look back 5 bars for swing points
+            
+            if i >= lookback:
+                # Find recent swing low in price and RSI
+                price_low_idx = i - lookback + np.argmin(low[i-lookback:i+1])
+                rsi_low_idx = i - lookback + np.argmin(rsi[i-lookback:i+1])
+                
+                # Find recent swing high in price and RSI
+                price_high_idx = i - lookback + np.argmax(high[i-lookback:i+1])
+                rsi_high_idx = i - lookback + np.argmax(rsi[i-lookback:i+1])
+                
+                bullish_div = (low[price_low_idx] < low[i-lookback] and 
+                              rsi[rsi_low_idx] > rsi[i-lookback])
+                bearish_div = (high[price_high_idx] > high[i-lookback] and 
+                              rsi[rsi_high_idx] < rsi[i-lookback])
+                
+                # Long: 4h trend up (price > EMA) and bullish RSI divergence
+                if (close[i] > ema_4h_aligned[i] and bullish_div and 
+                    volume_filter[i]):
+                    signals[i] = 0.20
+                    position = 1
+                    bars_since_exit = 0
+                # Short: 4h trend down (price < EMA) and bearish RSI divergence
+                elif (close[i] < ema_4h_aligned[i] and bearish_div and 
+                      volume_filter[i]):
+                    signals[i] = -0.20
+                    position = -1
+                    bars_since_exit = 0
         elif position != 0:
-            # Exit: price returns to opposite EMA34 side
-            if position == 1 and close[i] < ema_34_1d_aligned[i]:
+            # Exit: price returns to opposite EMA side or RSI reaches extreme
+            if position == 1 and (close[i] < ema_4h_aligned[i] or rsi[i] > 70):
                 signals[i] = 0.0
                 position = 0
                 bars_since_exit = 0
-            elif position == -1 and close[i] > ema_34_1d_aligned[i]:
+            elif position == -1 and (close[i] > ema_4h_aligned[i] or rsi[i] < 30):
                 signals[i] = 0.0
                 position = 0
                 bars_since_exit = 0
             else:
                 # Hold position
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.20 if position == 1 else -0.20
     
     return signals
