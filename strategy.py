@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_PivotBreakout_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -34,19 +34,11 @@ def generate_signals(prices):
     pivot = (prev_high + prev_low + prev_close) / 3
     r1 = 2 * pivot - prev_low
     s1 = 2 * pivot - prev_high
-    r2 = pivot + (prev_high - prev_low)
-    s2 = pivot - (prev_high - prev_low)
-    r3 = prev_high + 2 * (pivot - prev_low)
-    s3 = prev_low - 2 * (prev_high - pivot)
     
-    # Align Pivot levels to 6h
+    # Align Pivot levels to 4h
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
     # Volume filter: > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -90,7 +82,7 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 6h Pivot Point (R1/S1) breakout with 1d EMA(34) trend filter and volume confirmation.
+# Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA(34) trend filter and volume confirmation.
 # Pivot levels from prior day provide key support/resistance. Breaking R1/S1 indicates momentum.
 # Daily EMA filter ensures alignment with higher timeframe trend. Volume confirms institutional participation.
 # Target: 25-35 trades/year to minimize fee drift. Position size 0.25 limits drawdown in volatile markets.
