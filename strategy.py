@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
-name = "6h_Choppiness_Regime_Adaptive"
-timeframe = "6h"
+name = "4h_Trix_Signal_With_Volume_And_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,63 +18,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for regime and trend filters
+    # Get 1d data for TRIX and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Get 4h data for additional trend confirmation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
-    
-    # Calculate 1d Choppiness Index (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d TRIX (15,9,9)
     close_1d = df_1d['close'].values
+    # First EMA
+    ema1 = pd.Series(close_1d).ewm(span=15, adjust=False).mean()
+    # Second EMA
+    ema2 = ema1.ewm(span=15, adjust=False).mean()
+    # Third EMA
+    ema3 = ema2.ewm(span=15, adjust=False).mean()
+    # TRIX = % change of third EMA
+    trix_raw = ((ema3 / ema3.shift(1)) - 1) * 100
+    trix = trix_raw.values
+    # Signal line (9-period EMA of TRIX)
+    trix_signal = pd.Series(trix).ewm(span=9, adjust=False).mean().values
     
-    # True Range
-    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]), np.abs(low_1d[1:] - close_1d[:-1]))
-    tr = np.concatenate([[np.nan], tr1])
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Sum of True Range over 14 periods
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    
-    # Highest high and lowest low over 14 periods
-    hh = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    
-    # Choppiness Index: 100 * log10(atr_sum / (hh - ll)) / log10(14)
-    # Avoid division by zero
-    range_hl = hh - ll
-    range_hl = np.where(range_hl == 0, 1e-10, range_hl)
-    chop = 100 * np.log10(atr_sum / range_hl) / np.log10(14)
-    
-    # 1d EMA50 for trend direction
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # 4h EMA20 for entry timing
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Align indicators to 6h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    # Align 1d indicators to 4h timeframe
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
+    trix_signal_aligned = align_htf_to_ltf(prices, df_1d, trix_signal)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
     
-    # Define regimes
-    # Chop > 61.8 = ranging (mean revert)
-    # Chop < 38.2 = trending (trend follow)
-    chop_high = 61.8
-    chop_low = 38.2
-    
-    ranging = chop_aligned > chop_high
-    trending = chop_aligned < chop_low
-    
-    # Volume filter: current volume > 1.3x 20-period average (6h)
+    # Volume filter: current volume > 1.3x 20-period average (4h)
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-20:i])
@@ -83,16 +55,15 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 4  # ~1 day for 6h to reduce trades
+    cooldown_bars = 6  # ~1 day for 4h to reduce trades
     
-    start_idx = max(50, 20)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(chop_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(ema_20_4h_aligned[i]) or 
-            np.isnan(close_1d_aligned[i]) or 
+        if (np.isnan(trix_aligned[i]) or 
+            np.isnan(trix_signal_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -104,74 +75,40 @@ def generate_signals(prices):
         
         bars_since_last_trade += 1
         
-        # Determine trend direction from 1d EMA50
-        trend_up = close_1d_aligned[i] > ema_50_1d_aligned[i]
-        trend_down = close_1d_aligned[i] < ema_50_1d_aligned[i]
+        # Determine 1d trend direction
+        trend_1d_up = close_1d_aligned[i] > ema_34_1d_aligned[i]
+        trend_1d_down = close_1d_aligned[i] < ema_34_1d_aligned[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # In ranging regime: mean reversion at Bollinger-like bands (using ATR)
-            if ranging[i]:
-                # Calculate 6-period ATR for band width
-                tr6 = np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1]))
-                tr6_full = np.concatenate([[np.nan], tr6])
-                atr6 = pd.Series(tr6_full).rolling(window=6, min_periods=6).mean().values
-                atr6_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high, 'low': low, 'close': close}), atr6)
-                
-                if not np.isnan(atr6_aligned[i]) and atr6_aligned[i] > 0:
-                    # Upper band: close + 1.5*ATR6
-                    # Lower band: close - 1.5*ATR6
-                    upper_band = close[i] + 1.5 * atr6_aligned[i]
-                    lower_band = close[i] - 1.5 * atr6_aligned[i]
-                    
-                    # Long when price touches lower band in uptrend bias
-                    if close[i] <= lower_band and trend_up and vol_filter[i]:
-                        signals[i] = 0.25
-                        position = 1
-                        bars_since_last_trade = 0
-                    # Short when price touches upper band in downtrend bias
-                    elif close[i] >= upper_band and trend_down and vol_filter[i]:
-                        signals[i] = -0.25
-                        position = -1
-                        bars_since_last_trade = 0
-            
-            # In trending regime: follow 4h EMA20 with pullback entry
-            elif trending[i]:
-                # Long when price pulls back to 4h EMA20 in uptrend
-                if close[i] <= ema_20_4h_aligned[i] * 1.005 and trend_up and vol_filter[i]:
-                    # Additional check: price above 4h EMA20 recently (pullback, not breakdown)
-                    lookback = min(6, i)
-                    if lookback > 0:
-                        recent_close = close[i-lookback:i]
-                        recent_ema = ema_20_4h_aligned[i-lookback:i]
-                        if np.any(recent_close > recent_ema):  # Was above EMA recently
-                            signals[i] = 0.25
-                            position = 1
-                            bars_since_last_trade = 0
-                
-                # Short when price pulls back to 4h EMA20 in downtrend
-                elif close[i] >= ema_20_4h_aligned[i] * 0.995 and trend_down and vol_filter[i]:
-                    # Additional check: price below 4h EMA20 recently (pullback, not breakout)
-                    lookback = min(6, i)
-                    if lookback > 0:
-                        recent_close = close[i-lookback:i]
-                        recent_ema = ema_20_4h_aligned[i-lookback:i]
-                        if np.any(recent_close < recent_ema):  # Was below EMA recently
-                            signals[i] = -0.25
-                            position = -1
-                            bars_since_last_trade = 0
-        
-        # Exit conditions
+            # Long: TRIX crosses above signal line with volume in 1d uptrend
+            if (trix_aligned[i] > trix_signal_aligned[i] and 
+                trix_aligned[i-1] <= trix_signal_aligned[i-1] and
+                trend_1d_up and 
+                vol_filter[i]):
+                signals[i] = 0.25
+                position = 1
+                bars_since_last_trade = 0
+            # Short: TRIX crosses below signal line with volume in 1d downtrend
+            elif (trix_aligned[i] < trix_signal_aligned[i] and 
+                  trix_aligned[i-1] >= trix_signal_aligned[i-1] and
+                  trend_1d_down and 
+                  vol_filter[i]):
+                signals[i] = -0.25
+                position = -1
+                bars_since_last_trade = 0
         elif position == 1:
-            # Exit long: chop shifts to extreme ranging (overbought) or trend reversal
-            if chop_aligned[i] > 70 or (chop_aligned[i] > chop_high and not trend_up):
+            # Exit: TRIX crosses below signal line or trend change
+            if (trix_aligned[i] < trix_signal_aligned[i] and 
+                trix_aligned[i-1] >= trix_signal_aligned[i-1]) or not trend_1d_up:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: chop shifts to extreme ranging (oversold) or trend reversal
-            if chop_aligned[i] > 70 or (chop_aligned[i] > chop_high and not trend_down):
+            # Exit: TRIX crosses above signal line or trend change
+            if (trix_aligned[i] > trix_signal_aligned[i] and 
+                trix_aligned[i-1] <= trix_signal_aligned[i-1]) or not trend_1d_down:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
@@ -180,10 +117,13 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Adaptive strategy using 1d Choppiness Index to detect market regime.
-# In ranging markets (CHOP > 61.8): mean reversion at ATR-based bands with trend bias.
-# In trending markets (CHOP < 38.2): pullback entries to 4h EMA20 with 1d trend filter.
-# Uses volume confirmation and cooldown to limit trades. Designed to work in both
-# bull and bear markets by adapting to regime. 6h timeframe balances signal quality
-# and trade frequency (target: 15-35 trades/year). Chop > 70 triggers exit to avoid
-# chop whipsaw. Avoids overtrading by using regime as primary filter.
+# Hypothesis: TRIX momentum with signal line crossovers on 1d timeframe, combined with 1d EMA34 trend filter and volume confirmation on 4h timeframe.
+# Long when TRIX crosses above its signal line in a 1d uptrend with volume confirmation.
+# Short when TRIX crosses below its signal line in a 1d downtrend with volume confirmation.
+# Exits when TRIX crosses back in the opposite direction or trend changes.
+# Uses 1d timeframe for signal generation to avoid noise, 4h for execution timing.
+# Volume filter prevents false signals. Cooldown reduces trade frequency.
+# Target: 25-40 trades/year. Works in bull markets by capturing momentum in uptrends
+# and in bear markets by shorting momentum in downtrends. TRIX is effective at
+# identifying trend changes and momentum shifts, making it suitable for both
+# bull and bear markets when combined with trend and volume filters.
