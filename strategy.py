@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-1D_RSI_Trend_Filter_Volume
-Hypothesis: Use RSI(14) on daily timeframe to identify momentum, with weekly trend filter to avoid counter-trend trades.
-Adds volume confirmation to ensure strong moves. Designed to work in both bull and bear markets by only taking trades
-in the direction of the weekly trend. Targets 10-25 trades/year to minimize fee drag on daily timeframe.
+6H_OrderFlow_Volume_Imbalance
+Hypothesis: Uses volume imbalance between consecutive 6h bars to detect institutional order flow.
+Strong buying pressure (positive imbalance) in uptrend or selling pressure (negative imbalance) in downtrend signals continuation.
+Works in bull markets by riding institutional buying, in bear markets by following institutional distribution.
+Uses 1-day trend filter to avoid counter-trend trades and reduce whipsaw.
+Targets 12-30 trades/year by requiring volume imbalance + trend alignment + minimum bar size.
 """
-name = "1D_RSI_Trend_Filter_Volume"
-timeframe = "1d"
+name = "6H_OrderFlow_Volume_Imbalance"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,84 +25,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1D data for RSI calculation
+    # Get 1D data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Get 1W data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
-    # Calculate RSI(14) on 1D close
+    # Calculate 1D EMA50 for trend filter
     close_1d = df_1d['close'].values
-    delta = np.diff(close_1d)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate average gain and loss
-    avg_gain = np.zeros_like(close_1d)
-    avg_loss = np.zeros_like(close_1d)
-    avg_gain[13] = np.mean(gain[:13])
-    avg_loss[13] = np.mean(loss[:13])
+    # Calculate volume imbalance: (current volume - previous volume) / previous volume
+    vol_change = np.diff(volume)
+    vol_prev = volume[:-1]
+    vol_imbalance = np.where(vol_prev != 0, vol_change / vol_prev, 0)
+    vol_imbalance = np.concatenate([[0], vol_imbalance])  # align with volume index
     
-    for i in range(14, len(close_1d)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = np.concatenate([np.full(14, np.nan), rsi[14:]])  # Align with original index
-    
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    
-    # Calculate 1W EMA20 for trend filter
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    
-    # Volume filter: current 1D volume > 1.5 x 20-day average volume
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_avg * 1.5)
+    # Calculate minimum bar size filter: true range > 0.5 * ATR(14)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[0], tr])
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    min_size = atr14 * 0.5
+    size_filter = tr >= min_size
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # Ensure sufficient warmup
+    start_idx = max(14, 50)  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any data is not ready
-        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(ema_20_1w_aligned[i]) or 
-            np.isnan(vol_avg[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(atr14[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: RSI > 50 (bullish momentum), weekly uptrend, and volume confirmation
-            if (rsi_1d_aligned[i] > 50 and 
-                close[i] > ema_20_1w_aligned[i] and 
-                volume_filter[i]):
+            # Long: positive volume imbalance (buying pressure) + uptrend + sufficient bar size
+            if (vol_imbalance[i] > 0.15 and 
+                close[i] > ema_50_1d_aligned[i] and 
+                size_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI < 50 (bearish momentum), weekly downtrend, and volume confirmation
-            elif (rsi_1d_aligned[i] < 50 and 
-                  close[i] < ema_20_1w_aligned[i] and 
-                  volume_filter[i]):
+            # Short: negative volume imbalance (selling pressure) + downtrend + sufficient bar size
+            elif (vol_imbalance[i] < -0.15 and 
+                  close[i] < ema_50_1d_aligned[i] and 
+                  size_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: RSI falls below 50
-            if rsi_1d_aligned[i] < 50:
+            # Exit long: volume imbalance turns negative OR price breaks trend
+            if (vol_imbalance[i] < -0.05 or 
+                close[i] < ema_50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: RSI rises above 50
-            if rsi_1d_aligned[i] > 50:
+            # Exit short: volume imbalance turns positive OR price breaks trend
+            if (vol_imbalance[i] > 0.05 or 
+                close[i] > ema_50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
