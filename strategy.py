@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_TRIX_VolumeSpike_TrendFilter_v1
-Hypothesis: Uses TRIX (15-period) for momentum with volume spike confirmation and EMA50 trend filter. 
-Enters long when TRIX crosses above zero with volume > 2x average and price above EMA50. 
-Enters short when TRIX crosses below zero with volume > 2x average and price below EMA50. 
-Designed for low trade frequency (20-40/year) with clear momentum logic, works in trending markets and avoids range-bound conditions.
+4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
+Hypothesis: Uses Camarilla pivot levels from 1d for S3/R3 breakout with volume spike confirmation and 1d EMA trend filter.
+Enters long when price breaks above R3 with volume > 2x average and price above 1d EMA50.
+Enters short when price breaks below S3 with volume > 2x average and price below 1d EMA50.
+Designed for low trade frequency (20-40/year) with clear breakout logic, works in trending markets and avoids range-bound conditions.
 """
 
-name = "4h_TRIX_VolumeSpike_TrendFilter_v1"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,21 +25,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
+    # Get daily data for Camarilla pivots and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     # Calculate daily EMA50 for trend filter
     ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # TRIX calculation (15-period EMA of EMA of EMA)
-    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
-    trix = 100 * (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1)
-    trix[0] = 0  # First value undefined
+    # Calculate Camarilla pivot levels for each day
+    # R4 = C + ((H-L)*1.1/2)
+    # R3 = C + ((H-L)*1.1/4)
+    # S3 = C - ((H-L)*1.1/4)
+    # S4 = C - ((H-L)*1.1/2)
+    camarilla_r3 = df_1d['close'] + (df_1d['high'] - df_1d['low']) * 1.1 / 4
+    camarilla_s3 = df_1d['close'] - (df_1d['high'] - df_1d['low']) * 1.1 / 4
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3.values)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3.values)
     
     # Volume confirmation: 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -52,8 +57,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(trix[i]) or np.isnan(vol_ratio[i]) or 
-            np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(vol_ratio[i]) or np.isnan(ema_50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,28 +76,28 @@ def generate_signals(prices):
         daily_trend_down = daily_close_aligned[i] < ema_50_1d_aligned[i]
         
         if position == 0:
-            # Long: TRIX crosses above zero, volume spike, price above EMA50
-            if (trix[i] > 0 and trix[i-1] <= 0 and 
+            # Long: price breaks above R3, volume spike, price above EMA50
+            if (close[i] > camarilla_r3_aligned[i] and 
                 vol_ratio[i] > 2.0 and 
-                close[i] > ema_50_1d_aligned[i]):
+                daily_trend_up):
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX crosses below zero, volume spike, price below EMA50
-            elif (trix[i] < 0 and trix[i-1] >= 0 and 
+            # Short: price breaks below S3, volume spike, price below EMA50
+            elif (close[i] < camarilla_s3_aligned[i] and 
                   vol_ratio[i] > 2.0 and 
-                  close[i] < ema_50_1d_aligned[i]):
+                  daily_trend_down):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: TRIX crosses below zero or price falls below EMA50
-            if trix[i] < 0 or close[i] < ema_50_1d_aligned[i]:
+            # Exit long: price falls below S3 or trend changes
+            if close[i] < camarilla_s3_aligned[i] or not daily_trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: TRIX crosses above zero or price rises above EMA50
-            if trix[i] > 0 or close[i] > ema_50_1d_aligned[i]:
+            # Exit short: price rises above R3 or trend changes
+            if close[i] > camarilla_r3_aligned[i] or not daily_trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
