@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_v2"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_v3"
 timeframe = "12h"
 leverage = 1.0
 
@@ -48,7 +48,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 4  # Prevent overtrading (approx 2 days for 12h)
+    cooldown_bars = 8  # Prevent overtrading (approx 4 days for 12h)
     
     start_idx = max(24, 34)  # Warmup for volume MA and EMA
     
