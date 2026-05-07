@@ -1,17 +1,39 @@
 #!/usr/bin/env python3
-# 4h_1dCamarilla_R1S1_Breakout_1dEMA34_Trend_Volume_v6
-# Hypothesis: Daily Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume spikes
-# work in both bull and bear markets by following the daily trend. Added tighter volume
-# threshold (4x MA) and reduced position size to 0.25 to lower trade frequency and
-# improve risk-adjusted returns. Target: 20-40 trades/year per symbol.
+# 1d_1w_1wKAMA_Trend_Filtered_By_RSI
+# Uses weekly KAMA for trend direction and daily RSI for entry timing.
+# Long when weekly KAMA rising and daily RSI < 30 (oversold).
+# Short when weekly KAMA falling and daily RSI > 70 (overbought).
+# Exits when RSI returns to neutral zone (40-60).
+# Designed for 1d timeframe to capture medium-term reversals in both bull and bear markets.
+# Uses weekly timeframe for trend filter to reduce whipsaw and improve trend accuracy.
 
-name = "4h_1dCamarilla_R1S1_Breakout_1dEMA34_Trend_Volume_v6"
-timeframe = "4h"
+name = "1d_1w_1wKAMA_Trend_Filtered_By_RSI"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def calculate_kama(close, er_period=10, fast_sc=2, slow_sc=30):
+    """Kaufman Adaptive Moving Average"""
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.abs(np.diff(close)).cumsum()
+    volatility = np.diff(volatility, prepend=volatility[0])
+    
+    er = np.zeros_like(close)
+    for i in range(er_period, len(close)):
+        if volatility[i-er_period:i].sum() != 0:
+            er[i] = change[i-er_period:i].sum() / volatility[i-er_period:i].sum()
+        else:
+            er[i] = 0
+    
+    sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    return kama
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,83 +41,70 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for KAMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
     
-    # Pivot point (PP) = (H + L + C) / 3
-    pp = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
+    # Calculate weekly KAMA
+    kama_1w = calculate_kama(close_1w, er_period=10, fast_sc=2, slow_sc=30)
     
-    # Camarilla levels (R1/S1 - tighter range for fewer trades)
-    r1 = pp + range_1d * 1.1 / 12
-    s1 = pp - range_1d * 1.1 / 12
+    # Align KAMA to daily timeframe
+    kama_1d = align_htf_to_ltf(prices, df_1w, kama_1w)
     
-    # Align Camarilla levels to 4h timeframe
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    # Calculate daily RSI
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Daily EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    avg_gain = np.zeros_like(close)
+    avg_loss = np.zeros_like(close)
     
-    # Daily volume filter (20-period MA) with higher threshold
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (4.0 * vol_ma_20)  # Increased threshold for stronger confirmation
+    # Wilder's smoothing
+    avg_gain[14] = np.mean(gain[1:15])
+    avg_loss[14] = np.mean(loss[1:15])
+    for i in range(15, len(close)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_entry = 0  # Track holding period
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if any critical value is NaN
-        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or 
-            np.isnan(ema_34_4h[i]) or np.isnan(volume_spike[i])):
+        if np.isnan(kama_1d[i]) or np.isnan(rsi[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             continue
         
-        bars_since_entry += 1
-        
         if position == 0:
-            # Long: break above R1 with uptrend (close > EMA34) and volume
-            if close[i] > r1_4h[i] and close[i] > ema_34_4h[i] and volume_spike[i]:
+            # Long: weekly KAMA rising and daily RSI oversold (< 30)
+            if kama_1d[i] > kama_1d[i-1] and rsi[i] < 30:
                 signals[i] = 0.25
                 position = 1
-                bars_since_entry = 0
-            # Short: break below S1 with downtrend (close < EMA34) and volume
-            elif close[i] < s1_4h[i] and close[i] < ema_34_4h[i] and volume_spike[i]:
+            # Short: weekly KAMA falling and daily RSI overbought (> 70)
+            elif kama_1d[i] < kama_1d[i-1] and rsi[i] > 70:
                 signals[i] = -0.25
                 position = -1
-                bars_since_entry = 0
         elif position == 1:
-            # Exit conditions: price returns to EMA34 or breaks below S1
-            # Minimum holding period of 4 bars to reduce churn
-            if bars_since_entry >= 4 and (close[i] < ema_34_4h[i] or close[i] < s1_4h[i]):
+            # Exit long when RSI returns to neutral (>= 40)
+            if rsi[i] >= 40:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit conditions: price returns to EMA34 or breaks above R1
-            # Minimum holding period of 4 bars to reduce churn
-            if bars_since_entry >= 4 and (close[i] > ema_34_4h[i] or close[i] > r1_4h[i]):
+            # Exit short when RSI returns to neutral (<= 60)
+            if rsi[i] <= 60:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             else:
                 signals[i] = -0.25
     
