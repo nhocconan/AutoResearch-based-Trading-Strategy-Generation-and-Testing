@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
-name = "6h_Retracement_Trend_Momentum"
-timeframe = "6h"
+name = "12h_RSI_MeanReversion_With_TrendFilter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,50 +18,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    # Weekly EMA50 for long-term trend
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Get daily data for momentum filter
+    # Get daily data for RSI and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
+    # Calculate daily RSI(14)
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    # RSI(14) on daily
     delta = np.diff(close_1d, prepend=close_1d[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_14_1d = 100 - (100 / (1 + rs))
-    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
     
-    # 6h ATR(14) for volatility filter
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]
-    atr_14 = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_ma_50 = pd.Series(atr_14).ewm(span=50, adjust=False, min_periods=50).mean().values
-    vol_filter = atr_14 > 0.5 * atr_ma_50  # Only trade when volatility is above half its 50-period average
+    avg_gain = np.zeros_like(close_1d)
+    avg_loss = np.zeros_like(close_1d)
+    for i in range(1, len(close_1d)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Align daily RSI to 12h timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    
+    # Calculate daily EMA(50) for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume filter: current volume > 1.8x 20-period average (12h)
+    vol_ma_20 = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma_20[i] = np.mean(volume[i-20:i])
+    vol_filter = volume > (1.8 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 4  # ~1 day for 6h
+    cooldown_bars = 2  # ~1 day for 12h to reduce trades
     
-    start_idx = max(60, 50)
+    start_idx = max(100, 20)
     
     for i in range(start_idx, n):
-        if np.isnan(ema_50_1w_aligned[i]) or np.isnan(rsi_14_1d_aligned[i]) or np.isnan(vol_filter[i]):
+        # Skip if any data not ready
+        if (np.isnan(rsi_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,32 +73,37 @@ def generate_signals(prices):
         
         bars_since_last_trade += 1
         
-        # Trend filter: price above/below weekly EMA50
-        trend_up = close[i] > ema_50_1w_aligned[i]
-        trend_down = close[i] < ema_50_1w_aligned[i]
+        # Determine daily trend direction
+        close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
+        trend_1d_up = close_1d_aligned[i] > ema_50_1d_aligned[i]
+        trend_1d_down = close_1d_aligned[i] < ema_50_1d_aligned[i]
         
-        if position == 0 and bars_since_last_trade >= cooldown_bars and vol_filter[i]:
-            # Long: Pullback to weekly EMA50 in uptrend with bullish momentum (RSI > 50)
-            if trend_up and close[i] <= ema_50_1w_aligned[i] * 1.01 and rsi_14_1d_aligned[i] > 50:
+        if position == 0 and bars_since_last_trade >= cooldown_bars:
+            # Long: RSI oversold (<30) in uptrend with volume
+            if (rsi_aligned[i] < 30 and 
+                trend_1d_up and 
+                vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: Pullback to weekly EMA50 in downtrend with bearish momentum (RSI < 50)
-            elif trend_down and close[i] >= ema_50_1w_aligned[i] * 0.99 and rsi_14_1d_aligned[i] < 50:
+            # Short: RSI overbought (>70) in downtrend with volume
+            elif (rsi_aligned[i] > 70 and 
+                  trend_1d_down and 
+                  vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit: Trend reversal or overbought RSI
-            if not trend_up or rsi_14_1d_aligned[i] > 70:
+            # Exit: RSI > 50 or trend change
+            if (rsi_aligned[i] > 50) or not trend_1d_up:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Trend reversal or oversold RSI
-            if not trend_down or rsi_14_1d_aligned[i] < 30:
+            # Exit: RSI < 50 or trend change
+            if (rsi_aligned[i] < 50) or not trend_1d_down:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
@@ -106,9 +112,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: In strong trends (price vs weekly EMA50), retracements to the weekly EMA50 with
-# momentum confirmation (daily RSI > 50 for longs, < 50 for shorts) offer high-probability entries.
-# The strategy works in bull markets by buying dips to weekly support in uptrends and in bear
-# markets by selling rallies to weekly resistance in downtrends. Volatility filter avoids choppy
-# markets, and cooldown prevents overtrading. Weekly EMA50 acts as dynamic support/resistance
-# that institutions watch, while daily RSI ensures momentum alignment. Target: 15-35 trades/year.
+# Hypothesis: Daily RSI mean reversion with 12h execution captures overextended moves
+# in both bull and bear markets. In bull markets, RSI < 30 during uptrends signals
+# pullback buying opportunities. In bear markets, RSI > 70 during downtrends signals
+# rally selling opportunities. The 12h timeframe reduces noise while maintaining
+# responsiveness. Volume confirmation ensures genuine participation, and trend
+# alignment prevents counter-trend trades. Conservative sizing (0.25) manages
+# drawdown during extended trends. Target: 15-30 trades/year to minimize fee drag.
