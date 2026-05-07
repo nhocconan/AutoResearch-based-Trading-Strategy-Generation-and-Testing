@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Donchian20_Breakout_12hTrend_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,47 +17,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h OHLC for Donchian and trend
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 1:
+    # Daily OHLC for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
     
-    # Donchian channel (20-period) on 12h
-    upper_12h = np.full(len(high_12h), np.nan)
-    lower_12h = np.full(len(low_12h), np.nan)
-    for i in range(20, len(high_12h)):
-        upper_12h[i] = np.max(high_12h[i-20:i])
-        lower_12h[i] = np.min(low_12h[i-20:i])
+    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    camarilla_r1 = daily_close + (daily_high - daily_low) * 1.1 / 12
+    camarilla_s1 = daily_close - (daily_high - daily_low) * 1.1 / 12
     
-    upper_12h_aligned = align_htf_to_ltf(prices, df_12h, upper_12h)
-    lower_12h_aligned = align_htf_to_ltf(prices, df_12h, lower_12h)
+    # Align Camarilla levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Daily trend: price above/below EMA34
+    ema_34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume filter: current volume > 2.5x 24-period average (6h bars = 4 days)
+    daily_trend_up = close > ema_34_aligned
+    daily_trend_down = close < ema_34_aligned
+    
+    # Volume filter: current volume > 2.0x 24-period average (6 days)
     vol_ma_24 = np.full(n, np.nan)
     for i in range(24, n):
         vol_ma_24[i] = np.mean(volume[i-24:i])
-    vol_filter = volume > (2.5 * vol_ma_24)
+    vol_filter = volume > (2.0 * vol_ma_24)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 8  # ~2 days (8*6h) to prevent overtrading
+    cooldown_bars = 12  # ~2 days (12*4h) to reduce trade frequency
     
-    start_idx = max(24, 20*2)  # Ensure Donchian and volume MA are ready
+    start_idx = 24  # Volume MA needs 24 bars
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(upper_12h_aligned[i]) or 
-            np.isnan(lower_12h_aligned[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or 
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or 
             np.isnan(vol_ma_24[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -69,32 +70,36 @@ def generate_signals(prices):
         
         bars_since_last_trade += 1
         
+        # Determine daily trend direction
+        trend_up = daily_trend_up[i]
+        trend_down = daily_trend_down[i]
+        
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: Price breaks above 12h Donchian upper with volume in 12h uptrend
-            if (close[i] > upper_12h_aligned[i] and 
-                close_12h[-1] > ema_50_12h_aligned[i] and  # Current 12h close above EMA50
+            # Long: Price breaks above Camarilla R1 with volume in daily uptrend
+            if (close[i] > r1_aligned[i] and 
+                trend_up and 
                 vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: Price breaks below 12h Donchian lower with volume in 12h downtrend
-            elif (close[i] < lower_12h_aligned[i] and 
-                  close_12h[-1] < ema_50_12h_aligned[i] and  # Current 12h close below EMA50
+            # Short: Price breaks below Camarilla S1 with volume in daily downtrend
+            elif (close[i] < s1_aligned[i] and 
+                  trend_down and 
                   vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit: Price falls back below 12h Donchian lower or 12h trend changes to down
-            if close[i] < lower_12h_aligned[i] or close_12h[-1] < ema_50_12h_aligned[i]:
+            # Exit: Price falls back below Camarilla S1 or daily trend changes to down
+            if close[i] < s1_aligned[i] or not trend_up:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price rises back above 12h Donchian upper or 12h trend changes to up
-            if close[i] > upper_12h_aligned[i] or close_12h[-1] > ema_50_12h_aligned[i]:
+            # Exit: Price rises back above Camarilla R1 or daily trend changes to up
+            if close[i] > r1_aligned[i] or not trend_down:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
@@ -103,4 +108,4 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: On 6h timeframe, price breaking above/below 12h Donchian(20) levels with volume confirmation and 12h EMA50 trend filter captures institutional breakout momentum. Works in bull markets (breakouts above upper band in 12h uptrend) and bear markets (breakdowns below lower band in 12h downtrend). Volume filter ensures participation, trend filter aligns with higher timeframe momentum. Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag while capturing significant moves. Donchian channels provide objective breakout levels with institutional relevance.
+# Hypothesis: On 4h timeframe, price breaking above/below Camarilla R1/S1 levels with volume confirmation and daily EMA34 trend filter captures institutional breakout momentum. Camarilla levels provide mathematically derived support/resistance with institutional relevance. Works in bull markets (breakouts above R1 in daily uptrend) and bear markets (breakdowns below S1 in daily downtrend). Increased cooldown to 12 bars (~2 days) reduces trade frequency to target 75-200 trades over 4 years, minimizing fee drag while capturing significant moves. Daily trend filter ensures alignment with higher timeframe momentum.
