@@ -1,6 +1,7 @@
+#%%
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_v2"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_v15"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -84,3 +85,5 @@ def generate_signals(prices):
                     signals[i] = -0.25
     
     return signals
+
+#%%
