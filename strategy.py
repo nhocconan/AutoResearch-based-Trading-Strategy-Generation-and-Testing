@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_WeeklyPivot_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_ADX_Alligator_Momentum"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,74 +17,97 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop for Pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
-    
-    # Load daily data ONCE before loop for trend filter
+    # Load daily data ONCE before loop for ADX and Alligator
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly Pivot (standard) from previous week
-    prev_high = df_1w['high'].shift(1).values
-    prev_low = df_1w['low'].shift(1).values
-    prev_close = df_1w['close'].shift(1).values
+    # Calculate ADX(14) on daily
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])], 
+                         np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Weekly Pivot support/resistance levels
-    s1 = pivot - range_hl
-    r1 = pivot + range_hl
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Align weekly levels to 4h timeframe
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    # Smoothed values
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False).mean().values
     
-    # Daily EMA(34) for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_smooth / atr
+    di_minus = 100 * dm_minus_smooth / atr
     
-    # Volume spike detection: 4-period average (1 day of 4h bars)
-    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
+    
+    # Alligator lines (SMMA)
+    jaw = pd.Series(close_1d).rolling(window=13, min_periods=13).mean().rolling(window=8, min_periods=8).mean().values
+    teeth = pd.Series(close_1d).rolling(window=8, min_periods=8).mean().rolling(window=5, min_periods=5).mean().values
+    lips = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().rolling(window=3, min_periods=3).mean().values
+    
+    # Align to 6h
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    
+    # Momentum: 6-period ROC on 6h
+    roc = np.zeros(n)
+    roc[6:] = (close[6:] - close[:-6]) / close[:-6] * 100
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0
     
-    start_idx = max(34, 4)  # Wait for EMA and volume MA
+    start_idx = max(13, 6)  # Wait for Alligator and ROC
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(vol_ma_4[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(jaw_aligned[i]) or 
+            np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or 
+            np.isnan(roc[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # ADX > 25 indicates trending market
+        trending = adx_aligned[i] > 25
+        
         if position == 0:
-            # Long: price above S1 with volume and daily uptrend
-            vol_condition = volume[i] > vol_ma_4[i] * 1.8
-            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
-            
-            if close[i] > s1_aligned[i] and vol_condition and uptrend:
+            # Long: Lips > Teeth > Jaw (bullish alignment) + positive momentum
+            if (lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i] and 
+                trending and roc[i] > 0):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below R1 with volume and daily downtrend
-            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
+            # Short: Lips < Teeth < Jaw (bearish alignment) + negative momentum
+            elif (lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i] and 
+                  trending and roc[i] < 0):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below S1 or volume drops
-            if close[i] < s1_aligned[i] or volume[i] < vol_ma_4[i] * 1.2:
+            # Exit: alignment breaks or momentum fades
+            if not (lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i]) or roc[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above R1 or volume drops
-            if close[i] > r1_aligned[i] or volume[i] < vol_ma_4[i] * 1.2:
+            # Exit: alignment breaks or momentum fades
+            if not (lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i]) or roc[i] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -92,17 +115,14 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 4h Weekly Pivot S1/R1 breakout with 1d trend and volume confirmation
-# - Weekly Pivot S1/R1 act as key support/resistance levels from prior week
-# - Breakout above S1 with volume in daily uptrend = long opportunity
-# - Breakdown below R1 with volume in daily downtrend = short opportunity
-# - Volume spike (1.8x average) confirms institutional participation
-# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
-# - Exit when price returns to S1/R1 or volume weakens
-# - Position size 0.25 targets ~20-50 trades/year, avoiding fee drag
-# - Uses actual weekly Pivot levels (not daily) for better stability
-# - Daily trend filter reduces whipsaws vs using same timeframe
-# - Designed to work in BOTH bull and bear markets via trend filter
-# - Volume confirmation reduces false breakouts
-# - Novel combination: Weekly Pivot (1w) + trend (1d) + volume (4h) not recently tried
-# - Aims for 50-150 total trades over 4 years (12-37/year) to stay within limits
+# Hypothesis: 6s ADX + Alligator momentum strategy
+# - Uses daily ADX(25) to filter for trending markets only (works in bull/bear)
+# - Alligator (Jaw/Teeth/Lips) provides clear trend direction signals
+# - 6-period ROC confirms momentum strength and direction
+# - Enters when Alligator shows bullish/bearish alignment with ADX confirmation
+# - Exits when alignment breaks or momentum fades
+# - Works in both bull (catch uptrends) and bear (catch downtrends) markets
+# - Position size 0.25 limits drawdown while capturing trends
+# - Targets 50-150 trades over 4 years (12-37/year) to avoid fee drag
+# - Novel combination: ADX trend filter + Alligator alignment + ROC momentum
+# - Avoids whipsaws by requiring strong trend confirmation (ADX>25)
