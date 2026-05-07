@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_ElderRay_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Powell_Trap_Midnight"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,63 +17,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for Elder Ray and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:
+    # Load weekly data ONCE for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # EMA13 for Elder Ray and trend
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema_13_1d = pd.Series(df_1d['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
+    # Weekly EMA for trend filter
+    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Elder Ray components
-    bull_power = high - ema_13
-    bear_power = low - ema_13
+    # Daily EMA for structure
+    ema_50_d = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Smooth Elder Ray with 6-period EMA
-    bull_power_smooth = pd.Series(bull_power).ewm(span=6, adjust=False, min_periods=6).mean().values
-    bear_power_smooth = pd.Series(bear_power).ewm(span=6, adjust=False, min_periods=6).mean().values
-    
-    # Volume spike detection
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Hour-based session filter (UTC)
+    hours = prices.index.hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_13_1d_aligned[i]) or np.isnan(bull_power_smooth[i]) or 
-            np.isnan(bear_power_smooth[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(ema_50_d[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        hour = hours[i]
+        in_midnight_window = (hour >= 21) or (hour <= 3)  # 9PM-3AM UTC
+        
         if position == 0:
-            # Long: Bull power rising above zero, bear power negative, 1d uptrend, volume spike
-            if (bull_power_smooth[i] > 0 and bear_power_smooth[i] < 0 and 
-                ema_13_1d_aligned[i] > ema_13_1d_aligned[i-1] and 
-                volume[i] > vol_ma_20[i] * 1.5):
+            # Long: Powell Trap - bullish reversal at weekly trend support during low liquidity
+            if (close[i] > ema_50_d[i] and 
+                ema_20_1w_aligned[i] > ema_20_1w_aligned[i-1] and  # Weekly uptrend
+                in_midnight_window):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear power falling below zero, bull power negative, 1d downtrend, volume spike
-            elif (bear_power_smooth[i] < 0 and bull_power_smooth[i] < 0 and 
-                  ema_13_1d_aligned[i] < ema_13_1d_aligned[i-1] and 
-                  volume[i] > vol_ma_20[i] * 1.5):
+            # Short: Powell Trap - bearish rejection at weekly trend resistance during low liquidity
+            elif (close[i] < ema_50_d[i] and 
+                  ema_20_1w_aligned[i] < ema_20_1w_aligned[i-1] and  # Weekly downtrend
+                  in_midnight_window):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Bull power turns negative or bear power turns positive
-            if bull_power_smooth[i] < 0 or bear_power_smooth[i] > 0:
+            # Exit: weekly trend breaks or price returns to EMA50
+            if (ema_20_1w_aligned[i] < ema_20_1w_aligned[i-1] or 
+                close[i] < ema_50_d[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Bear power turns positive or bull power turns positive
-            if bear_power_smooth[i] > 0 or bull_power_smooth[i] > 0:
+            # Exit: weekly trend breaks or price returns to EMA50
+            if (ema_20_1w_aligned[i] > ema_20_1w_aligned[i-1] or 
+                close[i] > ema_50_d[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -81,15 +79,14 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 6h Elder Ray with 1d trend filter and volume confirmation
-# - Elder Ray (Bull/Bear Power) measures buying/selling pressure relative to EMA13
-# - Long when Bull Power > 0 and Bear Power < 0 (buying pressure, no selling pressure)
-# - Short when Bear Power < 0 and Bull Power < 0 (selling pressure, no buying pressure)
-# - 1d EMA13 trend filter ensures alignment with higher timeframe trend
-# - Volume confirmation (1.5x average) reduces false signals
-# - Exits when power signals reverse, capturing trend exhaustion
-# - Works in bull markets (buy power signals) and bear markets (sell power signals)
-# - Position size 0.25 targets ~50-150 total trades over 4 years (12-37/year)
-# - Elder Ray provides clear momentum signals with defined zero-line crossovers
-# - 1d trend filter reduces whipsaws vs same-timeframe signals
-# - Novel for 6h: Elder Ray + 1d trend + volume (not recently tried in this combination)
+# Hypothesis: Powell Trap exploits institutional stop hunts during low-liquidity midnight sessions
+# - During 21:00-03:00 UTC (Asian session overlap), liquidity thins and stops get hunted
+# - In weekly uptrend: price dips to EMA50 then reverses up (long trap)
+# - In weekly downtrend: price spikes to EMA50 then reverses down (short trap)
+# - Weekly EMA20 filter ensures we only trade with the higher timeframe trend
+# - EMA50 acts as dynamic support/resistance where stops accumulate
+# - Midnight session filter targets periods of lowest liquidity for maximum effect
+# - Position size 0.25 limits risk while allowing meaningful moves
+# - Designed for 12h timeframe to capture these infrequent but high-probability events
+# - Works in both bull (buy the dip) and bear (sell the rally) markets
+# - Target: 15-30 trades/year to avoid fee drag while capturing asymmetric moves
