@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Turtle_Soup_1dTrend_1wVolFilter"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeS_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,78 +17,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily and weekly data ONCE before loop
+    # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    
-    if len(df_1d) < 20 or len(df_1w) < 5:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Daily 20-period high/low for Turtle Soup (false breakout fade)
-    high_20d = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
-    low_20d = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
-    
-    # Weekly volume filter (avoid low-volume weeks)
-    vol_5w = pd.Series(df_1w['volume'].values).rolling(window=5, min_periods=5).mean().values
-    
-    # Align to 12h timeframe
-    high_20d_aligned = align_htf_to_ltf(prices, df_1d, high_20d)
-    low_20d_aligned = align_htf_to_ltf(prices, df_1d, low_20d)
-    vol_5w_aligned = align_htf_to_ltf(prices, df_1w, vol_5w)
-    
-    # Daily trend filter (20 EMA)
+    # Calculate daily Camarilla pivot levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_20d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20d_aligned = align_htf_to_ltf(prices, df_1d, ema_20d)
+    
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = np.concatenate([[high_1d[0]], high_1d[:-1]])
+    prev_low = np.concatenate([[low_1d[0]], low_1d[:-1]])
+    prev_close = np.concatenate([[close_1d[0]], close_1d[:-1]])
+    
+    # Calculate pivot and ranges
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_val = prev_high - prev_low
+    
+    # Camarilla levels
+    r1 = pivot + (range_val * 1.1 / 12)
+    s1 = pivot - (range_val * 1.1 / 12)
+    
+    # Calculate daily EMA(34) for trend
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    
+    # Volume spike detection (20-period average on 4h)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Wait for daily 20-period calculations
+    start_idx = 20  # Wait for volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(high_20d_aligned[i]) or np.isnan(low_20d_aligned[i]) or np.isnan(ema_20d_aligned[i]) or np.isnan(vol_5w_aligned[i]):
+        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume filter: only trade when weekly volume is above average
-        vol_filter = volume[i] > vol_5w_aligned[i] * 0.8  # Allow some flexibility
-        
         if position == 0:
-            # Turtle Soup Long: false breakdown below 20-day low, then reversal
-            # Condition: price breaks below 20-day low but closes back above it
-            breakdown = low[i] < low_20d_aligned[i]
-            recovery = close[i] > low_20d_aligned[i]
+            # Long: break above R1 with volume and in uptrend
+            vol_condition = volume[i] > vol_ma[i] * 1.5
+            uptrend = close[i] > ema_34_aligned[i]
             
-            # Only take long if in uptrend (price above daily 20 EMA)
-            uptrend = close[i] > ema_20d_aligned[i]
-            
-            if breakdown and recovery and vol_filter and uptrend:
+            if close[i] > r1_aligned[i] and vol_condition and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Turtle Soup Short: false breakout above 20-day high, then reversal
-            # Condition: price breaks above 20-day high but closes back below it
-            breakout = high[i] > high_20d_aligned[i]
-            failure = close[i] < high_20d_aligned[i]
-            
-            # Only take short if in downtrend (price below daily 20 EMA)
-            downtrend = close[i] < ema_20d_aligned[i]
-            
-            if breakout and failure and vol_filter and downtrend:
+            # Short: break below S1 with volume and in downtrend
+            elif close[i] < s1_aligned[i] and vol_condition and not uptrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price breaks above 20-day high (trend continuation) or stops
-            if high[i] > high_20d_aligned[i] or low[i] < low_20d_aligned[i] * 0.95:
+            # Exit: price back below EMA or volume drops
+            if close[i] < ema_34_aligned[i] or volume[i] < vol_ma[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price breaks below 20-day low (trend continuation) or stops
-            if low[i] < low_20d_aligned[i] or high[i] > high_20d_aligned[i] * 1.05:
+            # Exit: price back above EMA or volume drops
+            if close[i] > ema_34_aligned[i] or volume[i] < vol_ma[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -96,11 +92,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 12h Turtle Soup strategy with daily trend filter and weekly volume filter.
-# Turtle Soup fades false breakouts of 20-day highs/lows - a proven mean reversion edge.
-# In uptrends: buy breakdowns of 20-day low that reverse back above (long).
-# In downtrends: sell breakouts of 20-day high that fail back below (short).
-# Daily 20 EMA ensures trades align with intermediate trend.
-# Weekly volume filter avoids low-volatility chop.
-# Works in both bull (buy false breakdowns in uptrend) and bear (sell false breakouts in downtrend).
-# Position size 0.25 keeps trades ~20-40/year to minimize fee drag.
+# Hypothesis: 4h Camarilla R1/S1 breakout with daily EMA(34) trend filter and volume confirmation.
+# Uses daily Camarilla pivot levels for key support/resistance and EMA(34) for trend direction.
+# Breaks above R1 or below S1 with volume indicate institutional interest.
+# Trend filter ensures trades align with daily direction.
+# Works in bull (buy R1 breaks in uptrend) and bear (sell S1 breaks in downtrend).
+# Position size 0.25 balances risk and keeps trade frequency ~20-50/year.
+# Reduced volume threshold from 2.0 to 1.5 to increase signal frequency while maintaining quality.
