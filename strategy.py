@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-# 1d_WeeklyTrend_Donchian_Breakout
-# Hypothesis: On 1d timeframe, buy when price breaks above 20-day Donchian high with weekly uptrend,
-# sell when price breaks below 20-day Donchian low with weekly downtrend. Uses volume confirmation
-# to filter false breakouts. Designed for low trade frequency (10-25/year) to work in both bull and bear markets.
-timeframe = "1d"
-name = "1d_WeeklyTrend_Donchian_Breakout"
+# 12h_Donchian20_Breakout_1dTrend_Volume
+# Hypothesis: Donchian channel breakout with 1-day trend filter and volume confirmation
+# captures sustained momentum moves while avoiding false signals. Designed for low
+# trade frequency (~20-40/year) to minimize fee drag and work in both bull and bear markets.
+# Uses 1-day EMA for trend filter and volume spike confirmation for institutional participation.
+timeframe = "12h"
+name = "12h_Donchian20_Breakout_1dTrend_Volume"
 leverage = 1.0
 
 import numpy as np
@@ -21,57 +22,57 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Weekly EMA trend filter (8-period)
-    ema_1w = pd.Series(df_1w['close']).ewm(span=8, adjust=False, min_periods=8).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # 1d EMA trend filter (34-period)
+    ema_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Donchian channel (20-period)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation: current volume > 1.5 * 20-period average
+    # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Wait for warmup
+    for i in range(30, n):  # Wait for warmup
         # Skip if any critical value is NaN
-        if (np.isnan(ema_1w_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(high_max[i]) or 
+            np.isnan(low_min[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian high + weekly uptrend + volume spike
-            if (close[i] > donchian_high[i] and 
-                close[i] > ema_1w_aligned[i] and 
-                volume[i] > 1.5 * vol_ma[i]):
+            # Long: price breaks above Donchian high + above 1d EMA + volume spike
+            if (close[i] > high_max[i-1] and 
+                close[i] > ema_1d_aligned[i] and 
+                volume[i] > 2.0 * vol_ma[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low + weekly downtrend + volume spike
-            elif (close[i] < donchian_low[i] and 
-                  close[i] < ema_1w_aligned[i] and 
-                  volume[i] > 1.5 * vol_ma[i]):
+            # Short: price breaks below Donchian low + below 1d EMA + volume spike
+            elif (close[i] < low_min[i-1] and 
+                  close[i] < ema_1d_aligned[i] and 
+                  volume[i] > 2.0 * vol_ma[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price breaks below Donchian low or weekly trend turns down
-            if close[i] < donchian_low[i] or close[i] < ema_1w_aligned[i]:
+            # Exit: price breaks below Donchian low or closes below 1d EMA
+            if close[i] < low_min[i-1] or close[i] < ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price breaks above Donchian high or weekly trend turns up
-            if close[i] > donchian_high[i] or close[i] > ema_1w_aligned[i]:
+            # Exit: price breaks above Donchian high or closes above 1d EMA
+            if close[i] > high_max[i-1] or close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
