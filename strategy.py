@@ -1,6 +1,12 @@
+# 4h_Camarilla_R3S3_1dTrend_VolumeSpike_v12
+# Hypothesis: Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike (2x 20-period avg) works in both bull and bear markets by capturing institutional breakouts during liquidity sweeps. Uses 4h timeframe for lower frequency to reduce fee drag. Tight entry conditions (price > level + buffer, trend alignment, volume spike) target 20-50 trades/year.
+# Exit at midpoint of prior day's range (H3/L3) for mean reversion within the day's range.
+# Risk: Position size 0.25 limits drawdown. Stoploss implicitly via mean-reversion exit.
+# Expectation: Works in ranging markets (mean reversion) and trending markets (breakout continuation).
+
 #!/usr/bin/env python3
-name = "12H_Camarilla_R3_S3_1dTrend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dTrend_VolumeSpike_v12"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 34:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
