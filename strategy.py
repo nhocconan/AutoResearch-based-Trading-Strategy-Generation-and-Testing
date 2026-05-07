@@ -1,5 +1,6 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_v2"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -110,4 +111,4 @@ def generate_signals(prices):
 # breakouts in both bull and bear markets. The 4h timeframe provides sufficient
 # noise filtering while capturing multi-day moves. Volume confirmation ensures
 # genuine institutional participation. Conservative sizing (0.25) limits drawdown
-# during false breaks. Target: 20-40 trades/year to minimize fee drag.
+# during false breaks. Target: 20-40 trades/year to minimize fee drift.
