@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_WeeklyPivot_Momentum_Breakout_v4"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,60 +17,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 5:
+    # Get 1d data for Camarilla pivot and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate weekly pivot points: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
+    # Calculate Camarilla pivot levels (R3, S3) from previous 1d
+    # Using previous day's high, low, close
+    phigh = df_1d['high'].values
+    plow = df_1d['low'].values
+    pclose = df_1d['close'].values
     
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
-    weekly_r1 = 2 * weekly_pivot - weekly_low
-    weekly_s1 = 2 * weekly_pivot - weekly_high
-    weekly_r2 = weekly_pivot + (weekly_high - weekly_low)
-    weekly_s2 = weekly_pivot - (weekly_high - weekly_low)
+    # Calculate pivot point and ranges
+    pivot = (phigh + plow + pclose) / 3.0
+    range_val = phigh - plow
     
-    # Align weekly pivot levels to 6h timeframe
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_weekly, weekly_pivot)
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s1)
-    weekly_r2_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r2)
-    weekly_s2_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s2)
+    # Camarilla levels: R3 = pivot + 1.1 * range/2, S3 = pivot - 1.1 * range/2
+    r3 = pivot + 1.1 * range_val / 2.0
+    s3 = pivot - 1.1 * range_val / 2.0
     
-    # Momentum filter: 6h RSI(14) > 50 for long, < 50 for short
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Align to 12h timeframe (wait for 1d bar to close)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Volume filter: current volume > 1.5x 20-period average
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma_20[i] = np.mean(volume[i-20:i])
-    vol_filter = volume > (1.5 * vol_ma_20)
+    # 1d EMA34 trend filter
+    ema_34_1d = pd.Series(pclose).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume filter: current volume > 2.0x 24-period average (for 12h)
+    vol_ma_24 = np.full(n, np.nan)
+    for i in range(24, n):
+        vol_ma_24[i] = np.mean(volume[i-24:i])
+    vol_filter = volume > (2.0 * vol_ma_24)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 2  # ~12 hours for 6h to reduce trades
+    cooldown_bars = 2  # ~1 day for 12h to reduce trades
     
-    start_idx = max(200, 20)
+    start_idx = max(100, 24, 34)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(weekly_pivot_aligned[i]) or 
-            np.isnan(weekly_r1_aligned[i]) or 
-            np.isnan(weekly_s1_aligned[i]) or 
-            np.isnan(weekly_r2_aligned[i]) or 
-            np.isnan(weekly_s2_aligned[i]) or 
-            np.isnan(rsi[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(vol_ma_24[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -81,34 +73,36 @@ def generate_signals(prices):
         
         bars_since_last_trade += 1
         
-        # Price relative to weekly pivot levels
-        price_above_r2 = close[i] > weekly_r2_aligned[i]
-        price_below_s2 = close[i] < weekly_s2_aligned[i]
-        price_between_r1_r2 = (close[i] > weekly_r1_aligned[i]) and (close[i] < weekly_r2_aligned[i])
-        price_between_s1_s2 = (close[i] > weekly_s2_aligned[i]) and (close[i] < weekly_s1_aligned[i])
+        # Determine 1d trend direction
+        trend_up = close > ema_34_1d_aligned[i]
+        trend_down = close < ema_34_1d_aligned[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: Price breaks above weekly R2 with bullish momentum and volume
-            if price_above_r2 and (rsi[i] > 50) and vol_filter[i]:
+            # Long: Price breaks above R3 with volume in uptrend
+            if (close[i] > r3_aligned[i] and 
+                trend_up[i] and 
+                vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: Price breaks below weekly S2 with bearish momentum and volume
-            elif price_below_s2 and (rsi[i] < 50) and vol_filter[i]:
+            # Short: Price breaks below S3 with volume in downtrend
+            elif (close[i] < s3_aligned[i] and 
+                  trend_down[i] and 
+                  vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit: Price falls back below weekly R1 or momentum turns bearish
-            if (close[i] < weekly_r1_aligned[i]) or (rsi[i] < 50):
+            # Exit: Price falls below S3 or trend changes
+            if close[i] < s3_aligned[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price rises back above weekly S1 or momentum turns bullish
-            if (close[i] > weekly_s1_aligned[i]) or (rsi[i] > 50):
+            # Exit: Price rises above R3 or trend changes
+            if close[i] > r3_aligned[i] or not trend_down[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
@@ -117,11 +111,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Weekly pivot points act as strong support/resistance levels. 
-# Breakout above weekly R2 with bullish momentum (RSI>50) and volume confirmation signals continuation of uptrend.
-# Breakdown below weekly S2 with bearish momentum (RSI<50) and volume signals continuation of downtrend.
-# Uses weekly timeframe for pivot calculation to capture major market structure.
-# RSI(14) filter ensures momentum alignment, reducing false breakouts.
-# Volume filter confirms institutional participation.
-# Designed to work in both bull and bear markets by capturing directional breaks of key weekly levels.
-# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
+# Hypothesis: Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation on 12h timeframe.
+# Long when price breaks above Camarilla R3 in uptrend with volume confirmation.
+# Short when price breaks below Camarilla S3 in downtrend with volume confirmation.
+# Uses 12h timeframe to balance trade frequency and capture meaningful trends.
+# Target: 50-150 total trades over 4 years (12-37/year) as per experiment guidelines.
+# Works in bull markets (breakouts in uptrend) and bear markets (breakdowns in downtrend).
+# Based on top-performing pattern from DB: Camarilla pivot + volume + trend filter.
