@@ -1,20 +1,17 @@
+# 6h Camarilla Pivot R3/S3 Breakout with 1d Trend and Volume Spike
+# Hypothesis: Camarilla pivot levels act as strong support/resistance. Breakouts above R3 or below S3
+# with volume confirmation and aligned with the 1d trend capture momentum moves. This strategy works
+# in both bull and bear markets by following the daily trend direction while using pivot levels
+# for precise entry/exit points. Target: 20-40 trades/year (80-160 total over 4 years).
+# Uses discrete position sizing (0.25) to minimize fee churn.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
-# Long when price breaks above upper Donchian(20) AND 1d EMA34 rising AND volume > 2x 20-period average.
-# Short when price breaks below lower Donchian(20) AND 1d EMA34 falling AND volume > 2x 20-period average.
-# Exit when price crosses back inside Donchian channels.
-# This strategy targets volatility expansion phases with trend alignment to capture momentum moves
-# while avoiding choppy markets. The 1d EMA34 filter ensures we trade with the higher timeframe trend.
-# Volume confirmation ensures institutional participation and reduces false breakouts.
-# Target: 20-40 trades/year (80-160 total over 4 years) to minimize fee drag.
-# Works in both bull and bear markets by following the 1d trend direction.
-
-name = "4h_DonchianBreakout_1dEMA34_Volume"
-timeframe = "4h"
+name = "6h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,10 +24,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian Channels (20)
-    dc_length = 20
-    upper_dc = pd.Series(high).rolling(window=dc_length, min_periods=dc_length).max().values
-    lower_dc = pd.Series(low).rolling(window=dc_length, min_periods=dc_length).min().values
+    # Camarilla pivot levels from previous day (using typical price)
+    # Typical price = (high + low + close) / 3
+    typical_price = (high + low + close) / 3.0
+    # For intraday, we use previous day's typical price to calculate pivots
+    # We'll calculate pivots using a rolling window of previous day's data
+    # Since we're on 6h timeframe, 4 bars = 1 day
+    tp_series = pd.Series(typical_price)
+    # Previous day's typical price (4 bars back)
+    prev_day_tp = tp_series.shift(4)
+    # For pivot calculation, we need the previous day's high, low, close
+    prev_day_high = pd.Series(high).shift(4)
+    prev_day_low = pd.Series(low).shift(4)
+    prev_day_close = pd.Series(close).shift(4)
+    
+    # Pivot point = (prev_high + prev_low + prev_close) / 3
+    pivot = (prev_day_high + prev_day_low + prev_day_close) / 3.0
+    # Camarilla levels
+    range_val = prev_day_high - prev_day_low
+    r3 = pivot + (range_val * 1.1 / 2)
+    s3 = pivot - (range_val * 1.1 / 2)
+    r4 = pivot + (range_val * 1.1)
+    s4 = pivot - (range_val * 1.1)
     
     # 1d EMA34 for trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -47,17 +62,18 @@ def generate_signals(prices):
     ema34_rising[1:] = ema34_1d_aligned[1:] > ema34_1d_aligned[:-1]
     ema34_falling[1:] = ema34_1d_aligned[1:] < ema34_1d_aligned[:-1]
     
-    # Volume filter: current volume > 2x 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (2.0 * vol_ma20)
+    # Volume filter: current volume > 2.0x 24-period average (4 days on 6h)
+    vol_ma24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_filter = volume > (2.0 * vol_ma24)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(dc_length, 34)  # Sufficient warmup
+    start_idx = max(24, 34)  # Sufficient warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(upper_dc[i]) or np.isnan(lower_dc[i]) or np.isnan(ema34_1d_aligned[i]) or 
+        if (np.isnan(pivot[i]) or np.isnan(r3[i]) or np.isnan(s3[i]) or np.isnan(r4[i]) or 
+            np.isnan(s4[i]) or np.isnan(ema34_1d_aligned[i]) or 
             np.isnan(ema34_rising[i]) or np.isnan(ema34_falling[i]) or 
             np.isnan(volume_filter[i])):
             if position != 0:
@@ -66,10 +82,10 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: price breaks above upper Donchian, 1d EMA34 rising, volume filter
-            long_cond = (close[i] > upper_dc[i]) and ema34_rising[i] and volume_filter[i]
-            # Short conditions: price breaks below lower Donchian, 1d EMA34 falling, volume filter
-            short_cond = (close[i] < lower_dc[i]) and ema34_falling[i] and volume_filter[i]
+            # Long conditions: price breaks above R3, 1d EMA34 rising, volume filter
+            long_cond = (close[i] > r3[i]) and ema34_rising[i] and volume_filter[i]
+            # Short conditions: price breaks below S3, 1d EMA34 falling, volume filter
+            short_cond = (close[i] < s3[i]) and ema34_falling[i] and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -78,15 +94,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses back inside Donchian channels (below lower band)
-            if close[i] < lower_dc[i]:
+            # Long exit: price crosses back below R3 (or optionally at R4 for profit taking)
+            if close[i] < r3[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses back inside Donchian channels (above upper band)
-            if close[i] > upper_dc[i]:
+            # Short exit: price crosses back above S3 (or optionally at S4 for profit taking)
+            if close[i] > s3[i]:
                 signals[i] = 0.0
                 position = 0
             else:
