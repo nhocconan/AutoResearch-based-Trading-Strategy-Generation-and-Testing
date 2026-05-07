@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_v3"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -31,7 +31,7 @@ def generate_signals(prices):
     r3 = prev_close + 0.25 * (prev_high - prev_low)
     s3 = prev_close - 0.25 * (prev_high - prev_low)
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
@@ -39,25 +39,25 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(prev_close).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume filter: current volume > 2.0x 24-period average (on 12h data)
-    vol_ma_24 = np.full(n, np.nan)
-    for i in range(24, n):
-        vol_ma_24[i] = np.mean(volume[i-24:i])
-    vol_filter = volume > (2.0 * vol_ma_24)
+    # Volume filter: current volume > 2.0x 20-period average (on 4h data)
+    vol_ma_20 = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma_20[i] = np.mean(volume[i-20:i])
+    vol_filter = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 8  # Prevent overtrading (approx 4 days for 12h)
+    cooldown_bars = 6  # Prevent overtrading (approx 1 day for 4h)
     
-    start_idx = max(24, 34)  # Warmup for volume MA and EMA
+    start_idx = max(20, 34)  # Warmup for volume MA and EMA
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(r3_aligned[i]) or 
             np.isnan(s3_aligned[i]) or 
             np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(vol_ma_24[i])):
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -78,14 +78,14 @@ def generate_signals(prices):
             if (close[i] > r3_aligned[i] and 
                 trend_1d_up and 
                 vol_filter[i]):
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
             # Short: price breaks below S3 in daily downtrend with volume spike
             elif (close[i] < s3_aligned[i] and 
                   trend_1d_down and 
                   vol_filter[i]):
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
@@ -95,7 +95,7 @@ def generate_signals(prices):
                 position = 0
                 bars_since_last_trade = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
             # Exit: price closes above S3 OR trend change
             if (close[i] > s3_aligned[i]) or not trend_1d_down:
@@ -103,7 +103,7 @@ def generate_signals(prices):
                 position = 0
                 bars_since_last_trade = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
@@ -111,6 +111,5 @@ def generate_signals(prices):
 # Long when price breaks above R3 in daily uptrend with volume confirmation.
 # Short when price breaks below S3 in daily downtrend with volume confirmation.
 # Daily EMA34 filter ensures we trade with the higher timeframe trend.
-# Volume spike confirms institutional participation. Increased cooldown reduces overtrading.
-# Effective in both bull (captures breakouts) and bear (avoids counter-trend trades).
-# Using 12h timeframe reduces trade frequency to avoid fee drag while capturing significant moves.
+# Volume spike confirms institutional participation. Cooldown reduces overtrading.
+# Using 4h timeframe balances trade frequency and responsiveness. Target: 20-50 trades/year.
