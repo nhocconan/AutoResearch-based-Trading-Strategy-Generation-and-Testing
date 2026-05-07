@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R3_S3_1DTrend_VolumeBreakout
-# Hypothesis: 12-hour timeframe strategy using daily Camarilla R3/S3 breakouts with 1-day EMA34 trend filter and volume spike confirmation. 
-# Targets fewer trades (12-37/year) to reduce fee drag while maintaining edge in bull/bear markets via trend alignment and volume confirmation.
-# Uses proper 12h/1d multi-timeframe alignment to avoid look-ahead.
+# 4H_Camarilla_R3_S3_1DTrend_VolumeBreakout
+# Hypothesis: 4-hour timeframe strategy using daily Camarilla R3/S3 breakouts with 1-day EMA34 trend filter and volume spike confirmation.
+# Targets 20-50 trades/year to minimize fee drag. Uses price channel structure with trend and volume filters.
+# Works in bull markets (breakouts with trend) and bear markets (fades from extremes with trend filter).
 
-name = "12h_Camarilla_R3_S3_1DTrend_VolumeBreakout"
-timeframe = "12h"
+name = "4H_Camarilla_R3_S3_1DTrend_VolumeBreakout"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -41,19 +41,19 @@ def generate_signals(prices):
     # Calculate 1-day EMA34 for trend filter
     ema_34 = pd.Series(prev_close).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align Camarilla levels, EMA, and pivot to 12h timeframe
+    # Align Camarilla levels, EMA, and pivot to 4h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Volume filter: current volume > 2.0x average volume (24-period) - balanced for 12h
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume filter: current volume > 2.0x average volume (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 24)  # Ensure we have EMA34 and volume MA data
+    start_idx = max(34, 20)  # Ensure we have EMA34 and volume MA data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
