@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R3S3_Breakout_4hTrend_Volume
-Hypothesis: 1-hour entries on Camarilla R3/S3 breakouts with 4-hour trend filter (EMA34) and volume confirmation. 
-Uses 4h for signal direction and 1h for entry timing precision. Target: 15-37 trades/year (60-150 total over 4 years).
-Session filter (08-20 UTC) reduces noise. Position size fixed at 0.20 to control drawdown.
-Works in bull/bear by following higher timeframe trend.
+6h_Weekly_Pivot_1dTrend_Volume
+Hypothesis: Weekly pivot levels (R2/S2) combined with daily trend filter and volume confirmation on 6h timeframe.
+Targets strong momentum moves after weekly pivot breaks while avoiding choppy markets.
+Weekly pivots provide stronger support/resistance than daily, reducing false breakouts.
+Target: 15-35 trades/year (60-140 total over 4 years) to minimize fee drag.
+Works in both bull/bear markets via trend filter and volume confirmation.
 """
 
-name = "1h_Camarilla_R3S3_Breakout_4hTrend_Volume"
-timeframe = "1h"
+name = "6h_Weekly_Pivot_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -25,72 +26,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Camarilla levels and trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 40:
+    # Get weekly data for pivot levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # 4h Camarilla R3/S3 levels
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 40:
+        return np.zeros(n)
     
-    range_4h = high_4h - low_4h
-    r3_4h = close_4h + 1.1666 * range_4h * 1.1 / 2
-    s3_4h = close_4h - 1.1666 * range_4h * 1.1 / 2
+    # Weekly pivot points (using prior week's OHLC)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    open_1w = df_1w['open'].values
     
-    # 4h EMA34 for trend filter
-    ema_34_4h = pd.Series(df_4h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate weekly pivot: P = (H + L + C) / 3
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    # Weekly R2 and S2: R2 = P + (H - L), S2 = P - (H - L)
+    r2_1w = pivot_1w + (high_1w - low_1w)
+    s2_1w = pivot_1w - (high_1w - low_1w)
     
-    # Align all to 1h timeframe
-    r3_4h_aligned = align_htf_to_ltf(prices, df_4h, r3_4h)
-    s3_4h_aligned = align_htf_to_ltf(prices, df_4h, s3_4h)
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Volume filter: current volume > 1.5 * 20-period average
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_avg * 1.5)
+    # Align all to 6h timeframe
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
+    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Volume filter: current volume > 1.8 * 30-period average
+    vol_avg = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_filter = volume > (vol_avg * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)
+    start_idx = max(34, 30)
     
     for i in range(start_idx, n):
         # Skip if any data is not ready
-        if (np.isnan(r3_4h_aligned[i]) or np.isnan(s3_4h_aligned[i]) or 
-            np.isnan(ema_34_4h_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(r2_1w_aligned[i]) or 
+            np.isnan(s2_1w_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R3 + 4h uptrend + volume + session
-            if close[i] > r3_4h_aligned[i] and close[i] > ema_34_4h_aligned[i] and volume_filter[i] and session_filter[i]:
-                signals[i] = 0.20
+            # Long: price breaks above weekly R2 + daily uptrend + volume
+            if close[i] > r2_1w_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_filter[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 + 4h downtrend + volume + session
-            elif close[i] < s3_4h_aligned[i] and close[i] < ema_34_4h_aligned[i] and volume_filter[i] and session_filter[i]:
-                signals[i] = -0.20
+            # Short: price breaks below weekly S2 + daily downtrend + volume
+            elif close[i] < s2_1w_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_filter[i]:
+                signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: price crosses back through the opposite S3/R3 level
+            # Exit: price crosses back through weekly pivot level
             if position == 1:
-                if close[i] < s3_4h_aligned[i]:
+                if close[i] < pivot_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
             else:  # position == -1
-                if close[i] > r3_4h_aligned[i]:
+                if close[i] > pivot_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
