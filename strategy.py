@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_v8"
-timeframe = "4h"
+name = "1h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -16,6 +16,9 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    
+    # Session filter: 8-20 UTC (pre-compute hours)
+    hours = prices.index.hour
     
     # 1d EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -34,7 +37,7 @@ def generate_signals(prices):
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume spike: current volume > 2.0 x 24-period average (4h * 24 = 4 days)
+    # Volume spike: current volume > 2.0 x 24-period average (1h * 24 = 1 day)
     vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
@@ -43,6 +46,13 @@ def generate_signals(prices):
     start_idx = 24  # Ensure volume MA data
     
     for i in range(start_idx, n):
+        # Session filter
+        if not (8 <= hours[i] <= 20):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
         if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
             np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
@@ -55,11 +65,11 @@ def generate_signals(prices):
         if position == 0:
             # Long: Break above R1 in 1d uptrend with volume spike
             if close[i] > r1_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_spike:
-                signals[i] = 0.30
+                signals[i] = 0.20
                 position = 1
             # Short: Break below S1 in 1d downtrend with volume spike
             elif close[i] < s1_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_spike:
-                signals[i] = -0.30
+                signals[i] = -0.20
                 position = -1
         elif position != 0:
             # Exit: Price returns to previous day's close (pivot point)
@@ -71,6 +81,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30 if position == 1 else -0.30
+                signals[i] = 0.20 if position == 1 else -0.20
     
     return signals
