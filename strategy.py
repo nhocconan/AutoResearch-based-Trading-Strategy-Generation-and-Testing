@@ -1,13 +1,6 @@
-# 6h_Camarilla_R3S3_Breakout_1dTrend_VolumeS
-# Hypothesis: Using 1d Camarilla R3/S3 levels for breakouts on 6h timeframe with 1d trend filter and volume confirmation.
-# 6h timeframe targets 50-150 total trades over 4 years (12-37/year). Uses strong breakout levels (R3/S3) to reduce false signals.
-# 1d trend filter ensures alignment with daily trend. Volume confirmation avoids low-momentum breakouts.
-# Should work in both bull and bear markets: breakouts capture momentum, trend filter avoids counter-trend trades, volume ensures validity.
-# Risk controlled via opposite-level exit (no arbitrary stops that may increase whipsaw).
-
 #!/usr/bin/env python3
-name = "6h_Camarilla_R3S3_Breakout_1dTrend_VolumeS"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -41,12 +34,12 @@ def generate_signals(prices):
     # 1d EMA34 for trend filter
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align all to 6h timeframe
+    # Align all to 12h timeframe
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume filter: current volume > 1.5 * 20-period average (balanced for 6h)
+    # Volume filter: current volume > 1.5 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_avg * 1.5)
     
@@ -67,11 +60,11 @@ def generate_signals(prices):
         if position == 0:
             # Long: price breaks above R3 + daily uptrend + volume
             if close[i] > r3_1d_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_filter[i]:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             # Short: price breaks below S3 + daily downtrend + volume
             elif close[i] < s3_1d_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_filter[i]:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         elif position != 0:
             # Exit: price crosses back through the opposite S3/R3 level
@@ -80,12 +73,12 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.30
             else:  # position == -1
                 if close[i] > r3_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.30
     
     return signals
