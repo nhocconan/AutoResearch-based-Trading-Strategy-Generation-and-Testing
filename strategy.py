@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_TRIX_0_Cross_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_AB_Swing_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,58 +22,83 @@ def generate_signals(prices):
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # TRIX(12) calculation (triple EMA of 1-period ROC)
-    roc = np.diff(np.log(close), prepend=np.log(close[0])) * 100
-    ema1 = pd.Series(roc).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
-    trix = ema3
+    # Daily EMA for trend filter
+    ema_20_1d = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
-    # Daily EMA34 for trend filter
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # A-B Swing: A = prior swing low/high, B = current swing high/low
+    # We'll use 5-period high/low for swing points
+    roll_high_5 = pd.Series(high).rolling(window=5, min_periods=5).max().values
+    roll_low_5 = pd.Series(low).rolling(window=5, min_periods=5).min().values
     
-    # Volume spike detection (4h)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Swing detection: new high/low in last 3 bars
+    swing_high = (roll_high_5 == high) & (high >= np.roll(high, 1)) & (high >= np.roll(high, 2)) & (high >= np.roll(high, 3))
+    swing_low = (roll_low_5 == low) & (low <= np.roll(low, 1)) & (low <= np.roll(low, 2)) & (low <= np.roll(low, 3))
+    
+    # Most recent swing points (look back up to 20 bars)
+    def find_most_recent(arr, start_idx):
+        for i in range(start_idx, max(-1, start_idx - 20), -1):
+            if arr[i]:
+                return i
+        return -1
+    
+    # Volume confirmation
+    vol_ma_10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 34)
+    start_idx = 20
     
     for i in range(start_idx, n):
-        if (np.isnan(trix[i]) or np.isnan(trix[i-1]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_20_1d_aligned[i]) or np.isnan(vol_ma_10[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # TRIX zero cross signals
-        trix_cross_up = trix[i-1] <= 0 and trix[i] > 0
-        trix_cross_down = trix[i-1] >= 0 and trix[i] < 0
+        # Find most recent swing high/low
+        swing_high_idx = find_most_recent(swing_high, i-1)
+        swing_low_idx = find_most_recent(swing_low, i-1)
         
-        vol_condition = volume[i] > vol_ma_20[i] * 1.5
+        if swing_high_idx == -1 or swing_low_idx == -1:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        swing_high_price = high[swing_high_idx]
+        swing_low_price = low[swing_low_idx]
+        
+        # Avoid division by zero
+        if swing_high_price == swing_low_price:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Calculate where price is in the swing range (0 = low, 1 = high)
+        price_in_range = (close[i] - swing_low_price) / (swing_high_price - swing_low_price)
         
         if position == 0:
-            # Long: TRIX crosses above 0 in daily uptrend with volume
-            if trix_cross_up and ema34_1d_aligned[i] > ema34_1d_aligned[i-1] and vol_condition:
+            # Long: price near swing low (0-0.3) in daily uptrend with volume
+            # Short: price near swing high (0.7-1.0) in daily downtrend with volume
+            if price_in_range < 0.3 and ema_20_1d_aligned[i] > ema_20_1d_aligned[i-1] and volume[i] > vol_ma_10[i] * 1.5:
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX crosses below 0 in daily downtrend with volume
-            elif trix_cross_down and ema34_1d_aligned[i] < ema34_1d_aligned[i-1] and vol_condition:
+            elif price_in_range > 0.7 and ema_20_1d_aligned[i] < ema_20_1d_aligned[i-1] and volume[i] > vol_ma_10[i] * 1.5:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: TRIX crosses below 0 or trend breaks
-            if trix_cross_down or ema34_1d_aligned[i] <= ema34_1d_aligned[i-1]:
+            # Exit: price reaches swing high or trend changes
+            if price_in_range > 0.7 or ema_20_1d_aligned[i] < ema_20_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: TRIX crosses above 0 or trend breaks
-            if trix_cross_up or ema34_1d_aligned[i] >= ema34_1d_aligned[i-1]:
+            # Exit: price reaches swing low or trend changes
+            if price_in_range < 0.3 or ema_20_1d_aligned[i] > ema_20_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -81,18 +106,16 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 4h TRIX zero cross with daily trend filter and volume confirmation
-# - TRIX (Triple Exponential Average) measures momentum of momentum
-# - Zero cross indicates change in momentum direction
-# - Daily EMA34 trend filter ensures alignment with higher timeframe trend
-# - Volume confirmation (1.5x average) reduces false signals
-# - Works in both bull (zero crosses up in uptrend) and bear (zero crosses down in downtrend)
-# - Position size 0.25 targets ~20-40 trades/year to avoid fee drag
-# - TRIX is less noisy than MACD and provides clearer signals
-# - TRIX zero cross + trend + volume combination not recently tried on 4h
-# - Aims for 80-160 total trades over 4 years (20-40/year) to stay within limits
-# - Effective in ranging markets as TRIX oscillates around zero
-# - Trend filter prevents counter-trend trading in strong trends
-# - Volume adds confirmation to reduce whipsaws
-# - Exit on signal reversal or trend breakdown provides clear risk control
-# - Simple 3-condition logic minimizes overfitting and curve-fitting risks
+# Hypothesis: 6h A-B Swing trading with daily trend filter and volume confirmation
+# - Identifies swing highs/lows using 5-period extremes
+# - Enters long near swing lows (0-30% of range) in daily uptrends
+# - Enters short near swing highs (70-100% of range) in daily downtrends
+# - Requires volume confirmation (1.5x average) to avoid false signals
+# - Exits when price reaches opposite swing or trend changes
+# - Works in both bull (buy dips in uptrend) and bear (sell rallies in downtrend)
+# - Position size 0.25 balances risk/reward while limiting trades
+# - Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag
+# - Novel: Pure price action swing trading with institutional trend/volume filters
+# - Avoids lagging indicators; uses actual swing points for precise entries
+# - Daily EMA20 trend filter ensures alignment with higher timeframe momentum
+# - Volume spike requirement reduces whipsaws in choppy markets
