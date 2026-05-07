@@ -1,15 +1,13 @@
-#!/usr/bin/env python3
-"""
-12h_1D_Donchian_Breakout_With_Volume_Confirmation
-Hypothesis: Uses Donchian channel breakout on 1d timeframe for trend direction,
-combined with volume confirmation on 12h timeframe to filter false signals.
-Trades only in direction of higher timeframe trend to reduce whipsaws.
-Designed for low trade frequency (15-25/year) to minimize fee drag while capturing
-major trends in both bull and bear markets.
-"""
+# USDC/USDT Exchange Rate Monitoring Strategy
+# Hypothesis: USDC/USDT is a stablecoin pair that should maintain a tight 1:1 peg.
+# Deviations from parity indicate market stress or arbitrage opportunities.
+# This strategy monitors the USDC/USDT price on Binance and takes small positions
+# when the price deviates significantly from 1.0, expecting mean reversion.
+# Works in both bull and bear markets as it's based on mean reversion of a stable peg.
+# Very low frequency - only triggers during significant de-pegging events.
 
-name = "12h_1D_Donchian_Breakout_With_Volume_Confirmation"
-timeframe = "12h"
+name = "USDC_USDT_Peg_Monitor"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,69 +20,81 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get daily data for Donchian calculation
+    # Calculate deviation from 1.0 peg
+    peg_deviation = close - 1.0
+    
+    # Calculate rolling statistics for z-score (20-period window)
+    peg_mean = pd.Series(peg_deviation).rolling(window=20, min_periods=20).mean().values
+    peg_std = pd.Series(peg_deviation).rolling(window=20, min_periods=20).std().values
+    
+    # Calculate z-score of peg deviation
+    z_score = np.zeros_like(peg_deviation)
+    for i in range(len(z_score)):
+        if peg_std[i] > 0:
+            z_score[i] = (peg_deviation[i] - peg_mean[i]) / peg_std[i]
+        else:
+            z_score[i] = 0
+    
+    # Get 1-day data for additional confirmation (market stress indicator)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Daily volatility as market stress indicator
+    daily_returns = np.abs(np.diff(df_1d['close'].values) / df_1d['close'].values[:-1])
+    daily_vol = pd.Series(daily_returns).rolling(window=10, min_periods=10).mean().values
+    daily_vol_aligned = align_htf_to_ltf(prices, df_1d, daily_vol)
     
-    # Calculate Donchian Channel (20-period)
-    # Upper band: highest high of last 20 days
-    # Lower band: lowest low of last 20 days
-    upper_20 = np.full_like(high_1d, np.nan)
-    lower_20 = np.full_like(low_1d, np.nan)
-    
-    for i in range(19, len(high_1d)):
-        upper_20[i] = np.max(high_1d[i-19:i+1])
-        lower_20[i] = np.min(low_1d[i-19:i+1])
-    
-    # Align Donchian bands to 12h timeframe
-    upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
-    lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
-    
-    # Volume confirmation: volume > 20-period average (20 * 12h = 10 days)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation - unusually high volume during de-pegging
+    volume_ma = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0  # 0: flat, 1: long (USDC undervalued), -1: short (USDC overvalued)
     
-    for i in range(30, n):
+    # Only trade during significant market stress to avoid noise
+    volatility_threshold = 0.02  # 2% daily volatility threshold
+    
+    for i in range(20, n):
         # Skip if any critical value is NaN
-        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or 
-            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(z_score[i]) or np.isnan(daily_vol_aligned[i]) or 
+            np.isnan(volume_ma[i]) or volume_ma[i] == 0):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Only trade when market volatility is elevated (stress conditions)
+        if daily_vol_aligned[i] < volatility_threshold:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above upper Donchian band with volume confirmation
-            if close[i] > upper_20_aligned[i] and volume[i] > vol_ma[i]:
-                signals[i] = 0.25
+            # Long: USDC significantly undervalued (z-score < -2) with volume confirmation
+            if z_score[i] < -2.0 and prices['volume'].values[i] > volume_ma[i]:
+                signals[i] = 0.25  # 25% position
                 position = 1
-            # Short: price breaks below lower Donchian band with volume confirmation
-            elif close[i] < lower_20_aligned[i] and volume[i] > vol_ma[i]:
-                signals[i] = -0.25
+            # Short: USDC significantly overvalued (z-score > 2) with volume confirmation
+            elif z_score[i] > 2.0 and prices['volume'].values[i] > volume_ma[i]:
+                signals[i] = -0.25  # 25% position
                 position = -1
         elif position == 1:
-            # Exit: price crosses below lower Donchian band (contrarian exit)
-            if close[i] < lower_20_aligned[i]:
+            # Exit long: USDC returns to peg (z-score > -0.5)
+            if z_score[i] > -0.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price crosses above upper Donchian band (contrarian exit)
-            if close[i] > upper_20_aligned[i]:
+            # Exit short: USDC returns to peg (z-score < 0.5)
+            if z_score[i] < 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
+
+#!/usr/bin/env python3
