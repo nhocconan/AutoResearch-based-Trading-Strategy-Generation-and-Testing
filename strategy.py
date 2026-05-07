@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 6h_WeeklyPivot_DonchianBreakout_Trend
-# Hypothesis: 6-hour Donchian(20) breakout with weekly pivot directional filter and volume confirmation
-# Uses weekly pivot levels from Monday open to determine bias: long above weekly pivot, short below
-# Combines with Donchian breakouts for momentum entries and volume filter to reduce false signals
-# Designed to work in both bull and bear markets by aligning with weekly structure
-# Target: 15-35 trades per year (~60-140 over 4 years) with position size 0.25
+# 4h_RSI_Trend_Pullback
+# Hypothesis: 4-hour RSI pullback in strong trends using 1d EMA trend filter and volume confirmation
+# Works in bull markets via long pullbacks to EMA in uptrends, and bear markets via short pullbacks in downtrends
+# Volume filter ensures momentum, RSI(14)<40 for long entries and >60 for short entries avoids chasing
+# Target: 25-40 trades per year (~100-160 over 4 years) with position size 0.25
 
-name = "6h_WeeklyPivot_DonchianBreakout_Trend"
-timeframe = "6h"
+name = "4h_RSI_Trend_Pullback"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,37 +23,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE for pivot calculation and trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 50:
+    # Load 1d data ONCE for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly pivot points (using prior week's data)
-    # Pivot = (H + L + C) / 3
-    # Support 1 = (2 * Pivot) - H
-    # Resistance 1 = (2 * Pivot) - L
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
+    # 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate pivot for each week using prior week's data
-    weekly_pivot = np.full_like(weekly_high, np.nan)
-    weekly_r1 = np.full_like(weekly_high, np.nan)
-    weekly_s1 = np.full_like(weekly_high, np.nan)
-    
-    for i in range(1, len(weekly_high)):
-        weekly_pivot[i] = (weekly_high[i-1] + weekly_low[i-1] + weekly_close[i-1]) / 3.0
-        weekly_r1[i] = (2 * weekly_pivot[i]) - weekly_high[i-1]
-        weekly_s1[i] = (2 * weekly_pivot[i]) - weekly_low[i-1]
-    
-    # Align weekly pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_weekly, weekly_pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s1)
-    
-    # Donchian channels (20-period) on 6h data
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values  # neutral when undefined
     
     # Volume ratio: current volume / 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -63,48 +49,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need 20 periods for Donchian
+    start_idx = 34  # Need 14 for RSI + 20 for volume MA
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(high_max[i]) or 
-            np.isnan(low_min[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(rsi[i]) or 
+            np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Breakout conditions
-        breakout_up = close[i] > high_max[i-1]  # Break above previous period's high
-        breakout_down = close[i] < low_min[i-1]  # Break below previous period's low
+        # Trend filter from 1d EMA50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Volume confirmation: volume > 1.5x average
-        volume_confirm = vol_ratio[i] > 1.5
-        
-        # Weekly pivot bias
-        above_pivot = close[i] > pivot_aligned[i]
-        below_pivot = close[i] < pivot_aligned[i]
+        # Volume confirmation: volume > 1.3x average
+        volume_confirm = vol_ratio[i] > 1.3
         
         if position == 0:
-            # Long: upward breakout + volume + above weekly pivot
-            if breakout_up and volume_confirm and above_pivot:
+            # Long: RSI pullback (<40) in uptrend with volume
+            if rsi[i] < 40 and uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: downward breakout + volume + below weekly pivot
-            elif breakout_down and volume_confirm and below_pivot:
+            # Short: RSI bounce (>60) in downtrend with volume
+            elif rsi[i] > 60 and downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price breaks below Donchian low or crosses below weekly pivot
-            if close[i] < low_min[i-1] or close[i] < pivot_aligned[i]:
+            # Exit: RSI overbought (>70) or trend reversal
+            if rsi[i] > 70 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price breaks above Donchian high or crosses above weekly pivot
-            if close[i] > high_max[i-1] or close[i] > pivot_aligned[i]:
+            # Exit: RSI oversold (<30) or trend reversal
+            if rsi[i] < 30 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
