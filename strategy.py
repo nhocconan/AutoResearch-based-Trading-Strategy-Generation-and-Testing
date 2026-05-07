@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v2"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,9 +17,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for trend filter and pivot points
+    # Load 1d data ONCE before loop for EMA and pivot points
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     # 1d EMA(34) for trend filter
@@ -35,19 +35,19 @@ def generate_signals(prices):
     r1 = 2 * pivot - prev_low
     s1 = 2 * pivot - prev_high
     
-    # Align Pivot levels to 12h
+    # Align Pivot levels to 4h
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume filter: > 1.5x 30-period average (adjusted for 12h)
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    vol_filter = volume > 1.5 * vol_ma
+    # Volume filter: > 1.8x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > 1.8 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Wait for EMA and volume average
+    start_idx = 34  # Wait for EMA
     
     for i in range(start_idx, n):
         if np.isnan(ema_1d_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(vol_ma[i]):
@@ -66,14 +66,14 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Close below S1 or trend change to downtrend
+            # Exit: Close below S1 or trend change
             if close[i] < s1_aligned[i] or close[i] < ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Close above R1 or trend change to uptrend
+            # Exit: Close above R1 or trend change
             if close[i] > r1_aligned[i] or close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
@@ -82,8 +82,7 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA(34) trend filter and volume confirmation.
-# Using higher timeframe (12h) reduces trade frequency to avoid fee drag while capturing major moves.
-# 1d EMA filter ensures alignment with daily trend, reducing whipsaw in choppy markets.
+# Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA(34) trend filter and volume confirmation.
 # Pivot levels from prior day provide key support/resistance. Breaking R1/S1 indicates momentum.
-# Volume confirms institutional participation. Position size 0.25 limits drawdown. Target: ~15-25 trades/year.
+# 1d EMA filter ensures alignment with higher timeframe trend, reducing whipsaw in choppy markets.
+# Volume confirms institutional participation. Position size 0.25 limits drawdown. Target: ~25-35 trades/year.
