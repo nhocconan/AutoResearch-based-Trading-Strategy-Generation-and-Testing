@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-6H_Chaikin_Oscillator_CCI_Breakout_1dTrend_v1
-Hypothesis: Use 1d CCI(20) for trend direction and 6h Chaikin Oscillator for momentum confirmation.
-Long when CCI > 100 (uptrend) and Chaikin Oscillator crosses above zero with volume confirmation.
-Short when CCI < -100 (downtrend) and Chaikin Oscillator crosses below zero.
-Add volume filter: current volume > 1.3x 20-period average volume.
-This combines trend-following with volume-weighted momentum to reduce false signals in both bull and bear markets.
-Target: 12-37 trades/year on 6h timeframe.
+12H_TRIX_Trend_Volume_Confirmation_v1
+Hypothesis: Use 1w TRIX for trend direction and 12h price action for entry.
+Long when 1w TRIX > 0 and 12h price closes above 12h EMA20; 
+Short when 1w TRIX < 0 and 12h price closes below 12h EMA20.
+Volume confirmation: current volume > 1.5x 20-period average volume.
+This combines long-term trend with medium-term momentum to capture sustained moves while avoiding whipsaws.
+Designed for low trade frequency (target: 15-30 trades/year) to minimize fee drag in bear markets.
 """
-name = "6H_Chaikin_Oscillator_CCI_Breakout_1dTrend_v1"
-timeframe = "6h"
+name = "12H_TRIX_Trend_Volume_Confirmation_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -26,48 +26,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for CCI trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 1w data for TRIX trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 1d CCI(20)
-    typical_price_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    sma_tp = typical_price_1d.rolling(window=20, min_periods=20).mean()
-    mean_deviation = typical_price_1d.rolling(window=20, min_periods=20).apply(
-        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
-    )
-    cci = (typical_price_1d - sma_tp) / (0.015 * mean_deviation.replace(0, np.nan))
-    cci_values = cci.values
-    cci_aligned = align_htf_to_ltf(prices, df_1d, cci_values)
+    # Calculate 1w TRIX (15-period triple EMA)
+    close_1w = pd.Series(df_1w['close'])
+    ema1 = close_1w.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
+    trix = 100 * (ema3 - ema3.shift(1)) / ema3.shift(1)
+    trix = trix.fillna(0).values
+    trix_signal = trix > 0  # Bullish when TRIX > 0
+    trix_signal_aligned = align_htf_to_ltf(prices, df_1w, trix_signal.astype(float))
     
-    # Calculate 6h Chaikin Oscillator (3,10)
-    # ADL = cumulative sum of ((close - low) - (high - close)) / (high - low) * volume
-    adl_raw = ((close - low) - (high - close)) / (high - low)
-    adl_raw = np.where((high - low) == 0, 0, adl_raw)  # avoid division by zero
-    adl = np.cumsum(adl_raw * volume)
+    # Get 12h data for EMA20
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
     
-    # Chaikin Oscillator = EMA(3) of ADL - EMA(10) of ADL
-    adl_series = pd.Series(adl)
-    ema3 = adl_series.ewm(span=3, adjust=False, min_periods=3).mean()
-    ema10 = adl_series.ewm(span=10, adjust=False, min_periods=10).mean()
-    chaikin_osc = (ema3 - ema10).values
+    # Calculate 12h EMA20
+    close_12h = pd.Series(df_12h['close'])
+    ema20 = close_12h.ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_aligned = align_htf_to_ltf(prices, df_12h, ema20)
     
-    # Volume filter: current volume > 1.3 * 20-period average volume
+    # Volume filter: current volume > 1.5 * 20-period average volume
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_avg * 1.3)
+    volume_filter = volume > (vol_avg * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_exit = 0  # bars since last exit to prevent overtrading
     
-    start_idx = max(30, 20)  # Ensure sufficient warmup for indicators
+    start_idx = max(20, 20)  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
         bars_since_exit += 1
         
         # Skip if any data is not ready
-        if (np.isnan(cci_aligned[i]) or np.isnan(chaikin_osc[i]) or 
+        if (np.isnan(trix_signal_aligned[i]) or np.isnan(ema20_aligned[i]) or 
             np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -76,31 +74,29 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Minimum 6 bars between trades (1.5 days on 6h TF) to reduce frequency
-            if bars_since_exit < 6:
+            # Minimum 20 bars between trades (10 days on 12h TF) to reduce frequency
+            if bars_since_exit < 20:
                 continue
                 
-            # Long: CCI > 100 (uptrend) and Chaikin Oscillator crosses above zero
-            if (cci_aligned[i] > 100 and 
-                chaikin_osc[i] > 0 and chaikin_osc[i-1] <= 0 and
-                volume_filter[i]):
+            # Long: bullish TRIX and price above EMA20
+            if (trix_signal_aligned[i] > 0.5 and 
+                close[i] > ema20_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_exit = 0
-            # Short: CCI < -100 (downtrend) and Chaikin Oscillator crosses below zero
-            elif (cci_aligned[i] < -100 and 
-                  chaikin_osc[i] < 0 and chaikin_osc[i-1] >= 0 and
-                  volume_filter[i]):
+            # Short: bearish TRIX and price below EMA20
+            elif (trix_signal_aligned[i] < 0.5 and 
+                  close[i] < ema20_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_exit = 0
         elif position != 0:
-            # Exit: Chaikin Oscillator crosses zero in opposite direction
-            if position == 1 and chaikin_osc[i] < 0 and chaikin_osc[i-1] >= 0:
+            # Exit: TRIX signal changes or price crosses EMA20 in opposite direction
+            if position == 1 and (trix_signal_aligned[i] < 0.5 or close[i] < ema20_aligned[i]):
                 signals[i] = 0.0
                 position = 0
                 bars_since_exit = 0
-            elif position == -1 and chaikin_osc[i] > 0 and chaikin_osc[i-1] <= 0:
+            elif position == -1 and (trix_signal_aligned[i] > 0.5 or close[i] > ema20_aligned[i]):
                 signals[i] = 0.0
                 position = 0
                 bars_since_exit = 0
