@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-# 1h_Camarilla_R1_S1_4hTrend_1dVolSlope
-# Hypothesis: Combines 4h trend filter with 1d volume slope to reduce false breakouts in 1h timeframe.
-# Uses 1d Camarilla R1/S1 for entry levels, filtered by 4h EMA20 trend and 1d volume slope (rising volume = institutional interest).
-# In bull markets: 4h trend up + price breaks R1 with rising 1d volume = long continuation.
-# In bear markets: 4h trend down + price breaks S1 with rising 1d volume = short continuation.
-# The 4h trend filter reduces whipsaws vs 1d, improving robustness in both regimes.
-# Volume slope filter ensures breakouts are supported by increasing participation.
-# Target: 20-30 trades/year to minimize fee drag while maintaining edge.
+# 6h_Alligator_RelativeStrength_1dTrend_Filter
+# Hypothesis: Uses Williams Alligator (13,8,5 SMAs) to identify trend direction and strength,
+# combined with 1d EMA50 trend filter and 6h relative strength (RSI vs 50) to avoid whipsaws.
+# In bull markets: Alligator bullish alignment + price above 1d EMA50 + RSI > 50 = long.
+# In bear markets: Alligator bearish alignment + price below 1d EMA50 + RSI < 50 = short.
+# The Alligator's jaw-teeth-lips convergence filters sideways markets, reducing false signals.
+# Target: 20-40 trades/year to minimize fee drag while maintaining edge in both bull/bear regimes.
 
-name = "1h_Camarilla_R1_S1_4hTrend_1dVolSlope"
-timeframe = "1h"
+name = "6h_Alligator_RelativeStrength_1dTrend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -18,85 +17,99 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation (R1, S1)
+    # Get 1d data for trend filter (EMA50)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Camarilla pivot levels: R1, S1
-    camarilla_range = high_1d - low_1d
-    r1 = close_1d + 1.1 * camarilla_range / 12
-    s1 = close_1d - 1.1 * camarilla_range / 12
+    # Calculate Williams Alligator on 6h data
+    # Jaw: 13-period SMMA, Teeth: 8-period SMMA, Lips: 5-period SMMA
+    def smma(arr, period):
+        result = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return result
+        sma = np.nansum(arr[:period]) / period
+        result[period-1] = sma
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    # Get 4h data for trend filter (EMA20)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
+    jaw = smma(close, 13)
+    teeth = smma(close, 8)
+    lips = smma(close, 5)
     
-    close_4h = df_4h['close'].values
-    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Alligator alignment signals
+    # Bullish: Lips > Teeth > Jaw (all aligned upward)
+    # Bearish: Lips < Teeth < Jaw (all aligned downward)
+    alligator_bullish = (lips > teeth) & (teeth > jaw)
+    alligator_bearish = (lips < teeth) & (teeth < jaw)
     
-    # Get 1d volume slope (5-period linear regression slope)
-    vol_1d = df_1d['volume'].values
-    vol_slope_1d = np.zeros(len(vol_1d))
-    for i in range(4, len(vol_1d)):
-        y = vol_1d[i-4:i+1]
-        x = np.arange(5)
-        slope = np.polyfit(x, y, 1)[0]
-        vol_slope_1d[i] = slope
+    # Relative strength filter: 6h RSI(14) vs 50
+    def rsi(arr, period=14):
+        delta = np.diff(arr, prepend=arr[0])
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = np.full_like(arr, np.nan)
+        avg_loss = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return avg_gain / (avg_loss + 1e-10)
+        avg_gain[period-1] = np.mean(gain[:period])
+        avg_loss[period-1] = np.mean(loss[:period])
+        for i in range(period, len(arr)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+        rs = avg_gain / (avg_loss + 1e-10)
+        return 100 - (100 / (1 + rs))
     
-    # Align all indicators to 1h timeframe
-    r1_1h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_1h = align_htf_to_ltf(prices, df_1d, s1)
-    ema_20_4h_1h = align_htf_to_ltf(prices, df_4h, ema_20_4h)
-    vol_slope_1d_1h = align_htf_to_ltf(prices, df_1d, vol_slope_1d)
+    rsi_6h = rsi(close, 14)
+    rsi_bullish = rsi_6h > 50
+    rsi_bearish = rsi_6h < 50
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any critical value is NaN
-        if (np.isnan(r1_1h[i]) or np.isnan(s1_1h[i]) or 
-            np.isnan(ema_20_4h_1h[i]) or np.isnan(vol_slope_1d_1h[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or 
+            np.isnan(lips[i]) or np.isnan(rsi_6h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price > R1, above 4h EMA20 trend, positive 1d volume slope
-            if close[i] > r1_1h[i] and close[i] > ema_20_4h_1h[i] and vol_slope_1d_1h[i] > 0:
-                signals[i] = 0.20
+            # Long: Alligator bullish + price above 1d EMA50 + RSI > 50
+            if alligator_bullish[i] and close[i] > ema_50_1d_aligned[i] and rsi_bullish[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: Price < S1, below 4h EMA20 trend, positive 1d volume slope
-            elif close[i] < s1_1h[i] and close[i] < ema_20_4h_1h[i] and vol_slope_1d_1h[i] > 0:
-                signals[i] = -0.20
+            # Short: Alligator bearish + price below 1d EMA50 + RSI < 50
+            elif alligator_bearish[i] and close[i] < ema_50_1d_aligned[i] and rsi_bearish[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Price < R1 or below 4h EMA20 trend
-            if close[i] < r1_1h[i] or close[i] < ema_20_4h_1h[i]:
+            # Exit: Alligator alignment breaks or price crosses 1d EMA50
+            if not alligator_bullish[i] or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: Price > S1 or above 4h EMA20 trend
-            if close[i] > s1_1h[i] or close[i] > ema_20_4h_1h[i]:
+            # Exit: Alligator alignment breaks or price crosses 1d EMA50
+            if not alligator_bearish[i] or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
