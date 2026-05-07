@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-# 1h_Camarilla_R1_S1_4hTrend_1dVolSlope
-# Hypothesis: 1h Camarilla pivot breakout at R1/S1 with 4h EMA trend filter and 1d volume slope confirmation.
-# Uses daily volume slope to detect institutional accumulation/distribution, works in bull/bear via trend filter.
-# Targets 20-50 trades/year by requiring confluence of pivot break, trend alignment, and volume slope.
+# 6h_SqueezeBreakout_WeeklyPivot
+# Hypothesis: Combines Bollinger Band squeeze (low volatility) with weekly pivot breakout
+# to capture explosive moves after consolidation. Uses weekly pivot levels as structural
+# support/resistance and Bollinger Band width to identify low-volatility regimes.
+# Works in both bull and bear markets: breakouts in either direction are traded.
+# Bollinger squeeze identifies when volatility is compressed, increasing probability of
+# a strong breakout. Weekly pivot provides meaningful levels that often act as
+# breakout/breakdown zones. Volume confirmation filters out false breakouts.
 
-name = "1h_Camarilla_R1_S1_4hTrend_1dVolSlope"
-timeframe = "1h"
+name = "6h_SqueezeBreakout_WeeklyPivot"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -22,106 +26,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Camarilla pivot calculation and trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 5:
+    # Get weekly data for pivot points
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 5:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    # Calculate previous 4h bar's Camarilla levels (R1, S1)
-    # Using previous bar to avoid look-ahead
-    prev_high = np.roll(high_4h, 1)
-    prev_low = np.roll(low_4h, 1)
-    prev_close = np.roll(close_4h, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # Calculate weekly pivot points (standard formula)
+    # Pivot = (H + L + C) / 3
+    # R1 = 2*P - L, S1 = 2*P - H
+    # R2 = P + (H - L), S2 = P - (H - L)
+    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    weekly_s1 = 2 * weekly_pivot - weekly_high
+    weekly_r2 = weekly_pivot + (weekly_high - weekly_low)
+    weekly_s2 = weekly_pivot - (weekly_high - weekly_low)
+    weekly_r3 = weekly_high + 2 * (weekly_pivot - weekly_low)
+    weekly_s3 = weekly_low - 2 * (weekly_high - weekly_pivot)
     
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    r1 = pivot + (prev_high - prev_low) * 1.1 / 12.0
-    s1 = pivot - (prev_high - prev_low) * 1.1 / 12.0
+    # Align weekly pivot levels to 6h timeframe
+    pivot_6h = align_htf_to_ltf(prices, df_weekly, weekly_pivot)
+    r1_6h = align_htf_to_ltf(prices, df_weekly, weekly_r1)
+    s1_6h = align_htf_to_ltf(prices, df_weekly, weekly_s1)
+    r2_6h = align_htf_to_ltf(prices, df_weekly, weekly_r2)
+    s2_6h = align_htf_to_ltf(prices, df_weekly, weekly_s2)
+    r3_6h = align_htf_to_ltf(prices, df_weekly, weekly_r3)
+    s3_6h = align_htf_to_ltf(prices, df_weekly, weekly_s3)
     
-    # Calculate 4h EMA20 for trend filter
-    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Bollinger Bands (20, 2) on 6h timeframe
+    close_series = pd.Series(close)
+    bb_middle = close_series.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_series.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2 * bb_std
+    bb_lower = bb_middle - 2 * bb_std
+    bb_width = (bb_upper - bb_lower) / bb_middle  # Normalized width
     
-    # Get 1d data for volume slope confirmation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
-        return np.zeros(n)
+    # Bollinger Squeeze: width below 20-period average width
+    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
+    squeeze = bb_width < bb_width_ma
     
-    volume_1d = df_1d['volume'].values
-    # Calculate volume slope (5-period linear regression slope)
-    def linreg_slope(arr, window):
-        if len(arr) < window:
-            return np.full_like(arr, np.nan)
-        slopes = np.full_like(arr, np.nan)
-        for i in range(window-1, len(arr)):
-            y = arr[i-window+1:i+1]
-            x = np.arange(window)
-            if np.all(np.isnan(y)):
-                slopes[i] = np.nan
-            else:
-                # Remove NaNs if any
-                valid = ~np.isnan(y)
-                if np.sum(valid) < 2:
-                    slopes[i] = np.nan
-                else:
-                    x_valid = x[valid]
-                    y_valid = y[valid]
-                    slope = np.polyfit(x_valid, y_valid, 1)[0]
-                    slopes[i] = slope
-        return slopes
-    
-    vol_slope_1d = linreg_slope(volume_1d, 5)
-    
-    # Align all indicators to 1h timeframe
-    r1_1h = align_htf_to_ltf(prices, df_4h, r1)
-    s1_1h = align_htf_to_ltf(prices, df_4h, s1)
-    ema_20_4h_1h = align_htf_to_ltf(prices, df_4h, ema_20_4h)
-    vol_slope_1d_1h = align_htf_to_ltf(prices, df_1d, vol_slope_1d)
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Volume confirmation: volume above 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ok = volume > vol_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
-        # Skip if any critical value is NaN or outside session
-        if (np.isnan(r1_1h[i]) or np.isnan(s1_1h[i]) or 
-            np.isnan(ema_20_4h_1h[i]) or np.isnan(vol_slope_1d_1h[i]) or
-            not in_session[i]):
+    for i in range(50, n):
+        # Skip if any critical value is NaN
+        if (np.isnan(pivot_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or
+            np.isnan(r2_6h[i]) or np.isnan(s2_6h[i]) or np.isnan(r3_6h[i]) or
+            np.isnan(s3_6h[i]) or np.isnan(squeeze[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Close > R1 + above 4h EMA20 + positive volume slope
-            if close[i] > r1_1h[i] and close[i] > ema_20_4h_1h[i] and vol_slope_1d_1h[i] > 0:
-                signals[i] = 0.20
+            # Long breakout: price above R1 with squeeze and volume
+            if close[i] > r1_6h[i] and squeeze[i] and volume_ok[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: Close < S1 + below 4h EMA20 + negative volume slope
-            elif close[i] < s1_1h[i] and close[i] < ema_20_4h_1h[i] and vol_slope_1d_1h[i] < 0:
-                signals[i] = -0.20
+            # Short breakdown: price below S1 with squeeze and volume
+            elif close[i] < s1_6h[i] and squeeze[i] and volume_ok[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Close < S1 or below 4h EMA20
-            if close[i] < s1_1h[i] or close[i] < ema_20_4h_1h[i]:
+            # Exit: price below pivot or squeeze breaks (volatility expansion)
+            if close[i] < pivot_6h[i] or not squeeze[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: Close > R1 or above 4h EMA20
-            if close[i] > r1_1h[i] or close[i] > ema_20_4h_1h[i]:
+            # Exit: price above pivot or squeeze breaks
+            if close[i] > pivot_6h[i] or not squeeze[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
