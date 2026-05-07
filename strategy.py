@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_1dTrend_VolumeSpike_v9"
-timeframe = "4h"
+name = "12H_Camarilla_R3S3_1dTrend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -33,8 +33,8 @@ def generate_signals(prices):
     
     # Calculate Camarilla R3 and S3 levels from previous 1d bar
     range_hl = prev_high - prev_low
-    r3 = prev_close + range_hl * 1.1 / 2 * 1.1
-    s3 = prev_close - range_hl * 1.1 / 2 * 1.1
+    r3 = prev_close + range_hl * 1.1 / 2
+    s3 = prev_close - range_hl * 1.1 / 2
     
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
