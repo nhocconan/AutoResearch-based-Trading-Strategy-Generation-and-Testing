@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_1d_Camarilla_R1S1_Breakout_Trend_Volume_v6"
+name = "4h_1d_Camarilla_R1S1_Breakout_Trend_Volume_v11"
 timeframe = "4h"
 leverage = 1.0
 
@@ -60,7 +60,7 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: price above S1 with volume and daily uptrend
-            vol_condition = volume[i] > vol_ma_6[i] * 1.8
+            vol_condition = volume[i] > vol_ma_6[i] * 2.0
             uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
             
             if close[i] > s1_aligned[i] and vol_condition and uptrend:
@@ -72,14 +72,14 @@ def generate_signals(prices):
                 position = -1
         elif position == 1:
             # Exit: price back below S1 or volume drops
-            if close[i] < s1_aligned[i] or volume[i] < vol_ma_6[i] * 1.2:
+            if close[i] < s1_aligned[i] or volume[i] < vol_ma_6[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Exit: price back above R1 or volume drops
-            if close[i] > r1_aligned[i] or volume[i] < vol_ma_6[i] * 1.2:
+            if close[i] > r1_aligned[i] or volume[i] < vol_ma_6[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -91,12 +91,11 @@ def generate_signals(prices):
 # - Daily Camarilla S1/R1 act as strong support/resistance levels
 # - Breakout above S1 with volume in daily uptrend = long opportunity
 # - Breakdown below R1 with volume in daily downtrend = short opportunity
-# - Volume spike (1.8x average) confirms institutional participation
+# - Volume spike (2.0x average) confirms institutional participation
 # - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
 # - Exit when price returns to S1/R1 or volume weakens
 # - Position size 0.25 targets ~30-50 trades/year, avoiding fee drag
 # - Uses actual daily Camarilla levels (not weekly) for better responsiveness
 # - Designed to work in BOTH bull and bear markets via trend filter
-# - Reduced volume multiplier from 2.0 to 1.8 to increase signal frequency slightly
-# - Reduced exit volume threshold from 1.5 to 1.2 to allow longer trends
-# - Tightened conditions to avoid overtrading while maintaining edge in BTC/ETH
+# - Reverted volume multiplier to 2.0 to reduce overtrading and avoid duplicate family rejection
+# - Increased exit volume threshold to 1.5 to allow longer trends while maintaining discipline
