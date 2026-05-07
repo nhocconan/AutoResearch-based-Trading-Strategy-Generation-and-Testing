@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_Breakout_12hEMA50_Trend_Volume"
-timeframe = "4h"
+name = "1h_4h1d_Regime_Breakout_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,89 +17,110 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for Camarilla pivot levels
+    # Load 4h data ONCE before loop for trend and structure
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
+        return np.zeros(n)
+    
+    # Load 1d data ONCE before loop for regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Load 12h data ONCE before loop for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
+    # 4h Donchian(20) for breakout levels
+    donchian_high = pd.Series(df_4h['high']).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(df_4h['low']).rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
     
-    # Calculate Camarilla pivot levels from previous day
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # 1d ADX(14) for trend strength regime
+    # Calculate ADX components
+    plus_dm = np.diff(df_4h['high'].values, prepend=df_4h['high'].values[0])
+    minus_dm = np.diff(df_4h['low'].values, prepend=df_4h['low'].values[0])
+    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0)
+    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0)
     
-    # Camarilla R3 and S3 levels
-    camarilla_range = prev_high - prev_low
-    r3 = prev_close + camarilla_range * 1.1 / 4
-    s3 = prev_close - camarilla_range * 1.1 / 4
+    tr1 = np.abs(df_4h['high'].values - df_4h['low'].values)
+    tr2 = np.abs(df_4h['high'].values - np.roll(df_4h['close'].values, 1))
+    tr3 = np.abs(df_4h['low'].values - np.roll(df_4h['close'].values, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
     
-    # Align Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_4h, adx)
     
-    # 12h EMA(50) for trend filter
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # 1d EMA(50) for trend direction
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume spike detection: 3-period average (3x4h = 12h)
-    vol_ma_3 = pd.Series(volume).rolling(window=3, min_periods=3).mean().values
+    # Volume spike: 24-period average (1 day of 1h bars)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 3)  # Wait for EMA and volume MA
+    start_idx = max(50, 24)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(vol_ma_3[i])):
+        # Skip if any required data is NaN
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_24[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Regime filter: only trade when ADX > 25 (trending market)
+        trending = adx_aligned[i] > 25
+        
         if position == 0:
-            # Long: price above S3 with volume and 12h uptrend
-            vol_condition = volume[i] > vol_ma_3[i] * 2.0
-            uptrend = ema_50_12h_aligned[i] > ema_50_12h_aligned[i-1]
-            
-            if close[i] > s3_aligned[i] and vol_condition and uptrend:
-                signals[i] = 0.30
-                position = 1
-            # Short: price below R3 with volume and 12h downtrend
-            elif close[i] < r3_aligned[i] and vol_condition and not uptrend:
-                signals[i] = -0.30
-                position = -1
+            if trending:
+                # Long: break above 4h Donchian high in uptrend with volume
+                long_condition = (close[i] > donchian_high_aligned[i] and 
+                                ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1] and
+                                volume[i] > vol_ma_24[i] * 1.5)
+                # Short: break below 4h Donchian low in downtrend with volume
+                short_condition = (close[i] < donchian_low_aligned[i] and 
+                                 ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1] and
+                                 volume[i] > vol_ma_24[i] * 1.5)
+                
+                if long_condition:
+                    signals[i] = 0.20
+                    position = 1
+                elif short_condition:
+                    signals[i] = -0.20
+                    position = -1
         elif position == 1:
-            # Exit: price back below S3 or volume drops or trend reversal
-            if close[i] < s3_aligned[i] or volume[i] < vol_ma_3[i] * 1.2 or ema_50_12h_aligned[i] < ema_50_12h_aligned[i-1]:
+            # Exit: price back below Donchian low or trend weakens
+            if (close[i] < donchian_low_aligned[i] or 
+                adx_aligned[i] < 20 or
+                ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.20
         elif position == -1:
-            # Exit: price back above R3 or volume drops or trend reversal
-            if close[i] > r3_aligned[i] or volume[i] < vol_ma_3[i] * 1.2 or ema_50_12h_aligned[i] > ema_50_12h_aligned[i-1]:
+            # Exit: price back above Donchian high or trend weakens
+            if (close[i] > donchian_high_aligned[i] or 
+                adx_aligned[i] < 20 or
+                ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.20
     
     return signals
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend and volume confirmation
-# - Camarilla R3/S3 are strong support/resistance levels from previous day
-# - Breakout above S3 with volume in 12h uptrend = high-probability long
-# - Breakdown below R3 with volume in 12h downtrend = high-probability short
-# - Volume spike (2.0x 3-period average) confirms institutional participation
-# - 12h EMA50 trend filter reduces whipsaws and aligns with higher timeframe momentum
-# - Works in both bull (buy S3 breaks in uptrend) and bear (sell R3 breaks in downtrend)
-# - Exit when price returns to S3/R3, volume weakens, or trend reverses
-# - Position size 0.30 targets ~20-50 trades/year, avoiding excessive fee drag
-# - Uses actual daily Camarilla levels (not intraday) for better stability
-# - Novel combination: Daily Camarilla (1d) + trend (12h) + volume (4h) not recently tried
-# - Aims for 50-150 total trades over 4 years (12-37/year) to stay within limits
-# - Focus on BTC/ETH as primary targets, avoiding SOL-only bias
+# Hypothesis: 1h breakout of 4h Donchian channels with 1d ADX regime filter and volume confirmation
+# - Uses 4h Donchian(20) breakouts for structural entry/exit
+# - 1d ADX(25) filter ensures we only trade in trending markets (reduces whipsaws in ranging)
+# - 1d EMA(50) provides trend direction for breakout bias
+# - Volume confirmation (1.5x average) filters low-probability breakouts
+# - Position size 0.20 manages risk while allowing meaningful returns
+# - Designed to work in both bull and bear markets via trend filter
+# - Target: 15-30 trades/year (60-120 over 4 years) to stay within fee limits
+# - Exit when price returns to opposite Donchian level or trend weakens (ADX<20)
