@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 12h_Donchian20_Breakout_Volume_Trend_1d
-# Hypothesis: On 12h chart, enter long when price breaks above 20-period Donchian upper band with volume confirmation and 1d EMA trend,
-# enter short when price breaks below 20-period Donchian lower band with volume confirmation and 1d EMA trend.
-# Uses 1d EMA for trend filter to avoid counter-trend trades. Designed for low trade frequency (~15-30/year) to minimize fee drift.
-# Donchian channels capture breakouts, volume confirms strength, and EMA filter ensures trend alignment.
-# Works in both bull and bear markets by filtering trades with higher timeframe trend.
-timeframe = "12h"
-name = "12h_Donchian20_Breakout_Volume_Trend_1d"
+# 4h_RSI_Stochastic_Confluence_Trend
+# Hypothesis: On 4h chart, enter long when RSI < 40 (oversold) AND %K crosses above %D (momentum up) AND price > 200-period SMA (long-term trend).
+# Enter short when RSI > 60 (overbought) AND %K crosses below %D (momentum down) AND price < 200-period SMA.
+# Use RSI and Stochastic for mean-reversion entries with trend filter to avoid counter-trend trades.
+# Designed for low trade frequency (~20-40/year) to minimize fee drag and work in trending markets.
+# Works in both bull and bear markets by only taking trades in direction of long-term trend.
+timeframe = "4h"
+name = "4h_RSI_Stochastic_Confluence_Trend"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,54 +23,59 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian Channel parameters
-    dc_period = 20
+    # 200-period SMA for trend filter
+    sma_200 = pd.Series(close).rolling(window=200, min_periods=200).mean().values
     
-    # Calculate Donchian Channels
-    dc_upper = pd.Series(high).rolling(window=dc_period, min_periods=dc_period).max().values
-    dc_lower = pd.Series(low).rolling(window=dc_period, min_periods=dc_period).min().values
+    # RSI (14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Volume spike: current volume > 1.5 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Stochastic (14,3,3)
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    k_percent = 100 * (close - lowest_low) / (highest_high - lowest_low + 1e-10)
+    d_percent = pd.Series(k_percent).rolling(window=3, min_periods=3).mean().values
     
-    # Load 1h data for EMA trend filter (using 1h as proxy for trend since 1d may be too sparse)
-    df_1h = get_htf_data(prices, '1h')
-    close_1h = df_1h['close'].values
-    ema_1h = pd.Series(close_1h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1h_aligned = align_htf_to_ltf(prices, df_1h, ema_1h)
+    # Stochastic crossover signals
+    k_cross_above_d = (k_percent > d_percent) & (np.roll(k_percent, 1) <= np.roll(d_percent, 1))
+    k_cross_below_d = (k_percent < d_percent) & (np.roll(k_percent, 1) >= np.roll(d_percent, 1))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(dc_period, n):
+    for i in range(200, n):
         # Skip if any critical value is NaN
-        if (np.isnan(dc_upper[i]) or np.isnan(dc_lower[i]) or 
-            np.isnan(vol_ma[i]) or vol_ma[i] == 0 or
-            np.isnan(ema_1h_aligned[i])):
+        if (np.isnan(sma_200[i]) or np.isnan(rsi[i]) or np.isnan(k_percent[i]) or 
+            np.isnan(d_percent[i]) or np.isnan(k_cross_above_d[i]) or np.isnan(k_cross_below_d[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian upper band + volume spike + price above 1h EMA
-            if close[i] > dc_upper[i] and volume[i] > 1.5 * vol_ma[i] and close[i] > ema_1h_aligned[i]:
+            # Long: RSI < 40 (oversold) AND %K crosses above %D AND price > 200 SMA
+            if rsi[i] < 40 and k_cross_above_d[i] and close[i] > sma_200[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower band + volume spike + price below 1h EMA
-            elif close[i] < dc_lower[i] and volume[i] > 1.5 * vol_ma[i] and close[i] < ema_1h_aligned[i]:
+            # Short: RSI > 60 (overbought) AND %K crosses below %D AND price < 200 SMA
+            elif rsi[i] > 60 and k_cross_below_d[i] and close[i] < sma_200[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price closes below Donchian lower band (stoploss)
-            if close[i] < dc_lower[i]:
+            # Exit: RSI > 60 (overbought) OR price < 200 SMA (trend change)
+            if rsi[i] > 60 or close[i] < sma_200[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price closes above Donchian upper band (stoploss)
-            if close[i] > dc_upper[i]:
+            # Exit: RSI < 40 (oversold) OR price > 200 SMA (trend change)
+            if rsi[i] < 40 or close[i] > sma_200[i]:
                 signals[i] = 0.0
                 position = 0
             else:
