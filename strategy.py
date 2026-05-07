@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_KAMA_RSI_Chop_Filter"
-timeframe = "1d"
+name = "6h_Three_Pillar_Signal"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,77 +17,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # KAMA components
-    change = np.abs(np.diff(close, prepend=close[0]))
-    direction = np.abs(np.diff(close, n=10, prepend=close[:10]))
-    er = np.where(change != 0, direction / change, 0)
-    sc = (er * (2 / (2 + 1) - 2 / (30 + 1)) + 2 / (30 + 1)) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # 1. 12h EMA(21) for trend filter - updated to shorter period for responsiveness
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 21:
+        return np.zeros(n)
+    ema_12h = pd.Series(df_12h['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # RSI(14)
-    delta = np.diff(close, prepend=close[0])
+    # 2. 24h RSI(14) for overbought/oversold - uses 24h data (two 12h candles)
+    df_24h = get_htf_data(prices, '12h')
+    if len(df_24h) < 28:  # Need 14*2 = 28 periods for 24h RSI
+        return np.zeros(n)
+    close_24h = df_24h['close'].values
+    delta = np.diff(close_24h, prepend=close_24h[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_24h = 100 - (100 / (1 + rs))
+    # Align to 6h: each 24h bar = 4 6h bars
+    rsi_24h_repeated = np.repeat(rsi_24h, 4)
+    if len(rsi_24h_repeated) > n:
+        rsi_24h_repeated = rsi_24h_repeated[:n]
+    else:
+        rsi_24h_repeated = np.pad(rsi_24h_repeated, (0, n - len(rsi_24h_repeated)), 'edge')
     
-    # Choppiness Index (14)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = np.inf
-    tr3[0] = np.inf
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    highest = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr_sum / (highest - lowest)) / np.log10(14)
-    
-    # Load 1w data ONCE before loop for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Weekly EMA(20) for trend filter
-    ema_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # 3. Volume spike detection - > 2.0x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for KAMA and RSI stability
+    start_idx = 50  # Warmup period
     
     for i in range(start_idx, n):
-        if np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or np.isnan(ema_1w_aligned[i]):
+        if np.isnan(ema_12h_aligned[i]) or np.isnan(rsi_24h_repeated[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price above KAMA, RSI > 50, chop > 61.8 (range), weekly uptrend
-            if (close[i] > kama[i] and rsi[i] > 50 and chop[i] > 61.8 and close[i] > ema_1w_aligned[i]):
+            # Long: Uptrend (price > EMA), RSI oversold (<30), volume spike
+            if (close[i] > ema_12h_aligned[i] and 
+                rsi_24h_repeated[i] < 30 and 
+                vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price below KAMA, RSI < 50, chop > 61.8 (range), weekly downtrend
-            elif (close[i] < kama[i] and rsi[i] < 50 and chop[i] > 61.8 and close[i] < ema_1w_aligned[i]):
+            # Short: Downtrend (price < EMA), RSI overbought (>70), volume spike
+            elif (close[i] < ema_12h_aligned[i] and 
+                  rsi_24h_repeated[i] > 70 and 
+                  vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Price below KAMA or trend change or chop < 38.2 (trend)
-            if close[i] < kama[i] or close[i] < ema_1w_aligned[i] or chop[i] < 38.2:
+            # Exit: RSI overbought (>70) or trend change
+            if rsi_24h_repeated[i] > 70 or close[i] < ema_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price above KAMA or trend change or chop < 38.2 (trend)
-            if close[i] > kama[i] or close[i] > ema_1w_aligned[i] or chop[i] < 38.2:
+            # Exit: RSI oversold (<30) or trend change
+            if rsi_24h_repeated[i] < 30 or close[i] > ema_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -95,7 +89,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Daily KAMA with RSI and Choppiness Index filter for range-bound markets, filtered by weekly EMA trend.
-# In choppy markets (CHOP > 61.8), we take mean-reversion trades: long when price > KAMA and RSI > 50, short when price < KAMA and RSI < 50.
-# Weekly EMA ensures we only trade in the direction of the higher timeframe trend.
-# Position size 0.25 limits drawdown. Target: 20-40 trades/year to avoid fee drag. Works in both bull and bear markets by adapting to regime.
+# Hypothesis: Combines 12h trend filter (EMA21), 24h RSI for extreme conditions, and volume spikes.
+# In trending markets, buys dips in uptrends and sells rallies in downtrends during high volume.
+# Works in both bull and bear markets by following the 12h trend while using RSI for entry timing.
+# Volume spike ensures institutional participation. Target: 20-40 trades/year to avoid fee drag.
+# Position size 0.25 balances capture and drawdown control. 6h timeframe reduces noise vs lower TFs.
+# 24h RSI uses two 12h candles for smoother readings vs 6h RSI which is too noisy.
