@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 6h_WilliamsAlligator_Trend_Filter_12hVolume
-# Hypothesis: Williams Alligator (SMAs with offset) on 6h defines trend, combined with 12h volume confirmation to avoid whipsaws. Works in bull/bear by filtering trend direction. Target: 20-40 trades/year.
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Filter
+# Hypothesis: Combines Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume spike confirmation for high-probability institutional moves. Uses 1d EMA for multi-timeframe alignment to reduce false signals in both bull and bear markets. Target: 20-35 trades/year with strict entry conditions to minimize fee drain.
 
-timeframe = "6h"
-name = "6h_WilliamsAlligator_Trend_Filter_12hVolume"
+timeframe = "4h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Filter"
 leverage = 1.0
 
 import numpy as np
@@ -20,72 +20,62 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 6h data for Williams Alligator
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) == 0:
+    # Get daily data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) == 0:
         return np.zeros(n)
     
-    # Williams Alligator: Jaw (13-period SMA, 8-bar offset), Teeth (8-period SMA, 5-bar offset), Lips (5-period SMA, 3-bar offset)
-    close_6h = df_6h['close'].values
-    jaw_raw = pd.Series(close_6h).rolling(window=13, min_periods=13).mean().values
-    teeth_raw = pd.Series(close_6h).rolling(window=8, min_periods=8).mean().values
-    lips_raw = pd.Series(close_6h).rolling(window=5, min_periods=5).mean().values
+    # Calculate EMA34 on daily closes
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Apply offsets: Jaw shifted by 8, Teeth by 5, Lips by 3
-    jaw = np.roll(jaw_raw, 8)
-    teeth = np.roll(teeth_raw, 5)
-    lips = np.roll(lips_raw, 3)
-    # Invalidate the first N values after roll
-    jaw[:8] = np.nan
-    teeth[:5] = np.nan
-    lips[:3] = np.nan
+    # Get daily data for Camarilla levels
+    d_high = df_1d['high'].values
+    d_low = df_1d['low'].values
+    d_close = df_1d['close'].values
     
-    jaw_aligned = align_htf_to_ltf(prices, df_6h, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_6h, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_6h, lips)
+    camarilla_r1 = d_close + 1.1 * (d_high - d_low) / 12
+    camarilla_s1 = d_close - 1.1 * (d_high - d_low) / 12
     
-    # Get 12h data for volume confirmation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) == 0:
-        return np.zeros(n)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    vol_12h = df_12h['volume'].values
-    vol_ma_12h = pd.Series(vol_12h).rolling(window=24, min_periods=24).mean().values  # 24 * 12h = 12 days
-    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
+    # Volume spike detection: 2x average volume (24-period = 1 day on 4h chart)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(13, 24)  # Ensure we have Alligator and volume MA data
+    start_idx = max(24, 34)  # Ensure we have volume MA and EMA data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or 
-            np.isnan(vol_ma_12h_aligned[i]) or vol_ma_12h_aligned[i] == 0):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Lips > Teeth > Jaw (bullish alignment) and 12h volume above average
-            if lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i] and volume[i] > vol_ma_12h_aligned[i]:
+            # Long: close > R1 with volume spike and 1d uptrend
+            if close[i] > camarilla_r1_aligned[i] and volume[i] > 2.0 * vol_ma[i] and close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Lips < Teeth < Jaw (bearish alignment) and 12h volume above average
-            elif lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaw_aligned[i] and volume[i] > vol_ma_12h_aligned[i]:
+            # Short: close < S1 with volume spike and 1d downtrend
+            elif close[i] < camarilla_s1_aligned[i] and volume[i] > 2.0 * vol_ma[i] and close[i] < ema_34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Alligator alignment breaks (Lips < Teeth or Teeth < Jaw)
-            if lips_aligned[i] < teeth_aligned[i] or teeth_aligned[i] < jaw_aligned[i]:
+            # Exit: touch S1 (opposite level) or trend failure
+            if close[i] < camarilla_s1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Alligator alignment breaks (Lips > Teeth or Teeth > Jaw)
-            if lips_aligned[i] > teeth_aligned[i] or teeth_aligned[i] > jaw_aligned[i]:
+            # Exit: touch R1 (opposite level) or trend failure
+            if close[i] > camarilla_r1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
