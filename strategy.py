@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-4H_Camarilla_R1_S1_Breakout_1DTrend_VolumeS
-Hypothesis: Buy at Camarilla R1 breakout in 1D uptrend with volume confirmation, sell at S1 breakout in 1D downtrend with volume confirmation.
-Uses 1D Camarilla levels for structure, 1D EMA34 for trend filter, and volume spike for confirmation.
-Targets 20-50 trades/year to minimize fee drag on 4H timeframe.
-Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
+12H_1D_200EMA_Trend_With_Volume_Filter
+Hypothesis: On 12h timeframe, use daily 200 EMA as trend filter and 12h price action for entry.
+In bull markets: price above daily 200 EMA, look for long entries when 12h closes above 12h EMA50 with volume.
+In bear markets: price below daily 200 EMA, look for short entries when 12h closes below 12h EMA50 with volume.
+This avoids counter-trend trades and uses volume to confirm momentum. Targets 12-30 trades/year.
 """
-name = "4H_Camarilla_R1_S1_Breakout_1DTrend_VolumeS"
-timeframe = "4h"
+name = "12H_1D_200EMA_Trend_With_Volume_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,68 +24,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1D data for Camarilla levels and trend filter
+    # Get 1D data for 200 EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    # Calculate 1D Camarilla levels (R1, S1)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 200 EMA on daily close
     close_1d = df_1d['close'].values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12
-    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12
+    # Calculate 12h EMA50 for entry signal
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    
-    # Calculate 1D EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume filter: current 4H volume > 1.5 x 20-period average volume
+    # Volume filter: current 12h volume > 1.5 x 20-period average volume
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_avg * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 35  # Ensure sufficient warmup
+    start_idx = max(200, 50)  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any data is not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(ema_200_1d_aligned[i]) or 
+            np.isnan(ema_50[i]) or 
+            np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R1, 1D uptrend, and volume confirmation
-            if (close[i] > r1_aligned[i] and 
-                close[i] > ema_34_aligned[i] and 
+            # Long: price above daily 200 EMA, 12h close above EMA50, and volume confirmation
+            if (close[i] > ema_200_1d_aligned[i] and 
+                close[i] > ema_50[i] and 
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1, 1D downtrend, and volume confirmation
-            elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema_34_aligned[i] and 
+            # Short: price below daily 200 EMA, 12h close below EMA50, and volume confirmation
+            elif (close[i] < ema_200_1d_aligned[i] and 
+                  close[i] < ema_50[i] and 
                   volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below S1 (reversal signal)
-            if close[i] < s1_aligned[i]:
+            # Exit long: price crosses below EMA50
+            if close[i] < ema_50[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above R1 (reversal signal)
-            if close[i] > r1_aligned[i]:
+            # Exit short: price crosses above EMA50
+            if close[i] > ema_50[i]:
                 signals[i] = 0.0
                 position = 0
             else:
