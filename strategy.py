@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# 4H_Camarilla_R3S3_1DTrend_Volume_Signal
-# Hypothesis: 4h strategy using daily Camarilla R3/S3 levels with daily trend filter (EMA34) and volume confirmation (>1.5x 20-period average).
-# Enters long when price breaks above daily R3, close > daily EMA34 (uptrend), and volume > 1.5x average.
-# Enters short when price breaks below daily S3, close < daily EMA34 (downtrend), and volume > 1.5x average.
+# 4H_Camarilla_R3S3_1DTrend_Volume_Signal_v2
+# Hypothesis: 4h strategy using daily Camarilla R3/S3 levels with daily trend filter (EMA34) and volume confirmation (>1.8x 20-period average).
+# The original version had 173 trades/sym which is within limits but we tighten volume threshold from 1.5x to 1.8x to reduce trade frequency and improve quality.
+# Enters long when price breaks above daily R3, close > daily EMA34 (uptrend), and volume > 1.8x average.
+# Enters short when price breaks below daily S3, close < daily EMA34 (downtrend), and volume > 1.8x average.
 # Exits when price returns to opposite S3/R3 level.
 # Uses daily trend filter to trade only in direction of higher timeframe trend, reducing whipsaw in sideways markets.
 # Target: 4h timeframe with daily HTF for trend and levels, designed for low trade frequency (~20-50/year) to minimize fee drag.
 
-name = "4H_Camarilla_R3S3_1DTrend_Volume_Signal"
+name = "4H_Camarilla_R3S3_1DTrend_Volume_Signal_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -30,7 +31,7 @@ def generate_signals(prices):
     if len(df_1d) == 0:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous daily period's OHLC
+    # Calculate Camarilla R3 and S3 levels from previous daily period's OHLC
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -48,7 +49,7 @@ def generate_signals(prices):
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume spike detection: 1.5x average volume (20-period for stability)
+    # Volume spike detection: 1.8x average volume (20-period for stability)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -66,16 +67,16 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above daily R3, price above daily EMA34 (uptrend), volume spike (>1.5x)
+            # Long: price breaks above daily R3, price above daily EMA34 (uptrend), volume spike (>1.8x)
             if (close[i] > r3_1d_aligned[i] and 
                 close[i] > ema34_1d_aligned[i] and 
-                volume[i] > 1.5 * vol_ma[i]):
+                volume[i] > 1.8 * vol_ma[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below daily S3, price below daily EMA34 (downtrend), volume spike (>1.5x)
+            # Short: price breaks below daily S3, price below daily EMA34 (downtrend), volume spike (>1.8x)
             elif (close[i] < s3_1d_aligned[i] and 
                   close[i] < ema34_1d_aligned[i] and 
-                  volume[i] > 1.5 * vol_ma[i]):
+                  volume[i] > 1.8 * vol_ma[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
