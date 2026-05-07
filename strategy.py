@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Pivot_Reversal_Volume_Trend"
-timeframe = "4h"
+name = "1d_4H_Trend_Align_Breakout"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,40 +17,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily pivot points (previous day)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Load 4h data ONCE for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    # Calculate daily pivots: P = (H+L+C)/3, S1 = 2P - H, R1 = 2P - L
-    prev_high = df_1d['high'].shift(1).values  # Previous day high
-    prev_low = df_1d['low'].shift(1).values    # Previous day low
-    prev_close = df_1d['close'].shift(1).values # Previous day close
+    # Daily Donchian channels (20-period)
+    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    r1 = 2 * pivot - prev_high
-    s1 = 2 * pivot - prev_low
+    # 4h EMA for trend filter
+    ema_34_4h = pd.Series(df_4h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
     
-    # Align pivots to 4h timeframe (wait for daily close)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Daily EMA trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # 4h volume spike detection
+    # Daily volume spike detection
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 50)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(high_max_20[i]) or np.isnan(low_min_20[i]) or 
+            np.isnan(ema_34_4h_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -59,24 +49,26 @@ def generate_signals(prices):
         vol_condition = volume[i] > vol_ma_20[i] * 1.5
         
         if position == 0:
-            # Long: price crosses above S1 with volume in uptrend
-            if close[i] > s1_aligned[i] and close[i-1] <= s1_aligned[i-1] and vol_condition and ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1]:
+            # Long: break above 20-day high in 4h uptrend with volume
+            if close[i] > high_max_20[i] and ema_34_4h_aligned[i] > ema_34_4h_aligned[i-1] and vol_condition:
                 signals[i] = 0.25
                 position = 1
-            # Short: price crosses below R1 with volume in downtrend
-            elif close[i] < r1_aligned[i] and close[i-1] >= r1_aligned[i-1] and vol_condition and ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1]:
+            # Short: break below 20-day low in 4h downtrend with volume
+            elif close[i] < low_min_20[i] and ema_34_4h_aligned[i] < ema_34_4h_aligned[i-1] and vol_condition:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price crosses below pivot or trend fails
-            if close[i] < pivot_aligned[i] or ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1]:
+            # Exit: close back below 20-day average or trend reversal
+            mid_point = (high_max_20[i] + low_min_20[i]) / 2
+            if close[i] < mid_point or ema_34_4h_aligned[i] < ema_34_4h_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price crosses above pivot or trend fails
-            if close[i] > pivot_aligned[i] or ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1]:
+            # Exit: close back above 20-day average or trend reversal
+            mid_point = (high_max_20[i] + low_min_20[i]) / 2
+            if close[i] > mid_point or ema_34_4h_aligned[i] > ema_34_4h_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -84,15 +76,14 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 4h Pivot reversals with daily trend filter and volume confirmation
-# - Uses previous day's pivot points (S1, R1, P) as support/resistance levels
-# - Long when price breaks above S1 with volume in daily uptrend
-# - Short when price breaks below R1 with volume in daily downtrend
-# - Daily EMA50 trend filter ensures alignment with higher timeframe trend
+# Hypothesis: Daily Donchian breakouts aligned with 4h EMA trend and volume confirmation
+# - Uses 20-day Donchian channels for breakout detection
+# - 4h EMA(34) trend filter ensures trades align with intermediate trend
 # - Volume confirmation (1.5x average) reduces false breakouts
-# - Exits when price returns to pivot level or trend fails
-# - Position size 0.25 targets ~25-50 trades/year to avoid fee drag
-# - Pivot levels provide institutional reference points that work in both bull/bear
-# - Works on BTC/ETH as they respect key daily levels during trends and reversals
-# - Avoids overtrading by requiring volume confirmation and trend alignment
-# - Pivot reversals capture institutional order flow around key daily levels
+# - Exits when price returns to midpoint of channel or trend reverses
+# - Works in both bull (breakouts in uptrend) and bear (breakdowns in downtrend)
+# - Position size 0.25 targets ~40-80 trades/year to avoid fee drag
+# - Simple, robust logic with clear entry/exit conditions
+# - Aims for 50-100 total trades over 4 years (12-25/year) to stay within limits
+# - Focus on BTC/ETH as primary targets; avoids over-optimization on SOL
+# - Weekly timeframe not needed as 4h provides sufficient trend context for daily signals
