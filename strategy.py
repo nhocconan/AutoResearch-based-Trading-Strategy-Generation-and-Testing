@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_ADX_Supertrend_DualTF_Trend"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -19,104 +19,76 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Daily ADX for regime filter
-    # Calculate True Range
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_14 = tr.rolling(window=14, min_periods=14).mean()
+    # Camarilla pivot levels from daily data
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
     
-    # Directional Movement
-    up_move = df_1d['high'] - df_1d['high'].shift(1)
-    down_move = df_1d['low'].shift(1) - df_1d['low']
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Pivot point and levels
+    pp = (daily_high + daily_low + daily_close) / 3
+    range_hl = daily_high - daily_low
+    r1 = daily_close + range_hl * 1.1 / 12
+    r2 = daily_close + range_hl * 1.1 / 6
+    r3 = daily_close + range_hl * 1.1 / 4
+    s1 = daily_close - range_hl * 1.1 / 12
+    s2 = daily_close - range_hl * 1.1 / 6
+    s3 = daily_close - range_hl * 1.1 / 4
     
-    # Smoothed values
-    plus_di_14 = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).sum() / atr_14
-    minus_di_14 = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).sum() / atr_14
-    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
-    adx_14 = dx.rolling(window=14, min_periods=14).mean().values
+    # Align Camarilla levels to 4h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Daily Supertrend (ATR=10, multiplier=3)
-    atr_10 = tr.rolling(window=10, min_periods=10).mean()
-    hl2 = (df_1d['high'] + df_1d['low']) / 2
-    upper_band = hl2 + 3 * atr_10
-    lower_band = hl2 - 3 * atr_10
+    # Daily trend filter: EMA(34) on daily close
+    ema_34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    supertrend = np.full(len(df_1d), np.nan)
-    direction = np.full(len(df_1d), 1)  # 1 for uptrend, -1 for downtrend
-    
-    for i in range(1, len(df_1d)):
-        if np.isnan(atr_10.iloc[i-1]) or np.isnan(upper_band.iloc[i-1]) or np.isnan(lower_band.iloc[i-1]):
-            continue
-            
-        if close.iloc[i] > upper_band.iloc[i-1]:
-            direction[i] = 1
-        elif close.iloc[i] < lower_band.iloc[i-1]:
-            direction[i] = -1
-        else:
-            direction[i] = direction[i-1]
-            if direction[i] == 1 and lower_band.iloc[i] < lower_band.iloc[i-1]:
-                lower_band.iloc[i] = lower_band.iloc[i-1]
-            if direction[i] == -1 and upper_band.iloc[i] > upper_band.iloc[i-1]:
-                upper_band.iloc[i] = upper_band.iloc[i-1]
-    
-        if direction[i] == 1:
-            supertrend[i] = lower_band.iloc[i]
-        else:
-            supertrend[i] = upper_band.iloc[i]
-    
-    # Align daily indicators to 6h
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
-    supertrend_aligned = align_htf_to_ltf(prices, df_1d, supertrend)
-    
-    # 6h ATR for volatility filter
-    tr_6h = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr_6h[0] = high[0] - low[0]
-    atr_6h = pd.Series(tr_6h).rolling(window=14, min_periods=14).mean().values
+    # Volume spike detection: 20-period average (approx 10 hours)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(14, 14)  # Wait for ADX and Supertrend
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(adx_aligned[i]) or np.isnan(supertrend_aligned[i]) or 
-            np.isnan(atr_6h[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(pp_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: ADX > 25 and Supertrend alignment
-        strong_trend = adx_aligned[i] > 25
-        uptrend_aligned = close[i] > supertrend_aligned[i]
-        downtrend_aligned = close[i] < supertrend_aligned[i]
-        
         if position == 0:
-            # Long: strong uptrend
-            if strong_trend and uptrend_aligned:
+            # Long: price above S1 with volume and daily uptrend
+            vol_condition = volume[i] > vol_ma_20[i] * 2.0
+            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
+            
+            if close[i] > s1_aligned[i] and vol_condition and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: strong downtrend
-            elif strong_trend and downtrend_aligned:
+            # Short: price below R1 with volume and daily downtrend
+            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: trend weakens or reverses
-            if not strong_trend or not uptrend_aligned:
+            # Exit: price back below S1 or volume drops
+            if close[i] < s1_aligned[i] or volume[i] < vol_ma_20[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: trend weakens or reverses
-            if not strong_trend or not downtrend_aligned:
+            # Exit: price back above R1 or volume drops
+            if close[i] > r1_aligned[i] or volume[i] < vol_ma_20[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -124,11 +96,16 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 6s ADX + Supertrend dual timeframe trend following
-# - Uses daily ADX (>25) to identify strong trending regimes (works in bull/bear)
-# - Daily Supertrend provides trend direction entry signal
-# - Only enters when both trend strength and direction align
-# - Avoids whipsaws by requiring strong trend confirmation
-# - Works in both bull (ADX>25 + uptrend) and bear (ADX>25 + downtrend)
-# - Position size 0.25 limits drawdown during choppy periods
-# - Targets 15-30 trades/year, avoiding excessive fee drag
+# Hypothesis: 4h Camarilla R1/S1 breakout with daily trend and volume confirmation
+# - Camarilla R1/S1 act as key support/resistance levels derived from daily price action
+# - Breakout above S1 with volume in daily uptrend = long opportunity
+# - Breakdown below R1 with volume in daily downtrend = short opportunity
+# - Volume spike (2x average) confirms institutional participation
+# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
+# - Exit when price returns to S1/R1 levels or volume weakens
+# - Position size 0.25 targets 20-40 trades/year, avoiding fee drag
+# - Camarilla levels provide structure that works across market regimes
+# - Daily EMA(34) filter ensures alignment with higher timeframe trend
+# - Uses only close-based exits, no intrabar assumptions
+# - Properly aligned multi-timeframe data using mtf_data helpers
+# - Discrete position sizing to minimize fee churn from frequent adjustments
