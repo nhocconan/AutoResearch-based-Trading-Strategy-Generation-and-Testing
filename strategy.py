@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume"
-timeframe = "4h"
+name = "1d_KAMA_Adaptive_Trend_With_RSI_and_Chop"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,49 +17,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d EMA34 trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    # Weekly trend filter (1w EMA200)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    trend_up = close > ema_34_1d_aligned
-    trend_down = close < ema_34_1d_aligned
+    close_1w = df_1w['close'].values
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    trend_up = close > ema_200_1w_aligned
+    trend_down = close < ema_200_1w_aligned
     
-    # Daily OHLC for Camarilla calculation
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    # KAMA on daily close
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close, n=10))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)
+    # Avoid division by zero
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # KAMA calculation
+    kama = np.full(n, np.nan)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    camarilla_r1 = daily_close + (daily_high - daily_low) * 1.1 / 12
-    camarilla_s1 = daily_close - (daily_high - daily_low) * 1.1 / 12
+    # RSI(14) on daily close
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
+    for i in range(14, n):
+        if i == 14:
+            avg_gain[i] = np.mean(gain[1:15])
+            avg_loss[i] = np.mean(loss[1:15])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Align Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # Volume filter: current volume > 2.0x 24-period average (4h bars = 4 days)
-    vol_ma_24 = np.full(n, np.nan)
-    for i in range(24, n):
-        vol_ma_24[i] = np.mean(volume[i-24:i])
-    vol_filter = volume > (2.0 * vol_ma_24)
+    # Choppiness Index (14) on daily high/low/close
+    atr14 = np.full(n, np.nan)
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    for i in range(1, n):
+        tr[i] = np.maximum(high[i] - low[i], np.maximum(np.abs(high[i] - close[i-1]), np.abs(low[i] - close[i-1])))
+    for i in range(14, n):
+        atr14[i] = np.sum(tr[i-13:i+1]) / 14
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    for i in range(14, n):
+        highest_high[i] = np.max(high[i-13:i+1])
+        lowest_low[i] = np.min(low[i-13:i+1])
+    chop = np.full(n, np.nan)
+    for i in range(14, n):
+        if atr14[i] > 0:
+            chop[i] = 100 * np.log10(highest_high[i] - lowest_low[i]) / np.log10(14) / atr14[i]
+        else:
+            chop[i] = 50
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 6  # ~1 day (6*4h) to prevent overtrading
+    cooldown_bars = 3  # 3 days to prevent overtrading
     
-    start_idx = 24  # Volume MA needs 24 bars
+    start_idx = 100  # Ensure all indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(vol_ma_24[i])):
+        if (np.isnan(kama[i]) or 
+            np.isnan(rsi[i]) or 
+            np.isnan(chop[i]) or 
+            np.isnan(ema_200_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,31 +105,37 @@ def generate_signals(prices):
         trending_down = trend_down[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: Price breaks above Camarilla R1 with volume in 1d uptrend
-            if (close[i] > r1_aligned[i] and 
-                trending_up and 
-                vol_filter[i]):
+            # Long: KAMA up + RSI > 50 + Chop < 61.8 (trending) + weekly uptrend
+            if (kama[i] > kama[i-1] and 
+                rsi[i] > 50 and 
+                chop[i] < 61.8 and 
+                trending_up):
                 signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: Price breaks below Camarilla S1 with volume in 1d downtrend
-            elif (close[i] < s1_aligned[i] and 
-                  trending_down and 
-                  vol_filter[i]):
+            # Short: KAMA down + RSI < 50 + Chop < 61.8 (trending) + weekly downtrend
+            elif (kama[i] < kama[i-1] and 
+                  rsi[i] < 50 and 
+                  chop[i] < 61.8 and 
+                  trending_down):
                 signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit: Price falls back below Camarilla S1 or 1d trend changes to down
-            if close[i] < s1_aligned[i] or not trending_up:
+            # Exit: KAMA reverses down or chop > 61.8 (choppy) or weekly trend changes
+            if (kama[i] < kama[i-1] or 
+                chop[i] > 61.8 or 
+                not trending_up):
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price rises back above Camarilla R1 or 1d trend changes to up
-            if close[i] > r1_aligned[i] or not trending_down:
+            # Exit: KAMA reverses up or chop > 61.8 (choppy) or weekly trend changes
+            if (kama[i] > kama[i-1] or 
+                chop[i] > 61.8 or 
+                not trending_down):
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
@@ -108,4 +144,4 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: On 4h timeframe, price breaking above/below Camarilla R1/S1 levels with volume confirmation and 1d EMA34 trend filter captures institutional breakout momentum. Camarilla levels provide mathematically derived support/resistance with institutional relevance. The 1d EMA34 trend filter ensures alignment with higher timeframe momentum. Works in bull markets (breakouts above R1 in 1d uptrend) and bear markets (breakdowns below S1 in 1d downtrend). Target: 75-200 trades over 4 years (19-50/year) to minimize fee drag while capturing significant moves. Volume filter adds confirmation of institutional participation. Cooldown period prevents overtrading.
+# Hypothesis: On daily timeframe, KAMA adapts to market efficiency to identify trend direction, filtered by RSI for momentum strength and Chop < 61.8 to ensure trending (not choppy) conditions. Weekly EMA200 provides higher timeframe trend alignment. This combination captures sustained trends in both bull and bear markets while avoiding false signals in sideways chop. Entry requires KAMA direction + RSI >/< 50 + Chop < 61.8 + weekly trend alignment. Exit on KAMA reversal, chop > 61.8, or weekly trend change. Position size 0.25 balances capture and risk. Target: 20-60 trades over 4 years (5-15/year) to minimize fee drag while capturing significant moves. Works in bull markets (KAMA up in uptrend) and bear markets (KAMA down in downtrend).
