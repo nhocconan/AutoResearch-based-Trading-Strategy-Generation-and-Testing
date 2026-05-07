@@ -1,10 +1,11 @@
-# 4h_Camarilla_R3_S3_Breakout_1dTrend_Volume_2point5
+#!/usr/bin/env python3
+# 12h_Camarilla_R3_S3_Breakout_1dTrend_Volume_2point5
 # Hypothesis: Price breaks above R3 or below S3 daily Camarilla levels with 1-day trend confirmation (EMA34) and volume spike >2.5x average.
 # Uses higher volume threshold to reduce trade frequency and improve edge. Works in both bull/bear markets by aligning with daily trend.
-# Targets 10-20 trades/year to minimize fee drift.
+# Targets 10-20 trades/year to minimize fee drift. 12h timeframe reduces noise and improves signal quality.
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume_2point5"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume_2point5"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -35,7 +36,7 @@ def generate_signals(prices):
     camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 2
     camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 2
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
