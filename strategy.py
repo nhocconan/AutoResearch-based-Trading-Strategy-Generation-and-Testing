@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_1w_KAMA_Direction_RSI_Chop_Filter"
-timeframe = "1d"
+name = "6h_12h_1d_Camarilla_R3S3_Breakout_Trend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,81 +17,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Weekly KAMA direction (14-period)
-    # Efficiency Ratio
-    change = np.abs(np.diff(df_1w['close'], prepend=df_1w['close'][0]))
-    volatility = np.abs(np.diff(df_1w['close'])).cumsum()
-    volatility = np.diff(volatility, prepend=0)
-    er = change / (volatility + 1e-10)
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    kama = np.zeros_like(df_1w['close'])
-    kama[0] = df_1w['close'][0]
-    for i in range(1, len(df_1w)):
-        kama[i] = kama[i-1] + sc[i] * (df_1w['close'][i] - kama[i-1])
-    kama_dir = kama > np.roll(kama, 1)
+    # Calculate daily Camarilla pivot levels from previous day
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Daily RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
     
-    # Daily Choppiness Index(14)
-    atr = np.zeros(n)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=1).mean().values
+    # Camarilla levels (R3 and S3 for breakouts)
+    s3 = prev_close - (range_hl * 1.1000 / 2)  # S3 level
+    r3 = prev_close + (range_hl * 1.1000 / 2)  # R3 level
     
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr.sum(axis=0) / (highest_high - lowest_low)) / np.log10(14) if False else \
-           100 * np.log10(pd.Series(tr).rolling(14).sum() / (highest_high - lowest_low)) / np.log10(14)
-    chop = chop.fillna(50).values  # neutral when undefined
+    # Align daily levels to 6h timeframe
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     
-    # Align weekly KAMA direction to daily
-    kama_dir_aligned = align_htf_to_ltf(prices, df_1w, kama_dir.astype(float))
+    # 12h trend filter: EMA(34) on 12h close
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
+        return np.zeros(n)
+    ema_34_12h = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    
+    # Volume spike detection: 4-period average (1 day of 6h bars)
+    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 14  # Wait for RSI and chop
+    start_idx = max(34, 4)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(kama_dir_aligned[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]):
+        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or np.isnan(vol_ma_4[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: weekly uptrend, RSI > 50, chop < 61.8 (trending)
-            if kama_dir_aligned[i] and rsi[i] > 50 and chop[i] < 61.8:
+            # Long: price above R3 with volume and 12h uptrend (breakout)
+            vol_condition = volume[i] > vol_ma_4[i] * 2.0
+            uptrend = ema_34_12h_aligned[i] > ema_34_12h_aligned[i-1]
+            
+            if close[i] > r3_aligned[i] and vol_condition and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: weekly downtrend, RSI < 50, chop < 61.8 (trending)
-            elif not kama_dir_aligned[i] and rsi[i] < 50 and chop[i] < 61.8:
+            # Short: price below S3 with volume and 12h downtrend (breakdown)
+            elif close[i] < s3_aligned[i] and vol_condition and not uptrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: weekly trend change or RSI < 40 or chop > 61.8 (range)
-            if not kama_dir_aligned[i] or rsi[i] < 40 or chop[i] > 61.8:
+            # Exit: price back below R3 or volume drops
+            if close[i] < r3_aligned[i] or volume[i] < vol_ma_4[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: weekly trend change or RSI > 60 or chop > 61.8 (range)
-            if kama_dir_aligned[i] or rsi[i] > 60 or chop[i] > 61.8:
+            # Exit: price back above S3 or volume drops
+            if close[i] > s3_aligned[i] or volume[i] < vol_ma_4[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -99,12 +90,13 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Daily KAMA direction from weekly trend with RSI and chop filter
-# - Weekly KAMA trend determines primary direction (avoid counter-trend trades)
-# - Daily RSI > 50 for long, < 50 for short ensures momentum alignment
-# - Chop < 61.8 filters for trending markets, avoids whipsaws in ranging
-# - Works in both bull (buy in weekly uptrend) and bear (sell in weekly downtrend)
-# - Exit when trend changes, RSI reverses, or market becomes choppy
-# - Position size 0.25 targets ~15-25 trades/year, avoiding fee drag
-# - Uses actual weekly data via mtf_data to prevent look-ahead
-# - Designed for 1d timeframe to capture multi-day trends with low turnover
+# Hypothesis: 6h Camarilla R3/S3 breakout with 12h trend and volume confirmation
+# - Daily Camarilla R3/S3 act as strong breakout/breakdown levels (wider than R1/S1)
+# - Breakout above R3 with volume in 12h uptrend = long opportunity
+# - Breakdown below S3 with volume in 12h downtrend = short opportunity
+# - Volume spike (2.0x average) confirms institutional participation
+# - Uses 12h EMA(34) for trend filter to avoid whipsaws in choppy markets
+# - Works in both bull (buy R3 breaks in uptrend) and bear (sell S3 breaks in downtrend)
+# - Exit when price returns to R3/S3 or volume weakens
+# - Position size 0.25 targets ~30-60 trades/year, avoiding fee drag
+# - Novelty: Using R3/S3 levels (not commonly tested) with 12h trend filter on 6h timeframe
