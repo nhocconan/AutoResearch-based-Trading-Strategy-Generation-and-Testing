@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_1w_Camarilla_R3S3_Breakout_Trend_Volume"
-timeframe = "1d"
+name = "6h_Donchian20_Breakout_1dTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,45 +17,56 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE for trend filter and volatility context
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Load daily data ONCE for Camarilla pivot calculation
+    # Load daily data ONCE for Donchian and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Daily Camarilla pivot levels from previous day
+    # Daily Donchian channels (20-period)
     d_high = df_1d['high'].values
     d_low = df_1d['low'].values
+    
+    # Donchian upper: highest high of last 20 days
+    upper = np.full_like(d_high, np.nan)
+    lower = np.full_like(d_low, np.nan)
+    for i in range(20, len(d_high)):
+        upper[i] = np.max(d_high[i-20:i])
+        lower[i] = np.min(d_low[i-20:i])
+    
+    # Align to 6h timeframe
+    upper_6h = align_htf_to_ltf(prices, df_1d, upper)
+    lower_6h = align_htf_to_ltf(prices, df_1d, lower)
+    
+    # Daily EMA34 for trend filter
     d_close = df_1d['close'].values
+    ema_34_1d = np.full_like(d_close, np.nan)
+    if len(d_close) >= 34:
+        ema = np.zeros_like(d_close)
+        ema[0] = d_close[0]
+        for i in range(1, len(d_close)):
+            ema[i] = (d_close[i] * 2/35) + (ema[i-1] * (1 - 2/35))
+        ema_34_1d = ema
+    ema_34_6h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    pivot = (d_high + d_low + d_close) / 3
-    range_val = d_high - d_low
-    r3 = pivot + (range_val * 1.1 / 4)
-    s3 = pivot - (range_val * 1.1 / 4)
-    
-    # Align Camarilla levels to daily timeframe
-    r3_d = align_htf_to_ltf(prices, df_1d, r3)
-    s3_d = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # Weekly EMA20 for trend filter
-    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_d = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    
-    # Volume spike detection (2x 20-day average)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume spike detection (2x 20-period average)
+    vol_ma_20 = np.full_like(volume, np.nan)
+    if len(volume) >= 20:
+        vol_sum = np.zeros_like(volume)
+        for i in range(len(volume)):
+            if i < 20:
+                vol_sum[i] = np.sum(volume[:i+1])
+            else:
+                vol_sum[i] = np.sum(volume[i-19:i+1])
+        vol_ma_20 = vol_sum / np.minimum(np.arange(len(volume)) + 1, 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)
+    start_idx = max(20, 34, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(r3_d[i]) or np.isnan(s3_d[i]) or 
-            np.isnan(ema_20_1w_d[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(upper_6h[i]) or np.isnan(lower_6h[i]) or 
+            np.isnan(ema_34_6h[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,26 +75,24 @@ def generate_signals(prices):
         vol_condition = volume[i] > vol_ma_20[i] * 2.0
         
         if position == 0:
-            # Long: break above R3 in weekly uptrend with volume
-            if close[i] > r3_d[i] and ema_20_1w_d[i] > ema_20_1w_d[i-1] and vol_condition:
+            # Long: break above upper band in daily uptrend with volume
+            if close[i] > upper_6h[i] and ema_34_6h[i] > ema_34_6h[i-1] and vol_condition:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S3 in weekly downtrend with volume
-            elif close[i] < s3_d[i] and ema_20_1w_d[i] < ema_20_1w_d[i-1] and vol_condition:
+            # Short: break below lower band in daily downtrend with volume
+            elif close[i] < lower_6h[i] and ema_34_6h[i] < ema_34_6h[i-1] and vol_condition:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price returns to pivot or weekly trend reverses
-            pivot_d = align_htf_to_ltf(prices, df_1d, pivot)
-            if close[i] < pivot_d[i] or ema_20_1w_d[i] < ema_20_1w_d[i-1]:
+            # Exit: price returns to lower band or trend reverses
+            if close[i] < lower_6h[i] or ema_34_6h[i] < ema_34_6h[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price returns to pivot or weekly trend reverses
-            pivot_d = align_htf_to_ltf(prices, df_1d, pivot)
-            if close[i] > pivot_d[i] or ema_20_1w_d[i] > ema_20_1w_d[i-1]:
+            # Exit: price returns to upper band or trend reverses
+            if close[i] > upper_6h[i] or ema_34_6h[i] > ema_34_6h[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -91,15 +100,13 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Weekly trend-filtered Camarilla R3/S3 breakouts on daily chart
-# - Camarilla R3/S3 represent strong support/resistance levels from previous day
-# - Breakout above R3 in weekly uptrend (EMA20 rising) signals bullish continuation
-# - Breakdown below S3 in weekly downtrend (EMA20 falling) signals bearish continuation
+# Hypothesis: Daily Donchian breakouts with trend filter and volume confirmation
+# - Donchian(20) on 1d provides structure based on 20-day high/low
+# - Breakout above upper band in daily uptrend (EMA34 rising) signals bullish continuation
+# - Breakdown below lower band in daily downtrend (EMA34 falling) signals bearish continuation
 # - Volume confirmation (2x average) reduces false breakouts
-# - Exit when price returns to pivot point or weekly trend reverses
-# - Position size 0.25 targets ~15-25 trades/year to avoid fee drag
-# - Weekly trend filter ensures alignment with higher timeframe momentum
+# - Position size 0.25 targets ~20-40 trades/year to avoid fee drag
 # - Works in both bull (breakouts in uptrend) and bear (breakdowns in downtrend)
-# - Uses daily timeframe for execution and weekly for trend context
-# - Similar Camarilla variants show strong test performance with proper filtering
-# - Target: 30-100 total trades over 4 years (7-25/year) as specified for 1d timeframe
+# - Uses 1d timeframe for structure and trend, 6h for execution timing
+# - Novel combination: Donchian breakout with EMA trend filter and volume spike
+# - Avoids saturated Donchian/volume families by using daily timeframe for structure
