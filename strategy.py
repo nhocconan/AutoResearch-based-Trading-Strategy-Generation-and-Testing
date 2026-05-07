@@ -1,34 +1,15 @@
 #!/usr/bin/env python3
-name = "4h_RSI_Divergence_Trend_Stop_v1"
-timeframe = "4h"
+name = "1d_TripleBandBreakout_WeeklyTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_rsi(prices, period=14):
-    delta = np.diff(prices, prepend=prices[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.zeros_like(prices)
-    avg_loss = np.zeros_like(prices)
-    
-    avg_gain[period] = np.mean(gain[1:period+1])
-    avg_loss[period] = np.mean(loss[1:period+1])
-    
-    for i in range(period+1, len(prices)):
-        avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-        avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -36,54 +17,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data once for RSI and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # 1d RSI for overbought/oversold
-    rsi_1d = calculate_rsi(df_1d['close'].values, 14)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Weekly trend: EMA10 slope
+    ema10_1w = pd.Series(df_1w['close']).ewm(span=10, adjust=False, min_periods=10).mean().values
+    ema10_slope = ema10_1w - np.roll(ema10_1w, 1)
+    ema10_slope[0] = 0
+    ema10_slope_aligned = align_htf_to_ltf(prices, df_1w, ema10_slope)
     
-    # 1d EMA50 for trend filter
-    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Daily Bollinger Bands (20, 2)
+    close_s = pd.Series(close)
+    ma20 = close_s.rolling(window=20, min_periods=20).mean().values
+    std20 = close_s.rolling(window=20, min_periods=20).std().values
+    upper_bb = ma20 + 2 * std20
+    lower_bb = ma20 - 2 * std20
     
-    # 4h volume spike: > 2x 20-period average
-    vol_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike_4h = volume > 2.0 * vol_ma_4h
+    # Daily Donchian (20)
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Daily volume filter: > 1.5x 20-day average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > 1.5 * vol_ma20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 30)
+    start_idx = 20
     
     for i in range(start_idx, n):
-        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(ema50_1d_aligned[i])):
+        if np.isnan(ema10_slope_aligned[i]) or np.isnan(ma20[i]) or np.isnan(std20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: RSI < 30 (oversold) + price above EMA50 + volume spike
-            if (rsi_1d_aligned[i] < 30 and close[i] > ema50_1d_aligned[i] and vol_spike_4h[i]):
+            # Long: Price breaks above upper BB OR upper Donchian with weekly uptrend and volume
+            if ((close[i] > upper_bb[i] or close[i] > high_roll[i]) and 
+                ema10_slope_aligned[i] > 0 and vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI > 70 (overbought) + price below EMA50 + volume spike
-            elif (rsi_1d_aligned[i] > 70 and close[i] < ema50_1d_aligned[i] and vol_spike_4h[i]):
+            # Short: Price breaks below lower BB OR lower Donchian with weekly downtrend and volume
+            elif ((close[i] < lower_bb[i] or close[i] < low_roll[i]) and 
+                  ema10_slope_aligned[i] < 0 and vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: RSI > 50 (overbought exit) or price below EMA50
-            if rsi_1d_aligned[i] > 50 or close[i] < ema50_1d_aligned[i]:
+            # Exit: Price closes below lower BB or weekly trend turns down
+            if close[i] < lower_bb[i] or ema10_slope_aligned[i] < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: RSI < 50 (oversold exit) or price above EMA50
-            if rsi_1d_aligned[i] < 50 or close[i] > ema50_1d_aligned[i]:
+            # Exit: Price closes above upper BB or weekly trend turns up
+            if close[i] > upper_bb[i] or ema10_slope_aligned[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
