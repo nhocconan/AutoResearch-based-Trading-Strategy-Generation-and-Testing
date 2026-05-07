@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -62,13 +62,13 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price above 1d EMA50 (uptrend), 12h close above daily R1, volume confirmation
+            # Long: price above 1d EMA50 (uptrend), 4h close above daily R1, volume confirmation
             if (close[i] > ema_50_1d_aligned[i] and 
                 close[i] > r1_aligned[i] and 
                 volume_filter_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below 1d EMA50 (downtrend), 12h close below daily S1, volume confirmation
+            # Short: price below 1d EMA50 (downtrend), 4h close below daily S1, volume confirmation
             elif (close[i] < ema_50_1d_aligned[i] and 
                   close[i] < s1_aligned[i] and 
                   volume_filter_aligned[i]):
