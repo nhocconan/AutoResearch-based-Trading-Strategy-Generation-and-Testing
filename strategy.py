@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Choppiness Index regime filter + 1d Williams %R mean reversion.
-# In high chop (CHOP > 61.8): mean revert at extreme Williams %R (WR < 20 long, WR > 80 short).
-# In low chop (CHOP < 38.2): follow trend (price > SMA50 long, price < SMA50 short).
-# Volume confirmation required for all entries.
-# This adapts to market regimes: mean reversion in ranging markets, trend following in trending markets.
-# Works in both bull and bear by dynamically switching strategies based on market structure.
+# Hypothesis: 12h Donchian(20) breakout with 1w ADX trend filter and 1d volume confirmation.
+# Long when price breaks above Donchian upper(20) AND 1w ADX > 25 (trending) AND 1d volume > 1.5x 20-period average.
+# Short when price breaks below Donchian lower(20) AND 1w ADX > 25 AND 1d volume > 1.5x 20-period average.
+# Exit when price crosses back inside the Donchian channel (middle).
+# This strategy captures strong trends with volume confirmation while avoiding choppy markets.
+# The 1w ADX filter ensures we only trade in trending conditions, reducing false breakouts.
+# Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drag.
 
-name = "6h_ChopWilliams_Regime_Volume"
-timeframe = "6h"
+name = "12h_DonchianBreakout_1wADX_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,80 +25,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Choppiness Index (14-period)
-    chop_length = 14
-    atr1 = np.abs(high - low)
-    tr = np.maximum(np.abs(high - np.roll(low, 1)), np.maximum(np.abs(low - np.roll(close, 1)), atr1))
-    tr[0] = atr1[0]  # first TR is just range
+    # Donchian Channel (20)
+    dc_length = 20
+    upper_dc = pd.Series(high).rolling(window=dc_length, min_periods=dc_length).max().values
+    lower_dc = pd.Series(low).rolling(window=dc_length, min_periods=dc_length).min().values
+    middle_dc = (upper_dc + lower_dc) / 2.0
     
-    # True Range sum over chop_length
-    tr_sum = pd.Series(tr).rolling(window=chop_length, min_periods=chop_length).sum().values
-    # AT-R = (high-low + |high-previous close| + |low-previous close|)/2 approximation
-    # Using actual TR above
-    highest_high = pd.Series(high).rolling(window=chop_length, min_periods=chop_length).max().values
-    lowest_low = pd.Series(low).rolling(window=chop_length, min_periods=chop_length).min().values
-    
-    # Avoid division by zero
-    range_chop = highest_high - lowest_low
-    range_chop = np.where(range_chop == 0, 1e-10, range_chop)
-    
-    chop = 100 * np.log10(tr_sum / range_chop) / np.log10(chop_length)
-    
-    # Williams %R from 1d timeframe
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # 1w ADX for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    highest_high_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    # True Range
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
     
-    # Avoid division by zero
-    range_wr = highest_high_1d - lowest_low_1d
-    range_wr = np.where(range_wr == 0, 1e-10, range_wr)
+    # Directional Movement
+    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w), 
+                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)), 
+                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    wr = -100 * (highest_high_1d - close_1d) / range_wr
-    wr_aligned = align_htf_to_ltf(prices, df_1d, wr)
+    # Smoothed values
+    atr_period = 14
+    tr_ma = pd.Series(tr).ewm(alpha=1/atr_period, adjust=False).mean().values
+    dm_plus_ma = pd.Series(dm_plus).ewm(alpha=1/atr_period, adjust=False).mean().values
+    dm_minus_ma = pd.Series(dm_minus).ewm(alpha=1/atr_period, adjust=False).mean().values
     
-    # 50-period SMA for trend filter
-    sma50 = pd.Series(close).rolling(window=50, min_periods=50).mean().values
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_ma / tr_ma
+    di_minus = 100 * dm_minus_ma / tr_ma
     
-    # Volume filter: current volume > 1.3x 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.3 * vol_ma20)
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    dx = np.where((di_plus + di_minus) == 0, 0, dx)
+    adx = pd.Series(dx).ewm(alpha=1/atr_period, adjust=False).mean().values
+    
+    adx_1w = adx
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    
+    # 1d volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    volume_1d = df_1d['volume'].values
+    vol_ma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(chop_length, 50, 20)  # Sufficient warmup
+    start_idx = max(dc_length, 30)  # Sufficient warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(chop[i]) or np.isnan(wr_aligned[i]) or np.isnan(sma50[i]) or 
-            np.isnan(volume_filter[i])):
+        if (np.isnan(upper_dc[i]) or np.isnan(lower_dc[i]) or np.isnan(middle_dc[i]) or
+            np.isnan(adx_1w_aligned[i]) or np.isnan(vol_ma20_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        chop_val = chop[i]
-        wr_val = wr_aligned[i]
-        
         if position == 0:
-            # Determine regime
-            if chop_val > 61.8:  # High chop - ranging market
-                # Mean reversion at Williams %R extremes
-                long_cond = wr_val < 20 and volume_filter[i]
-                short_cond = wr_val > 80 and volume_filter[i]
-            elif chop_val < 38.2:  # Low chop - trending market
-                # Follow trend with price vs SMA50
-                long_cond = close[i] > sma50[i] and volume_filter[i]
-                short_cond = close[i] < sma50[i] and volume_filter[i]
-            else:  # Neutral chop - no clear regime
-                long_cond = False
-                short_cond = False
+            # Long conditions: price breaks above upper DC, ADX > 25, volume > 1.5x MA
+            long_cond = (close[i] > upper_dc[i]) and (adx_1w_aligned[i] > 25) and (volume[i] > 1.5 * vol_ma20_1d_aligned[i])
+            # Short conditions: price breaks below lower DC, ADX > 25, volume > 1.5x MA
+            short_cond = (close[i] < lower_dc[i]) and (adx_1w_aligned[i] > 25) and (volume[i] > 1.5 * vol_ma20_1d_aligned[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -106,44 +108,18 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: opposite condition or chop regime change
-            if chop_val > 61.8:  # In chop, exit on WR normalization
-                if wr_val > 50:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-            elif chop_val < 38.2:  # In trend, exit on trend reversal
-                if close[i] < sma50[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-            else:  # Neutral - exit on opposite signal
-                if wr_val > 50:  # Exit long condition
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+            # Long exit: price crosses back inside Donchian channel (below middle)
+            if close[i] < middle_dc[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: opposite condition or chop regime change
-            if chop_val > 61.8:  # In chop, exit on WR normalization
-                if wr_val < 50:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
-            elif chop_val < 38.2:  # In trend, exit on trend reversal
-                if close[i] > sma50[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
-            else:  # Neutral - exit on opposite signal
-                if wr_val < 50:  # Exit short condition
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            # Short exit: price crosses back inside Donchian channel (above middle)
+            if close[i] > middle_dc[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
