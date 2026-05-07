@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-# 4h_ThreeBarReversal_VolumeFilter_Trend
-# Hypothesis: Three-bar reversal patterns (bullish/bearish) at key levels with volume confirmation and daily trend filter work in both bull and bear markets by capturing institutional buying/selling pressure.
-# Timeframe: 4h, uses 1d trend filter for multi-timeframe alignment.
-# Low trade frequency (~20-30/year) via strict three-bar pattern + volume + trend confluence.
-# Long: Bullish reversal (higher low, higher close) above EMA20 with volume > 1.5x average and daily uptrend.
-# Short: Bearish reversal (lower high, lower close) below EMA20 with volume > 1.5x average and daily downtrend.
-# Exit: Opposite reversal signal or trend failure.
-# Uses volume filter to reduce false signals and trend filter for higher timeframe alignment.
+# 12h_Camarilla_R3S3_Breakout_1dTrend_Volume
+# Hypothesis: Camarilla pivot breakouts on 12h with daily trend filter and volume confirmation capture institutional moves in both bull and bear markets.
+# Timeframe: 12h, uses 1d trend filter for multi-timeframe alignment.
+# Low trade frequency (~15-25/year) via strict R3/S3 breakout + volume + trend confluence.
+# Long: Breakout above R3 with volume > 1.5x average and daily uptrend.
+# Short: Breakdown below S3 with volume > 1.5x average and daily downtrend.
+# Exit: Opposite Camarilla level (S3 for long, R3 for short) or trend failure.
 
-timeframe = "4h"
-name = "4h_ThreeBarReversal_VolumeFilter_Trend"
+timeframe = "12h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
 leverage = 1.0
 
 import numpy as np
@@ -26,24 +25,23 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # EMA20 for dynamic support/resistance
-    close_s = pd.Series(close)
-    ema20 = close_s.ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate Camarilla levels from previous day
+    # Using previous day's high, low, close
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
     
-    # Average volume for spike detection (24-period = 1 day on 4h chart)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
     
-    # Three-bar reversal detection
-    bullish_reversal = np.zeros(n, dtype=bool)
-    bearish_reversal = np.zeros(n, dtype=bool)
+    R3 = pivot + (range_hl * 1.1 / 2)
+    S3 = pivot - (range_hl * 1.1 / 2)
     
-    for i in range(2, n):
-        # Bullish reversal: higher low and higher close than previous bar
-        if low[i] > low[i-1] and close[i] > close[i-1]:
-            bullish_reversal[i] = True
-        # Bearish reversal: lower high and lower close than previous bar
-        if high[i] < high[i-1] and close[i] < close[i-1]:
-            bearish_reversal[i] = True
+    # Average volume for spike detection (2-period = 1 day on 12h chart)
+    vol_ma = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
     
     # Get 1d EMA34 for trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -56,11 +54,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(24, 34)  # Ensure we have volume MA and EMA data
+    start_idx = max(2, 34)  # Ensure we have Camarilla, volume MA and EMA data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(ema20[i]) or np.isnan(ema_34_aligned[i]) or 
+        if (np.isnan(R3[i]) or np.isnan(S3[i]) or 
+            np.isnan(ema_34_aligned[i]) or 
             np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
@@ -68,24 +67,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: bullish reversal above EMA20 with volume spike and daily uptrend
-            if bullish_reversal[i] and close[i] > ema20[i] and volume[i] > 1.5 * vol_ma[i] and close[i] > ema_34_aligned[i]:
+            # Long: breakout above R3 with volume spike and daily uptrend
+            if close[i] > R3[i] and volume[i] > 1.5 * vol_ma[i] and close[i] > ema_34_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish reversal below EMA20 with volume spike and daily downtrend
-            elif bearish_reversal[i] and close[i] < ema20[i] and volume[i] > 1.5 * vol_ma[i] and close[i] < ema_34_aligned[i]:
+            # Short: breakdown below S3 with volume spike and daily downtrend
+            elif close[i] < S3[i] and volume[i] > 1.5 * vol_ma[i] and close[i] < ema_34_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: bearish reversal or trend failure
-            if bearish_reversal[i] or close[i] < ema_34_aligned[i]:
+            # Exit: breakdown below S3 or trend failure
+            if close[i] < S3[i] or close[i] < ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: bullish reversal or trend failure
-            if bullish_reversal[i] or close[i] > ema_34_aligned[i]:
+            # Exit: breakout above R3 or trend failure
+            if close[i] > R3[i] or close[i] > ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
