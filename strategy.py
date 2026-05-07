@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume_v3"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -18,9 +18,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot levels and trend filter
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
+    
+    # Calculate 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # Get 1d data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     # Calculate Camarilla levels from previous day
@@ -31,33 +40,29 @@ def generate_signals(prices):
     camarilla_R3 = prev_high + 1.1 * (prev_high - prev_low)
     camarilla_S3 = prev_low - 1.1 * (prev_high - prev_low)
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     R3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S3)
     
-    # Daily EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume filter: current volume > 2.0x 24-period average (12h)
-    vol_ma_24 = np.full(n, np.nan)
-    for i in range(24, n):
-        vol_ma_24[i] = np.mean(volume[i-24:i])
-    vol_filter = volume > (2.0 * vol_ma_24)
+    # Volume filter: current volume > 1.5x 20-period average (4h)
+    vol_ma_20 = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma_20[i] = np.mean(volume[i-20:i])
+    vol_filter = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 8  # ~4 days for 12h
+    cooldown_bars = 6  # ~1 day for 4h
     
-    start_idx = max(40, 45)  # Warmup for daily data
+    start_idx = max(40, 50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(R3_aligned[i]) or 
             np.isnan(S3_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(vol_ma_24[i])):
+            np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,31 +73,31 @@ def generate_signals(prices):
         
         bars_since_last_trade += 1
         
-        # Determine daily trend direction
-        close_1d_aligned = align_htf_to_ltf(prices, df_1d, df_1d['close'].values)
-        trend_1d_up = close_1d_aligned[i] > ema_34_1d_aligned[i]
-        trend_1d_down = close_1d_aligned[i] < ema_34_1d_aligned[i]
+        # Determine 12h trend direction
+        close_12h_aligned = align_htf_to_ltf(prices, df_12h, df_12h['close'].values)
+        trend_12h_up = close_12h_aligned[i] > ema_50_12h_aligned[i]
+        trend_12h_down = close_12h_aligned[i] < ema_50_12h_aligned[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: Break above R3 with volume in daily uptrend
+            # Long: Break above R3 with volume in 12h uptrend
             if (close[i] > R3_aligned[i] and 
                 close[i-1] <= R3_aligned[i-1] and 
-                trend_1d_up and 
+                trend_12h_up and 
                 vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: Break below S3 with volume in daily downtrend
+            # Short: Break below S3 with volume in 12h downtrend
             elif (close[i] < S3_aligned[i] and 
                   close[i-1] >= S3_aligned[i-1] and 
-                  trend_1d_down and 
+                  trend_12h_down and 
                   vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
             # Exit: Close below S3 OR trend change
-            if (close[i] < S3_aligned[i]) or not trend_1d_up:
+            if (close[i] < S3_aligned[i]) or not trend_12h_up:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
@@ -100,7 +105,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         elif position == -1:
             # Exit: Close above R3 OR trend change
-            if (close[i] > R3_aligned[i]) or not trend_1d_down:
+            if (close[i] > R3_aligned[i]) or not trend_12h_down:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
@@ -109,11 +114,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R3/S3 breakout with daily trend filter and volume confirmation on 12h timeframe.
-# Long when price breaks above R3 level with volume spike in daily uptrend.
-# Short when price breaks below S3 level with volume spike in daily downtrend.
+# Hypothesis: Camarilla R3/S3 breakout with 12h trend filter and volume confirmation on 4h timeframe.
+# Long when price breaks above R3 level with volume spike in 12h uptrend.
+# Short when price breaks below S3 level with volume spike in 12h downtrend.
 # Exits on reversal to S3/R3 levels or trend change.
-# Uses daily Camarilla levels for intraday support/resistance and EMA34 for trend.
-# Volume confirmation filters false breakouts. Increased cooldown prevents overtrading.
-# Target: 20-40 trades/year to avoid fee drift. Works in bull/bear by capturing
-# significant intraday moves with trend alignment. Daily timeframe reduces noise.
+# Uses 1d Camarilla levels for intraday support/resistance and 12h EMA50 for trend.
+# Volume confirmation filters false breakouts. Cooldown prevents overtrading.
+# Target: 20-40 trades/year to avoid fee drag. Works in bull/bear by capturing
+# significant intraday moves with trend alignment. 4h timeframe reduces noise vs 12h.
