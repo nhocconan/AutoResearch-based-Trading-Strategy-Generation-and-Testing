@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
-# 4H_KAMA_TRIX_Confluence_v1
-# Hypothesis: Combines KAMA trend direction with TRIX momentum and volume confirmation on 4h timeframe.
-# KAMA adapts to market noise, reducing false signals in ranging markets. TRIX captures momentum shifts.
-# Volume spike confirms institutional participation. Designed for low trade frequency (<30/year) to avoid fee drag.
-# Works in bull markets via KAMA uptrend + TRIX cross-up, and in bear markets via KAMA downtrend + TRIX cross-down.
-# Uses 1d timeframe for trend context to avoid whipsaws.
+# 1D_VWAP_RollingBreakout_WeeklyTrend_VolumeConfirm
+# Hypothesis: Breakout above/below rolling VWAP (50-period) on 1d timeframe, filtered by weekly trend (EMA 50) and volume spike (current volume > 1.8x 20-day average). Uses 1d as primary timeframe and 1w for trend filter. VWAP acts as dynamic support/resistance; breakouts with volume confirmation capture institutional moves. Weekly EMA filter ensures trades align with higher-timeframe trend, reducing whipsaws. Works in bull/bear by following weekly trend. Designed for low trade frequency (10-20/year) to minimize fee drag.
 
-name = "4H_KAMA_TRIX_Confluence_v1"
-timeframe = "4h"
+name = "1D_VWAP_RollingBreakout_WeeklyTrend_VolumeConfirm"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -24,55 +20,33 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend context
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # KAMA parameters
-    fast_ema = 2
-    slow_ema = 30
-    # Calculate ER (Efficiency Ratio) and SSC (Smoothing Constant)
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.abs(np.diff(close, prepend=close[0]))
-    for i in range(1, len(volatility)):
-        volatility[i] = volatility[i-1] + np.abs(close[i] - close[i-1])
-    volatility = pd.Series(volatility).rolling(window=10, min_periods=1).sum().values
-    er = np.where(volatility > 0, change / volatility, 0)
-    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
-    # Calculate KAMA
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Calculate weekly EMA 50 for trend filter
+    ema50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # TRIX on 1d close
-    close_1d = df_1d['close'].values
-    # Triple EMA
-    ema1 = pd.Series(close_1d).ewm(span=12, adjust=False, min_periods=12).mean()
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean()
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean()
-    # TRIX = 100 * (ema3 - ema3_prev) / ema3_prev
-    ema3_values = ema3.values
-    trix = np.zeros_like(ema3_values)
-    trix[1:] = 100 * (ema3_values[1:] - ema3_values[:-1]) / ema3_values[:-1]
-    trix = np.where(np.isnan(trix), 0, trix)
+    # Calculate rolling VWAP (50-period) on 1d
+    typical_price = (high + low + close) / 3.0
+    pv = typical_price * volume
+    cum_pv = pd.Series(pv).rolling(window=50, min_periods=50).sum().values
+    cum_vol = pd.Series(volume).rolling(window=50, min_periods=50).sum().values
+    vwap = np.divide(cum_pv, cum_vol, out=np.zeros_like(cum_pv), where=cum_vol!=0)
     
-    # Align KAMA and TRIX to 4h
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
-    
-    # Volume spike: current volume > 1.5x average volume (20-period)
+    # Volume spike: current volume > 1.8x average volume (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure we have volume MA data
+    start_idx = 50  # Ensure we have VWAP and volume MA data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(kama_aligned[i]) or np.isnan(trix_aligned[i]) or 
+        if (np.isnan(vwap[i]) or np.isnan(ema50_1w_aligned[i]) or 
             np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
@@ -80,31 +54,31 @@ def generate_signals(prices):
             continue
         
         # Volume filter: spike confirmation
-        volume_filter = volume[i] > 1.5 * vol_ma[i]
+        volume_filter = volume[i] > 1.8 * vol_ma[i]
         
         if position == 0:
-            # Long: price above KAMA + TRIX turning up + volume spike
-            if (close[i] > kama_aligned[i] and 
-                trix_aligned[i] > trix_aligned[i-1] and
+            # Long: price breaks above VWAP + up-trend (close > weekly EMA50) + volume spike
+            if (close[i] > vwap[i] and 
+                close[i] > ema50_1w_aligned[i] and
                 volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA + TRIX turning down + volume spike
-            elif (close[i] < kama_aligned[i] and 
-                  trix_aligned[i] < trix_aligned[i-1] and
+            # Short: price breaks below VWAP + down-trend (close < weekly EMA50) + volume spike
+            elif (close[i] < vwap[i] and 
+                  close[i] < ema50_1w_aligned[i] and
                   volume_filter):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price crosses below KAMA or TRIX turns down
-            if close[i] < kama_aligned[i] or trix_aligned[i] < trix_aligned[i-1]:
+            # Exit: price returns below VWAP or weekly EMA50 (mean reversion)
+            if close[i] < vwap[i] or close[i] < ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price crosses above KAMA or TRIX turns up
-            if close[i] > kama_aligned[i] or trix_aligned[i] > trix_aligned[i-1]:
+            # Exit: price returns above VWAP or weekly EMA50 (mean reversion)
+            if close[i] > vwap[i] or close[i] > ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
