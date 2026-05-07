@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1S1_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "1d_Weekly_Channel_Breakout_With_Volume_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,77 +17,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # 12h EMA50 for trend filter
-    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Weekly Donchian channels (20-week period)
+    high_1w = pd.Series(df_1w['high']).rolling(window=20, min_periods=20).max().values
+    low_1w = pd.Series(df_1w['low']).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 12h volume spike: > 1.8x 24-period average (12 days)
-    vol_12h = df_12h['volume'].values
-    vol_ma_12h = pd.Series(vol_12h).rolling(window=24, min_periods=24).mean().values
-    vol_spike_12h = vol_12h > 1.8 * vol_ma_12h
-    vol_spike_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_spike_12h.astype(float))
+    # Align to daily - weekly signals available after weekly bar close
+    high_1w_aligned = align_htf_to_ltf(prices, df_1w, high_1w)
+    low_1w_aligned = align_htf_to_ltf(prices, df_1w, low_1w)
     
-    # Calculate Camarilla levels from previous 1d (using close only)
-    # For 4h timeframe, we need daily data for Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    # Previous day's OHLC for Camarilla calculation
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    
-    # Calculate Camarilla R1 and S1 levels
-    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
-    
-    # Align Camarilla levels to 4h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Daily volume filter: volume > 1.5x 20-day average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > 1.5 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 24)  # Wait for EMA50 and volume MA
+    start_idx = 20  # Wait for Donchian channels
     
     for i in range(start_idx, n):
-        if np.isnan(ema50_12h_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]):
+        if np.isnan(high_1w_aligned[i]) or np.isnan(low_1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above Camarilla R1 with 12h uptrend and volume spike
-            if (close[i] > camarilla_r1_aligned[i] and 
-                ema50_12h_aligned[i] > ema50_12h_aligned[max(i-1, start_idx)] and 
-                vol_spike_12h_aligned[i]):
+            # Long: Break above weekly high with volume confirmation
+            if close[i] > high_1w_aligned[i] and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Camarilla S1 with 12h downtrend and volume spike
-            elif (close[i] < camarilla_s1_aligned[i] and 
-                  ema50_12h_aligned[i] < ema50_12h_aligned[max(i-1, start_idx)] and 
-                  vol_spike_12h_aligned[i]):
+            # Short: Break below weekly low with volume confirmation
+            elif close[i] < low_1w_aligned[i] and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Price breaks below Camarilla S1 or trend reverses
-            if (close[i] < camarilla_s1_aligned[i] or 
-                ema50_12h_aligned[i] < ema50_12h_aligned[max(i-1, start_idx)]):
+            # Exit: Price breaks below weekly low
+            if close[i] < low_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price breaks above Camarilla R1 or trend reverses
-            if (close[i] > camarilla_r1_aligned[i] or 
-                ema50_12h_aligned[i] > ema50_12h_aligned[max(i-1, start_idx)]):
+            # Exit: Price breaks above weekly high
+            if close[i] > high_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -95,11 +72,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 4h Camarilla R1/S1 breakout with 12h EMA50 trend filter and 12h volume spike confirmation.
-# Long when price breaks above Camarilla R1 level, 12h EMA50 is rising, and 12h volume spike occurs.
-# Short when price breaks below Camarilla S1 level, 12h EMA50 is falling, and 12h volume spike occurs.
-# Uses 12h timeframe for trend/volume confirmation to avoid whipsaws, 4h for entry timing.
-# Camarilla levels provide precise intraday support/resistance based on previous day's range.
-# Volume spike (>1.8x average) ensures institutional participation. Discrete 0.25 position size limits risk.
-# Works in bull markets (breakouts with volume) and bear markets (breakdowns with volume).
-# Target: 20-50 trades/year to minimize fee drag while capturing meaningful moves.
+# Hypothesis: Weekly Donchian breakout with volume confirmation on daily timeframe.
+# Long when price breaks above 20-week high with above-average volume.
+# Short when price breaks below 20-week low with above-average volume.
+# Uses weekly timeframe for structure to avoid whipsaws, daily for execution.
+# Volume filter ensures breakout conviction. Position size 0.25 limits risk.
+# Works in trending markets (breakouts) and avoids choppy periods.
+# Target: 10-25 trades/year to minimize fee decay while capturing major moves.
