@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-name = "1d_Williams_Alligator_ElderRay_Trend"
-timeframe = "1d"
+name = "6h_Contrarian_RSI_With_Volume_Regime"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_htf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -17,58 +17,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 1w Williams Alligator: Jaw (13), Teeth (8), Lips (5)
-    jaw = pd.Series(df_1w['close']).rolling(window=13, min_periods=13).mean().values
-    teeth = pd.Series(df_1w['close']).rolling(window=8, min_periods=8).mean().values
-    lips = pd.Series(df_1w['close']).rolling(window=5, min_periods=5).mean().values
-    jaw_aligned = align_ltf_to_htf(prices, df_1w, jaw)
-    teeth_aligned = align_ltf_to_htf(prices, df_1w, teeth)
-    lips_aligned = align_ltf_to_htf(prices, df_1w, lips)
+    # 1d RSI with proper calculation
+    delta = pd.Series(df_1d['close']).diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=14).mean()
+    rs = gain / loss
+    rs = rs.replace(0, 1e-10)
+    rsi1d = 100 - (100 / (1 + rs))
+    rsi1d = rsi1d.fillna(50).values
     
-    # 1w Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema13 = pd.Series(df_1w['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = df_1w['high'].values - ema13
-    bear_power = df_1w['low'].values - ema13
-    bull_power_aligned = align_ltf_to_htf(prices, df_1w, bull_power)
-    bear_power_aligned = align_ltf_to_htf(prices, df_1w, bear_power)
+    # 1d Close for trend context
+    close1d = df_1d['close'].values
+    
+    # Align 1d data to 6h
+    rsi1d_aligned = align_htf_to_ltf(prices, df_1d, rsi1d)
+    close1d_aligned = align_htf_to_ltf(prices, df_1d, close1d)
+    
+    # 6h RSI for overbought/oversold
+    delta6 = pd.Series(close).diff()
+    gain6 = (delta6.where(delta6 > 0, 0)).rolling(window=14, min_periods=14).mean()
+    loss6 = (-delta6.where(delta6 < 0, 0)).rolling(window=14, min_periods=14).mean()
+    rs6 = gain6 / loss6
+    rs6 = rs6.replace(0, 1e-10)
+    rsi6 = 100 - (100 / (1 + rs6))
+    rsi6 = rsi6.fillna(50).values
+    
+    # 6h volume regime: high volume when above 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_regime = volume > vol_ma
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0
     
-    start_idx = 34  # Wait for Alligator
+    start_idx = max(20, 14)
     
     for i in range(start_idx, n):
-        if np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or \
-           np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]):
+        if np.isnan(rsi1d_aligned[i]) or np.isnan(close1d_aligned[i]) or np.isnan(rsi6[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Lips > Teeth > Jaw (bullish alignment) AND Bull Power > 0
-            if lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i] and bull_power_aligned[i] > 0:
+            # Contrarian long: Oversold on 6h RSI, but 1d trend is up (close > previous close)
+            if rsi6[i] < 30 and close1d_aligned[i] > close1d_aligned[i-1] and vol_regime[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Jaws > Teeth > Lips (bearish alignment) AND Bear Power < 0
-            elif jaw_aligned[i] > teeth_aligned[i] > lips_aligned[i] and bear_power_aligned[i] < 0:
+            # Contrarian short: Overbought on 6h RSI, but 1d trend is down
+            elif rsi6[i] > 70 and close1d_aligned[i] < close1d_aligned[i-1] and vol_regime[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Lips < Jaw (Alligator sleeping) OR Bull Power < 0
-            if lips_aligned[i] < jaw_aligned[i] or bull_power_aligned[i] < 0:
+            # Exit: RSI returns to neutral or trend changes
+            if rsi6[i] > 50 or close1d_aligned[i] < close1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Jaws < Lips (Alligator sleeping) OR Bear Power > 0
-            if jaw_aligned[i] < lips_aligned[i] or bear_power_aligned[i] > 0:
+            # Exit: RSI returns to neutral or trend changes
+            if rsi6[i] < 50 or close1d_aligned[i] > close1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -76,11 +89,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Williams Alligator identifies trend presence and direction via SMAs (13,8,5).
-# Elder Ray measures bull/bear power relative to EMA13. Together they filter whipsaws.
-# Long when Alligator is bullish (Lips>Teeth>Jaw) and Bull Power > 0.
-# Short when Alligator is bearish (Jaw>Teeth>Lips) and Bear Power < 0.
-# Weekly timeframe reduces noise, daily execution captures trends.
-# Discrete 0.25 position size limits drawdown in choppy markets.
-# Works in bull markets (trend following) and bear markets (reverse criteria).
-# Target: 15-30 trades/year to minimize fee drag while capturing sustained moves.
+# Hypothesis: Contrarian mean reversion on 6s timeframe with 1d trend filter and volume confirmation.
+# In bull markets: buy 6s oversold (RSI<30) when 1d trend is up, sell when RSI>50 or trend turns down.
+# In bear markets: sell 6s overbought (RSI>70) when 1d trend is down, buy when RSI<50 or trend turns up.
+# Volume regime filter ensures trades occur during active participation, reducing false signals.
+# Uses discrete 0.25 position sizing to limit risk and reduce fee churn.
+# Target: 20-40 trades/year to avoid overtrading while capturing mean reversion opportunities.
