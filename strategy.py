@@ -1,10 +1,14 @@
-# 12h_Camarilla_R1S1_Breakout_1dTrend_Volume
-# Hypothesis: 12h Camarilla pivot level R1/S1 breakout with volume confirmation and 1d trend filter.
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: 4h Camarilla pivot level S2/R2 breakout with volume confirmation and 1d trend filter.
 # Uses Camarilla pivot levels from daily data for precise entry points, confirmed by volume spikes and 1d EMA trend.
 # Designed to work in both bull and bear markets by following the 1d trend direction.
-# Target: 15-30 trades/year per symbol to avoid excessive fee drag on 12h timeframe.
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+# Target: 25-40 trades/year per symbol to avoid excessive fee drag.
+name = "4h_Camarilla_S2R2_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,20 +30,20 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Camarilla pivot levels from previous day (R1/S1)
+    # Camarilla pivot levels from previous day
     high_prev = df_1d['high'].shift(1).values
     low_prev = df_1d['low'].shift(1).values
     close_prev = df_1d['close'].shift(1).values
     pivot = (high_prev + low_prev + close_prev) / 3
     range_ = high_prev - low_prev
-    S1 = close_prev - 1.1 * range_ / 6
-    R1 = close_prev + 1.1 * range_ / 6
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S2 = close_prev - 1.1 * range_ / 4
+    R2 = close_prev + 1.1 * range_ / 4
+    S2_aligned = align_htf_to_ltf(prices, df_1d, S2)
+    R2_aligned = align_htf_to_ltf(prices, df_1d, R2)
     
-    # 12h volume average for spike detection
-    vol_ema_12h = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike = np.where(vol_ema_12h > 0, volume / vol_ema_12h, 1.0) > 1.5
+    # 4h volume average for spike detection
+    vol_ema_4h = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_spike = np.where(vol_ema_4h > 0, volume / vol_ema_4h, 1.0) > 1.8
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -47,8 +51,8 @@ def generate_signals(prices):
     start_idx = 100  # Sufficient warmup for EMA and pivot calculation
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(R1_aligned[i]) or np.isnan(vol_spike[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(S2_aligned[i]) or 
+            np.isnan(R2_aligned[i]) or np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -59,10 +63,10 @@ def generate_signals(prices):
         downtrend = close[i] < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Long breakout: price breaks above R1 with volume spike in uptrend
-            long_condition = (close[i] > R1_aligned[i]) and vol_spike[i] and uptrend
-            # Short breakdown: price breaks below S1 with volume spike in downtrend
-            short_condition = (close[i] < S1_aligned[i]) and vol_spike[i] and downtrend
+            # Long breakout: price breaks above R2 with volume spike in uptrend
+            long_condition = (close[i] > R2_aligned[i]) and vol_spike[i] and uptrend
+            # Short breakdown: price breaks below S2 with volume spike in downtrend
+            short_condition = (close[i] < S2_aligned[i]) and vol_spike[i] and downtrend
             
             if long_condition:
                 signals[i] = 0.25
@@ -71,15 +75,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price re-enters below R1 or trend turns down
-            if (close[i] < R1_aligned[i]) or (not uptrend):
+            # Exit: price re-enters below R2 or trend turns down
+            if (close[i] < R2_aligned[i]) or (not uptrend):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price re-enters above S1 or trend turns up
-            if (close[i] > S1_aligned[i]) or (not downtrend):
+            # Exit: price re-enters above S2 or trend turns up
+            if (close[i] > S2_aligned[i]) or (not downtrend):
                 signals[i] = 0.0
                 position = 0
             else:
