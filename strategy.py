@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Triple_SMA_Cross_Trend"
-timeframe = "4h"
+name = "1d_WeeklyPivot_DailyTrend_VolumeBreak"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,71 +17,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily trend filter: EMA(34) on daily close
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Daily EMA(34) - trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Weekly high/low/close from weekly data
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Daily EMA(89) - stronger trend filter
-    ema_89_1d = pd.Series(df_1d['close']).ewm(span=89, adjust=False, min_periods=89).mean().values
-    ema_89_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_89_1d)
+    # Weekly pivot points
+    pp = (weekly_high + weekly_low + weekly_close) / 3
+    r1 = 2 * pp - weekly_low
+    s1 = 2 * pp - weekly_high
+    r2 = pp + (weekly_high - weekly_low)
+    s2 = pp - (weekly_high - weekly_low)
     
-    # 4h SMA(20) - short-term trend
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    # Align weekly pivot levels to daily timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
     
-    # 4h SMA(50) - medium-term trend
-    sma_50 = pd.Series(close).rolling(window=50, min_periods=50).mean().values
+    # Daily trend filter: EMA(34) on daily close
+    ema_34 = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # 4h SMA(200) - long-term trend
-    sma_200 = pd.Series(close).rolling(window=200, min_periods=200).mean().values
-    
-    # Volume confirmation: 20-period average
+    # Volume spike detection: 20-period average (20 days)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 200)  # Wait for indicators
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(ema_89_1d_aligned[i]) or 
-            np.isnan(sma_20[i]) or np.isnan(sma_50[i]) or np.isnan(sma_200[i]) or
+        if (np.isnan(ema_34[i]) or np.isnan(pp_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend condition: daily EMA(34) > EMA(89) for uptrend, < for downtrend
-        daily_uptrend = ema_34_1d_aligned[i] > ema_89_1d_aligned[i]
-        daily_downtrend = ema_34_1d_aligned[i] < ema_89_1d_aligned[i]
-        
-        # Volume condition: above average
-        vol_condition = volume[i] > vol_ma_20[i]
-        
         if position == 0:
-            # Long: SMA(20) > SMA(50) > SMA(200) with daily uptrend and volume
-            if (sma_20[i] > sma_50[i] > sma_200[i] and daily_uptrend and vol_condition):
+            # Long: price above S1 with volume and daily uptrend
+            vol_condition = volume[i] > vol_ma_20[i] * 2.0
+            uptrend = ema_34[i] > ema_34[i-1]
+            
+            if close[i] > s1_aligned[i] and vol_condition and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: SMA(20) < SMA(50) < SMA(200) with daily downtrend and volume
-            elif (sma_20[i] < sma_50[i] < sma_200[i] and daily_downtrend and vol_condition):
+            # Short: price below R1 with volume and daily downtrend
+            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: SMA(20) < SMA(50) or daily trend reverses
-            if sma_20[i] < sma_50[i] or not daily_uptrend:
+            # Exit: price back below pivot or volume drops
+            if close[i] < pp_aligned[i] or volume[i] < vol_ma_20[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: SMA(20) > SMA(50) or daily trend reverses
-            if sma_20[i] > sma_50[i] or not daily_downtrend:
+            # Exit: price back above pivot or volume drops
+            if close[i] > pp_aligned[i] or volume[i] < vol_ma_20[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -89,13 +90,15 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 4h Triple SMA Cross with Daily Trend Filter
-# - Uses SMA(20/50/200) on 4h for trend identification and entry signals
-# - Daily EMA(34/89) as higher timeframe trend filter to avoid counter-trend trades
-# - Volume confirmation to ensure institutional participation
-# - Long when SMA(20) > SMA(50) > SMA(200) with daily uptrend and volume
-# - Short when SMA(20) < SMA(50) < SMA(200) with daily downtrend and volume
-# - Exit when short-term SMA crosses below/above medium-term SMA or daily trend reverses
-# - Position size 0.25 limits risk while capturing trends
-# - Designed to work in both bull (catch uptrends) and bear (catch downtrends) markets
-# - Target: 20-40 trades/year to minimize fee drag while maintaining edge
+# Hypothesis: Daily price action based on weekly pivot points with trend and volume filters
+# - Weekly pivot points (S1/R1) act as dynamic support/resistance levels
+# - Breakout above S1 with volume in daily uptrend = long opportunity
+# - Breakdown below R1 with volume in daily downtrend = short opportunity
+# - Volume spike (2x average) confirms institutional participation
+# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
+# - Exit when price returns to weekly pivot (PP) or volume weakens
+# - Position size 0.25 targets 15-25 trades/year, avoiding fee drag
+# - Weekly pivot provides structure that works across market regimes
+# - Daily timeframe reduces noise and increases signal quality vs lower timeframes
+# - Only long in uptrend, only short in downtrend to avoid whipsaws
+# - Weekly timeframe ensures pivot points are based on significant price action
