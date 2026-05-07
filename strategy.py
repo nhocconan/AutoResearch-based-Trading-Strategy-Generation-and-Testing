@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_1d_Camarilla_R1S1_Breakout_Trend_Volume_v3"
+name = "4h_1d_Camarilla_R1S1_Breakout_Trend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -30,9 +30,9 @@ def generate_signals(prices):
     pivot = (prev_high + prev_low + prev_close) / 3
     range_hl = prev_high - prev_low
     
-    # Camarilla levels - tighter bands for fewer trades
-    s1 = prev_close - (range_hl * 1.08 / 4)  # Half the distance for stricter entry
-    r1 = prev_close + (range_hl * 1.08 / 4)
+    # Camarilla levels
+    s1 = prev_close - (range_hl * 1.08 / 2)
+    r1 = prev_close + (range_hl * 1.08 / 2)
     
     # Align daily levels to 4h timeframe
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
@@ -42,44 +42,44 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume spike detection: require stronger confirmation
-    vol_ma_10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values  # Increased window
+    # Volume spike detection: 6-period average (1.5 days of 4h bars)
+    vol_ma_6 = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 10)  # Wait for EMA and volume MA
+    start_idx = max(34, 6)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
         if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(vol_ma_10[i])):
+            np.isnan(r1_aligned[i]) or np.isnan(vol_ma_6[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above S1 with strong volume and daily uptrend
-            vol_condition = volume[i] > vol_ma_10[i] * 2.0  # Increased threshold
+            # Long: price above S1 with volume and daily uptrend
+            vol_condition = volume[i] > vol_ma_6[i] * 1.8
             uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
             
             if close[i] > s1_aligned[i] and vol_condition and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below R1 with strong volume and daily downtrend
+            # Short: price below R1 with volume and daily downtrend
             elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below S1 or volume drops significantly
-            if close[i] < s1_aligned[i] or volume[i] < vol_ma_10[i] * 0.8:
+            # Exit: price back below S1 or volume drops
+            if close[i] < s1_aligned[i] or volume[i] < vol_ma_6[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above R1 or volume drops significantly
-            if close[i] > r1_aligned[i] or volume[i] < vol_ma_10[i] * 0.8:
+            # Exit: price back above R1 or volume drops
+            if close[i] > r1_aligned[i] or volume[i] < vol_ma_6[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -88,10 +88,12 @@ def generate_signals(prices):
     return signals
 
 # Hypothesis: 4h Camarilla S1/R1 breakout with daily trend and volume confirmation
-# - Tighter Camarilla bands (1.08/4 instead of /2) for fewer, higher-quality signals
-# - Increased volume confirmation threshold (2.0x vs 1.8x) and longer MA (10 vs 6)
-# - Reduced position size to 0.25 to manage risk
-# - Designed to generate ~25-40 trades/year, avoiding fee drag
+# - Daily Camarilla S1/R1 act as strong support/resistance levels
+# - Breakout above S1 with volume in daily uptrend = long opportunity
+# - Breakdown below R1 with volume in daily downtrend = short opportunity
+# - Volume spike (1.8x average) confirms institutional participation
 # - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
-# - Exit when price returns to S1/R1 or volume weakens significantly
-# - Uses actual daily Camarilla levels for institutional reference points
+# - Exit when price returns to S1/R1 or volume weakens
+# - Position size 0.25 targets ~30-50 trades/year, avoiding fee drag
+# - Uses actual daily Camarilla levels (not weekly) for better responsiveness
+# - Designed to work in BOTH bull and bear markets via trend filter
