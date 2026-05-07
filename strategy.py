@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_Camarilla_R3S3_Breakout_1dTrend"
-timeframe = "1h"
+name = "6h_WeeklyDonchianBreakout_WeeklyTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,50 +17,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for Donchian channels and trend
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla R3 and S3 levels from previous day
-    high_prev = df_1d['high'].shift(1).values
-    low_prev = df_1d['low'].shift(1).values
-    close_prev = df_1d['close'].shift(1).values
+    # Calculate weekly Donchian channels (20-period)
+    high_max = pd.Series(df_weekly['high'].values).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(df_weekly['low'].values).rolling(window=20, min_periods=20).min().values
     
-    r3 = close_prev + 1.1 * (high_prev - low_prev) / 4
-    s3 = close_prev - 1.1 * (high_prev - low_prev) / 4
+    # Align weekly channels to 6h timeframe (wait for weekly close)
+    high_max_aligned = align_htf_to_ltf(prices, df_weekly, high_max)
+    low_min_aligned = align_htf_to_ltf(prices, df_weekly, low_min)
     
-    # Align daily levels to 1h timeframe (with 1-day delay for completed bar)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # 1d trend filter: EMA50
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Volume filter: current volume > 1.5x 24-period average (24h)
-    vol_ma_24 = np.full(n, np.nan)
-    for i in range(24, n):
-        vol_ma_24[i] = np.mean(volume[i-24:i])
-    vol_filter = volume > (1.5 * vol_ma_24)
-    
-    # Session filter: 8-20 UTC
-    hours = prices.index.hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Weekly trend: EMA50 on weekly close
+    ema_50_weekly = pd.Series(df_weekly['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_50_weekly)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 12  # ~12 hours for 1h to reduce trades
+    cooldown_bars = 4  # ~1 day for 6h to reduce trades
     
-    start_idx = max(100, 24, 50)
+    start_idx = max(100, 20, 50)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(vol_ma_24[i])):
+        if (np.isnan(high_max_aligned[i]) or 
+            np.isnan(low_min_aligned[i]) or 
+            np.isnan(ema_50_weekly_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,44 +56,46 @@ def generate_signals(prices):
         
         bars_since_last_trade += 1
         
-        # Determine 1d trend direction
-        trend_up = close > ema_50_1d_aligned[i]
-        trend_down = close < ema_50_1d_aligned[i]
+        # Determine weekly trend direction
+        trend_up = close > ema_50_weekly_aligned[i]
+        trend_down = close < ema_50_weekly_aligned[i]
         
-        if position == 0 and bars_since_last_trade >= cooldown_bars and session_filter[i]:
-            # Long: Break above R3 in uptrend with strong volume
-            if (close[i] > r3_aligned[i] and 
-                trend_up[i] and 
-                vol_filter[i]):
-                signals[i] = 0.20
+        if position == 0 and bars_since_last_trade >= cooldown_bars:
+            # Long: Break above weekly Donchian high in uptrend
+            if (close[i] > high_max_aligned[i] and 
+                trend_up[i]):
+                signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: Break below S3 in downtrend with strong volume
-            elif (close[i] < s3_aligned[i] and 
-                  trend_down[i] and 
-                  vol_filter[i]):
-                signals[i] = -0.20
+            # Short: Break below weekly Donchian low in downtrend
+            elif (close[i] < low_min_aligned[i] and 
+                  trend_down[i]):
+                signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit: Price re-enters Camarilla body (between R3 and S3) or trend change
-            if (close[i] < r3_aligned[i] and close[i] > s3_aligned[i]) or not trend_up[i]:
+            # Exit: Price re-enters weekly Donchian range or trend change
+            if (close[i] < high_max_aligned[i] and close[i] > low_min_aligned[i]) or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: Price re-enters Camarilla body or trend change
-            if (close[i] < r3_aligned[i] and close[i] > s3_aligned[i]) or not trend_down[i]:
+            # Exit: Price re-enters weekly Donchian range or trend change
+            if (close[i] < high_max_aligned[i] and close[i] > low_min_aligned[i]) or not trend_down[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-# Hypothesis: Using 1h timeframe with Camarilla R3/S3 breakouts, 1d EMA50 trend filter, volume confirmation, and session filter (8-20 UTC)
-# will yield 15-37 trades per year (60-150 total over 4 years), minimizing fee drag. The strategy trades with the higher timeframe trend,
-# capturing institutional breakouts in both bull and bear markets. Position size of 0.20 manages drawdown, and cooldown of 12 bars prevents overtrading.
+# Hypothesis: Using 6h timeframe with weekly Donchian breakout (20-period) and weekly EMA50 trend filter
+# will capture major trend continuations in both bull and bear markets. The weekly timeframe provides
+# a robust trend filter that avoids whipsaws, while the 6h timeframe allows timely entry on breakouts.
+# Position size of 0.25 manages drawdown, and cooldown of 4 bars prevents overtrading. This strategy
+# targets 20-50 total trades over 4 years (5-12/year) to minimize fee drag. The weekly Donchian
+# channels act as strong support/resistance levels that institutions watch, making breakouts significant.
+# Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
