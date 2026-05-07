@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_1d_ParabolicSAR_Trend_Filter"
-timeframe = "12h"
+name = "4h_1d_Camarilla_S1R1_Breakout_VolumeTrend_v4"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,131 +9,86 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Daily Parabolic SAR
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate daily Camarilla pivot levels from previous day
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Initialize SAR
-    sar = np.zeros(len(high_1d))
-    trend = np.ones(len(high_1d))  # 1 for uptrend, -1 for downtrend
-    af = 0.02  # acceleration factor
-    max_af = 0.2
-    ep = high_1d[0]  # extreme point
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
     
-    sar[0] = low_1d[0]
-    trend[0] = 1
+    # Camarilla levels
+    s1 = prev_close - (range_hl * 1.08 / 2)
+    r1 = prev_close + (range_hl * 1.08 / 2)
+    s2 = prev_close - (range_hl * 1.16 / 2)
+    r2 = prev_close + (range_hl * 1.16 / 2)
+    s3 = prev_close - (range_hl * 1.26 / 4)
+    r3 = prev_close + (range_hl * 1.26 / 4)
     
-    for i in range(1, len(high_1d)):
-        if trend[i-1] == 1:  # uptrend
-            sar[i] = sar[i-1] + af * (ep - sar[i-1])
-            if low_1d[i] < sar[i]:  # trend reversal
-                trend[i] = -1
-                sar[i] = ep
-                ep = low_1d[i]
-                af = 0.02
-            else:
-                trend[i] = 1
-                if high_1d[i] > ep:
-                    ep = high_1d[i]
-                    af = min(af + 0.02, max_af)
-        else:  # downtrend
-            sar[i] = sar[i-1] + af * (ep - sar[i-1])
-            if high_1d[i] > sar[i]:  # trend reversal
-                trend[i] = 1
-                sar[i] = ep
-                ep = high_1d[i]
-                af = 0.02
-            else:
-                trend[i] = -1
-                if low_1d[i] < ep:
-                    ep = low_1d[i]
-                    af = min(af + 0.02, max_af)
+    # Align daily levels to 4h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     
-    # Align daily SAR and trend to 12h timeframe
-    sar_aligned = align_htf_to_ltf(prices, df_1d, sar)
-    trend_aligned = align_htf_to_ltf(prices, df_1d, trend)
+    # Daily trend filter: EMA(34) on daily close
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 12h Parabolic SAR for entry timing
-    # Initialize 12h SAR
-    sar_12h = np.zeros(n)
-    trend_12h = np.ones(n)
-    af_12h = 0.02
-    max_af_12h = 0.2
-    ep_12h = high[0]
-    
-    sar_12h[0] = low[0]
-    trend_12h[0] = 1
-    
-    for i in range(1, n):
-        if trend_12h[i-1] == 1:  # uptrend
-            sar_12h[i] = sar_12h[i-1] + af_12h * (ep_12h - sar_12h[i-1])
-            if low[i] < sar_12h[i]:  # trend reversal
-                trend_12h[i] = -1
-                sar_12h[i] = ep_12h
-                ep_12h = low[i]
-                af_12h = 0.02
-            else:
-                trend_12h[i] = 1
-                if high[i] > ep_12h:
-                    ep_12h = high[i]
-                    af_12h = min(af_12h + 0.02, max_af_12h)
-        else:  # downtrend
-            sar_12h[i] = sar_12h[i-1] + af_12h * (ep_12h - sar_12h[i-1])
-            if high[i] > sar_12h[i]:  # trend reversal
-                trend_12h[i] = 1
-                sar_12h[i] = ep_12h
-                ep_12h = high[i]
-                af_12h = 0.02
-            else:
-                trend_12h[i] = -1
-                if low[i] < ep_12h:
-                    ep_12h = low[i]
-                    af_12h = min(af_12h + 0.02, max_af_12h)
+    # Volume spike detection: 6-period average (1.5 days of 4h bars)
+    vol_ma_6 = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for sufficient data
+    start_idx = max(34, 6)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(sar_aligned[i]) or np.isnan(trend_aligned[i]) or 
-            np.isnan(sar_12h[i]) or np.isnan(trend_12h[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(vol_ma_6[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: daily uptrend AND 12h price above SAR
-            if trend_aligned[i] == 1 and close[i] > sar_12h[i]:
+            # Long: price above S1 with volume and daily uptrend
+            vol_condition = volume[i] > vol_ma_6[i] * 1.8
+            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
+            
+            if close[i] > s1_aligned[i] and vol_condition and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: daily downtrend AND 12h price below SAR
-            elif trend_aligned[i] == -1 and close[i] < sar_12h[i]:
+            # Short: price below R1 with volume and daily downtrend
+            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: daily trend turns down OR 12h price crosses below SAR
-            if trend_aligned[i] == -1 or close[i] < sar_12h[i]:
+            # Exit: price back below S1 or volume drops
+            if close[i] < s1_aligned[i] or volume[i] < vol_ma_6[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: daily trend turns up OR 12h price crosses above SAR
-            if trend_aligned[i] == 1 or close[i] > sar_12h[i]:
+            # Exit: price back above R1 or volume drops
+            if close[i] > r1_aligned[i] or volume[i] < vol_ma_6[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -141,12 +96,15 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 12h Parabolic SAR with daily trend filter
-# - Daily Parabolic SAR determines the higher-timeframe trend (1d)
-# - 12h Parabolic SAR provides entry/exit signals within that trend
-# - Only take longs when daily trend is up (SAR below price) and 12h price above its SAR
-# - Only take shorts when daily trend is down (SAR above price) and 12h price below its SAR
-# - Exit when either the daily trend changes or the 12h price crosses its SAR
-# - This dual-timeframe approach reduces whipsaws and works in both bull and bear markets
-# - Position size 0.25 limits risk and keeps trade frequency moderate (target: 15-35 trades/year)
-# - Parabolic SAR is effective in trending markets and provides automatic trailing stops
+# Hypothesis: 4h Camarilla S1/R1 breakout with daily trend and volume confirmation
+# - Daily Camarilla S1/R1 act as strong support/resistance levels
+# - Breakout above S1 with volume in daily uptrend = long opportunity
+# - Breakdown below R1 with volume in daily downtrend = short opportunity
+# - Volume spike (1.8x average) confirms institutional participation
+# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
+# - Exit when price returns to S1/R1 or volume weakens
+# - Position size 0.25 targets ~30-50 trades/year, avoiding fee drag
+# - Uses actual daily Camarilla levels (not weekly) for better responsiveness
+# - Designed to work in BOTH bull and bear markets via trend filter
+# - Version 4: Increased volume threshold to 1.8x for stricter entry (was 1.5x in v1-v3) to reduce trades and improve quality
+# - Target: 20-40 trades/year to stay well under the 50/year limit and avoid fee drag damage
