@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R3_S3_Breakout_1dTrend_Volume_v4
-# Hypothesis: Uses Camarilla R3/S3 levels from 1d as breakout levels, filtered by 1d EMA34 trend and volume spikes.
-# Adds a momentum filter (4h RSI) to reduce overtrading and improve signal quality.
-# Designed for 4h to balance trade frequency and signal quality. Works in bull/bear via trend filter.
-# Only long when above 1d EMA34 and RSI > 50, short when below 1d EMA34 and RSI < 50.
+# 1d_RSI_Trend_Pullback_1wTrend_Volume
+# Hypothesis: Uses RSI pullbacks on daily timeframe aligned with 1-week trend and volume confirmation.
+# Long when RSI < 30 (oversold) and price above 1w EMA20, short when RSI > 70 (overbought) and price below 1w EMA20.
+# Volume filter requires volume > 1.5x 20-day average to confirm momentum.
+# Designed for 1d to work in both bull and bear markets via trend filter and mean-reversion entries.
+# Targets 20-40 trades per year to minimize fee drag.
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume_v4"
-timeframe = "4h"
+name = "1d_RSI_Trend_Pullback_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -23,40 +24,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla levels (R3, S3) from previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1w EMA20 for trend filter
+    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Camarilla R3 = close + (high - low) * 1.1/4
-    # Camarilla S3 = close - (high - low) * 1.1/4
-    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
-    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
-    
-    # Shift by 1 to use previous day's levels (no look-ahead)
-    camarilla_r3 = np.roll(camarilla_r3, 1)
-    camarilla_s3 = np.roll(camarilla_s3, 1)
-    camarilla_r3[0] = np.nan
-    camarilla_s3[0] = np.nan
-    
-    # Align Camarilla levels to 4h timeframe
-    camarilla_r3_4h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_4h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_4h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Calculate volume spike on 4h timeframe (20-period average)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)
-    
-    # Calculate 4h RSI for momentum filter
+    # Calculate daily RSI(14)
     delta = pd.Series(close).diff()
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
@@ -66,37 +43,40 @@ def generate_signals(prices):
     rsi = 100 - (100 / (1 + rs))
     rsi = rsi.values
     
+    # Calculate volume spike: volume > 1.5x 20-day average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma_20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if any critical value is NaN
-        if (np.isnan(camarilla_r3_4h[i]) or np.isnan(camarilla_s3_4h[i]) or 
-            np.isnan(ema_34_1d_4h[i]) or np.isnan(volume_spike[i]) or np.isnan(rsi[i])):
+        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(rsi[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above Camarilla R3 + above 1d EMA34 + volume spike + RSI > 50
-            if close[i] > camarilla_r3_4h[i] and close[i] > ema_34_1d_4h[i] and volume_spike[i] and rsi[i] > 50:
+            # Long: RSI < 30 (oversold) + price above 1w EMA20 + volume spike
+            if rsi[i] < 30 and close[i] > ema_20_1w_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Camarilla S3 + below 1d EMA34 + volume spike + RSI < 50
-            elif close[i] < camarilla_s3_4h[i] and close[i] < ema_34_1d_4h[i] and volume_spike[i] and rsi[i] < 50:
+            # Short: RSI > 70 (overbought) + price below 1w EMA20 + volume spike
+            elif rsi[i] > 70 and close[i] < ema_20_1w_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Price closes below Camarilla S3 or below 1d EMA34
-            if close[i] < camarilla_s3_4h[i] or close[i] < ema_34_1d_4h[i]:
+            # Exit: RSI crosses above 50 (momentum shift) or price closes below 1w EMA20
+            if rsi[i] > 50 or close[i] < ema_20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price closes above Camarilla R3 or above 1d EMA34
-            if close[i] > camarilla_r3_4h[i] or close[i] > ema_34_1d_4h[i]:
+            # Exit: RSI crosses below 50 (momentum shift) or price closes above 1w EMA20
+            if rsi[i] < 50 or close[i] > ema_20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
