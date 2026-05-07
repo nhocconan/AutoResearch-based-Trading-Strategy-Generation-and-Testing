@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-# 1h_RSI_OverboughtOversold_4hTrend_1dVolume
-# Hypothesis: 1-hour RSI mean reversion with 4-hour trend filter and 1-day volume confirmation.
-# Works in bull/bear markets by using RSI extremes only when aligned with higher timeframe trend.
-# Long: RSI < 30 on 1h, price above 4h EMA50 (uptrend), volume > 1.5x 20-day average.
-# Short: RSI > 70 on 1h, price below 4h EMA50 (downtrend), volume > 1.5x 20-day average.
-# Exit: RSI returns to neutral zone (40-60) or opposing extreme triggers reversal.
-# Designed for 15-30 trades/year with controlled risk via trend alignment and volume filter.
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: 4-hour Camarilla R1/S1 breakouts with 1-day trend filter and volume spikes.
+# Uses proven Camarilla pivot levels from daily data (proven in DB) to capture institutional levels.
+# Long: price breaks above R1 with daily uptrend and volume spike. Short: breaks below S1 with daily downtrend and volume spike.
+# Exit: price returns to Pivot Point (PP) level. Designed for fewer trades (20-40/year) with high win rate.
 
-name = "1h_RSI_OverboughtOversold_4hTrend_1dVolume"
-timeframe = "1h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,84 +15,84 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) == 0:
-        return np.zeros(n)
-    
-    # Get 1d data for volume filter
+    # Get daily data for Camarilla pivot calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) == 0:
         return np.zeros(n)
     
-    # Calculate 4h EMA50 for trend filter
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Calculate Camarilla pivot levels from previous day's OHLC
+    # Classic Camarilla: R1 = C + 1.1*(H-L)/12, S1 = C - 1.1*(H-L)/12
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1-day average volume (20-day for stability)
-    volume_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Calculate pivot components
+    hl_range = high_1d - low_1d
+    r1_1d = close_1d + 1.1 * hl_range / 12
+    s1_1d = close_1d - 1.1 * hl_range / 12
+    pp_1d = (high_1d + low_1d + close_1d) / 3  # Pivot Point
     
-    # Calculate 1-hour RSI (14-period)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Align Camarilla levels to 4h timeframe (use previous day's levels)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate EMA34 for trend filter (daily)
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Volume spike detection: 2.0x average volume (20-period for stability)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(14, 50, 20)  # Ensure we have RSI, EMA50, and volume MA data
+    start_idx = max(20, 34, 20)  # Ensure we have Camarilla, EMA34, and volume MA data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(rsi[i]) or np.isnan(ema50_4h_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i]) or vol_ma_1d_aligned[i] == 0):
+        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
+            np.isnan(pp_1d_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: RSI oversold (<30), price above 4h EMA50 (uptrend), volume spike
-            if (rsi[i] < 30 and 
-                close[i] > ema50_4h_aligned[i] and 
-                volume[i] > 1.5 * vol_ma_1d_aligned[i]):
-                signals[i] = 0.20
+            # Long: price breaks above R1, price above EMA34 (uptrend), volume spike
+            if (close[i] > r1_1d_aligned[i] and 
+                close[i] > ema34_1d_aligned[i] and 
+                volume[i] > 2.0 * vol_ma[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: RSI overbought (>70), price below 4h EMA50 (downtrend), volume spike
-            elif (rsi[i] > 70 and 
-                  close[i] < ema50_4h_aligned[i] and 
-                  volume[i] > 1.5 * vol_ma_1d_aligned[i]):
-                signals[i] = -0.20
+            # Short: price breaks below S1, price below EMA34 (downtrend), volume spike
+            elif (close[i] < s1_1d_aligned[i] and 
+                  close[i] < ema34_1d_aligned[i] and 
+                  volume[i] > 2.0 * vol_ma[i]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: RSI returns to neutral (>=40) or reverses to overbought
-            if rsi[i] >= 40:
+            # Exit: price returns to or below Pivot Point (PP)
+            if close[i] <= pp_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: RSI returns to neutral (<=60) or reverses to oversold
-            if rsi[i] <= 60:
+            # Exit: price returns to or above Pivot Point (PP)
+            if close[i] >= pp_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
