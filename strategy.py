@@ -1,12 +1,14 @@
-# 12h_KAMA_Trend_Filter_v1
-# Hypothesis: Uses Kaufman Adaptive Moving Average (KAMA) on daily timeframe for trend direction,
-# combined with 12h price action above/below KAMA and volume confirmation to reduce false signals.
-# KAMA adapts to market noise, reducing whipsaws in ranging markets while capturing trends.
-# Targets 15-30 trades/year to minimize fee drag while maintaining trend-following edge.
-# Works in both bull and bear markets by adapting smoothing constant to market volatility.
+#!/usr/bin/env python3
+# 4h_Bollinger_Squeeze_Breakout
+# Hypothesis: Bollinger Bands squeeze (low volatility) precedes breakouts in both bull and bear markets.
+# Uses 4h timeframe with 1d Bollinger Bands for volatility regime detection, volume confirmation
+# for breakout strength, and ATR-based stoploss. Bollinger Band width < 50th percentile indicates
+# low volatility squeeze; breakout occurs when price closes outside Bollinger Bands with volume
+# > 1.5x average. Works in ranging markets (captures breakouts from consolidation) and trending
+# markets (rides the breakout). Targets 20-40 trades/year to minimize fee drag.
 
-name = "12h_KAMA_Trend_Filter_v1"
-timeframe = "12h"
+name = "4h_Bollinger_Squeeze_Breakout"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,48 +25,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for KAMA calculation
+    # Get daily data for Bollinger Bands
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate Kaufman Adaptive Moving Average (KAMA)
-    # Parameters: ER period=10, Fast SC=2/(2+1)=0.6667, Slow SC=2/(30+1)=0.0645
-    er_period = 10
-    fast_sc = 2 / (2 + 1)  # 0.6667
-    slow_sc = 2 / (30 + 1)  # 0.0645
+    # Calculate Bollinger Bands (20, 2) on daily timeframe
+    bb_period = 20
+    bb_std = 2
     
-    # Calculate Efficiency Ratio (ER)
-    change = np.abs(np.diff(close_1d))
-    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0) if len(change) > 0 else np.array([0])
+    # Calculate rolling mean and std
+    ma = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).std().values
     
-    # For proper calculation, we need to compute volatility over er_period window
-    volatility_sum = np.zeros_like(close_1d)
-    for i in range(er_period, len(close_1d)):
-        volatility_sum[i] = np.sum(np.abs(np.diff(close_1d[i-er_period:i+1])))
+    upper_bb = ma + (bb_std * std)
+    lower_bb = ma - (bb_std * std)
+    bb_width = upper_bb - lower_bb
     
-    er = np.zeros_like(close_1d)
-    for i in range(er_period, len(close_1d)):
-        if volatility_sum[i] > 0:
-            er[i] = np.abs(close_1d[i] - close_1d[i-er_period]) / volatility_sum[i]
+    # Calculate Bollinger Band width percentile (50-period lookback)
+    bb_width_percentile = np.zeros_like(bb_width)
+    for i in range(50, len(bb_width)):
+        window = bb_width[i-50:i]
+        if len(window) > 0 and not np.all(np.isnan(window)):
+            bb_width_percentile[i] = np.percentile(window, 50)  # 50th percentile (median)
         else:
-            er[i] = 0
+            bb_width_percentile[i] = bb_width[i] if not np.isnan(bb_width[i]) else 0
     
-    # Calculate smoothing constant (SC)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Squeeze condition: BB width < 50th percentile (low volatility)
+    squeeze = bb_width < bb_width_percentile
     
-    # Calculate KAMA
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # Align Bollinger Bands and squeeze to 4h timeframe
+    upper_bb_4h = align_htf_to_ltf(prices, df_1d, upper_bb)
+    lower_bb_4h = align_htf_to_ltf(prices, df_1d, lower_bb)
+    squeeze_4h = align_htf_to_ltf(prices, df_1d, squeeze.astype(float))
     
-    # Align KAMA to 12h timeframe
-    kama_12h = align_htf_to_ltf(prices, df_1d, kama)
-    
-    # Volume confirmation: volume > 24-period average (24 * 12h = 12 days)
+    # Volume confirmation: volume > 1.5x 24-period average (24 * 4h = 4 days)
     vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
@@ -72,31 +71,34 @@ def generate_signals(prices):
     
     for i in range(30, n):
         # Skip if any critical value is NaN
-        if (np.isnan(kama_12h[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(upper_bb_4h[i]) or np.isnan(lower_bb_4h[i]) or 
+            np.isnan(squeeze_4h[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above KAMA with volume confirmation
-            if close[i] > kama_12h[i] and volume[i] > vol_ma[i]:
-                signals[i] = 0.25
-                position = 1
-            # Short: price below KAMA with volume confirmation
-            elif close[i] < kama_12h[i] and volume[i] > vol_ma[i]:
-                signals[i] = -0.25
-                position = -1
+            # Look for breakout from squeeze with volume confirmation
+            if squeeze_4h[i] > 0.5:  # Currently in squeeze
+                if close[i] > upper_bb_4h[i] and volume[i] > 1.5 * vol_ma[i]:
+                    signals[i] = 0.25
+                    position = 1
+                elif close[i] < lower_bb_4h[i] and volume[i] > 1.5 * vol_ma[i]:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Exit: price crosses below KAMA
-            if close[i] < kama_12h[i]:
+            # Exit: price returns to middle Bollinger Band (mean reversion) or opposite band touch
+            middle_bb = (upper_bb_4h[i] + lower_bb_4h[i]) / 2
+            if close[i] < middle_bb or close[i] > upper_bb_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price crosses above KAMA
-            if close[i] > kama_12h[i]:
+            # Exit: price returns to middle Bollinger Band or opposite band touch
+            middle_bb = (upper_bb_4h[i] + lower_bb_4h[i]) / 2
+            if close[i] > middle_bb or close[i] < lower_bb_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
