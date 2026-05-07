@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_KAMA_Trend_RSI_Filter_v2"
-timeframe = "1d"
+name = "6h_ElderRay_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,87 +17,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Load daily data ONCE for trend filter and Elder Ray
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 13:
         return np.zeros(n)
     
-    # KAMA: Kaufman Adaptive Moving Average
-    # ER = Efficiency Ratio
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.abs(np.diff(close))
-    er = np.zeros_like(change)
-    for i in range(len(change)):
-        if volatility[i] != 0:
-            er[i] = change[i] / volatility[i]
-        else:
-            er[i] = 0
-    # Smooth ER
-    er_smooth = pd.Series(er).ewm(alpha=0.1, adjust=False).fillna(0).values
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)  # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er_smooth * (fast_sc - slow_sc) + slow_sc) ** 2
-    # KAMA calculation
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Elder Ray components (13-period EMA)
+    ema_13_1d = pd.Series(df_1d['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power_1d = df_1d['high'].values - ema_13_1d
+    bear_power_1d = df_1d['low'].values - ema_13_1d
     
-    # Weekly EMA for trend filter
-    ema_30_1w = pd.Series(df_1w['close']).ewm(span=30, adjust=False, min_periods=30).mean().values
-    ema_30_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_30_1w)
+    # Align Elder Ray to 6t
+    bull_power_6h = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_6h = align_htf_to_ltf(prices, df_1d, bear_power_1d)
     
-    # RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Daily EMA13 for trend filter
+    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
     
-    # Volume spike detection
+    # Volume spike detection (20-period SMA on 6h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 200
     
     for i in range(start_idx, n):
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(ema_30_1w_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(bull_power_6h[i]) or np.isnan(bear_power_6h[i]) or 
+            np.isnan(ema_13_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # KAMA slope (trend direction)
-        kama_slope = kama[i] - kama[i-1]
-        
-        # Volume condition
-        vol_condition = volume[i] > vol_ma_20[i] * 1.5
-        
         if position == 0:
-            # Long: price above KAMA, RSI > 50, weekly uptrend, volume spike
-            if close[i] > kama[i] and rsi[i] > 50 and ema_30_1w_aligned[i] > ema_30_1w_aligned[i-1] and vol_condition:
+            # Long: Bull power positive AND bear power negative (bullish divergence) + price above EMA13 + volume spike
+            if (bull_power_6h[i] > 0 and bear_power_6h[i] < 0 and 
+                close[i] > ema_13_1d_aligned[i] and volume[i] > vol_ma_20[i] * 2.0):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA, RSI < 50, weekly downtrend, volume spike
-            elif close[i] < kama[i] and rsi[i] < 50 and ema_30_1w_aligned[i] < ema_30_1w_aligned[i-1] and vol_condition:
+            # Short: Bear power positive AND bull power negative (bearish divergence) + price below EMA13 + volume spike
+            elif (bear_power_6h[i] > 0 and bull_power_6h[i] < 0 and 
+                  close[i] < ema_13_1d_aligned[i] and volume[i] > vol_ma_20[i] * 2.0):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price below KAMA or RSI < 40
-            if close[i] < kama[i] or rsi[i] < 40:
+            # Exit: bull power turns negative OR price below EMA13
+            if bull_power_6h[i] <= 0 or close[i] < ema_13_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price above KAMA or RSI > 60
-            if close[i] > kama[i] or rsi[i] > 60:
+            # Exit: bear power turns negative OR price above EMA13
+            if bear_power_6h[i] <= 0 or close[i] > ema_13_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -105,15 +78,16 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: KAMA adapts to market noise - reduces whipsaws in sideways markets
-# - KAMA follows price closely in trends, flattens in ranges (reduces false signals)
-# - Entry: price crosses KAMA with RSI confirmation and weekly trend alignment
-# - Volume spike (1.5x average) confirms institutional participation
-# - Weekly EMA30 filter ensures alignment with higher timeframe trend
-# - Exit when price returns to KAMA or RSI reaches extreme levels
-# - Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend)
-# - Position size 0.25 targets ~20-50 trades/year to minimize fee drag
-# - KAMA's adaptive nature reduces whipsaws vs fixed MA in choppy markets
-# - RSI filter prevents overextended entries
-# - Weekly trend filter avoids counter-trend trades
-# - Simple, robust logic with clear entry/exit conditions
+# Hypothesis: Elder Ray (Bull/Bear power) with daily trend filter and volume confirmation
+# - Bull Power = High - EMA13, Bear Power = Low - EMA13 (13-period EMA on daily)
+# - Long when Bull Power > 0 AND Bear Power < 0 (bullish divergence) + price above EMA13 + volume spike
+# - Short when Bear Power > 0 AND Bull Power < 0 (bearish divergence) + price below EMA13 + volume spike
+# - Daily EMA13 trend filter ensures alignment with higher timeframe trend
+# - Volume spike (2x 20-period average) reduces false signals
+# - Exit when power diverges or price crosses EMA13
+# - Works in bull markets (bull power dominance) and bear markets (bear power dominance)
+# - Divergence between powers indicates strong directional momentum
+# - Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag
+# - Position size 0.25 balances return potential with drawdown control
+# - Novel application: Elder Ray divergence (not just single power) + trend + volume filter
+# - Avoids overtrading by requiring confluence of 4 conditions for entry
