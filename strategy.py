@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ElderRay_BullBearPower_1dTrend"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,29 +17,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for Elder Ray and trend
+    # Load 1d data ONCE for trend and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 1d EMA13 for trend filter
-    ema_13_1d = pd.Series(df_1d['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
+    # 1d trend filter: 20-period EMA on close
+    ema_20_1d = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
-    # 1d EMA13 for Elder Ray calculation
-    ema13 = pd.Series(df_1d['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # 1d volume average for spike detection
+    vol_avg_1d = pd.Series(df_1d['volume']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = df_1d['high'].values - ema13
-    bear_power = df_1d['low'].values - ema13
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    prev_range = prev_high - prev_low
     
-    # Align Elder Ray components to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    # Camarilla levels for current day (based on previous day)
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    camarilla_r1 = prev_close + prev_range * 1.1 / 12
+    camarilla_s1 = prev_close - prev_range * 1.1 / 12
     
-    # 6h volume spike: current volume > 1.5x 20-period EMA
-    vol_ema_6h = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike = np.where(vol_ema_6h > 0, volume / vol_ema_6h, 1.0) > 1.5
+    # Align Camarilla levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # 4h volume spike: current volume > 1.5x 20-period EMA
+    vol_ema_4h = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_spike = np.where(vol_ema_4h > 0, volume / vol_ema_4h, 1.0) > 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -47,25 +55,22 @@ def generate_signals(prices):
     start_idx = 100  # Sufficient warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(ema_13_1d_aligned[i]) or np.isnan(vol_spike[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_20_1d_aligned[i]) or np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: price above/below 1d EMA13
-        uptrend = close[i] > ema_13_1d_aligned[i]
-        downtrend = close[i] < ema_13_1d_aligned[i]
+        # Trend filter: price above/below 1d EMA20
+        uptrend = close[i] > ema_20_1d_aligned[i]
+        downtrend = close[i] < ema_20_1d_aligned[i]
         
         if position == 0:
-            # Long: Bull Power positive and rising, with volume spike in uptrend
-            bull_rising = bull_power_aligned[i] > bull_power_aligned[i-1]
-            long_condition = bull_rising and (bull_power_aligned[i] > 0) and vol_spike[i] and uptrend
-            
-            # Short: Bear Power negative and falling (more negative), with volume spike in downtrend
-            bear_falling = bear_power_aligned[i] < bear_power_aligned[i-1]
-            short_condition = bear_falling and (bear_power_aligned[i] < 0) and vol_spike[i] and downtrend
+            # Long breakout: price > R1 with volume spike in uptrend
+            long_condition = (close[i] > r1_aligned[i]) and vol_spike[i] and uptrend
+            # Short breakdown: price < S1 with volume spike in downtrend
+            short_condition = (close[i] < s1_aligned[i]) and vol_spike[i] and downtrend
             
             if long_condition:
                 signals[i] = 0.25
@@ -74,15 +79,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Bull Power turns negative or trend turns down
-            if (bull_power_aligned[i] <= 0) or (not uptrend):
+            # Exit: price re-enters below R1 or trend turns down
+            if (close[i] < r1_aligned[i]) or (not uptrend):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Bear Power turns positive or trend turns up
-            if (bear_power_aligned[i] >= 0) or (not downtrend):
+            # Exit: price re-enters above S1 or trend turns up
+            if (close[i] > s1_aligned[i]) or (not downtrend):
                 signals[i] = 0.0
                 position = 0
             else:
