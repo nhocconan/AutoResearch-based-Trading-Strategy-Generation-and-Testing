@@ -1,15 +1,15 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-1d_WeeklyCandlePattern_1WTrend_Filter
-Hypothesis: Use weekly candle patterns (engulfing/bullish/bearish) on the close of weekly candles,
-filtered by the trend of the weekly EMA20, to capture multi-week trends in BTC/ETH.
-This strategy aims for low trade frequency (<10/year per symbol) with high conviction entries,
-making it suitable for the 1d timeframe and avoiding fee drag. Works in bull and bear by
-trading with the weekly trend: long when weekly close > weekly EMA20 and bullish engulfing,
-short when weekly close < weekly EMA20 and bearish engulfing.
+6H_Camarilla_R3_S3_Breakout_1DTrend_Volume
+Hypothesis: Use daily Camarilla R3/S3 levels as dynamic support/resistance for 6h breakouts.
+In bull markets (price > daily EMA34): go long when 6h close breaks above daily R3 with volume confirmation.
+In bear markets (price < daily EMA34): go short when 6h close breaks below daily S3 with volume confirmation.
+This avoids weak R1/S1 breakouts that often fail, focusing on stronger institutional levels.
+Exit when price crosses back below/above daily EMA34.
 """
-name = "1d_WeeklyCandlePattern_1WTrend_Filter"
-timeframe = "1d"
+name = "6H_Camarilla_R3_S3_Breakout_1DTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -18,79 +18,79 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 10:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    open_price = prices['open'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for trend filter and pattern detection
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1D data for Camarilla levels and EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate weekly EMA20 for trend filter
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Calculate daily EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate weekly bullish and bearish engulfing patterns
-    open_1w = df_1w['open'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate daily Camarilla levels (R3, S3)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Bullish engulfing: current week bullish (close > open) and engulfs previous week's body
-    bullish_engulf = (close_1w > open_1w) & (close_1w >= open_1w[:-1]) & (open_1w <= close_1w[:-1])
-    # Bearish engulfing: current week bearish (close < open) and engulfs previous week's body
-    bearish_engulf = (close_1w < open_1w) & (close_1w <= open_1w[:-1]) & (open_1w >= close_1w[:-1])
+    # Camarilla: R3 = close + (high - low) * 1.1 / 4, S3 = close - (high - low) * 1.1 / 4
+    r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
+    s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
     
-    # Shift to align with current week's signal (pattern known at weekly close)
-    bullish_engulf = np.roll(bullish_engulf, 1)
-    bearish_engulf = np.roll(bearish_engulf, 1)
-    bullish_engulf[0] = False
-    bearish_engulf[0] = False
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Align patterns to daily timeframe
-    bullish_engulf_aligned = align_htf_to_ltf(prices, df_1w, bullish_engulf.astype(float))
-    bearish_engulf_aligned = align_htf_to_ltf(prices, df_1w, bearish_engulf.astype(float))
+    # Volume filter: current 6h volume > 1.5 x 20-period average volume
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_avg * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Wait for EMA20 warmup
+    start_idx = max(34, 20)  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any data is not ready
-        if (np.isnan(ema_20_1w_aligned[i]) or 
-            np.isnan(bullish_engulf_aligned[i]) or 
-            np.isnan(bearish_engulf_aligned[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or 
+            np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: weekly close above weekly EMA20 and bullish engulfing pattern
-            if close[i] > ema_20_1w_aligned[i] and bullish_engulf_aligned[i] > 0.5:
+            # Long: price above daily EMA34, 6h close above daily R3, volume confirmation
+            if (close[i] > ema_34_1d_aligned[i] and 
+                close[i] > r3_aligned[i] and 
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: weekly close below weekly EMA20 and bearish engulfing pattern
-            elif close[i] < ema_20_1w_aligned[i] and bearish_engulf_aligned[i] > 0.5:
+            # Short: price below daily EMA34, 6h close below daily S3, volume confirmation
+            elif (close[i] < ema_34_1d_aligned[i] and 
+                  close[i] < s3_aligned[i] and 
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: weekly close crosses below weekly EMA20
-            if close[i] < ema_20_1w_aligned[i]:
+            # Exit long: price crosses below daily EMA34
+            if close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: weekly close crosses above weekly EMA20
-            if close[i] > ema_20_1w_aligned[i]:
+            # Exit short: price crosses above daily EMA34
+            if close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
