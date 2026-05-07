@@ -1,11 +1,11 @@
-# 6H_WEEKLYPIVOT_CAMARILLA_TREND_REVERSAL
-# Hypothesis: In 6h timeframe, combine weekly pivot points with daily Camarilla levels for trend reversal signals.
-# Uses weekly pivot as trend filter and daily Camarilla R3/S3 for reversal entries, reducing trades while capturing
-# major reversals in both bull and bear markets. Target: 50-150 total trades over 4 years.
-# Weekly pivot provides higher timeframe context; daily Camarilla provides precise entry/exit levels.
+#!/usr/bin/env python3
+"""
+4h_RSI_MeanReversion_Volume_Confirmation
+Hypothesis: In both bull and bear markets, RSI extremes on 4h timeframe combined with volume spike and price reversal from Bollinger Bands provides mean-reversion opportunities. Uses volume confirmation to filter false signals and Bollinger Band width to identify high-probability reversal zones. Designed for lower trade frequency (<50/year) to minimize fee drag.
+"""
 
-name = "6H_WEEKLYPIVOT_CAMARILLA_TREND_REVERSAL"
-timeframe = "6h"
+name = "4h_RSI_MeanReversion_Volume_Confirmation"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,82 +22,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # Calculate RSI (14-period)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Get weekly data for pivot points
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # Use Wilder's smoothing (equivalent to EMA with alpha=1/14)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate daily Camarilla levels (using prior day's OHLC)
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    # Bollinger Bands (20, 2)
+    ma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_band = ma20 + (2 * std20)
+    lower_band = ma20 - (2 * std20)
     
-    camarilla_range = daily_high - daily_low
-    r3 = daily_close + (camarilla_range * 1.1 / 4)  # R3 level
-    s3 = daily_close - (camarilla_ratio * 1.1 / 4)  # S3 level
+    # Bollinger Band Width for regime filter
+    bb_width = (upper_band - lower_band) / ma20
+    bb_width_ma50 = pd.Series(bb_width).rolling(window=50, min_periods=50).mean().values
     
-    # Calculate weekly pivot points (using prior week's OHLC)
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
-    
-    pivot_point = (weekly_high + weekly_low + weekly_close) / 3
-    r1 = 2 * pivot_point - weekly_low
-    s1 = 2 * pivot_point - weekly_high
-    
-    # Align indicators to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3, additional_delay_bars=1)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3, additional_delay_bars=1)
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_point)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    
-    # Weekly trend filter (price relative to weekly pivot)
-    weekly_close_aligned = align_htf_to_ltf(prices, df_1w, weekly_close)
+    # Volume confirmation
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = np.divide(volume, vol_ma20, out=np.zeros_like(volume), where=vol_ma20!=0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 50  # Warmup for BB width MA
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(weekly_close_aligned[i])):
+        if (np.isnan(rsi[i]) or 
+            np.isnan(ma20[i]) or 
+            np.isnan(std20[i]) or 
+            np.isnan(vol_ratio[i]) or 
+            np.isnan(bb_width_ma50[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine weekly trend
-        weekly_trend_up = weekly_close_aligned[i] > pivot_aligned[i]
-        weekly_trend_down = weekly_close_aligned[i] < pivot_aligned[i]
+        # Regime filter: only trade when volatility is contracting (low BB width)
+        # This identifies consolidation periods before mean reversion
+        if bb_width[i] > bb_width_ma50[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
         
         if position == 0:
-            # Long reversal: price drops to S3 in weekly uptrend
-            if (weekly_trend_up and close[i] <= s3_aligned[i]):
+            # Long signal: RSI oversold (<30) + price at/below lower BB + volume spike
+            if (rsi[i] < 30 and 
+                close[i] <= lower_band[i] and 
+                vol_ratio[i] > 2.5):
                 signals[i] = 0.25
                 position = 1
-            # Short reversal: price rises to R3 in weekly downtrend
-            elif (weekly_trend_down and close[i] >= r3_aligned[i]):
+            # Short signal: RSI overbought (>70) + price at/above upper BB + volume spike
+            elif (rsi[i] > 70 and 
+                  close[i] >= upper_band[i] and 
+                  vol_ratio[i] > 2.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price reaches weekly R1 or reverses below pivot
-            if close[i] >= r1_aligned[i] or weekly_close_aligned[i] < pivot_aligned[i]:
+            # Exit long: RSI returns to neutral (50) or price reaches middle band
+            if rsi[i] >= 50 or close[i] >= ma20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price reaches weekly S1 or reverses above pivot
-            if close[i] <= s1_aligned[i] or weekly_close_aligned[i] > pivot_aligned[i]:
+            # Exit short: RSI returns to neutral (50) or price reaches middle band
+            if rsi[i] <= 50 or close[i] <= ma20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
