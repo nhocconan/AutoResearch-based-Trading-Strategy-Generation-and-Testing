@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Keltner_Breakout_Volume_Trend_v1"
-timeframe = "4h"
+name = "1d_WeeklyDonchian_Breakout_TrendVolume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,67 +17,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Load weekly data ONCE before loop for Donchian and trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate daily EMA(20) for trend filter
-    ema_20_1d = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    # Calculate weekly Donchian channels (20-week lookback)
+    high_20w = pd.Series(df_1w['high']).rolling(window=20, min_periods=20).max().values
+    low_20w = pd.Series(df_1w['low']).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 4h ATR(20) for Keltner channels
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    # Align weekly levels to daily timeframe
+    high_20w_aligned = align_htf_to_ltf(prices, df_1w, high_20w)
+    low_20w_aligned = align_htf_to_ltf(prices, df_1w, low_20w)
     
-    # Calculate 4h EMA(20) for Keltner middle line
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Weekly trend filter: EMA(13) on weekly close
+    ema_13_1w = pd.Series(df_1w['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema_13_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_13_1w)
     
-    # Keltner bands
-    upper = ema_20 + 2 * atr_20
-    lower = ema_20 - 2 * atr_20
-    
-    # Volume spike detection: 4-period average
-    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    # Volume spike detection: 3-day average (to avoid noise)
+    vol_ma_3 = pd.Series(volume).rolling(window=3, min_periods=3).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)  # Wait for EMA and ATR
+    start_idx = max(20, 13, 3)  # Wait for Donchian, EMA, and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_20_1d_aligned[i]) or np.isnan(upper[i]) or 
-            np.isnan(lower[i]) or np.isnan(vol_ma_4[i])):
+        if (np.isnan(high_20w_aligned[i]) or np.isnan(low_20w_aligned[i]) or 
+            np.isnan(ema_13_1w_aligned[i]) or np.isnan(vol_ma_3[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: close above upper Keltner band with volume and daily uptrend
-            vol_condition = volume[i] > vol_ma_4[i] * 1.5
-            daily_uptrend = ema_20_1d_aligned[i] > ema_20_1d_aligned[i-1]
+            # Long: price breaks above weekly Donchian high with volume and weekly uptrend
+            vol_condition = volume[i] > vol_ma_3[i] * 2.0
+            weekly_uptrend = ema_13_1w_aligned[i] > ema_13_1w_aligned[i-1]
             
-            if close[i] > upper[i] and vol_condition and daily_uptrend:
+            if close[i] > high_20w_aligned[i] and vol_condition and weekly_uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: close below lower Keltner band with volume and daily downtrend
-            elif close[i] < lower[i] and vol_condition and not daily_uptrend:
+            # Short: price breaks below weekly Donchian low with volume and weekly downtrend
+            elif close[i] < low_20w_aligned[i] and vol_condition and not weekly_uptrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: close back below EMA(20) or volume drops
-            if close[i] < ema_20[i] or volume[i] < vol_ma_4[i] * 1.2:
+            # Exit: price returns below weekly Donchian low or volume drops
+            if close[i] < low_20w_aligned[i] or volume[i] < vol_ma_3[i] * 1.1:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: close back above EMA(20) or volume drops
-            if close[i] > ema_20[i] or volume[i] < vol_ma_4[i] * 1.2:
+            # Exit: price returns above weekly Donchian high or volume drops
+            if close[i] > high_20w_aligned[i] or volume[i] < vol_ma_3[i] * 1.1:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -85,15 +79,14 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 4h Keltner channel breakout with volume confirmation and daily trend filter
-# - Keltner channels (EMA20 ± 2*ATR) adapt to volatility better than fixed bands
-# - Breakout above upper band with volume in daily uptrend = long opportunity
-# - Breakdown below lower band with volume in daily downtrend = short opportunity
-# - Volume confirmation (1.5x average) reduces false breakouts
-# - Exit when price returns to middle line (EMA20) or volume weakens
-# - Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend)
-# - Position size 0.25 targets ~30-60 trades/year, avoiding fee drag
-# - Daily trend filter ensures we trade with higher timeframe momentum
-# - Volatility-adjusted channels prevent whipsaws in low volatility periods
-# - Designed for BTC/ETH primary focus with potential applicability to SOL
-# - Aims for 80-160 total trades over 4 years (20-40/year) to stay within limits
+# Hypothesis: Weekly Donchian breakout with volume confirmation and weekly trend filter
+# - Weekly Donchian(20) captures major support/resistance from institutional timeframe
+# - Breakout above weekly high with 2x volume in weekly uptrend = high-probability long
+# - Breakdown below weekly low with 2x volume in weekly downtrend = high-probability short
+# - Volume confirmation (2x 3-day average) filters false breakouts
+# - Weekly EMA(13) trend filter ensures trades align with higher timeframe momentum
+# - Designed for low trade frequency: targets 15-30 trades/year to minimize fee drag
+# - Works in both bull (buy weekly high breaks) and bear (sell weekly low breaks)
+# - Position size 0.25 balances return potential with drawdown control
+# - Uses actual weekly data from Binance (no resampling) via mtf_data
+# - Avoids overtrading by requiring multiple confluence factors for entry
