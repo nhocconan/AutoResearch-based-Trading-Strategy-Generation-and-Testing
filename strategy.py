@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-name = "1h_RSI_4hTrend_1dVolume"
-timeframe = "1h"
+name = "6h_ElderRay_BullBearPower_1wTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtr_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,92 +17,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h data ONCE for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 34:
+    # Load weekly data ONCE for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 13:
         return np.zeros(n)
     
-    # Load 1d data ONCE for volume filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
+    # Elder Ray indicators (13-period EMA as base)
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema_13
+    bear_power = low - ema_13
     
-    # 4h EMA34 for trend filter
-    ema_34_4h = pd.Series(df_4h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    # Weekly EMA for trend filter
+    ema_13_1w = pd.Series(df_1w['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema_13_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_13_1w)
     
-    # 1d volume SMA20 for volume filter
-    vol_sma_20_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
-    vol_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma_20_1d)
-    
-    # 1h RSI(14) for entry timing
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
+    # Volume filter: 1.5x average volume
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 34)
+    start_idx = max(30, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_4h_aligned[i]) or np.isnan(vol_sma_20_1d_aligned[i]) or 
-            np.isnan(rsi[i])):
+        if (np.isnan(ema_13_1w_aligned[i]) or np.isnan(ema_13[i]) or 
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
+        # Bullish conditions: bull power > 0, weekly uptrend, volume spike
+        bullish = (bull_power[i] > 0) and (ema_13_1w_aligned[i] > ema_13_1w_aligned[i-1]) and (volume[i] > vol_ma_20[i] * 1.5)
+        # Bearish conditions: bear power < 0, weekly downtrend, volume spike
+        bearish = (bear_power[i] < 0) and (ema_13_1w_aligned[i] < ema_13_1w_aligned[i-1]) and (volume[i] > vol_ma_20[i] * 1.5)
         
         if position == 0:
-            # Long: RSI < 30 (oversold) + 4h uptrend + volume above average
-            if (rsi[i] < 30 and 
-                ema_34_4h_aligned[i] > ema_34_4h_aligned[i-1] and 
-                volume[i] > vol_sma_20_1d_aligned[i] and
-                in_session):
-                signals[i] = 0.20
+            if bullish:
+                signals[i] = 0.25
                 position = 1
-            # Short: RSI > 70 (overbought) + 4h downtrend + volume above average
-            elif (rsi[i] > 70 and 
-                  ema_34_4h_aligned[i] < ema_34_4h_aligned[i-1] and 
-                  volume[i] > vol_sma_20_1d_aligned[i] and
-                  in_session):
-                signals[i] = -0.20
+            elif bearish:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: RSI > 50 or trend change
-            if rsi[i] > 50 or ema_34_4h_aligned[i] < ema_34_4h_aligned[i-1]:
+            # Exit: bull power turns negative or weekly trend changes
+            if bull_power[i] <= 0 or ema_13_1w_aligned[i] <= ema_13_1w_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: RSI < 50 or trend change
-            if rsi[i] < 50 or ema_34_4h_aligned[i] > ema_34_4h_aligned[i-1]:
+            # Exit: bear power turns positive or weekly trend changes
+            if bear_power[i] >= 0 or ema_13_1w_aligned[i] >= ema_13_1w_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-# Hypothesis: 1h RSI mean reversion with 4h trend filter and 1d volume confirmation
-# - RSI < 30 for long, RSI > 70 for short (mean reversion)
-# - 4h EMA34 trend filter ensures trades align with higher timeframe momentum
-# - 1d volume spike filter increases signal reliability
-# - Session filter (08-20 UTC) reduces noise during low liquidity hours
-# - Works in bull markets (buying oversold dips in uptrend) and bear markets (selling overbought rallies in downtrend)
-# - Position size 0.20 limits drawdown while maintaining sufficient exposure
-# - Target: 60-120 total trades over 4 years (15-30/year) to avoid fee drag
-# - Simple, robust logic with clear entry/exit conditions
-# - Avoids overtrading by requiring multiple confluence factors
-# - Uses higher timeframes for direction, lower timeframe only for timing precision
+# Hypothesis: Elder Ray (Bull/Bear Power) with weekly trend filter and volume confirmation
+# - Bull Power = High - EMA13 measures bullish strength
+# - Bear Power = Low - EMA13 measures bearish strength
+# - Long when Bull Power > 0 (bulls in control) + weekly uptrend + volume confirmation
+# - Short when Bear Power < 0 (bears in control) + weekly downtrend + volume confirmation
+# - Weekly EMA13 trend filter ensures alignment with higher timeframe trend
+# - Works in both bull (buy strength in uptrend) and bear (sell weakness in downtrend)
+# - Volume confirmation (1.5x average) reduces false signals
+# - Exit when power turns negative/positive or weekly trend changes
+# - Position size 0.25 targets ~15-35 trades/year to stay within limits
+# - Novel combination: Elder Ray (13/13 EMA) + weekly trend + volume filter not recently tried
+# - Aims for 60-140 total trades over 4 years (15-35/year) to stay within limits
