@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_1dTrend_VolumeSpike_v11"
-timeframe = "4h"
+name = "6h_Adaptive_Kelly_CamR3S3_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -54,17 +54,31 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     session_filter = (hours >= 8) & (hours <= 20)
     
+    # Kelly sizing components
+    # Win probability estimate from recent price action
+    returns_6h = np.diff(np.log(close), prepend=np.log(close[0]))
+    win_prob = pd.Series(returns_6h > 0).rolling(window=50, min_periods=20).mean().values
+    # Win/loss ratio from recent volatility
+    abs_returns = np.abs(returns_6h)
+    win_loss_ratio = pd.Series(abs_returns).rolling(window=50, min_periods=20).mean().values / \
+                     (pd.Series(abs_returns[returns_6h < 0]).rolling(window=50, min_periods=20).mean().values + 1e-10)
+    # Kelly fraction: f* = (bp - q)/b where b = win_loss_ratio, p = win_prob, q = 1-p
+    kelly_raw = (win_loss_ratio * win_prob - (1 - win_prob)) / (win_loss_ratio + 1e-10)
+    kelly_fraction = np.clip(kelly_raw, 0, 0.5)  # Cap at 50% Kelly
+    position_size = kelly_fraction * 0.5  # Scale to 0-0.25 range
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)  # Ensure volume MA and EMA data
+    start_idx = max(20, 34, 50)  # Ensure all indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN or invalid
         if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
             np.isnan(vol_ma[i]) or vol_ma[i] == 0 or
             np.isnan(vol_filter[i]) or not vol_filter[i] or
-            not session_filter[i]):
+            not session_filter[i] or
+            np.isnan(position_size[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -79,13 +93,13 @@ def generate_signals(prices):
             if (close[i] > r3_aligned[i] + buffer and 
                 close[i] > ema_34_1d_aligned[i] + buffer and   # 1d uptrend
                 volume_spike):
-                signals[i] = 0.25
+                signals[i] = position_size[i]
                 position = 1
             # Short: Price breaks below S3, below 1d EMA34 (downtrend), with volume spike
             elif (close[i] < s3_aligned[i] - buffer and 
                   close[i] < ema_34_1d_aligned[i] - buffer and   # 1d downtrend
                   volume_spike):
-                signals[i] = -0.25
+                signals[i] = -position_size[i]
                 position = -1
         elif position != 0:
             # Exit: Price returns to midpoint of prior 1d range (H3/L3)
@@ -104,7 +118,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                # Maintain position
-                signals[i] = 0.25 if position == 1 else -0.25
+                # Maintain position with Kelly sizing
+                signals[i] = position_size[i] if position == 1 else -position_size[i]
     
     return signals
