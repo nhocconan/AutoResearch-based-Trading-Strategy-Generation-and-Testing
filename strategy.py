@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_1dTrend_Volume_v1
-Hypothesis: Enter long/short when price breaks Donchian channel (20-period high/low) on 4h with volume confirmation (>2x 20-bar average) and in direction of daily EMA34 trend. Exit when price crosses opposite Donchian band or volume dries up. Designed for low trade frequency (~20-40/year) to minimize fee drag. Works in both bull and bear markets by aligning with higher timeframe trend.
+4h_Camarilla_R1S1_Breakout_1dEMA34_Volume_v2
+Hypothesis: Enter long/short when price breaks above/below Camarilla R1/S1 levels on 4h with volume confirmation (>2x 20-bar average) and in direction of daily EMA34 trend. Exit when price crosses opposite Camarilla level or volume dries up. Designed for low trade frequency (~20-40/year) to minimize fee drag. Works in both bull and bear markets by aligning with higher timeframe trend.
 """
 
-name = "4h_Donchian20_Breakout_1dTrend_Volume_v1"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_Volume_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -31,10 +31,23 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Donchian channel (20-period)
-    donchian_window = 20
-    donchian_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    donchian_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
+    # Camarilla pivot levels (based on previous day's OHLC)
+    # For each 4h bar, use the previous daily OHLC to calculate pivot levels
+    prev_daily_high = df_1d['high'].shift(1).values  # Previous day's high
+    prev_daily_low = df_1d['low'].shift(1).values    # Previous day's low
+    prev_daily_close = df_1d['close'].shift(1).values # Previous day's close
+    
+    # Align previous day's OHLC to 4h timeframe
+    prev_daily_high_aligned = align_htf_to_ltf(prices, df_1d, prev_daily_high)
+    prev_daily_low_aligned = align_htf_to_ltf(prices, df_1d, prev_daily_low)
+    prev_daily_close_aligned = align_htf_to_ltf(prices, df_1d, prev_daily_close)
+    
+    # Calculate Camarilla levels
+    # R1 = Close + (High - Low) * 1.1/12
+    # S1 = Close - (High - Low) * 1.1/12
+    camarilla_range = prev_daily_high_aligned - prev_daily_low_aligned
+    r1 = prev_daily_close_aligned + camarilla_range * 1.1 / 12
+    s1 = prev_daily_close_aligned - camarilla_range * 1.1 / 12
     
     # Volume confirmation: 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -43,11 +56,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, donchian_window)  # Warmup for Donchian and volume MA
+    start_idx = 20  # Warmup for volume MA
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+        if (np.isnan(r1[i]) or np.isnan(s1[i]) or 
             np.isnan(vol_ratio[i]) or np.isnan(ema_34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -66,28 +79,28 @@ def generate_signals(prices):
         daily_trend_down = daily_close_aligned[i] < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Long: price breaks above Donchian high, volume spike, daily trend up
-            if (close[i] > donchian_high[i] and 
+            # Long: price breaks above R1, volume spike, daily trend up
+            if (close[i] > r1[i] and 
                 vol_ratio[i] > 2.0 and 
                 daily_trend_up):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low, volume spike, daily trend down
-            elif (close[i] < donchian_low[i] and 
+            # Short: price breaks below S1, volume spike, daily trend down
+            elif (close[i] < s1[i] and 
                   vol_ratio[i] > 2.0 and 
                   daily_trend_down):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below Donchian low or volume dries up
-            if (close[i] < donchian_low[i] or vol_ratio[i] < 1.0):
+            # Exit long: price crosses below S1 or volume dries up
+            if (close[i] < s1[i] or vol_ratio[i] < 1.0):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above Donchian high or volume dries up
-            if (close[i] > donchian_high[i] or vol_ratio[i] < 1.0):
+            # Exit short: price crosses above R1 or volume dries up
+            if (close[i] > r1[i] or vol_ratio[i] < 1.0):
                 signals[i] = 0.0
                 position = 0
             else:
