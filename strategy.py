@@ -1,12 +1,6 @@
-# [132912] 12h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_v1
-# Hypothesis: Use 12h timeframe with Camarilla R1/S1 breakouts from prior day, filtered by 1d EMA34 trend and volume spikes.
-# This targets fewer trades (~20-50/year) with higher quality: trend alignment + volatility expansion.
-# Works in bull (breakouts catch momentum) and bear (mean reversion to pivot point exits).
-# Focus on BTC/ETH; avoids overtrading via strict entry conditions.
-
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_v8"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -40,7 +34,7 @@ def generate_signals(prices):
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume spike: current volume > 2.0 x 24-period average (12h * 24 = 12 days)
+    # Volume spike: current volume > 2.0 x 24-period average (4h * 24 = 4 days)
     vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
@@ -61,11 +55,11 @@ def generate_signals(prices):
         if position == 0:
             # Long: Break above R1 in 1d uptrend with volume spike
             if close[i] > r1_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_spike:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             # Short: Break below S1 in 1d downtrend with volume spike
             elif close[i] < s1_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_spike:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         elif position != 0:
             # Exit: Price returns to previous day's close (pivot point)
@@ -77,6 +71,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.30 if position == 1 else -0.30
     
     return signals
