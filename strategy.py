@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Donchian_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -19,18 +19,18 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     # 1d EMA(34) for trend filter
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 12h Donchian channel (20-period)
+    # 4h Donchian channel (20-period)
     high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 12h volume spike (20-period average)
+    # 4h volume spike (20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -47,40 +47,41 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: break above Donchian high with volume and 1d uptrend
-            vol_condition = volume[i] > vol_ma_20[i] * 1.8
+            vol_condition = volume[i] > vol_ma_20[i] * 2.0
             uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]  # Rising EMA
             
             if close[i] > high_20[i] and vol_condition and uptrend:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             # Short: break below Donchian low with volume and 1d downtrend
             elif close[i] < low_20[i] and vol_condition and not uptrend:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
             # Exit: price back below Donchian midpoint or volume drops
             midpoint = (high_20[i] + low_20[i]) / 2
-            if close[i] < midpoint or volume[i] < vol_ma_20[i] * 1.2:
+            if close[i] < midpoint or volume[i] < vol_ma_20[i] * 1.3:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
             # Exit: price back above Donchian midpoint or volume drops
             midpoint = (high_20[i] + low_20[i]) / 2
-            if close[i] > midpoint or volume[i] < vol_ma_20[i] * 1.2:
+            if close[i] > midpoint or volume[i] < vol_ma_20[i] * 1.3:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-# Hypothesis: 12h Donchian breakout with 1d EMA trend filter and volume confirmation
+# Hypothesis: 4h Donchian breakout with 1d EMA trend filter and volume confirmation
 # - Donchian(20) breakouts capture momentum after range periods
 # - 1d EMA(34) ensures alignment with higher timeframe trend
-# - Volume spike (1.8x average) confirms institutional participation
+# - Volume spike (2.0x average) confirms institutional participation
 # - Works in bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend)
-# - Position size 0.25 targets 15-25 trades/year, avoiding fee drag
+# - Position size 0.30 targets 20-40 trades/year, avoiding fee drag
 # - Exit at range midpoint provides logical profit target in ranging markets
-# - Timeframe 12h reduces trade frequency to avoid fee drag (target: 50-150 total trades over 4 years)
+# - Conservative entry conditions to limit trades and avoid overtrading
+# - Tested on BTC/ETH/SOL with focus on major pairs for robustness
