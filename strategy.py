@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeS
-# Hypothesis: Uses weekly EMA50 trend and monthly volatility filter with daily Camarilla R1/S1 breakouts.
-# Weekly trend filter (EMA50) reduces whipsaws; monthly volatility filter ensures trades occur in stable regimes.
-# Designed for 12h timeframe to target 50-150 total trades over 4 years.
-# Works in bull markets (price above weekly EMA50 + breaks R1 with volume) and bear markets (price below weekly EMA50 + breaks S1 with volume).
+# 1h_VolatilityRegime_CamarillaBreakout_4hTrend
+# Hypothesis: Use 4h trend (close vs EMA34) for direction, 1h for entry timing. 
+# Entry when price breaks 1d Camarilla R1/S1 with volume spike, only in high volatility regime (ATR ratio > 1.2).
+# Volatility regime filter reduces whipsaws in ranging markets. Target 15-30 trades/year.
 
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeS"
-timeframe = "12h"
+name = "1h_VolatilityRegime_CamarillaBreakout_4hTrend"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,87 +22,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 35:
         return np.zeros(n)
+    close_4h = df_4h['close'].values
+    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
     
+    # 1d data for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla pivot levels: R1, S1
     camarilla_range = high_1d - low_1d
     r1 = close_1d + 1.1 * camarilla_range / 12
     s1 = close_1d - 1.1 * camarilla_range / 12
+    r1_1h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_1h = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Get weekly data for trend filter (EMA50)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # 1h volatility regime: ATR ratio (current ATR / 50-period ATR)
+    tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
+    tr1[0] = high[0] - low[0]
+    atr_14 = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
+    atr_50 = pd.Series(tr1).rolling(window=50, min_periods=50).mean().values
+    atr_ratio = atr_14 / atr_50
+    high_vol = atr_ratio > 1.2  # volatile regime
     
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Get monthly data for volatility filter (ATR ratio)
-    df_1M = get_htf_data(prices, '1M')
-    if len(df_1M) < 14:
-        return np.zeros(n)
-    
-    high_1M = df_1M['high'].values
-    low_1M = df_1M['low'].values
-    close_1M = df_1M['close'].values
-    tr_1M = np.maximum(high_1M - low_1M, np.absolute(high_1M - np.roll(close_1M, 1)), np.absolute(low_1M - np.roll(close_1M, 1)))
-    tr_1M[0] = high_1M[0] - low_1M[0]
-    atr_14_1M = pd.Series(tr_1M).rolling(window=14, min_periods=14).mean().values
-    atr_50_1M = pd.Series(tr_1M).rolling(window=50, min_periods=50).mean().values
-    volatility_filter = atr_14_1M < atr_50_1M  # Low volatility regime
-    
-    # Align all indicators to 12h timeframe
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
-    ema_50_1w_12h = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    volatility_filter_12h = align_htf_to_ltf(prices, df_1M, volatility_filter, additional_delay_bars=0)
-    
-    # Volume spike filter on 12h (24-period average)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > (1.5 * vol_ma_24)
+    # Volume spike (20-period average)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        # Skip if any critical value is NaN
-        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or 
-            np.isnan(ema_50_1w_12h[i]) or np.isnan(volatility_filter_12h[i]) or 
-            np.isnan(volume_spike[i])):
+    for i in range(60, n):
+        if (np.isnan(ema_34_4h_aligned[i]) or np.isnan(r1_1h[i]) or np.isnan(s1_1h[i]) or
+            np.isnan(volume_spike[i]) or np.isnan(high_vol[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price > R1, above weekly EMA50 trend, low volatility, volume spike
-            if close[i] > r1_12h[i] and close[i] > ema_50_1w_12h[i] and volatility_filter_12h[i] and volume_spike[i]:
-                signals[i] = 0.25
+            # Long: price > R1, above 4h EMA34 trend, volume spike, high volatility
+            if close[i] > r1_1h[i] and close[i] > ema_34_4h_aligned[i] and volume_spike[i] and high_vol[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short: Price < S1, below weekly EMA50 trend, low volatility, volume spike
-            elif close[i] < s1_12h[i] and close[i] < ema_50_1w_12h[i] and volatility_filter_12h[i] and volume_spike[i]:
-                signals[i] = -0.25
+            # Short: price < S1, below 4h EMA34 trend, volume spike, high volatility
+            elif close[i] < s1_1h[i] and close[i] < ema_34_4h_aligned[i] and volume_spike[i] and high_vol[i]:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit: Price < R1 or below weekly EMA50 trend
-            if close[i] < r1_12h[i] or close[i] < ema_50_1w_12h[i]:
+            # Exit: price < R1 or below 4h EMA34 trend
+            if close[i] < r1_1h[i] or close[i] < ema_34_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit: Price > S1 or above weekly EMA50 trend
-            if close[i] > s1_12h[i] or close[i] > ema_50_1w_12h[i]:
+            # Exit: price > S1 or above 4h EMA34 trend
+            if close[i] > s1_1h[i] or close[i] > ema_34_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
