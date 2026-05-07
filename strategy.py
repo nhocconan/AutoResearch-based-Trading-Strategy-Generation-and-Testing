@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h trend filter and volume confirmation.
-# Long when price breaks above Donchian upper channel AND price > 12h EMA50 with volume spike.
-# Short when price breaks below Donchian lower channel AND price < 12h EMA50 with volume spike.
-# Uses 12h EMA50 trend filter to align with higher timeframe trend and avoid counter-trend trades.
-# Volume spike filter ensures momentum confirmation. Designed for fewer trades (target: 20-30/year) to reduce fee drag.
-# Works in both bull and bear markets by following the 12h trend direction.
-name = "4h_Donchian20_12hTrend_Volume"
-timeframe = "4h"
+# Hypothesis: 1d KAMA trend with weekly trend filter and volume confirmation.
+# Long when KAMA indicates uptrend AND price > weekly EMA34 AND volume > 1.5x average.
+# Short when KAMA indicates downtrend AND price < weekly EMA34 AND volume > 1.5x average.
+# KAMA adapts to market noise, reducing whipsaw in ranging markets.
+# Weekly EMA34 filter ensures alignment with higher timeframe trend.
+# Volume confirmation adds momentum validation. Designed for 10-20 trades/year to minimize fee drag.
+# Works in both bull and bear markets by following adaptive trend and weekly trend direction.
+name = "1d_KAMA_WeeklyTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,45 +24,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load weekly data ONCE for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # 12h trend filter: 50-period EMA on close
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Weekly trend filter: 34-period EMA on close
+    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # KAMA (Kaufman Adaptive Moving Average) - 10-period ER, 2 and 30 SC
+    # ER = |net change| / sum(|changes|)
+    change = np.abs(np.diff(close, prepend=close[0]))
+    dir = np.abs(np.diff(close, k=10, prepend=close[:10]))
+    vol = np.sum(np.lib.stride_tricks.sliding_window_view(change, 10), axis=1)
+    # Pad vol to match length
+    vol = np.concatenate([np.full(9, np.nan), vol])
+    er = np.where(vol > 0, dir / vol, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # Initialize KAMA
+    kama = np.full(n, np.nan)
+    kama[9] = close[9]  # Start after first 10 periods
+    for i in range(10, n):
+        if not np.isnan(sc[i]) and not np.isnan(kama[i-1]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
     
-    # 4h volume average for spike detection
-    vol_ema_4h = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike = np.where(vol_ema_4h > 0, volume / vol_ema_4h, 1.0) > 1.8
+    # 1d volume average for spike detection
+    vol_ma = np.convolve(volume, np.ones(20)/20, mode='same')
+    vol_ma[:10] = np.nan
+    vol_ma[-10:] = np.nan
+    vol_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Sufficient warmup for Donchian and EMA calculation
+    start_idx = 30  # Sufficient warmup for KAMA and EMA calculation
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(vol_spike[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(kama[i]) or 
+            np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: price above/below 12h EMA50
-        uptrend = close[i] > ema_50_12h_aligned[i]
-        downtrend = close[i] < ema_50_12h_aligned[i]
+        # KAMA trend: price above/below KAMA
+        kama_uptrend = close[i] > kama[i]
+        kama_downtrend = close[i] < kama[i]
+        
+        # Weekly trend filter
+        weekly_uptrend = close[i] > ema_34_1w_aligned[i]
+        weekly_downtrend = close[i] < ema_34_1w_aligned[i]
         
         if position == 0:
-            # Long condition: break above Donchian high, in uptrend with volume spike
-            long_condition = (close[i] > donchian_high[i-1]) and uptrend and vol_spike[i]
-            # Short condition: break below Donchian low, in downtrend with volume spike
-            short_condition = (close[i] < donchian_low[i-1]) and downtrend and vol_spike[i]
+            # Long condition: KAMA uptrend, weekly uptrend, volume spike
+            long_condition = kama_uptrend and weekly_uptrend and vol_spike[i]
+            # Short condition: KAMA downtrend, weekly downtrend, volume spike
+            short_condition = kama_downtrend and weekly_downtrend and vol_spike[i]
             
             if long_condition:
                 signals[i] = 0.25
@@ -70,15 +92,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price breaks below Donchian low or trend turns down
-            if (close[i] < donchian_low[i]) or (not uptrend):
+            # Exit: KAMA downtrend or weekly downtrend
+            if (not kama_uptrend) or (not weekly_uptrend):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price breaks above Donchian high or trend turns up
-            if (close[i] > donchian_high[i]) or (not downtrend):
+            # Exit: KAMA uptrend or weekly uptrend
+            if (not kama_downtrend) or (not weekly_downtrend):
                 signals[i] = 0.0
                 position = 0
             else:
