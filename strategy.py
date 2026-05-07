@@ -1,6 +1,15 @@
+# 6h_Camarilla_R3S3_Breakout_1dTrend_Volume_1wFilter_v1
+# Hypothesis: Use 6h timeframe with Camarilla R3/S3 breakout filtered by 1d trend and 1w volume regime.
+# Long when price breaks above R3 with 1d uptrend and 1w volume expansion.
+# Short when price breaks below S3 with 1d downtrend and 1w volume expansion.
+# Uses weekly volume SMA filter to avoid low-volume false breakouts.
+# Designed for 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# Works in bull markets (breakouts in uptrend) and bear markets (breakdowns in downtrend).
+# Volume filter ensures breakouts occur with institutional participation.
+
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Filter_v3"
-timeframe = "4h"
+name = "6h_Camarilla_R3S3_Breakout_1dTrend_Volume_1wFilter_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,47 +26,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Camarilla levels
+    # Get 1d data for Camarilla levels and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     # 1d EMA34 trend filter
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla levels from previous 1d bar
+    # Camarilla levels from previous 1d bar
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
     prev_close = df_1d['close'].shift(1).values
     
+    # Calculate Camarilla levels
     range_ = prev_high - prev_low
-    R1 = prev_close + range_ * 1.1 / 12
-    S1 = prev_close - range_ * 1.1 / 12
+    R3 = prev_close + range_ * 1.1 / 4
+    S3 = prev_close - range_ * 1.1 / 4
     
-    # Align Camarilla levels to 4h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    # Align Camarilla levels to 6h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
-    # Volume filter: current volume > 1.5x 20-period average
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma_20[i] = np.mean(volume[i-20:i])
-    vol_filter = volume > (1.5 * vol_ma_20)
+    # Get 1w data for volume regime filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    # 1w volume SMA20 for volume regime
+    vol_sma_20_1w = pd.Series(df_1w['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_sma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_sma_20_1w)
+    
+    # Volume filter: current volume > 1.5x 20-period weekly average
+    vol_filter = volume > (1.5 * vol_sma_20_1w_aligned)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 12  # ~2 days for 4h to reduce trades
+    cooldown_bars = 4  # ~1 day for 6h to reduce trades
     
-    start_idx = max(100, 20, 34)
+    start_idx = max(100, 34, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(R1_aligned[i]) or 
-            np.isnan(S1_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+            np.isnan(R3_aligned[i]) or 
+            np.isnan(S3_aligned[i]) or 
+            np.isnan(vol_sma_20_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,31 +89,31 @@ def generate_signals(prices):
         trend_down = close < ema_34_1d_aligned[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: Price breaks above R1 with volume in uptrend
-            if (close[i] > R1_aligned[i] and 
+            # Long: Price breaks above R3 with 1d uptrend and volume expansion
+            if (close[i] > R3_aligned[i] and 
                 trend_up[i] and 
                 vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: Price breaks below S1 with volume in downtrend
-            elif (close[i] < S1_aligned[i] and 
+            # Short: Price breaks below S3 with 1d downtrend and volume expansion
+            elif (close[i] < S3_aligned[i] and 
                   trend_down[i] and 
                   vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit: Price falls below S1 or trend changes
-            if close[i] < S1_aligned[i] or not trend_up[i]:
+            # Exit: Price falls below S3 or trend changes to down
+            if close[i] < S3_aligned[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price rises above R1 or trend changes
-            if close[i] > R1_aligned[i] or not trend_down[i]:
+            # Exit: Price rises above R3 or trend changes to up
+            if close[i] > R3_aligned[i] or not trend_down[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
@@ -106,9 +122,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume filter.
-# Long when price breaks above R1 in uptrend with volume confirmation.
-# Short when price breaks below S1 in downtrend with volume confirmation.
-# Uses 4h timeframe for optimal balance of signal quality and trade frequency.
-# Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
+# Hypothesis: Camarilla R3/S3 breakout with 1d EMA34 trend filter and 1w volume expansion filter.
+# Long when price breaks above R3 in uptrend with weekly volume expansion.
+# Short when price breaks below S3 in downtrend with weekly volume expansion.
+# Uses 6h timeframe for optimal balance of signal quality and trade frequency.
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
 # Works in bull markets (breakouts in uptrend) and bear markets (breakdowns in downtrend).
+# Volume filter ensures breakouts occur with institutional participation.
