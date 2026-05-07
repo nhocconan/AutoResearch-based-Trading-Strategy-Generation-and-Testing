@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4H_Camarilla_R3_S3_1DTrend_VolumeSpike_MomentumExit
-# Hypothesis: Combines Camarilla R3/S3 breakout with 1-day EMA trend, volume spike, and momentum-based exit.
-# Uses MOMENTUM (10-period ROC) to exit early when momentum fades, reducing whipsaw in sideways markets.
-# Designed for 4h timeframe with low trade frequency (<50/year) and strong performance in both bull and bear regimes.
-# Target: 20-50 trades per year per symbol with clear entry/exit rules.
+# 1D_Camarilla_R3_S3_1WTrend_VolumeSpike
+# Hypothesis: Combines daily Camarilla R3/S3 breakout with 1-week EMA trend and volume spike.
+# Uses weekly EMA to filter trend direction and volume spike for confirmation.
+# Designed for 1d timeframe with low trade frequency (<25/year) and strong performance in both bull and bear regimes.
+# Target: 15-25 trades per year per symbol with clear entry/exit rules.
 
-name = "4H_Camarilla_R3_S3_1DTrend_VolumeSpike_MomentumExit"
-timeframe = "4h"
+name = "1D_Camarilla_R3_S3_1WTrend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -23,6 +23,15 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
+    # Get 1w data for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 21:
+        return np.zeros(n)
+    
+    # 1-week EMA21 for trend filter
+    ema21_1w = pd.Series(df_1w['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
+    
     # Get 1d data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
@@ -38,34 +47,22 @@ def generate_signals(prices):
     camarilla_r3 = close_1d + rng * 1.1 / 4
     camarilla_s3 = close_1d - rng * 1.1 / 4
     
-    # 1-day EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align Camarilla levels and EMA to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Align Camarilla levels to 1d timeframe (no alignment needed as already 1d)
+    r3_aligned = camarilla_r3
+    s3_aligned = camarilla_s3
     
     # Volume filter: current volume > 2.0x average volume (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Momentum filter: 10-period ROC for exit signal
-    roc_period = 10
-    roc = np.full_like(close, np.nan, dtype=np.float64)
-    for i in range(roc_period, n):
-        if close[i - roc_period] != 0:
-            roc[i] = (close[i] - close[i - roc_period]) / close[i - roc_period] * 100
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, roc_period)  # Ensure we have volume MA and ROC data
+    start_idx = max(20, 21)  # Ensure we have volume MA and EMA data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
         if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema34_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0 or
-            np.isnan(roc[i])):
+            np.isnan(ema21_1w_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,26 +72,23 @@ def generate_signals(prices):
         volume_filter = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long: Price breaks above R3 + Uptrend (price > EMA34) + volume spike
+            # Long: Price breaks above R3 + Uptrend (price > EMA21_1w) + volume spike
             if (close[i] > r3_aligned[i] and 
-                close[i] > ema34_aligned[i] and
+                close[i] > ema21_1w_aligned[i] and
                 volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S3 + Downtrend (price < EMA34) + volume spike
+            # Short: Price breaks below S3 + Downtrend (price < EMA21_1w) + volume spike
             elif (close[i] < s3_aligned[i] and 
-                  close[i] < ema34_aligned[i] and
+                  close[i] < ema21_1w_aligned[i] and
                   volume_filter):
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit conditions:
-            # 1. Momentum reversal: ROC crosses zero against position
-            # 2. Price returns inside pivot range (reversion to mean)
-            momentum_exit = (position == 1 and roc[i] < 0) or (position == -1 and roc[i] > 0)
+            # Exit: Price returns inside pivot range (reversion to mean)
             price_inside = (close[i] < r3_aligned[i] and close[i] > s3_aligned[i])
             
-            if momentum_exit or price_inside:
+            if price_inside:
                 signals[i] = 0.0
                 position = 0
             else:
