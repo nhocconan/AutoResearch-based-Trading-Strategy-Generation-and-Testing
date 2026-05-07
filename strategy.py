@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 12h_WeeklyPivot_Breakout_1dTrend
-# Hypothesis: Uses weekly pivot points (calculated from prior week's high/low/close) to identify key support/resistance levels.
-# Breakouts above weekly R1 or below S1 with volume confirmation and 1d trend filter (price > EMA50 for longs, < EMA50 for shorts).
-# Weekly pivots provide structure that works in both bull and bear markets by identifying institutional levels.
-# Target: 15-30 trades/year to stay within optimal frequency range and minimize fee drag.
+# 4h_Camarilla_R3_S3_Breakout_12hTrend_Volume
+# Hypothesis: Uses Camarilla R3/S3 levels from 1d as breakout levels, filtered by 12h EMA50 trend and volume spikes.
+# Camarilla levels provide high-probability reversal/breakout points. Trading breaks of R3 (bullish) or S3 (bearish)
+# with 12h trend filter ensures alignment with higher timeframe momentum. Volume spikes confirm breakout strength.
+# Designed for 4h timeframe to balance trade frequency and signal quality. Works in bull/bear via trend filter.
 
-name = "12h_WeeklyPivot_Breakout_1dTrend"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,80 +23,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot calculation and trend filter
+    # Get 1d data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly pivot points from 1d data (using prior week's H/L/C)
-    # We'll resample 1d data to weekly manually since we can't use .resample()
-    # Get weekly high, low, close from daily data
+    # Calculate Camarilla levels (R3, S3) from previous day
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Arrays to store weekly pivot levels
-    weekly_high = np.full(len(close_1d), np.nan)
-    weekly_low = np.full(len(close_1d), np.nan)
-    weekly_close = np.full(len(close_1d), np.nan)
+    # Camarilla R3 = close + (high - low) * 1.1/4
+    # Camarilla S3 = close - (high - low) * 1.1/4
+    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
+    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
     
-    # Calculate weekly values (assuming 7 days per week)
-    for i in range(6, len(close_1d)):
-        weekly_high[i] = np.max(high_1d[i-6:i+1])
-        weekly_low[i] = np.min(low_1d[i-6:i+1])
-        weekly_close[i] = close_1d[i]
+    # Shift by 1 to use previous day's levels (no look-ahead)
+    camarilla_r3 = np.roll(camarilla_r3, 1)
+    camarilla_s3 = np.roll(camarilla_s3, 1)
+    camarilla_r3[0] = np.nan
+    camarilla_s3[0] = np.nan
     
-    # Calculate pivot points: P = (H + L + C) / 3
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    # R1 = 2*P - L, S1 = 2*P - H
-    weekly_r1 = 2 * weekly_pivot - weekly_low
-    weekly_s1 = 2 * weekly_pivot - weekly_high
+    # Align Camarilla levels to 4h timeframe
+    camarilla_r3_4h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_4h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Align weekly levels to 1d timeframe (already aligned since calculated from 1d)
-    # Now align to 12h timeframe
-    weekly_pivot_12h = align_htf_to_ltf(prices, df_1d, weekly_pivot)
-    weekly_r1_12h = align_htf_to_ltf(prices, df_1d, weekly_r1)
-    weekly_s1_12h = align_htf_to_ltf(prices, df_1d, weekly_s1)
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
+        return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_4h = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Volume confirmation: 20-period volume average on 12h
+    # Calculate volume spike on 4h timeframe (20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ma_20)  # Higher threshold for fewer trades
+    volume_spike = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if any critical value is NaN
-        if (np.isnan(weekly_r1_12h[i]) or np.isnan(weekly_s1_12h[i]) or 
-            np.isnan(ema_50_12h[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(camarilla_r3_4h[i]) or np.isnan(camarilla_s3_4h[i]) or 
+            np.isnan(ema_50_12h_4h[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Break above weekly R1 with volume and above 1d EMA50
-            if close[i] > weekly_r1_12h[i] and close[i] > ema_50_12h[i] and volume_spike[i]:
+            # Long: Price breaks above Camarilla R3 + above 12h EMA50 + volume spike
+            if close[i] > camarilla_r3_4h[i] and close[i] > ema_50_12h_4h[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below weekly S1 with volume and below 1d EMA50
-            elif close[i] < weekly_s1_12h[i] and close[i] < ema_50_12h[i] and volume_spike[i]:
+            # Short: Price breaks below Camarilla S3 + below 12h EMA50 + volume spike
+            elif close[i] < camarilla_s3_4h[i] and close[i] < ema_50_12h_4h[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Price closes below weekly pivot or below 1d EMA50
-            if close[i] < weekly_pivot_12h[i] or close[i] < ema_50_12h[i]:
+            # Exit: Price closes below Camarilla S3 or below 12h EMA50
+            if close[i] < camarilla_s3_4h[i] or close[i] < ema_50_12h_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price closes above weekly pivot or above 1d EMA50
-            if close[i] > weekly_pivot_12h[i] or close[i] > ema_50_12h[i]:
+            # Exit: Price closes above Camarilla R3 or above 12h EMA50
+            if close[i] > camarilla_r3_4h[i] or close[i] > ema_50_12h_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
