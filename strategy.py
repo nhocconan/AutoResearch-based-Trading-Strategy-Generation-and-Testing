@@ -1,12 +1,16 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-# 6h_1dIchimoku_Cloud_TF_Breakout
-# Uses daily Ichimoku cloud (Tenkan/Kijun/Senkou) with 6h price breakout and volume confirmation.
-# Long when price breaks above Senkou Span A in uptrend (price > Kumo cloud top and Tenkan > Kijun), short when breaks below Senkou Span B in downtrend.
-# Ichimoku components calculated on daily timeframe and aligned to 6h with proper look-ahead prevention.
-# Designed for 6h timeframe to capture institutional trend continuation in both bull and bear markets.
+"""
+12h_1dKAMA_RSI_Chop_Filter
+KAMA trend direction + RSI momentum + Choppiness regime filter.
+Long when KAMA rising, RSI > 50, and choppy market (CHOP > 61.8).
+Short when KAMA falling, RSI < 50, and choppy market (CHOP > 61.8).
+Uses daily timeframe for KAMA and RSI, 12h for execution.
+Designed to work in both bull and bear markets by avoiding strong trends.
+"""
 
-name = "6h_1dIchimoku_Cloud_TF_Breakout"
-timeframe = "6h"
+name = "12h_1dKAMA_RSI_Chop_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +19,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,52 +27,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Ichimoku components
+    # Get daily data for KAMA and RSI
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:  # Need at least 52 periods for Senkou Span B (26*2)
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate daily KAMA (ER=10, fast=2, slow=30)
     close_1d = df_1d['close'].values
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0)  # Will be calculated properly below
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (period9_high + period9_low) / 2
+    # Proper ER calculation
+    er = np.zeros_like(close_1d)
+    for i in range(1, len(close_1d)):
+        direction = abs(close_1d[i] - close_1d[i-9]) if i >= 9 else abs(close_1d[i] - close_1d[0])
+        volatility_sum = np.sum(np.abs(np.diff(close_1d[max(0,i-9):i+1]))) if i >= 9 else np.sum(np.abs(np.diff(close_1d[:i+1])))
+        er[i] = direction / volatility_sum if volatility_sum > 0 else 0
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (period26_high + period26_low) / 2
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
     
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
-    senkou_span_a = (tenkan_sen + kijun_sen) / 2
+    # Calculate daily RSI(14)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_span_b = (period52_high + period52_low) / 2
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Align Ichimoku components to 6h timeframe (no extra delay needed as these are concurrent indicators)
-    tenkan_sen_6h = align_htf_to_ltf(prices, df_1d, tenkan_sen)
-    kijun_sen_6h = align_htf_to_ltf(prices, df_1d, kijun_sen)
-    senkou_span_a_6h = align_htf_to_ltf(prices, df_1d, senkou_span_a)
-    senkou_span_b_6h = align_htf_to_ltf(prices, df_1d, senkou_span_b)
+    # Calculate daily Choppiness Index(14)
+    atr = np.zeros_like(close_1d)
+    tr1 = np.abs(np.diff(high))
+    tr2 = np.abs(np.diff(low))
+    tr3 = np.abs(np.diff(close_1d))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
     
-    # 6-period volume average for spike detection (2x average)
-    vol_ma_6 = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
-    volume_spike = volume > (2.0 * vol_ma_6)
+    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    
+    chop = np.zeros_like(close_1d)
+    for i in range(13, len(close_1d)):
+        if atr[i] > 0 and (max_high[i] - min_low[i]) > 0:
+            chop[i] = 100 * np.log10(atr[i] / (max_high[i] - min_low[i])) / np.log10(14)
+        else:
+            chop[i] = 50
+    
+    # Align indicators to 12h timeframe
+    kama_12h = align_htf_to_ltf(prices, df_1d, kama)
+    rsi_12h = align_htf_to_ltf(prices, df_1d, rsi)
+    chop_12h = align_htf_to_ltf(prices, df_1d, chop)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_entry = 0  # Track holding period to prevent churn
+    bars_since_entry = 0
     
-    for i in range(52, n):  # Start after Senkou Span B calculation is valid
+    for i in range(30, n):
         # Skip if any critical value is NaN
-        if (np.isnan(tenkan_sen_6h[i]) or np.isnan(kijun_sen_6h[i]) or 
-            np.isnan(senkou_span_a_6h[i]) or np.isnan(senkou_span_b_6h[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(kama_12h[i]) or np.isnan(rsi_12h[i]) or np.isnan(chop_12h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,34 +98,28 @@ def generate_signals(prices):
         
         bars_since_entry += 1
         
-        # Determine cloud top and bottom (Senkou Span A and B)
-        cloud_top = max(senkou_span_a_6h[i], senkou_span_b_6h[i])
-        cloud_bottom = min(senkou_span_a_6h[i], senkou_span_b_6h[i])
-        
         if position == 0:
-            # Long: price breaks above cloud top with bullish alignment (Tenkan > Kijun) and volume
-            if close[i] > cloud_top and tenkan_sen_6h[i] > kijun_sen_6h[i] and volume_spike[i]:
+            # Long: KAMA rising, RSI > 50, choppy market (CHOP > 61.8)
+            if kama_12h[i] > kama_12h[i-1] and rsi_12h[i] > 50 and chop_12h[i] > 61.8:
                 signals[i] = 0.25
                 position = 1
                 bars_since_entry = 0
-            # Short: price breaks below cloud bottom with bearish alignment (Tenkan < Kijun) and volume
-            elif close[i] < cloud_bottom and tenkan_sen_6h[i] < kijun_sen_6h[i] and volume_spike[i]:
+            # Short: KAMA falling, RSI < 50, choppy market (CHOP > 61.8)
+            elif kama_12h[i] < kama_12h[i-1] and rsi_12h[i] < 50 and chop_12h[i] > 61.8:
                 signals[i] = -0.25
                 position = -1
                 bars_since_entry = 0
         elif position == 1:
-            # Exit: price returns below cloud bottom or Tenkan crosses below Kijun
-            # Minimum holding period of 3 bars to reduce churn
-            if bars_since_entry >= 3 and (close[i] < cloud_bottom or tenkan_sen_6h[i] < kijun_sen_6h[i]):
+            # Exit: KAMA falling or RSI < 50 or chop < 61.8 (trending market)
+            if bars_since_entry >= 2 and (kama_12h[i] < kama_12h[i-1] or rsi_12h[i] < 50 or chop_12h[i] < 61.8):
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price returns above cloud top or Tenkan crosses above Kijun
-            # Minimum holding period of 3 bars to reduce churn
-            if bars_since_entry >= 3 and (close[i] > cloud_top or tenkan_sen_6h[i] > kijun_sen_6h[i]):
+            # Exit: KAMA rising or RSI > 50 or chop < 61.8 (trending market)
+            if bars_since_entry >= 2 and (kama_12h[i] > kama_12h[i-1] or rsi_12h[i] > 50 or chop_12h[i] < 61.8):
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
