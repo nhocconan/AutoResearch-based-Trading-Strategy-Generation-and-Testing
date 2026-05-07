@@ -1,3 +1,8 @@
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
+# Hypothesis: Combines Camarilla pivot breakouts with 1-day EMA trend filter and volume confirmation.
+# Works in bull markets via breakout momentum and in bear markets via mean reversion at pivot levels.
+# Uses tight entry conditions to limit trades and reduce fee drag.
+
 #!/usr/bin/env python3
 name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
 timeframe = "4h"
