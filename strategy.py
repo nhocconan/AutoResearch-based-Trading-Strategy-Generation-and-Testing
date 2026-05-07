@@ -1,6 +1,7 @@
+# 175336
 #!/usr/bin/env python3
-name = "1d_1w_Camarilla_Pivot_Breakout_Trend"
-timeframe = "1d"
+name = "6h_12h_Donchian20_Slope_Filter_Trend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,69 +18,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Calculate weekly Camarilla pivot levels from previous week
-    prev_high = df_1w['high'].shift(1).values
-    prev_low = df_1w['low'].shift(1).values
-    prev_close = df_1w['close'].shift(1).values
+    # 12h Donchian channel (20 periods)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
+    # Calculate rolling high/low using pandas
+    high_roll = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # Camarilla levels
-    s1 = prev_close - (range_hl * 1.08 / 2)
-    r1 = prev_close + (range_hl * 1.08 / 2)
+    # Calculate Donchian slope (change over 3 periods)
+    high_slope = np.diff(high_roll, prepend=high_roll[0])
+    low_slope = np.diff(low_roll, prepend=low_roll[0])
+    high_slope_3 = pd.Series(high_slope).rolling(window=3, min_periods=1).mean().values
+    low_slope_3 = pd.Series(low_slope).rolling(window=3, min_periods=1).mean().values
     
-    # Align weekly levels to daily timeframe
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    # Align to 6h timeframe
+    high_20_aligned = align_htf_to_ltf(prices, df_12h, high_roll)
+    low_20_aligned = align_htf_to_ltf(prices, df_12h, low_roll)
+    high_slope_aligned = align_htf_to_ltf(prices, df_12h, high_slope_3)
+    low_slope_aligned = align_htf_to_ltf(prices, df_12h, low_slope_3)
     
-    # Weekly trend filter: EMA(34) on weekly close
-    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Volume spike detection: 4-period average (4 days)
-    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    # 6h volume spike detection (20-period average)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 4)  # Wait for EMA and volume MA
+    start_idx = max(20, 20)  # Wait for Donchian calculation
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(vol_ma_4[i])):
+        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
+            np.isnan(high_slope_aligned[i]) or np.isnan(low_slope_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above S1 with volume and weekly uptrend
-            vol_condition = volume[i] > vol_ma_4[i] * 1.8
-            uptrend = ema_34_1w_aligned[i] > ema_34_1w_aligned[i-1]
-            
-            if close[i] > s1_aligned[i] and vol_condition and uptrend:
+            # Long: breakout above upper band with upward slope and volume
+            vol_condition = volume[i] > vol_ma_20[i] * 1.5
+            if close[i] > high_20_aligned[i] and high_slope_aligned[i] > 0 and vol_condition:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below R1 with volume and weekly downtrend
-            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
+            # Short: breakout below lower band with downward slope and volume
+            elif close[i] < low_20_aligned[i] and low_slope_aligned[i] < 0 and vol_condition:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below S1 or volume drops
-            if close[i] < s1_aligned[i] or volume[i] < vol_ma_4[i] * 1.2:
+            # Exit: price back below upper band or slope turns down
+            if close[i] < high_20_aligned[i] or high_slope_aligned[i] < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above R1 or volume drops
-            if close[i] > r1_aligned[i] or volume[i] < vol_ma_4[i] * 1.2:
+            # Exit: price back above lower band or slope turns up
+            if close[i] > low_20_aligned[i] or low_slope_aligned[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -87,18 +87,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 1d Camarilla S1/R1 breakout with weekly trend and volume confirmation
-# - Weekly Camarilla S1/R1 act as strong support/resistance levels
-# - Breakout above S1 with volume in weekly uptrend = long opportunity
-# - Breakdown below R1 with volume in weekly downtrend = short opportunity
-# - Volume spike (1.8x average) confirms institutional participation
-# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
-# - Exit when price returns to S1/R1 or volume weakens
-# - Position size 0.25 targets ~15-25 trades/year, avoiding fee drag
-# - Uses actual weekly Camarilla levels for better long-term structure
-# - Designed to work in BOTH bull and bear markets via trend filter
-# - Weekly timeframe reduces noise and captures longer-term trends
-# - Targeting 30-100 total trades over 4 years (7-25/year) as per experiment guidelines
-# - Weekly trend filter helps avoid false breakouts in ranging markets
-# - Volume confirmation reduces false signals and improves win rate
-# - Exit conditions based on price retracement to pivot levels or volume decline
+# Hypothesis: 6h Donchian breakout with 12h slope filter and volume confirmation
+# - Uses 12h Donchian channel (20-period) for major support/resistance levels
+# - Adds slope filter to ensure breakout occurs in direction of channel momentum
+# - Volume confirmation (1.5x average) filters false breakouts
+# - Works in both bull and bear markets by trading breakouts in direction of 12h momentum
+# - Position size 0.25 targets ~50-100 trades over 4 years (12-25/year)
+# - Slope filter reduces whipsaw by requiring momentum alignment
+# - Designed for 6h timeframe to balance signal frequency and transaction costs
