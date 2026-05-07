@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Ehlers_Fisher_Transform_Signal"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,83 +17,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Fisher Transform and regime
+    # Get 1d data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Get 12h data for volume filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    # Ehlers Fisher Transform on 1d closes
+    # 1d Camarilla R1/S1 levels (stronger breakout levels)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    hl2_1d = (high_1d + low_1d) / 2
+    close_1d = df_1d['close'].values
     
-    # Normalize price to [-1, 1] range over 10-period window
-    def normalize_series(series, length):
-        highest = pd.Series(series).rolling(window=length, min_periods=length).max().values
-        lowest = pd.Series(series).rolling(window=length, min_periods=length).min().values
-        # Avoid division by zero
-        diff = highest - lowest
-        diff = np.where(diff == 0, 1, diff)
-        return 2 * ((series - lowest) / diff) - 1
+    range_1d = high_1d - low_1d
+    r1_1d = close_1d + 1.0833 * range_1d * 1.1 / 2
+    s1_1d = close_1d - 1.0833 * range_1d * 1.1 / 2
     
-    price_norm = normalize_series(hl2_1d, 10)
+    # 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Fisher Transform: 0.5 * ln((1+price)/(1-price))
-    # Clamp to avoid division by zero or log of negative
-    price_norm_clamped = np.clip(price_norm, -0.999, 0.999)
-    fish = 0.5 * np.log((1 + price_norm_clamped) / (1 - price_norm_clamped))
+    # Align all to 4h timeframe
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Smoothed Fisher (signal line)
-    fish_smooth = pd.Series(fish).ewm(span=3, adjust=False).mean().values
-    
-    # Volume filter: 12h volume > 1.5 * 20-period average
-    vol_12h = df_12h['volume'].values
-    vol_avg_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
-    vol_filter_12h = vol_12h > (vol_avg_12h * 1.5)
-    
-    # Align all to 6h timeframe
-    fish_aligned = align_htf_to_ltf(prices, df_1d, fish)
-    fish_smooth_aligned = align_htf_to_ltf(prices, df_1d, fish_smooth)
-    vol_filter_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_filter_12h)
+    # Volume filter: current volume > 1.8 * 24-period average (reasonable for 4h)
+    vol_avg = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_filter = volume > (vol_avg * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # enough for indicators to stabilize
+    start_idx = max(50, 24)
     
     for i in range(start_idx, n):
         # Skip if any data is not ready
-        if (np.isnan(fish_aligned[i]) or np.isnan(fish_smooth_aligned[i]) or 
-            np.isnan(vol_filter_12h_aligned[i])):
+        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Fisher crosses above -1.5 (oversold reversal)
-            if fish[i] > -1.5 and fish_smooth[i] <= -1.5 and vol_filter_12h_aligned[i]:
+            # Long: price breaks above R1 + daily uptrend + volume
+            if close[i] > r1_1d_aligned[i] and close[i] > ema_50_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Fisher crosses below +1.5 (overbought reversal)
-            elif fish[i] < 1.5 and fish_smooth[i] >= 1.5 and vol_filter_12h_aligned[i]:
+            # Short: price breaks below S1 + daily downtrend + volume
+            elif close[i] < s1_1d_aligned[i] and close[i] < ema_50_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: Fisher crosses the signal line in opposite direction
+            # Exit: price crosses back through the opposite S1/R1 level
             if position == 1:
-                if fish[i] < fish_smooth[i]:
+                if close[i] < s1_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if fish[i] > fish_smooth[i]:
+                if close[i] > r1_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
