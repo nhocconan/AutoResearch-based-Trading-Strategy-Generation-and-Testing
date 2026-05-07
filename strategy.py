@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-# 12h_KAMA_1wTrend_VolumeFilter
-# Hypothesis: 12h strategy using KAMA trend filter with weekly trend and volume confirmation.
-# Enters long when KAMA turns upward (bullish slope), price above KAMA, weekly trend up, and volume > 1.5x average.
-# Enters short when KAMA turns downward (bearish slope), price below KAMA, weekly trend down, and volume > 1.5x average.
-# Exits when price crosses back below/above KAMA.
-# Designed for low trade frequency (<25/year) with strong trend following in both bull and bear markets.
-# Uses weekly trend filter to avoid counter-trend trades, reducing whipsaw in choppy markets.
+# 4H_KAMA_1WTrend_AdaptiveSizing
+# Hypothesis: 4h strategy using weekly KAMA direction with adaptive position sizing based on volatility regime.
+# Uses weekly KAMA trend to filter direction, 4h RSI for momentum confirmation, and volatility-adjusted sizing.
+# Designed to work in both bull and bear markets by aligning with higher timeframe trend and reducing exposure in high volatility.
+# Target: 4h timeframe with weekly HTF for trend filter.
 
-name = "12h_KAMA_1wTrend_VolumeFilter"
-timeframe = "12h"
+name = "4H_KAMA_1WTrend_AdaptiveSizing"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,97 +23,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
+    # Get weekly data for KAMA trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) == 0:
         return np.zeros(n)
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average) on close
-    # ER = Efficiency Ratio, SC = Smoothing Constant
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0)  # This is incorrect, let's fix properly
-    
-    # Correct KAMA calculation
-    dir = np.abs(np.diff(close, prepend=close[0]))  # direction = |close - close_prev|
-    vol = np.abs(np.diff(close, prepend=close[0]))  # volatility = sum of |close - close_prev| over window
-    
-    # We'll compute over a 10-period window for ER
-    window = 10
-    dir_sum = pd.Series(dir).rolling(window=window, min_periods=1).sum().values
-    vol_sum = pd.Series(vol).rolling(window=window, min_periods=1).sum().values
-    
-    # Avoid division by zero
-    er = np.where(vol_sum > 0, dir_sum / vol_sum, 0)
-    
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # for EMA(2)
-    slow_sc = 2 / (30 + 1)  # for EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Calculate KAMA
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # Calculate KAMA slope (trend direction) - positive = upward slope
-    kama_slope = kama - np.roll(kama, 1)
-    kama_slope[0] = 0
-    
-    # Weekly trend: EMA34 on weekly close
+    # Calculate weekly KAMA (ER=10, fast=2, slow=30)
     close_1w = df_1w['close'].values
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_slope = ema34_1w - np.roll(ema34_1w, 1)
-    ema34_1w_slope[0] = 0
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
-    ema34_1w_slope_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w_slope)
+    change = np.abs(np.diff(close_1w, prepend=close_1w[0]))
+    volatility = np.sum(np.abs(np.diff(close_1w)), axis=0)  # placeholder for true ER calculation
+    # Simplified: use price change vs total movement for ER
+    er = np.zeros_like(close_1w)
+    for i in range(1, len(close_1w)):
+        if i >= 10:
+            price_change = np.abs(close_1w[i] - close_1w[i-10])
+            total_change = np.sum(np.abs(np.diff(close_1w[i-10:i+1])))
+            if total_change > 0:
+                er[i] = price_change / total_change
+            else:
+                er[i] = 0
+        else:
+            er[i] = 0
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # smoothing constant
+    kama = np.zeros_like(close_1w)
+    kama[0] = close_1w[0]
+    for i in range(1, len(close_1w)):
+        kama[i] = kama[i-1] + sc[i] * (close_1w[i] - kama[i-1])
     
-    # Volume filter: 1.5x average volume (50-period for stability)
-    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    # Align KAMA to 4h timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_1w, kama)
+    
+    # 4h RSI for momentum confirmation (14-period)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # 4h ATR for volatility regime (14-period)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Volatility regime: normalize ATR by 50-period MA
+    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+    vol_regime = atr / atr_ma  # >1 = high volatility, <1 = low volatility
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 34)  # Ensure we have volume MA and EMA34 data
+    start_idx = max(14, 50)  # RSI and volatility regime lookback
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(kama[i]) or np.isnan(kama_slope[i]) or 
-            np.isnan(ema34_1w_aligned[i]) or np.isnan(ema34_1w_slope_aligned[i]) or 
-            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
+        if (np.isnan(kama_aligned[i]) or np.isnan(rsi[i]) or 
+            np.isnan(vol_regime[i]) or atr_ma[i] == 0):
+            signals[i] = 0.0
             continue
         
-        if position == 0:
-            # Long: KAMA slope up, price above KAMA, weekly trend up, volume spike
-            if (kama_slope[i] > 0 and 
-                close[i] > kama[i] and 
-                ema34_1w_slope_aligned[i] > 0 and 
-                volume[i] > 1.5 * vol_ma[i]):
-                signals[i] = 0.25
-                position = 1
-            # Short: KAMA slope down, price below KAMA, weekly trend down, volume spike
-            elif (kama_slope[i] < 0 and 
-                  close[i] < kama[i] and 
-                  ema34_1w_slope_aligned[i] < 0 and 
-                  volume[i] > 1.5 * vol_ma[i]):
-                signals[i] = -0.25
-                position = -1
-        elif position == 1:
-            # Exit: price crosses below KAMA
-            if close[i] < kama[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:
-            # Exit: price crosses above KAMA
-            if close[i] > kama[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+        # Adaptive sizing: reduce exposure in high volatility
+        base_size = 0.25
+        vol_multiplier = np.clip(1.0 / vol_regime[i], 0.5, 1.5)  # inverse vol weighting
+        size = base_size * vol_multiplier
+        
+        # Long: price above weekly KAMA (uptrend), RSI > 50 (bullish momentum)
+        if close[i] > kama_aligned[i] and rsi[i] > 50:
+            signals[i] = size
+        # Short: price below weekly KAMA (downtrend), RSI < 50 (bearish momentum)
+        elif close[i] < kama_aligned[i] and rsi[i] < 50:
+            signals[i] = -size
+        else:
+            signals[i] = 0.0
     
     return signals
