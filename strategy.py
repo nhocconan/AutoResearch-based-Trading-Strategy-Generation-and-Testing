@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_PriceAction"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -34,7 +34,7 @@ def generate_signals(prices):
     r3 = close_prev + 1.1 * (high_prev - low_prev) / 4
     s3 = close_prev - 1.1 * (high_prev - low_prev) / 4
     
-    # Align daily levels to 12h timeframe (with 1-day delay for completed bar)
+    # Align daily levels to 4h timeframe (with 1-day delay for completed bar)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
@@ -44,10 +44,17 @@ def generate_signals(prices):
         vol_ma_20[i] = np.mean(volume[i-20:i])
     vol_filter = volume > (2.0 * vol_ma_20)
     
+    # Price action filter: close in upper/lower third of candle for momentum
+    candle_range = high - low
+    upper_third = low + (candle_range * 2 / 3)
+    lower_third = low + (candle_range * 1 / 3)
+    bullish_candle = close > upper_third
+    bearish_candle = close < lower_third
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 2  # ~24 hours for 12h to reduce trades
+    cooldown_bars = 3  # ~12 hours for 4h to reduce trades
     
     start_idx = max(200, 20, 50)
     
@@ -72,17 +79,19 @@ def generate_signals(prices):
         trend_down = close < ema_34_1d_aligned[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: Break above R3 in uptrend with strong volume
+            # Long: Break above R3 in uptrend with strong volume and bullish candle
             if (close[i] > r3_aligned[i] and 
                 trend_up[i] and 
-                vol_filter[i]):
+                vol_filter[i] and 
+                bullish_candle[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: Break below S3 in downtrend with strong volume
+            # Short: Break below S3 in downtrend with strong volume and bearish candle
             elif (close[i] < s3_aligned[i] and 
                   trend_down[i] and 
-                  vol_filter[i]):
+                  vol_filter[i] and 
+                  bearish_candle[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
@@ -105,9 +114,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Using 12h timeframe with Camarilla R3/S3 breakouts, 1d EMA34 trend filter, and 2.0x volume spike
-# will yield 12-37 trades per year (50-150 total over 4 years), minimizing fee drag. The strategy trades
-# with the higher timeframe trend, capturing institutional breakouts in both bull and bear markets.
-# Position size of 0.25 manages drawdown, and cooldown of 2 bars prevents overtrading. Focus on BTC/ETH
-# as primary targets, avoiding SOL-only bias. This combines proven elements from top performers:
-# Camarilla levels + higher timeframe trend + volume confirmation.
+# Hypothesis: Using 4h timeframe with Camarilla R3/S3 breakouts, 1d EMA34 trend filter,
+# volume confirmation, and price action confirmation (bullish/bearish candles) will yield
+# 19-50 trades per year (75-200 total over 4 years), minimizing fee drag. The strategy
+# trades with the higher timeframe trend, capturing institutional breakouts in both bull
+# and bear markets. Price action filter adds confirmation of momentum direction.
+# Position size of 0.25 manages drawdown, and cooldown of 3 bars prevents overtrading.
