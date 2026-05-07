@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_Trend_Follow_With_Volume_Filter"
-timeframe = "1d"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,73 +17,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load 1d data ONCE for Camarilla levels and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Daily EMA for trend following
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1d Camarilla levels (using previous day's OHLC)
+    # Camarilla formula: Range = High - Low
+    # R3 = Close + (High - Low) * 1.1/2
+    # S3 = Close - (High - Low) * 1.1/2
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    range_1d = prev_high - prev_low
+    r3 = prev_close + range_1d * 1.1 / 2
+    s3 = prev_close - range_1d * 1.1 / 2
     
-    # Weekly EMA for trend filter
-    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Align Camarilla levels to 12h timeframe (wait for 1d bar to close)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Volume filter
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume spike detection on 12h
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)
+    start_idx = 34  # Wait for EMA34 warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(ema_50[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Weekly trend filter: up if weekly EMA20 rising, down if falling
-        weekly_uptrend = ema_20_1w_aligned[i] > ema_20_1w_aligned[i-1]
-        weekly_downtrend = ema_20_1w_aligned[i] < ema_20_1w_aligned[i-1]
-        
-        vol_condition = volume[i] > vol_ma_20[i] * 1.5
+        vol_condition = volume[i] > vol_ma_20[i] * 1.5  # 1.5x volume spike
         
         if position == 0:
-            # Long: price above EMA50 in weekly uptrend with volume
-            if close[i] > ema_50[i] and weekly_uptrend and vol_condition:
-                signals[i] = 0.30
+            # Long: break above R3 in 1d uptrend with volume
+            if close[i] > r3_aligned[i] and ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and vol_condition:
+                signals[i] = 0.25
                 position = 1
-            # Short: price below EMA50 in weekly downtrend with volume
-            elif close[i] < ema_50[i] and weekly_downtrend and vol_condition:
-                signals[i] = -0.30
+            # Short: break below S3 in 1d downtrend with volume
+            elif close[i] < s3_aligned[i] and ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and vol_condition:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below EMA50 or weekly trend turns down
-            if close[i] < ema_50[i] or not weekly_uptrend:
+            # Exit: price returns to S3 level or trend breaks
+            if close[i] < s3_aligned[i] or ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above EMA50 or weekly trend turns up
-            if close[i] > ema_50[i] or not weekly_downtrend:
+            # Exit: price returns to R3 level or trend breaks
+            if close[i] > r3_aligned[i] or ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-# Hypothesis: Daily trend following with weekly trend filter and volume confirmation
-# - Uses daily EMA50 for trend identification on 1d chart
-# - Weekly EMA20 acts as higher timeframe filter to ensure alignment with weekly trend
-# - Volume confirmation (1.5x average) reduces false signals and whipsaws
-# - Long when price > EMA50 AND weekly uptrend AND volume spike
-# - Short when price < EMA50 AND weekly downtrend AND volume spike
-# - Exit when price crosses back below/above EMA50 or weekly trend reverses
-# - Position size 0.30 balances return potential with risk management
-# - Designed to work in both bull and bear markets by following the weekly trend
-# - Volume filter helps avoid choppy markets and false breakouts
-# - Target: ~20-50 trades per year to stay within limits and minimize fee drag
+# Hypothesis: 12h Camarilla R3/S3 breakouts with 1d EMA34 trend filter and volume confirmation
+# - Camarilla R3/S3 are key intraday support/resistance levels derived from prior day's range
+# - Breakouts above R3 in uptrend or below S3 in downtrend with volume confirmation indicate strong momentum
+# - 1d EMA34 trend filter ensures alignment with higher timeframe direction
+# - Volume spike (1.5x average) reduces false breakouts
+# - Works in both bull and breakouts in uptrends, bears via breakdowns in downtrends
+# - Position size 0.25 targets ~25-50 trades/year to stay within 12h limits (50-150 total over 4 years)
+# - Proven pattern: Similar to top performers (e.g., 4H_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_Dyn) but adapted to 12h timeframe
+# - Uses actual 1d Camarilla calculations (not resampled) with proper alignment via mtf_data helpers
