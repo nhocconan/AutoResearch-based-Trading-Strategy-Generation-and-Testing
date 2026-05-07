@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_WideRange_Fade_WeeklyTrend"
-timeframe = "1d"
+name = "6h_TurtleTrend_12hATRBreakout_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,61 +17,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Get 12h data for Donchian channel (20-period high/low)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Weekly EMA10 trend filter
-    ema_10_1w = pd.Series(df_1w['close']).ewm(span=10, adjust=False, min_periods=10).mean().values
-    ema_10_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_10_1w)
+    # 12h Donchian channel (20-period high/low)
+    donchian_high = pd.Series(df_12h['high']).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(df_12h['low']).rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
     
-    # Daily range expansion filter: today's range > 1.5 * 20-day average range
-    daily_range = high - low
-    avg_range = pd.Series(daily_range).rolling(window=20, min_periods=20).mean().values
-    wide_range = daily_range > (avg_range * 1.5)
+    # 12h ATR for volatility filter (14-period)
+    tr12 = np.maximum(
+        df_12h['high'].values - df_12h['low'].values,
+        np.maximum(
+            np.abs(df_12h['high'].values - np.concatenate([[df_12h['close'].values[0]], df_12h['close'].values[:-1]])),
+            np.abs(df_12h['low'].values - np.concatenate([[df_12h['close'].values[0]], df_12h['close'].values[:-1]]))
+        )
+    )
+    atr_12h = pd.Series(tr12).rolling(window=14, min_periods=14).mean().values
+    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
     
-    # Mean reversion: fade extreme closes relative to 5-day VWAP
-    typical_price = (high + low + close) / 3
-    vwap_num = (typical_price * volume).cumsum()
-    vwap_den = volume.cumsum()
-    vwap = vwap_num / vwap_den
-    # Reset VWAP every 5 days
-    vwap_reset = pd.Series(vwap).groupby(np.arange(len(vwap)) // 5).transform(lambda x: x.ffill())
-    price_vwap_ratio = close / vwap_reset
+    # Volume filter: current volume > 1.5 * 20-period average volume
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_avg * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Wait for range average
+    start_idx = 20  # Wait for Donchian and ATR
     
     for i in range(start_idx, n):
-        if np.isnan(ema_10_1w_aligned[i]) or np.isnan(avg_range[i]) or np.isnan(price_vwap_ratio[i]):
+        if np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or np.isnan(atr_12h_aligned[i]) or np.isnan(vol_avg[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Fade extreme closes on wide range days
-            # Short when price closes significantly above VWAP on wide range day
-            if price_vwap_ratio[i] > 1.02 and wide_range[i] and close[i] < ema_10_1w_aligned[i]:
-                signals[i] = -0.25
-                position = -1
-            # Long when price closes significantly below VWAP on wide range day
-            elif price_vwap_ratio[i] < 0.98 and wide_range[i] and close[i] > ema_10_1w_aligned[i]:
+            # Long breakout: close above 12h Donchian high + volume filter
+            if close[i] > donchian_high_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
+            # Short breakout: close below 12h Donchian low + volume filter
+            elif close[i] < donchian_low_aligned[i] and volume_filter[i]:
+                signals[i] = -0.25
+                position = -1
         elif position != 0:
-            # Exit when price returns to VWAP or weekly trend reverses
+            # Exit: close crosses back through the opposite Donchian band
             if position == 1:
-                if price_vwap_ratio[i] >= 0.995 or close[i] <= ema_10_1w_aligned[i]:
+                if close[i] < donchian_low_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if price_vwap_ratio[i] >= 1.005 or close[i] >= ema_10_1w_aligned[i]:
+                if close[i] > donchian_high_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
