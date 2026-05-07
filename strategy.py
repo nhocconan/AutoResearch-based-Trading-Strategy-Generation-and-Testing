@@ -3,21 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R with weekly trend filter and daily volume confirmation.
-# Long when: Williams %R < -80 (oversold) AND weekly close > weekly EMA(34) (uptrend) AND daily volume > daily SMA(20) volume (confirmation)
-# Short when: Williams %R > -20 (overbought) AND weekly close < weekly EMA(34) (downtrend) AND daily volume > daily SMA(20) volume (confirmation)
-# Exit when Williams %R crosses back to -50.
-# Designed for 6h timeframe with low trade frequency (target: 15-30/year) to avoid fee drag.
-# Uses weekly for trend direction and daily for volume confirmation to avoid false signals.
-# Works in bull markets via buying oversold dips in uptrend, in bear markets via selling overbought rallies in downtrend.
-# Volume filter ensures participation and avoids low-liquidity whipsaws.
-name = "6h_WilliamsR_WeeklyTrend_DailyVolume"
-timeframe = "6h"
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and ADX trend filter.
+# Long when: price > Donchian upper(20) AND volume > 1.5x volume MA(20) AND ADX(14) > 25
+# Short when: price < Donchian lower(20) AND volume > 1.5x volume MA(20) AND ADX(14) > 25
+# Exit when price crosses Donchian middle (20-period midpoint).
+# Designed for 4h timeframe with moderate trade frequency (target: 25-40/year) to avoid fee drag.
+# Uses volume confirmation to avoid false breakouts and ADX to ensure trending markets.
+# Works in bull markets via upward breakouts, in bear markets via downward breakouts.
+name = "4h_Donchian20_Volume_AdxTrend"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,70 +24,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Williams %R(14)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
+    # Donchian channels (20-period)
+    lookback = 20
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    donchian_mid = np.full(n, np.nan)
     
-    # Weekly EMA(34) for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
+    for i in range(lookback-1, n):
+        donchian_high[i] = np.max(high[i-lookback+1:i+1])
+        donchian_low[i] = np.min(low[i-lookback+1:i+1])
+        donchian_mid[i] = (donchian_high[i] + donchian_low[i]) / 2
     
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    weekly_uptrend = close_1w > ema_34_1w
-    weekly_downtrend = close_1w < ema_34_1w
+    # Volume confirmation: volume > 1.5x volume MA(20)
+    volume_ma = np.full(n, np.nan)
+    volume_series = pd.Series(volume)
+    volume_ma_values = volume_series.rolling(window=20, min_periods=20).mean().values
+    volume_ma = volume_ma_values
+    volume_confirm = volume > (1.5 * volume_ma)
     
-    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend)
-    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_downtrend)
+    # ADX(14) for trend strength
+    # Calculate True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Daily volume confirmation: volume > SMA(20) volume
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # Directional Movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    up_move[0] = 0
+    down_move[0] = 0
     
-    volume_1d = df_1d['volume'].values
-    vol_sma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume_1d > vol_sma_20
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    volume_confirm_aligned = align_htf_to_ltf(prices, df_1d, volume_confirm)
+    # Smoothed values
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    plus_dm_sum = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
+    minus_dm_sum = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
+    
+    # Avoid division by zero
+    plus_di = np.where(tr_sum > 0, 100 * plus_dm_sum / tr_sum, 0)
+    minus_di = np.where(tr_sum > 0, 100 * minus_dm_sum / tr_sum, 0)
+    
+    dx = np.where((plus_di + minus_di) > 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_strong = adx > 25
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Sufficient warmup for indicators
+    start_idx = 40  # Sufficient warmup for all indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(williams_r[i]) or np.isnan(weekly_uptrend_aligned[i]) or np.isnan(weekly_downtrend_aligned[i]) or 
-            np.isnan(volume_confirm_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(donchian_mid[i]) or
+            np.isnan(volume_ma[i]) or np.isnan(adx[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Williams %R < -80 AND weekly uptrend AND volume confirmation
-            long_condition = (williams_r[i] < -80) and weekly_uptrend_aligned[i] and volume_confirm_aligned[i]
-            # Short: Williams %R > -20 AND weekly downtrend AND volume confirmation
-            short_condition = (williams_r[i] > -20) and weekly_downtrend_aligned[i] and volume_confirm_aligned[i]
+            # Long breakout: price > Donchian high + volume confirmation + strong trend
+            long_breakout = (close[i] > donchian_high[i]) and volume_confirm[i] and adx_strong[i]
+            # Short breakdown: price < Donchian low + volume confirmation + strong trend
+            short_breakout = (close[i] < donchian_low[i]) and volume_confirm[i] and adx_strong[i]
             
-            if long_condition:
+            if long_breakout:
                 signals[i] = 0.25
                 position = 1
-            elif short_condition:
+            elif short_breakout:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Williams %R > -50
-            if williams_r[i] > -50:
+            # Long exit: price crosses below Donchian middle
+            if close[i] < donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Williams %R < -50
-            if williams_r[i] < -50:
+            # Short exit: price crosses above Donchian middle
+            if close[i] > donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
