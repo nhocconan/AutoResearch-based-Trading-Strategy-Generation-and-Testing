@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_v4"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -70,14 +70,14 @@ def generate_signals(prices):
             # Long: price breaks above R1 level, uptrend (price > EMA50), volume confirmation
             if (close[i] > r1_aligned[i] and 
                 close[i] > ema_50_1d_aligned[i] and 
-                volume_ratio[i] > 2.5):
-                signals[i] = 0.30
+                volume_ratio[i] > 2.0):
+                signals[i] = 0.25
                 position = 1
             # Short: price breaks below S1 level, downtrend (price < EMA50), volume confirmation
             elif (close[i] < s1_aligned[i] and 
                   close[i] < ema_50_1d_aligned[i] and 
-                  volume_ratio[i] > 2.5):
-                signals[i] = -0.30
+                  volume_ratio[i] > 2.0):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Exit long: price breaks below S1 level (reversal signal)
@@ -85,13 +85,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
             # Exit short: price breaks above R1 level (reversal signal)
             if close[i] > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
