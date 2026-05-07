@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_1d_Camarilla_S1R1_Breakout_Trend"
+name = "4h_1d_Camarilla_S1R1_Breakout_Trend_v4"
 timeframe = "4h"
 leverage = 1.0
 
