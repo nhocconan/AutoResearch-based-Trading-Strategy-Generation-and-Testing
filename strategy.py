@@ -1,7 +1,17 @@
-# 1d_Camarilla_R3S3_Pivot_1wTrend_v1
-# Hypothesis: On daily timeframe, use weekly Camarilla pivot levels (R3/S3) for breakout entries, filtered by weekly EMA trend and volume spikes. Long when price breaks above R3 with weekly uptrend and volume spike. Short when price breaks below S3 with weekly downtrend and volume spike. Weekly pivots provide stronger support/resistance than daily, reducing false breaks. EMA filter ensures alignment with higher timeframe trend. Volume spike confirms breakout strength. Designed for fewer trades (target 7-25/year) to minimize fee drag on 1d timeframe.
-name = "1d_Camarilla_R3S3_Pivot_1wTrend_v1"
-timeframe = "1d"
+# -*- coding: utf-8 -*-
+#!/usr/bin/env python3
+"""
+6h_Elder_Ray_Cross_1wTrend_v1
+Hypothesis: Use Elder Ray (Bull/Bear Power) crossovers on 6h with weekly trend filter to capture momentum shifts.
+- Bull Power = High - EMA13, Bear Power = Low - EMA13
+- Long when Bull Power crosses above zero with weekly uptrend
+- Short when Bear Power crosses below zero with weekly downtrend
+- Weekly EMA40 trend filter ensures alignment with higher timeframe
+- Designed for 60-120 total trades over 4 years (15-30/year) to minimize fee drag
+- Works in bull/bear via trend filter: only trade in direction of weekly trend
+"""
+name = "6h_Elder_Ray_Cross_1wTrend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -16,94 +26,66 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # Get weekly data for Camarilla pivots
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    # Calculate weekly Camarilla levels (based on prior week)
-    # Using typical pivot formula: P = (H+L+C)/3
-    # R3 = P + 1.1*(H-L), S3 = P - 1.1*(H-L)
-    ph = df_1w['high'].values
-    pl = df_1w['low'].values
-    pc = df_1w['close'].values
-    
-    p = (ph + pl + pc) / 3.0
-    r3 = p + 1.1 * (ph - pl)
-    s3 = p - 1.1 * (ph - pl)
-    
-    # Align weekly levels to 1d timeframe (wait for weekly close)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
     
     # Get weekly data for trend filter
-    # Weekly EMA20 for trend filter
-    ema_20 = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 40:
+        return np.zeros(n)
     
-    # Volume filter: current volume > 2.0 * 20-period average volume
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_avg * 2.0)
+    # Weekly EMA40 for trend filter
+    ema_40_weekly = pd.Series(df_1w['close']).ewm(span=40, adjust=False, min_periods=40).mean().values
+    ema_40_weekly_aligned = align_htf_to_ltf(prices, df_1w, ema_40_weekly)
+    
+    # Calculate EMA13 for Elder Ray (6h timeframe)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Elder Ray components
+    bull_power = high - ema13  # High - EMA13
+    bear_power = low - ema13   # Low - EMA13
+    
+    # Crossovers: Bull Power crosses above zero, Bear Power crosses below zero
+    bull_cross_up = (bull_power[1:] > 0) & (bull_power[:-1] <= 0)
+    bear_cross_down = (bear_power[1:] < 0) & (bear_power[:-1] >= 0)
+    
+    # Pad to original length
+    bull_cross_up = np.concatenate([[False], bull_cross_up])
+    bear_cross_down = np.concatenate([[False], bear_cross_down])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_exit = 0  # bars since last exit to prevent overtrading
     
-    start_idx = max(20, 20)  # Ensure sufficient warmup
+    start_idx = max(13, 40)  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
-        bars_since_exit += 1
-        
-        # Skip if any data is not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_20_aligned[i]) or np.isnan(vol_avg[i])):
+        # Skip if weekly trend data not ready
+        if np.isnan(ema_40_weekly_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                bars_since_exit = 0
             continue
         
         if position == 0:
-            # Minimum 5 bars between trades (5 days on 1d TF) to reduce frequency
-            if bars_since_exit < 5:
-                continue
-                
-            # Long: price breaks above R3 + weekly uptrend + volume filter
-            if (close[i] > r3_aligned[i] and 
-                close[i] > ema_20_aligned[i] and 
-                volume_filter[i]):
+            # Long: Bull Power crosses above zero + weekly uptrend
+            if bull_cross_up[i] and close[i] > ema_40_weekly_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-                bars_since_exit = 0
-            # Short: price breaks below S3 + weekly downtrend + volume filter
-            elif (close[i] < s3_aligned[i] and 
-                  close[i] < ema_20_aligned[i] and 
-                  volume_filter[i]):
+            # Short: Bear Power crosses below zero + weekly downtrend
+            elif bear_cross_down[i] and close[i] < ema_40_weekly_aligned[i]:
                 signals[i] = -0.25
                 position = -1
-                bars_since_exit = 0
-        elif position != 0:
-            # Exit: price returns to weekly pivot point (P)
-            # Calculate weekly pivot point for exit
-            pp = (ph + pl + pc) / 3.0
-            pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
-            
-            if not np.isnan(pp_aligned[i]):
-                if position == 1 and close[i] < pp_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                    bars_since_exit = 0
-                elif position == -1 and close[i] > pp_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                    bars_since_exit = 0
-                else:
-                    # Hold position
-                    signals[i] = 0.25 if position == 1 else -0.25
+        elif position == 1:
+            # Exit long: Bear Power crosses below zero
+            if bear_cross_down[i]:
+                signals[i] = 0.0
+                position = 0
             else:
-                # Hold if pivot not ready
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.25
+        elif position == -1:
+            # Exit short: Bull Power crosses above zero
+            if bull_cross_up[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
