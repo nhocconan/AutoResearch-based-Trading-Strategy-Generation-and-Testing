@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_KAMA_1dTrend_VolumeSpike_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,71 +17,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # KAMA parameters
-    er_len = 10
-    fast_len = 2
-    slow_len = 30
-    
-    # Calculate Efficiency Ratio (ER) for KAMA
-    change = np.abs(np.diff(close, n=er_len))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)
-    er = np.zeros_like(change)
-    er = np.where(volatility != 0, change / volatility, 0)
-    er = np.concatenate([np.full(er_len-1, np.nan), er])
-    
-    # Smoothing constants
-    sc = (er * (2/(fast_len+1) - 2/(slow_len+1)) + 2/(slow_len+1))**2
-    kama = np.full_like(close, np.nan)
-    kama[er_len-1] = close[er_len-1]
-    
-    for i in range(er_len, n):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # Get daily data for trend filter
+    # Get daily data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    # 1d EMA34 trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate daily Camarilla levels (R3, S3)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Volume filter: current volume > 2.0 * 20-period average
+    # Camarilla: R3 = Close + (High - Low) * 1.1/2, S3 = Close - (High - Low) * 1.1/2
+    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 2
+    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 2
+    
+    # Align to 12h timeframe
+    r3_12h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_12h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # 1-day EMA34 trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume filter: current volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > (vol_ma * 2.0)
+    volume_ok = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(er_len, 20)
+    start_idx = 20  # Need 20 for volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(kama[i]) or np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or np.isnan(ema_34_12h[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above KAMA AND above daily EMA34 + volume spike
-            if close[i] > kama[i] and close[i] > ema_34_1d_aligned[i] and volume_ok[i]:
+            # Long: price breaks above R3 AND above daily EMA34 + volume confirmation
+            if close[i] > r3_12h[i] and close[i] > ema_34_12h[i] and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA AND below daily EMA34 + volume spike
-            elif close[i] < kama[i] and close[i] < ema_34_1d_aligned[i] and volume_ok[i]:
+            # Short: price breaks below S3 AND below daily EMA34 + volume confirmation
+            elif close[i] < s3_12h[i] and close[i] < ema_34_12h[i] and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: price crosses KAMA or breaks in opposite direction
+            # Exit: price returns to opposite Camarilla level or trend reverses
             if position == 1:
-                if close[i] < kama[i] or close[i] < ema_34_1d_aligned[i]:
+                if close[i] < s3_12h[i] or close[i] < ema_34_12h[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > kama[i] or close[i] > ema_34_1d_aligned[i]:
+                if close[i] > r3_12h[i] or close[i] > ema_34_12h[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
