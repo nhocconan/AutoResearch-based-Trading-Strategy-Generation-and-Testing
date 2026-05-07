@@ -1,8 +1,7 @@
-#!/usr/bin/env python3
-"""
-4h_Camarilla_R3_S3_Breakout_1dTrend_Volume_2point5
-Hypothesis: Price breaks above R3 or below S3 daily Camarilla levels with 1-day trend confirmation (EMA34) and volume spike >2.5x average. Uses higher volume threshold to further reduce trade frequency and improve edge. Designed for both bull and bear markets by aligning with daily trend. Targets 10-20 trades/year to minimize fee drift.
-"""
+# 4h_Camarilla_R3_S3_Breakout_1dTrend_Volume_2point5
+# Hypothesis: Price breaks above R3 or below S3 daily Camarilla levels with 1-day trend confirmation (EMA34) and volume spike >2.5x average.
+# Uses higher volume threshold to reduce trade frequency and improve edge. Works in both bull/bear markets by aligning with daily trend.
+# Targets 10-20 trades/year to minimize fee drift.
 
 name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume_2point5"
 timeframe = "4h"
