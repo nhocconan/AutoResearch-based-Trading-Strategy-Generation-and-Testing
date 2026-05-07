@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 6h_ThreeBarReversal_1dTrend_Volume
-# Hypothesis: Uses 3-bar reversal pattern on 6h chart for mean reversion entries, filtered by 1-day EMA34 trend and volume spikes.
-# In bull markets: 3-bar down reversal above EMA34 + volume spike = long.
-# In bear markets: 3-bar up reversal below EMA34 + volume spike = short.
-# The 3-bar reversal captures exhaustion moves, while EMA34 filter ensures trend alignment and volume confirms conviction.
-# Target: 15-35 trades/year to minimize fee drag while capturing meaningful reversals.
+# 12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeS
+# Hypothesis: Uses weekly EMA50 trend and monthly volatility filter with daily Camarilla R1/S1 breakouts.
+# Weekly trend filter (EMA50) reduces whipsaws; monthly volatility filter ensures trades occur in stable regimes.
+# Designed for 12h timeframe to target 50-150 total trades over 4 years.
+# Works in bull markets (price above weekly EMA50 + breaks R1 with volume) and bear markets (price below weekly EMA50 + breaks S1 with volume).
 
-name = "6h_ThreeBarReversal_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeS"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,64 +23,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter (EMA34)
+    # Get daily data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA34
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate Camarilla pivot levels: R1, S1
+    camarilla_range = high_1d - low_1d
+    r1 = close_1d + 1.1 * camarilla_range / 12
+    s1 = close_1d - 1.1 * camarilla_range / 12
     
-    # Align 1d EMA34 to 6h timeframe
-    ema_34_1d_6h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Get weekly data for trend filter (EMA50)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Volume spike filter on 6h (20-period average)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Get monthly data for volatility filter (ATR ratio)
+    df_1M = get_htf_data(prices, '1M')
+    if len(df_1M) < 14:
+        return np.zeros(n)
+    
+    high_1M = df_1M['high'].values
+    low_1M = df_1M['low'].values
+    close_1M = df_1M['close'].values
+    tr_1M = np.maximum(high_1M - low_1M, np.absolute(high_1M - np.roll(close_1M, 1)), np.absolute(low_1M - np.roll(close_1M, 1)))
+    tr_1M[0] = high_1M[0] - low_1M[0]
+    atr_14_1M = pd.Series(tr_1M).rolling(window=14, min_periods=14).mean().values
+    atr_50_1M = pd.Series(tr_1M).rolling(window=50, min_periods=50).mean().values
+    volatility_filter = atr_14_1M < atr_50_1M  # Low volatility regime
+    
+    # Align all indicators to 12h timeframe
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
+    ema_50_1w_12h = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    volatility_filter_12h = align_htf_to_ltf(prices, df_1M, volatility_filter, additional_delay_bars=0)
+    
+    # Volume spike filter on 12h (24-period average)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > (1.5 * vol_ma_24)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(35, n):  # Start after EMA warmup
+    for i in range(50, n):
         # Skip if any critical value is NaN
-        if (np.isnan(ema_34_1d_6h[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or 
+            np.isnan(ema_50_1w_12h[i]) or np.isnan(volatility_filter_12h[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Three-bar down reversal: lower low and lower close for 3 consecutive bars
-            three_bar_down = (low[i] < low[i-1] and low[i-1] < low[i-2] and
-                              close[i] < close[i-1] and close[i-1] < close[i-2])
-            # Three-bar up reversal: higher high and higher close for 3 consecutive bars
-            three_bar_up = (high[i] > high[i-1] and high[i-1] > high[i-2] and
-                            close[i] > close[i-1] and close[i-1] > close[i-2])
-            
-            # Long: 3-bar down reversal, above 1d EMA34 trend, volume spike
-            if three_bar_down and close[i] > ema_34_1d_6h[i] and volume_spike[i]:
+            # Long: Price > R1, above weekly EMA50 trend, low volatility, volume spike
+            if close[i] > r1_12h[i] and close[i] > ema_50_1w_12h[i] and volatility_filter_12h[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: 3-bar up reversal, below 1d EMA34 trend, volume spike
-            elif three_bar_up and close[i] < ema_34_1d_6h[i] and volume_spike[i]:
+            # Short: Price < S1, below weekly EMA50 trend, low volatility, volume spike
+            elif close[i] < s1_12h[i] and close[i] < ema_50_1w_12h[i] and volatility_filter_12h[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Price closes below EMA34 or three-bar up reversal forms
-            three_bar_up = (high[i] > high[i-1] and high[i-1] > high[i-2] and
-                            close[i] > close[i-1] and close[i-1] > close[i-2])
-            if close[i] < ema_34_1d_6h[i] or three_bar_up:
+            # Exit: Price < R1 or below weekly EMA50 trend
+            if close[i] < r1_12h[i] or close[i] < ema_50_1w_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price closes above EMA34 or three-bar down reversal forms
-            three_bar_down = (low[i] < low[i-1] and low[i-1] < low[i-2] and
-                              close[i] < close[i-1] and close[i-1] < close[i-2])
-            if close[i] > ema_34_1d_6h[i] or three_bar_down:
+            # Exit: Price > S1 or above weekly EMA50 trend
+            if close[i] > s1_12h[i] or close[i] > ema_50_1w_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
