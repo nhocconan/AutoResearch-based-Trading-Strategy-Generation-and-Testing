@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-name = "1h_Stochastic_Trend_With_Volume"
-timeframe = "1h"
+name = "6h_Weekly_Pivot_Donchian_Breakout_v2"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_htf
 
 def generate_signals(prices):
     n = len(prices)
@@ -17,81 +17,89 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Load weekly data ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 20:
         return np.zeros(n)
     
-    # 4h EMA50 for trend filter
-    ema50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Weekly Donchian channels (20 periods)
+    weekly_high = pd.Series(df_weekly['high']).rolling(window=20, min_periods=20).max().values
+    weekly_low = pd.Series(df_weekly['low']).rolling(window=20, min_periods=20).min().values
     
-    # 1h Stochastic (14,3,3) for momentum
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    k_percent = 100 * (close - lowest_low) / (highest_high - lowest_low)
-    d_percent = pd.Series(k_percent).rolling(window=3, min_periods=3).mean().values
+    # Align weekly Donchian to 6h timeframe
+    weekly_high_aligned = align_ltf_to_htf(prices, df_weekly, weekly_high)
+    weekly_low_aligned = align_ltf_to_htf(prices, df_weekly, weekly_low)
     
-    # 1h volume filter: > 1.3x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > 1.3 * vol_ma
+    # Weekly pivot points from previous week
+    weekly_high_prev = pd.Series(df_weekly['high']).shift(1).values
+    weekly_low_prev = pd.Series(df_weekly['low']).shift(1).values
+    weekly_close_prev = pd.Series(df_weekly['close']).shift(1).values
+    
+    # Calculate pivot points (standard formula)
+    pivot = (weekly_high_prev + weekly_low_prev + weekly_close_prev) / 3.0
+    r1 = 2 * pivot - weekly_low_prev
+    s1 = 2 * pivot - weekly_high_prev
+    r2 = pivot + (weekly_high_prev - weekly_low_prev)
+    s2 = pivot - (weekly_high_prev - weekly_low_prev)
+    r3 = weekly_high_prev + 2 * (pivot - weekly_low_prev)
+    s3 = weekly_low_prev - 2 * (weekly_high_prev - pivot)
+    
+    # Align pivot levels to 6h timeframe
+    pivot_aligned = align_ltf_to_htf(prices, df_weekly, pivot)
+    r1_aligned = align_ltf_to_htf(prices, df_weekly, r1)
+    s1_aligned = align_ltf_to_htf(prices, df_weekly, s1)
+    r2_aligned = align_ltf_to_htf(prices, df_weekly, r2)
+    s2_aligned = align_ltf_to_htf(prices, df_weekly, s2)
+    r3_aligned = align_ltf_to_htf(prices, df_weekly, r3)
+    s3_aligned = align_ltf_to_htf(prices, df_weekly, s3)
+    
+    # Volume filter: 6h volume > 1.5x 24-period average (4 days)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_spike = volume > 1.5 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 50)  # Wait for volume MA and EMA50
+    start_idx = max(20, 24)  # Wait for weekly Donchian and volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(ema50_4h_aligned[i]) or np.isnan(d_percent[i]):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
-        in_session = (8 <= hour <= 20)  # UTC 8-20
-        
-        if not in_session:
+        if np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or \
+           np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or \
+           np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price above 4h EMA50, Stochastic rising from oversold, volume
-            if (close[i] > ema50_4h_aligned[i] and 
-                k_percent[i] < 30 and d_percent[i] < 30 and 
-                k_percent[i] > k_percent[i-1] and d_percent[i] > d_percent[i-1] and
-                vol_filter[i]):
-                signals[i] = 0.20
+            # Long: Break above weekly R3 with volume spike
+            if close[i] > r3_aligned[i] and vol_spike[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: Price below 4h EMA50, Stochastic falling from overbought, volume
-            elif (close[i] < ema50_4h_aligned[i] and 
-                  k_percent[i] > 70 and d_percent[i] > 70 and 
-                  k_percent[i] < k_percent[i-1] and d_percent[i] < d_percent[i-1] and
-                  vol_filter[i]):
-                signals[i] = -0.20
+            # Short: Break below weekly S3 with volume spike
+            elif close[i] < s3_aligned[i] and vol_spike[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Price below 4h EMA50 or Stochastic overbought
-            if close[i] < ema50_4h_aligned[i] or d_percent[i] > 80:
+            # Exit: Close below weekly pivot or weekly low
+            if close[i] < pivot_aligned[i] or close[i] < weekly_low_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: Price above 4h EMA50 or Stochastic oversold
-            if close[i] > ema50_4h_aligned[i] or d_percent[i] < 20:
+            # Exit: Close above weekly pivot or weekly high
+            if close[i] > pivot_aligned[i] or close[i] > weekly_high_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-# Hypothesis: 1h trend following with 4h EMA50 trend filter and Stochastic(14,3,3) momentum.
-# Long when price > 4h EMA50, Stochastic rising from oversold (<30), and volume confirms.
-# Short when price < 4h EMA50, Stochastic falling from overbought (>70), and volume confirms.
-# Uses 4h timeframe for trend to avoid whipsaws, 1h for entry timing with Stochastic.
-# Volume filter (>1.3x average) ensures conviction. Session filter (8-20 UTC) reduces noise.
-# Target: 15-35 trades/year to minimize fee drag while capturing sustained moves in both bull and bear markets.
+# Hypothesis: Weekly pivot points act as strong support/resistance levels.
+# Breakouts above R3 or below S3 with volume confirmation indicate strong momentum.
+# Uses weekly Donchian channels for trend context and weekly pivot levels for entry/exit.
+# Volume spike (>1.5x average) ensures conviction. Discrete 0.25 position size limits risk.
+# Works in bull markets (breakouts above resistance) and bear markets (breakdowns below support).
+# Target: 15-35 trades/year to minimize fee decay while capturing significant moves.
