@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 1D_WeeklyTrend_VolumeSpike
-# Hypothesis: Uses weekly trend filter (EMA10 on 1w close) with daily price action (close > open) and volume spike (2x 20-day average) for entries.
-# Exits when trend weakens (price < weekly EMA10) or volume drops. Designed for low frequency (<25/year) and strong performance in both bull and bear regimes.
-# Target: 10-20 trades per year per symbol with clear trend-following logic.
+# 6h_MovingAverage_Crossover_1dTrend_Filter
+# Hypothesis: Uses 6-hour MA crossover (MA20 x MA50) filtered by 1-day trend (close > EMA34) with volume confirmation.
+# Designed for 6h timeframe with moderate trade frequency (20-40/year) and strong performance in both bull and bear regimes.
+# The 1d trend filter avoids counter-trend trades during strong trends, while MA crossover captures momentum.
+# Volume confirmation reduces false signals. Target: 80-160 total trades over 4 years (20-40/year).
 
-name = "1D_WeeklyTrend_VolumeSpike"
-timeframe = "1d"
+name = "6h_MovingAverage_Crossover_1dTrend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,59 +18,62 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Weekly EMA10 for trend filter
-    close_1w = df_1w['close'].values
-    ema10_1w = pd.Series(close_1w).ewm(span=10, adjust=False, min_periods=10).mean().values
-    ema10_1w_aligned = align_htf_to_ltf(prices, df_1w, ema10_1w)
+    # 1-day EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Daily volume filter: current volume > 2.0x average volume (20-day)
+    # Moving averages on 6h timeframe
+    ma20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ma50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Volume filter: current volume > 1.5x average volume (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 10)  # Ensure we have volume MA and weekly data
+    start_idx = max(50, 20)  # Ensure we have MA50, MA20 and volume MA data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(ema10_1w_aligned[i]) or 
-            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(ma20[i]) or np.isnan(ma50[i]) or 
+            np.isnan(ema34_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Volume filter: spike confirmation
-        volume_filter = volume[i] > 2.0 * vol_ma[i]
+        volume_filter = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long: Close > Open (bullish daily candle) + price > weekly EMA10 + volume spike
-            if (close[i] > prices['open'].iloc[i] and 
-                close[i] > ema10_1w_aligned[i] and
+            # Long: MA20 crosses above MA50 + Uptrend (close > EMA34) + volume confirmation
+            if (ma20[i] > ma50[i] and ma20[i-1] <= ma50[i-1] and
+                close[i] > ema34_aligned[i] and
                 volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: Close < Open (bearish daily candle) + price < weekly EMA10 + volume spike
-            elif (close[i] < prices['open'].iloc[i] and 
-                  close[i] < ema10_1w_aligned[i] and
+            # Short: MA20 crosses below MA50 + Downtrend (close < EMA34) + volume confirmation
+            elif (ma20[i] < ma50[i] and ma20[i-1] >= ma50[i-1] and
+                  close[i] < ema34_aligned[i] and
                   volume_filter):
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: price crosses weekly EMA10 against position OR volume drops below average
-            trend_exit = (position == 1 and close[i] < ema10_1w_aligned[i]) or \
-                         (position == -1 and close[i] > ema10_1w_aligned[i])
-            volume_exit = volume[i] < vol_ma[i]  # exit on low volume
-            
-            if trend_exit or volume_exit:
+            # Exit: MA20 crosses back in opposite direction
+            if (position == 1 and ma20[i] < ma50[i]) or \
+               (position == -1 and ma20[i] > ma50[i]):
                 signals[i] = 0.0
                 position = 0
             else:
