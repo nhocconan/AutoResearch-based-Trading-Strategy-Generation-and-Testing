@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_Camarilla_R3S3_Breakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,18 +17,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d trend filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # 1w trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 55:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    trend_up = close > ema34_1d_aligned
-    trend_down = close < ema34_1d_aligned
+    close_1w = df_1w['close'].values
+    ema55_1w = pd.Series(close_1w).ewm(span=55, adjust=False, min_periods=55).mean().values
+    ema55_1w_aligned = align_htf_to_ltf(prices, df_1w, ema55_1w)
+    trend_up = close > ema55_1w_aligned
+    trend_down = close < ema55_1w_aligned
     
     # Daily Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d_prev = df_1d['close'].shift(1).values
@@ -41,26 +45,26 @@ def generate_signals(prices):
     
     # Volume confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_surge = volume > 1.5 * vol_ma
+    vol_surge = volume > 2.0 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Wait for EMA and volume MA
+    start_idx = max(55, 20)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(ema34_1d_aligned[i]) or np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]):
+        if np.isnan(ema55_1w_aligned[i]) or np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Close breaks above R3 with volume surge and 1d uptrend
+            # Long: Close breaks above R3 with volume surge and 1w uptrend
             if close[i] > R3_aligned[i] and vol_surge[i] and trend_up[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close breaks below S3 with volume surge and 1d downtrend
+            # Short: Close breaks below S3 with volume surge and 1w downtrend
             elif close[i] < S3_aligned[i] and vol_surge[i] and trend_down[i]:
                 signals[i] = -0.25
                 position = -1
@@ -81,9 +85,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R3/S3 breakouts with 1d trend filter and volume surge capture institutional breakout moves.
-# Long when price breaks above R3 (strong resistance) with volume confirmation in 1d uptrend.
-# Short when price breaks below S3 (strong support) with volume confirmation in 1d downtrend.
-# Uses daily Camarilla levels for institutional relevance, 1d EMA34 for trend, and volume surge for conviction.
-# Designed for 4h timeframe to balance trade frequency (~20-50/year) and capture multi-day trends.
+# Hypothesis: Camarilla R3/S3 breakouts with 1w trend filter and volume surge capture institutional breakout moves.
+# Long when price breaks above R3 (strong resistance) with volume confirmation in 1w uptrend.
+# Short when price breaks below S3 (strong support) with volume confirmation in 1w downtrend.
+# Uses daily Camarilla levels for institutional relevance, 1w EMA55 for trend, and volume surge for conviction.
+# Designed for 1d timeframe to minimize trade frequency (~10-25/year) and capture multi-week trends.
 # Works in bull markets (breaks above R3 in uptrend) and bear markets (breaks below S3 in downtrend).
