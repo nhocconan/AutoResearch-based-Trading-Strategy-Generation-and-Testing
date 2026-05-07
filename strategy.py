@@ -1,11 +1,30 @@
 #!/usr/bin/env python3
-name = "12h_1w_TwoDayBreakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_RSI_Divergence_Trend_Stop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def calculate_rsi(prices, period=14):
+    delta = np.diff(prices, prepend=prices[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.zeros_like(prices)
+    avg_loss = np.zeros_like(prices)
+    
+    avg_gain[period] = np.mean(gain[1:period+1])
+    avg_loss[period] = np.mean(loss[1:period+1])
+    
+    for i in range(period+1, len(prices)):
+        avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+        avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
 def generate_signals(prices):
     n = len(prices)
@@ -17,76 +36,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w and 1d data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data once for RSI and trend
     df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_1w) < 2 or len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 1w Two-Day Breakout: 2-week high/low (10 trading days)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    two_week_high = pd.Series(high_1w).rolling(window=10, min_periods=10).max().values
-    two_week_low = pd.Series(low_1w).rolling(window=10, min_periods=10).min().values
+    # 1d RSI for overbought/oversold
+    rsi_1d = calculate_rsi(df_1d['close'].values, 14)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Align 1w breakout levels to 12h timeframe
-    two_week_high_aligned = align_htf_to_ltf(prices, df_1w, two_week_high)
-    two_week_low_aligned = align_htf_to_ltf(prices, df_1w, two_week_low)
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # 1d EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # 12h volume spike: > 2.0x 20-period average
-    vol_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike_12h = volume > 2.0 * vol_ma_12h
+    # 4h volume spike: > 2x 20-period average
+    vol_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike_4h = volume > 2.0 * vol_ma_4h
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 34)  # Wait for EMA and volume MA
+    start_idx = max(50, 30)
     
     for i in range(start_idx, n):
-        if (np.isnan(two_week_high_aligned[i]) or np.isnan(two_week_low_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i])):
+        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(ema50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Break above 2-week high with volume spike, uptrend (price > EMA34)
-            if (close[i] > two_week_high_aligned[i] and vol_spike_12h[i] and 
-                close[i] > ema34_1d_aligned[i]):
+            # Long: RSI < 30 (oversold) + price above EMA50 + volume spike
+            if (rsi_1d_aligned[i] < 30 and close[i] > ema50_1d_aligned[i] and vol_spike_4h[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below 2-week low with volume spike, downtrend (price < EMA34)
-            elif (close[i] < two_week_low_aligned[i] and vol_spike_12h[i] and 
-                  close[i] < ema34_1d_aligned[i]):
+            # Short: RSI > 70 (overbought) + price below EMA50 + volume spike
+            elif (rsi_1d_aligned[i] > 70 and close[i] < ema50_1d_aligned[i] and vol_spike_4h[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Price below 2-week low or trend reversal (price < EMA34)
-            if close[i] < two_week_low_aligned[i] or close[i] < ema34_1d_aligned[i]:
+            # Exit: RSI > 50 (overbought exit) or price below EMA50
+            if rsi_1d_aligned[i] > 50 or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price above 2-week high or trend reversal (price > EMA34)
-            if close[i] > two_week_high_aligned[i] or close[i] > ema34_1d_aligned[i]:
+            # Exit: RSI < 50 (oversold exit) or price above EMA50
+            if rsi_1d_aligned[i] < 50 or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
-
-# Hypothesis: 12h timeframe captures multi-day momentum. 
-# 2-week breakout captures institutional accumulation/distribution. 
-# Volume spike confirms institutional participation. 
-# EMA34 trend filter ensures trading with the trend. 
-# Works in both bull/bear: breaksout in bull, breakdowns in bear. 
-# Target: 15-25 trades/year, low frequency minimizes fee drag.
