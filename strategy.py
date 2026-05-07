@@ -1,11 +1,13 @@
-# 4h_Donchian20_1dTrend_VolumeBreakout
-# Hypothesis: Uses daily trend filter with Donchian channel breakout and volume confirmation.
-# Enters long when price breaks above 20-period Donchian high with 1d uptrend (price > 1d EMA50) and volume spike.
-# Enters short when price breaks below 20-period Donchian low with 1d downtrend (price < 1d EMA50) and volume spike.
-# Daily trend filter ensures alignment with intermediate trend; volume confirms breakout strength; Donchian breakouts capture momentum.
-# Targets 20-40 trades/year on 4h timeframe.
+#!/usr/bin/env python3
+# 4h_Chaikin_Money_Flow_Signal_v1
+# Hypothesis: Uses Chaikin Money Flow (CMF) to measure buying/selling pressure with trend filter.
+# Enters long when CMF > 0.15 (strong buying pressure) and price > 4h EMA50 (uptrend).
+# Enters short when CMF < -0.15 (strong selling pressure) and price < 4h EMA50 (downtrend).
+# Exits when CMF crosses back to zero or trend changes.
+# CMF combines price and volume to confirm institutional activity, working in both bull and bear markets.
+# Targets 20-35 trades/year (80-140 total over 4 years) with strict entry conditions.
 
-name = "4h_Donchian20_1dTrend_VolumeBreakout"
+name = "4h_Chaikin_Money_Flow_Signal_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,68 +25,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # Calculate Chaikin Money Flow (CMF) on 4h data
+    # CMF = sum(Money Flow Volume * 20) / sum(Volume * 20)
+    # Money Flow Multiplier = [(Close - Low) - (High - Close)] / (High - Low)
+    # Money Flow Volume = Money Flow Multiplier * Volume
     
-    close_1d = df_1d['close'].values
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Avoid division by zero
+    high_low = high - low
+    high_low = np.where(high_low == 0, 1e-10, high_low)
     
-    # Align 1d EMA50 to 4h timeframe
-    ema_50_1d_4h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    mf_multiplier = ((close - low) - (high - close)) / high_low
+    mf_volume = mf_multiplier * volume
     
-    # Calculate Donchian channel on 4h data
-    lookback = 20
-    donchian_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    donchian_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Calculate 20-period sums
+    mf_volume_sum = pd.Series(mf_volume).rolling(window=20, min_periods=20).sum().values
+    volume_sum = pd.Series(volume).rolling(window=20, min_periods=20).sum().values
     
-    # Volume spike filter on 4h (20-period average)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)
+    # CMF calculation
+    cmf = np.where(volume_sum != 0, mf_volume_sum / volume_sum, 0.0)
+    
+    # Calculate 4h EMA50 for trend filter
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_entry = 0
     
     for i in range(50, n):
         # Skip if any critical value is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_50_1d_4h[i]) or np.isnan(volume_spike[i])):
+        if np.isnan(cmf[i]) or np.isnan(ema_50[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             continue
         
-        bars_since_entry += 1
-        
         if position == 0:
-            # Long: Price > Donchian high, above 1d EMA50 trend, volume spike
-            if close[i] > donchian_high[i] and close[i] > ema_50_1d_4h[i] and volume_spike[i]:
+            # Long: Strong buying pressure (CMF > 0.15) and uptrend (price > EMA50)
+            if cmf[i] > 0.15 and close[i] > ema_50[i]:
                 signals[i] = 0.25
                 position = 1
-                bars_since_entry = 0
-            # Short: Price < Donchian low, below 1d EMA50 trend, volume spike
-            elif close[i] < donchian_low[i] and close[i] < ema_50_1d_4h[i] and volume_spike[i]:
+            # Short: Strong selling pressure (CMF < -0.15) and downtrend (price < EMA50)
+            elif cmf[i] < -0.15 and close[i] < ema_50[i]:
                 signals[i] = -0.25
                 position = -1
-                bars_since_entry = 0
         elif position == 1:
-            # Exit: price breaks below Donchian low or below 1d EMA50
-            if close[i] < donchian_low[i] or close[i] < ema_50_1d_4h[i]:
+            # Long exit: CMF turns negative or trend turns down
+            if cmf[i] < 0 or close[i] < ema_50[i]:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price breaks above Donchian high or above 1d EMA50
-            if close[i] > donchian_high[i] or close[i] > ema_50_1d_4h[i]:
+            # Short exit: CMF turns positive or trend turns up
+            if cmf[i] > 0 or close[i] > ema_50[i]:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             else:
                 signals[i] = -0.25
     
