@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_1dTrend_VolumeSpike_v18"
-timeframe = "4h"
+name = "1h_RSI_Stoch_Bollinger_Confluence_v1"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -17,38 +17,49 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 21:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 4h EMA21 for trend filter
+    ema_21_4h = pd.Series(df_4h['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
     
-    # Get 1d data for Camarilla levels (previous day's high, low, close)
-    prev_high = df_1d['high'].values
-    prev_low = df_1d['low'].values
-    prev_close = df_1d['close'].values
+    # Get 1d data for regime filter (Bollinger Band width)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Calculate Camarilla R3 and S3 levels from previous 1d bar
-    range_hl = prev_high - prev_low
-    r3 = prev_close + range_hl * 0.55  # Standard Camarilla formula: close + (high-low)*1.1/2
-    s3 = prev_close - range_hl * 0.55  # Standard Camarilla formula: close - (high-low)*1.1/2
+    # Calculate 1d Bollinger Band width
+    ma_20_1d = pd.Series(df_1d['close'].values).rolling(window=20, min_periods=20).mean().values
+    std_20_1d = pd.Series(df_1d['close'].values).rolling(window=20, min_periods=20).std().values
+    bb_width_1d = (std_20_1d * 2) / ma_20_1d
+    bb_width_1d_aligned = align_htf_to_ltf(prices, df_1d, bb_width_1d)
     
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Calculate 1h RSI (14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Volume filter: 20-period average volume for spike detection
+    # Calculate 1h Stochastic (14,3,3)
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    k_percent = 100 * (close - lowest_low) / (highest_high - lowest_low + 1e-10)
+    d_percent = pd.Series(k_percent).rolling(window=3, min_periods=3).mean().values
+    
+    # Calculate 1h Bollinger Bands (20,2)
+    ma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = ma_20 + 2 * std_20
+    lower_bb = ma_20 - 2 * std_20
+    
+    # Volume filter: 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Volatility filter: avoid low volatility (ATR > 0.4% of price)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    vol_filter = atr > 0.004 * close  # ATR > 0.4% of price
     
     # Session filter: 08:00 - 20:00 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -57,54 +68,57 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)  # Ensure volume MA and EMA data
+    start_idx = max(20, 14)  # Ensure BB, Stoch, and volume data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN or invalid
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+        if (np.isnan(ema_21_4h_aligned[i]) or np.isnan(bb_width_1d_aligned[i]) or
+            np.isnan(rsi[i]) or np.isnan(d_percent[i]) or
+            np.isnan(upper_bb[i]) or np.isnan(lower_bb[i]) or
             np.isnan(vol_ma[i]) or vol_ma[i] == 0 or
-            np.isnan(vol_filter[i]) or not vol_filter[i] or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume spike: current volume > 2.0 x 20-period average
-        volume_spike = volume[i] > 2.0 * vol_ma[i]
+        # Volume filter: current volume > 1.5 x 20-period average
+        volume_filter = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long: Price breaks above R3, above 1d EMA34 (uptrend), with volume spike
-            buffer = 0.001 * close[i]  # 0.1% buffer to avoid whipsaws
-            if (close[i] > r3_aligned[i] + buffer and 
-                close[i] > ema_34_1d_aligned[i] + buffer and   # 1d uptrend
-                volume_spike):
-                signals[i] = 0.25
+            # Long conditions: Oversold + BB bounce + 4h uptrend + low volatility regime
+            if (rsi[i] < 30 and 
+                d_percent[i] < 20 and 
+                close[i] < lower_bb[i] and
+                close[i] > ema_21_4h_aligned[i] and  # 4h uptrend filter
+                bb_width_1d_aligned[i] < 0.05 and   # Low volatility regime (BB width < 5%)
+                volume_filter):
+                signals[i] = 0.20
                 position = 1
-            # Short: Price breaks below S3, below 1d EMA34 (downtrend), with volume spike
-            elif (close[i] < s3_aligned[i] - buffer and 
-                  close[i] < ema_34_1d_aligned[i] - buffer and   # 1d downtrend
-                  volume_spike):
-                signals[i] = -0.25
+            # Short conditions: Overbought + BB rejection + 4h downtrend + low volatility regime
+            elif (rsi[i] > 70 and 
+                  d_percent[i] > 80 and 
+                  close[i] > upper_bb[i] and
+                  close[i] < ema_21_4h_aligned[i] and  # 4h downtrend filter
+                  bb_width_1d_aligned[i] < 0.05 and   # Low volatility regime
+                  volume_filter):
+                signals[i] = -0.20
                 position = -1
         elif position != 0:
-            # Exit: Price returns to midpoint of prior day's range (H3/L3)
-            range_hl = prev_high - prev_low
-            h3 = prev_close + range_hl * 0.275  # Standard Camarilla H3: close + (high-low)*1.1/4
-            l3 = prev_close - range_hl * 0.275  # Standard Camarilla L3: close - (high-low)*1.1/4
-            h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-            l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-            
-            camarilla_mid = (h3_aligned[i] + l3_aligned[i]) / 2
-            range_hl_1d = h3_aligned[i] - l3_aligned[i]
-            # Exit when within 30% of midpoint (tighter exit to reduce holding losing positions)
-            at_mid = abs(close[i] - camarilla_mid) < range_hl_1d * 0.30
-            
-            if at_mid:
-                signals[i] = 0.0
-                position = 0
-            else:
-                # Maintain position
-                signals[i] = 0.25 if position == 1 else -0.25
+            # Exit conditions: Mean reversion or trend exhaustion
+            if position == 1:  # Long position
+                # Exit when RSI reaches overbought or price touches upper BB
+                if rsi[i] > 70 or close[i] > upper_bb[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.20
+            else:  # Short position
+                # Exit when RSI reaches oversold or price touches lower BB
+                if rsi[i] < 30 or close[i] < lower_bb[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.20
     
     return signals
