@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-# 1d_Vortex_Trend_Filter_Vortex
-# Hypothesis: Uses Vortex Indicator on weekly timeframe for trend direction,
-# combined with 1d price action above/below Vortex and volume confirmation to reduce false signals.
-# Vortex identifies trending markets by measuring directional movement.
-# Targets 15-25 trades/year to minimize fee drift while maintaining trend-following edge.
-# Works in both bull and bear markets by adapting to trend strength via VI+ and VI-.
+"""
+12h_1D_Donchian_Breakout_With_Volume_Confirmation
+Hypothesis: Uses Donchian channel breakout on 1d timeframe for trend direction,
+combined with volume confirmation on 12h timeframe to filter false signals.
+Trades only in direction of higher timeframe trend to reduce whipsaws.
+Designed for low trade frequency (15-25/year) to minimize fee drag while capturing
+major trends in both bull and bear markets.
+"""
 
-name = "1d_Vortex_Trend_Filter_Vortex"
-timeframe = "1d"
+name = "12h_1D_Donchian_Breakout_With_Volume_Confirmation"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,46 +26,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Vortex calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get daily data for Donchian calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate Vortex Indicator (VI)
-    # Parameters: period = 14
-    period = 14
+    # Calculate Donchian Channel (20-period)
+    # Upper band: highest high of last 20 days
+    # Lower band: lowest low of last 20 days
+    upper_20 = np.full_like(high_1d, np.nan)
+    lower_20 = np.full_like(low_1d, np.nan)
     
-    # True Range
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value is NaN
+    for i in range(19, len(high_1d)):
+        upper_20[i] = np.max(high_1d[i-19:i+1])
+        lower_20[i] = np.min(low_1d[i-19:i+1])
     
-    # Positive and Negative Vortex Movements
-    vm_plus = np.abs(high_1w[1:] - low_1w[:-1])
-    vm_minus = np.abs(low_1w[1:] - high_1w[:-1])
-    vm_plus = np.concatenate([[np.nan], vm_plus])
-    vm_minus = np.concatenate([[np.nan], vm_minus])
+    # Align Donchian bands to 12h timeframe
+    upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
     
-    # Sum over period
-    tr_sum = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
-    vm_plus_sum = pd.Series(vm_plus).rolling(window=period, min_periods=period).sum().values
-    vm_minus_sum = pd.Series(vm_minus).rolling(window=period, min_periods=period).sum().values
-    
-    # VI+ and VI-
-    vi_plus = vm_plus_sum / tr_sum
-    vi_minus = vm_minus_sum / tr_sum
-    
-    # Align Vortex to 1d timeframe
-    vi_plus_1d = align_htf_to_ltf(prices, df_1w, vi_plus)
-    vi_minus_1d = align_htf_to_ltf(prices, df_1w, vi_minus)
-    
-    # Volume confirmation: volume > 20-period average (20 days)
+    # Volume confirmation: volume > 20-period average (20 * 12h = 10 days)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -71,7 +56,7 @@ def generate_signals(prices):
     
     for i in range(30, n):
         # Skip if any critical value is NaN
-        if (np.isnan(vi_plus_1d[i]) or np.isnan(vi_minus_1d[i]) or 
+        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or 
             np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
@@ -79,24 +64,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: VI+ > VI- with volume confirmation
-            if vi_plus_1d[i] > vi_minus_1d[i] and volume[i] > vol_ma[i]:
+            # Long: price breaks above upper Donchian band with volume confirmation
+            if close[i] > upper_20_aligned[i] and volume[i] > vol_ma[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: VI- > VI+ with volume confirmation
-            elif vi_minus_1d[i] > vi_plus_1d[i] and volume[i] > vol_ma[i]:
+            # Short: price breaks below lower Donchian band with volume confirmation
+            elif close[i] < lower_20_aligned[i] and volume[i] > vol_ma[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: VI- crosses above VI+
-            if vi_minus_1d[i] > vi_plus_1d[i]:
+            # Exit: price crosses below lower Donchian band (contrarian exit)
+            if close[i] < lower_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: VI+ crosses above VI-
-            if vi_plus_1d[i] > vi_minus_1d[i]:
+            # Exit: price crosses above upper Donchian band (contrarian exit)
+            if close[i] > upper_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
