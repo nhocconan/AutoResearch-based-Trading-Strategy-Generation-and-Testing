@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-# 4h_RSI_MeanReversion_4HTrend_Filter
-# Hypothesis: Mean reversion on 4h RSI with trend filter from higher timeframe (1d) to avoid counter-trend trades.
-# Uses RSI(14) < 30 for long and > 70 for short, filtered by 1-day EMA50 trend.
-# Includes volume confirmation and minimum holding period to reduce whipsaw.
-# Target: 20-30 trades/year to minimize fee drag while capturing reversals in both bull and bear markets.
+# 6h_WeeklyPivot_Trend_Scalp_v1
+# Hypothesis: Use weekly pivot points (R1/S1) for trend direction, combined with daily
+#   EMA50 trend filter and volume confirmation on 6h. Long when price > weekly R1 and
+#   above daily EMA50 with volume spike; short when price < weekly S1 and below daily
+#   EMA50 with volume spike. Weekly pivots provide multi-week structure that works in
+#   both bull and bear markets, while volume confirmation filters false breakouts.
+#   Target: 15-25 trades/year to minimize fee drag.
 
-name = "4h_RSI_MeanReversion_4HTrend_Filter"
-timeframe = "4h"
+name = "6h_WeeklyPivot_Trend_Scalp_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,42 +25,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for calculations
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for pivot points
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
+    close_weekly = df_weekly['close'].values
     
-    # Calculate RSI(14) on 4h
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate weekly pivot points (standard formula)
+    # Pivot = (H + L + C) / 3
+    # R1 = 2*P - L
+    # S1 = 2*P - H
+    pivot_weekly = (high_weekly + low_weekly + close_weekly) / 3.0
+    r1_weekly = 2 * pivot_weekly - low_weekly
+    s1_weekly = 2 * pivot_weekly - high_weekly
     
-    # Calculate EMA50 on 1d for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Get daily data for EMA50 trend filter
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 50:
+        return np.zeros(n)
     
-    # Align 1d EMA50 to 4h
-    ema_50_1d_4h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    close_daily = df_daily['close'].values
+    ema_50_daily = pd.Series(close_daily).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume spike filter on 6h (20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma_20)
+    volume_spike = volume > (2.0 * vol_ma_20)
+    
+    # Align all indicators to 6h timeframe
+    r1_weekly_6h = align_htf_to_ltf(prices, df_weekly, r1_weekly)
+    s1_weekly_6h = align_htf_to_ltf(prices, df_weekly, s1_weekly)
+    ema_50_daily_6h = align_htf_to_ltf(prices, df_daily, ema_50_daily)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_entry = 0
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any critical value is NaN
-        if (np.isnan(rsi[i]) or np.isnan(ema_50_1d_4h[i]) or 
-            np.isnan(volume_confirm[i])):
+        if (np.isnan(r1_weekly_6h[i]) or np.isnan(s1_weekly_6h[i]) or 
+            np.isnan(ema_50_daily_6h[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,27 +76,27 @@ def generate_signals(prices):
         bars_since_entry += 1
         
         if position == 0:
-            # Long: RSI < 30 (oversold), above 1d EMA50 trend, volume confirmation
-            if rsi[i] < 30 and close[i] > ema_50_1d_4h[i] and volume_confirm[i]:
+            # Long: Price > weekly R1, above daily EMA50, volume spike
+            if close[i] > r1_weekly_6h[i] and close[i] > ema_50_daily_6h[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
                 bars_since_entry = 0
-            # Short: RSI > 70 (overbought), below 1d EMA50 trend, volume confirmation
-            elif rsi[i] > 70 and close[i] < ema_50_1d_4h[i] and volume_confirm[i]:
+            # Short: Price < weekly S1, below daily EMA50, volume spike
+            elif close[i] < s1_weekly_6h[i] and close[i] < ema_50_daily_6h[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
                 bars_since_entry = 0
         elif position == 1:
-            # Exit: RSI > 50 or below trend
-            if rsi[i] > 50 or close[i] < ema_50_1d_4h[i]:
+            # Exit: price closes below weekly R1 or daily EMA50
+            if close[i] < r1_weekly_6h[i] or close[i] < ema_50_daily_6h[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: RSI < 50 or above trend
-            if rsi[i] < 50 or close[i] > ema_50_1d_4h[i]:
+            # Exit: price closes above weekly S1 or daily EMA50
+            if close[i] > s1_weekly_6h[i] or close[i] > ema_50_daily_6h[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
