@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Volume"
-timeframe = "4h"
+name = "6h_WeeklyPivot_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,7 +17,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for EMA and pivot points
+    # Load weekly data ONCE before loop for pivot points
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    # Calculate Weekly Pivot Points from previous week
+    prev_high = df_1w['high'].shift(1).values
+    prev_low = df_1w['low'].shift(1).values
+    prev_close = df_1w['close'].shift(1).values
+    
+    # Classic floor trader pivot: P = (H+L+C)/3
+    pivot = (prev_high + prev_low + prev_close) / 3
+    # Weekly R3 and S3 levels
+    r3 = pivot + 2 * (prev_high - prev_low)  # R3 = P + 2*(H-L)
+    s3 = pivot - 2 * (prev_high - prev_low)  # S3 = P - 2*(H-L)
+    
+    # Align Weekly levels to 6h
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    
+    # Load daily data ONCE before loop for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -25,19 +45,6 @@ def generate_signals(prices):
     # 1d EMA(34) for trend filter
     ema_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # Calculate Pivot Points from previous 1d for R3/S3
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
-    
-    pivot = (prev_high + prev_low + prev_close) / 3
-    r3 = pivot + 2 * (prev_high - prev_low)  # R3 = P + 2*(H - L)
-    s3 = pivot - 2 * (prev_high - prev_low)  # S3 = P - 2*(H - L)
-    
-    # Align Pivot levels to 4h
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
     # Volume filter: > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -81,8 +88,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA(34) trend filter and volume confirmation.
-# R3/S3 are extreme support/resistance levels that break less frequently but with stronger follow-through.
+# Hypothesis: 6s Weekly Pivot R3/S3 breakout with 1d EMA(34) trend filter and volume confirmation.
+# Weekly R3/S3 are strong institutional levels that act as magnet/resistance.
+# Breakouts beyond these levels indicate strong momentum with follow-through.
 # 1d EMA(34) ensures alignment with daily trend, reducing whipsaw in choppy markets.
 # Volume confirms institutional participation. Position size 0.25 limits drawdown.
-# Target: ~15-25 trades/year to avoid fee decay while capturing significant moves.
+# Target: ~15-25 trades/year to avoid fee dust while capturing significant weekly moves.
