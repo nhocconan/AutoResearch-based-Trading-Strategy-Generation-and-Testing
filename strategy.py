@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-# 12h_Panic_Long_With_Weekly_Trend_Filter
-# Hypothesis: Enter long on 12h when weekly trend is bullish (price > weekly EMA200) and
-# 12h price closes below 12h Bollinger Lower Band (20,2) + volume spike > 2x average.
-# Exit when price closes above 12h Bollinger Middle Band (20).
-# Designed to catch mean-reversion bounces in strong uptrends, works in bull (continuation)
-# and bear (bear market rallies). Weekly trend filter avoids counter-trend trades.
-# Target: 15-25 trades/year (~60-100 total over 4 years) to minimize fee drag.
+# 12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeS
+# Hypothesis: Uses Camarilla pivot levels (R3/S3) from daily timeframe combined with 1d EMA34 trend filter and volume confirmation.
+# Only enters on breakout of R3 (long) or S3 (short) when price is aligned with 1d EMA34 and volume is above average.
+# Designed for 12h timeframe to target 12-37 trades/year, avoiding fee drag while capturing trend moves.
+# Works in bull markets via breakouts and in bear markets via short breakdowns.
 
-name = "12h_Panic_Long_With_Weekly_Trend_Filter"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeS"
 timeframe = "12h"
 leverage = 1.0
 
@@ -25,54 +23,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 200:
+    # Get 1d data for Camarilla calculation and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    # Weekly EMA200 for trend filter
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 12h Bollinger Bands (20,2)
-    close_s = pd.Series(close)
-    ma_20 = close_s.rolling(window=20, min_periods=20).mean().values
-    std_20 = close_s.rolling(window=20, min_periods=20).std().values
-    lower_band = ma_20 - 2 * std_20
-    middle_band = ma_20
+    # Calculate Camarilla levels using previous day's OHLC
+    # Camarilla: R4 = C + (H-L)*1.1/2, R3 = C + (H-L)*1.1/4, etc.
+    # We use previous day's data to avoid look-ahead
+    camarilla_R3 = np.zeros(len(close_1d))
+    camarilla_S3 = np.zeros(len(close_1d))
     
-    # Volume confirmation: volume > 2x 20-period average
-    vol_ma_20 = close_s.rolling(window=20, min_periods=20).mean().values  # using close for volume MA approximation
+    for i in range(1, len(close_1d)):
+        # Use previous day's OHLC (i-1)
+        H = high_1d[i-1]
+        L = low_1d[i-1]
+        C = close_1d[i-1]
+        range_hl = H - L
+        camarilla_R3[i] = C + range_hl * 1.1 / 4
+        camarilla_S3[i] = C - range_hl * 1.1 / 4
+    
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align Camarilla levels and EMA to 12h timeframe
+    camarilla_R3_12h = align_htf_to_ltf(prices, df_1d, camarilla_R3)
+    camarilla_S3_12h = align_htf_to_ltf(prices, df_1d, camarilla_S3)
+    ema_34_12h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume confirmation: volume > 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long
+    position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if any critical value is NaN
-        if (np.isnan(ema_200_1w_aligned[i]) or np.isnan(ma_20[i]) or 
-            np.isnan(std_20[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(camarilla_R3_12h[i]) or np.isnan(camarilla_S3_12h[i]) or 
+            np.isnan(ema_34_12h[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: weekly uptrend + price below BB lower + volume spike
-            weekly_uptrend = close[i] > ema_200_1w_aligned[i]
-            bb_oversold = close[i] < lower_band[i]
-            volume_spike = volume[i] > 2 * vol_ma[i]
+            vol_ok = volume[i] > vol_ma[i]
             
-            if weekly_uptrend and bb_oversold and volume_spike:
+            # Long: breakout above R3 + price above EMA34 + volume confirmation
+            if (close[i] > camarilla_R3_12h[i] and 
+                close[i] > ema_34_12h[i] and vol_ok):
                 signals[i] = 0.25
                 position = 1
+            # Short: breakdown below S3 + price below EMA34 + volume confirmation
+            elif (close[i] < camarilla_S3_12h[i] and 
+                  close[i] < ema_34_12h[i] and vol_ok):
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Exit: price closes above BB middle band
-            if close[i] > middle_band[i]:
+            # Exit: price breaks below S3 or trend changes
+            if (close[i] < camarilla_S3_12h[i] or 
+                close[i] < ema_34_12h[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
+        elif position == -1:
+            # Exit: price breaks above R3 or trend changes
+            if (close[i] > camarilla_R3_12h[i] or 
+                close[i] > ema_34_12h[i]):
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
