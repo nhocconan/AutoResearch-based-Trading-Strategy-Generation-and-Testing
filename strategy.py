@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-1h_4hTrend_1dVolume_R3S3_Breakout
+1h_4hTrend_1dVolume_CamPullback
 Hypothesis: 1h timeframe with 4h trend filter (EMA20) and 1d volume confirmation.
-Uses 4h OHLC to calculate daily-style Camarilla R3/S3 levels (based on prior 4h bar).
-Breakouts occur when price penetrates R3/S3 with volume spike (1d volume > 1.5x 20-period average)
-and 4h trend alignment. Designed for 15-30 trades/year to avoid fee drag in 1h.
+Enters on pullback to 4h EMA20 during 4h trend (pullback in opposite direction of trend).
+Uses 1d volume spike (>1.5x 20-day average) for confirmation.
+Designed for 15-30 trades/year to avoid fee drag in 1h.
 Works in bull/bear via trend filter and volume confirmation.
 """
 
-name = "1h_4hTrend_1dVolume_R3S3_Breakout"
+name = "1h_4hTrend_1dVolume_CamPullback"
 timeframe = "1h"
 leverage = 1.0
 
@@ -26,26 +26,13 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Camarilla calculation and trend
+    # Get 4h data for trend and pullback logic
     df_4h = get_htf_data(prices, '4h')
     if len(df_4h) < 30:
         return np.zeros(n)
     
-    # Calculate 4h OHLC for Camarilla (using prior 4h bar)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # 4h EMA20 for trend
     close_4h = df_4h['close'].values
-    
-    # Range and Camarilla levels from prior 4h bar
-    range_4h = high_4h - low_4h
-    r3_4h = close_4h + 1.1 * range_4h
-    s3_4h = close_4h - 1.1 * range_4h
-    
-    # Align Camarilla levels to 1h
-    r3_4h_aligned = align_htf_to_ltf(prices, df_4h, r3_4h)
-    s3_4h_aligned = align_htf_to_ltf(prices, df_4h, s3_4h)
-    
-    # 4h EMA20 for trend filter
     ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
     ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
     
@@ -60,6 +47,9 @@ def generate_signals(prices):
     vol_ratio_1d = np.divide(vol_1d, vol_ma20_1d, out=np.zeros_like(vol_1d), where=vol_ma20_1d!=0)
     vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
     
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
@@ -67,8 +57,17 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isclose(r3_4h_aligned[i], 0) or np.isclose(s3_4h_aligned[i], 0) or
-            np.isnan(ema_20_4h_aligned[i]) or np.isnan(vol_ratio_1d_aligned[i])):
+        if (np.isnan(ema_20_4h_aligned[i]) or 
+            np.isnan(vol_ratio_1d_aligned[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Session filter
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
+        if not in_session:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -86,29 +85,31 @@ def generate_signals(prices):
         trend_down = close_4h_aligned[i] < ema_20_4h_aligned[i]
         
         if position == 0:
-            # Long: break above R3 with volume and uptrend
-            if (close[i] > r3_4h_aligned[i] and 
+            # Long: pullback to EMA20 during uptrend with volume confirmation
+            if (low[i] <= ema_20_4h_aligned[i] and 
+                close[i] > ema_20_4h_aligned[i] and  # closed back above EMA
                 vol_ratio_1d_aligned[i] > 1.5 and 
                 trend_up):
                 signals[i] = 0.20
                 position = 1
-            # Short: break below S3 with volume and downtrend
-            elif (close[i] < s3_4h_aligned[i] and 
+            # Short: pullback to EMA20 during downtrend with volume confirmation
+            elif (high[i] >= ema_20_4h_aligned[i] and 
+                  close[i] < ema_20_4h_aligned[i] and  # closed back below EMA
                   vol_ratio_1d_aligned[i] > 1.5 and 
                   trend_down):
                 signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: break below S3 or trend turns down
-            if (close[i] < s3_4h_aligned[i] or 
+            # Exit long: price breaks below EMA20 or trend turns down
+            if (close[i] < ema_20_4h_aligned[i] or 
                 not trend_up):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.20
         elif position == -1:
-            # Exit short: break above R3 or trend turns up
-            if (close[i] > r3_4h_aligned[i] or 
+            # Exit short: price breaks above EMA20 or trend turns up
+            if (close[i] > ema_20_4h_aligned[i] or 
                 not trend_down):
                 signals[i] = 0.0
                 position = 0
