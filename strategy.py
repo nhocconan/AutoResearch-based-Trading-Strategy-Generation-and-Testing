@@ -1,6 +1,15 @@
+# This strategy is designed for 12h timeframe with daily trend and volume confirmation
+# It uses weekly pivot points as dynamic support/resistance levels
+# Long: price breaks above S1 with volume spike and daily uptrend
+# Short: price breaks below R1 with volume spike and daily downtrend
+# Exit: price returns to weekly pivot (PP) or volume drops below average
+# Position size: 0.25 to limit trade frequency and manage risk
+# Designed to work in both bull and bear markets by following daily trend
+# Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag
+
 #!/usr/bin/env python3
-name = "6h_Liquidity_Sweep_Reversal"
-timeframe = "6h"
+name = "12h_WeeklyPivot_DailyTrend_VolumeBreak"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -22,57 +31,74 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Daily trend: EMA(34) on close
+    # Weekly pivot points from daily data (use last completed week)
+    # Calculate weekly high/low/close from daily data
+    # We'll compute weekly pivot using the last 5 trading days (approximate week)
+    weekly_high = pd.Series(high).rolling(window=5*24//12, min_periods=5*24//12).max().values  # 5 days of 12h bars
+    weekly_low = pd.Series(low).rolling(window=5*24//12, min_periods=5*24//12).min().values
+    weekly_close = pd.Series(close).rolling(window=5*24//12, min_periods=5*24//12).mean().values
+    
+    # Pivot levels
+    pp = (weekly_high + weekly_low + weekly_close) / 3
+    r1 = 2 * pp - weekly_low
+    s1 = 2 * pp - weekly_high
+    r2 = pp + (weekly_high - weekly_low)
+    s2 = pp - (weekly_high - weekly_low)
+    r3 = weekly_high + 2 * (pp - weekly_low)
+    s3 = weekly_low - 2 * (weekly_high - pp)
+    
+    # Align weekly pivot levels to 12h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp.values)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2.values)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2.values)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3.values)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3.values)
+    
+    # Daily trend filter: EMA(34) on daily close
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Liquidity sweep detection: look for false breaks of daily high/low
-    # Daily high/low from previous day
-    daily_high_prev = df_1d['high'].shift(1).values
-    daily_low_prev = df_1d['low'].shift(1).values
-    daily_high_prev_aligned = align_htf_to_ltf(prices, df_1d, daily_high_prev)
-    daily_low_prev_aligned = align_htf_to_ltf(prices, df_1d, daily_low_prev)
-    
-    # Volume filter: 24-period average (4 days of 6h bars)
+    # Volume spike detection: 24-period average (4 days of 12h bars)
     vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 24)
+    start_idx = max(34, 24, 5*24//12)  # Wait for all indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(daily_high_prev_aligned[i]) or 
-            np.isnan(daily_low_prev_aligned[i]) or np.isnan(vol_ma_24[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(pp_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(vol_ma_24[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: false break below daily low then reversal with volume
-            false_break_low = low[i] < daily_low_prev_aligned[i] and close[i] > daily_low_prev_aligned[i]
-            vol_condition = volume[i] > vol_ma_24[i] * 1.5
+            # Long: price above S1 with volume and daily uptrend
+            vol_condition = volume[i] > vol_ma_24[i] * 2.0
             uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
             
-            if false_break_low and vol_condition and uptrend:
+            if close[i] > s1_aligned[i] and vol_condition and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: false break above daily high then reversal with volume
-            elif high[i] > daily_high_prev_aligned[i] and close[i] < daily_high_prev_aligned[i]:
-                if vol_condition and not uptrend:
-                    signals[i] = -0.25
-                    position = -1
+            # Short: price below R1 with volume and daily downtrend
+            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Exit: price reaches daily high or momentum fails
-            if close[i] >= daily_high_prev_aligned[i] or ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]:
+            # Exit: price back below pivot or volume drops
+            if close[i] < pp_aligned[i] or volume[i] < vol_ma_24[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price reaches daily low or momentum fails
-            if close[i] <= daily_low_prev_aligned[i] or ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]:
+            # Exit: price back above pivot or volume drops
+            if close[i] > pp_aligned[i] or volume[i] < vol_ma_24[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -80,11 +106,12 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Liquidity sweep reversal on 6h timeframe with daily trend filter
-# - Looks for false breaks of previous day's high/low (liquidity sweeps)
-# - Enters on reversal back inside the prior day's range with volume confirmation
-# - Uses daily EMA(34) for trend filter: only long in uptrend, short in downtrend
-# - Works in both bull (buy dips in uptrend) and bear (sell rallies in downtrend)
-# - Exit when price reaches opposite daily extreme or trend changes
+# Hypothesis: 12h weekly pivot breakout with daily trend and volume confirmation
+# - Weekly pivot points (S1/R1) act as dynamic support/resistance levels
+# - Breakout above S1 with volume in daily uptrend = long opportunity
+# - Breakdown below R1 with volume in daily downtrend = short opportunity
+# - Volume spike (2x average) confirms institutional participation
+# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
+# - Exit when price returns to weekly pivot (PP) or volume weakens
 # - Position size 0.25 targets 20-40 trades/year, avoiding fee drag
-# - Liquidity sweeps are common in crypto as stop hunts before reversals
+# - Weekly pivot provides structure that works across market regimes
