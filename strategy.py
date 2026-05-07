@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Volume"
-timeframe = "1h"
+name = "6h_Keltner_Channel_Breakout_1wTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,58 +17,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h OHLC for trend
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 1:
+    # 1w trend filter (EMA200)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    # 4h EMA50 trend
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    trend_up = close > ema_50_4h_aligned
-    trend_down = close < ema_50_4h_aligned
+    close_1w = df_1w['close'].values
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    trend_up = close > ema_200_1w_aligned
+    trend_down = close < ema_200_1w_aligned
     
-    # Daily OHLC for Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
-        return np.zeros(n)
+    # Keltner Channel (20, 2.0) on 6h
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    atr = np.zeros(n)
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        atr[i] = 0.9 * atr[i-1] + 0.1 * tr[i] if not np.isnan(atr[i-1]) else tr[i]
+    atr_ma = pd.Series(atr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    kc_upper = ema_20 + 2.0 * atr_ma
+    kc_lower = ema_20 - 2.0 * atr_ma
     
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
-    
-    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    camarilla_r1 = daily_close + (daily_high - daily_low) * 1.1 / 12
-    camarilla_s1 = daily_close - (daily_high - daily_low) * 1.1 / 12
-    
-    # Align Camarilla levels to 1h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # Volume filter: current volume > 2.0x 12-period average (12h)
-    vol_ma_12 = np.full(n, np.nan)
-    for i in range(12, n):
-        vol_ma_12[i] = np.mean(volume[i-12:i])
-    vol_filter = volume > (2.0 * vol_ma_12)
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Volume filter: current volume > 1.5x 20-period average
+    vol_ma_20 = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma_20[i] = np.mean(volume[i-20:i])
+    vol_filter = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 12  # ~12 hours to prevent overtrading
+    cooldown_bars = 4  # ~1 day (4*6h) to prevent overtrading
     
-    start_idx = 12  # Volume MA needs 12 bars
+    start_idx = max(20, 20)  # Keltner and volume MA need 20 bars
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(vol_ma_12[i])):
+        if (np.isnan(ema_200_1w_aligned[i]) or 
+            np.isnan(kc_upper[i]) or 
+            np.isnan(kc_lower[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -84,39 +73,37 @@ def generate_signals(prices):
         trending_down = trend_down[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: Price breaks above Camarilla R1 with volume in 4h uptrend and session
-            if (close[i] > r1_aligned[i] and 
+            # Long: Price breaks above Keltner upper with volume in 1w uptrend
+            if (close[i] > kc_upper[i] and 
                 trending_up and 
-                vol_filter[i] and 
-                session_filter[i]):
-                signals[i] = 0.20
+                vol_filter[i]):
+                signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: Price breaks below Camarilla S1 with volume in 4h downtrend and session
-            elif (close[i] < s1_aligned[i] and 
+            # Short: Price breaks below Keltner lower with volume in 1w downtrend
+            elif (close[i] < kc_lower[i] and 
                   trending_down and 
-                  vol_filter[i] and 
-                  session_filter[i]):
-                signals[i] = -0.20
+                  vol_filter[i]):
+                signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit: Price falls back below Camarilla S1 or 4h trend changes to down
-            if close[i] < s1_aligned[i] or not trending_up:
+            # Exit: Price falls back below Keltner lower or 1w trend changes to down
+            if close[i] < kc_lower[i] or not trending_up:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: Price rises back above Camarilla R1 or 4h trend changes to up
-            if close[i] > r1_aligned[i] or not trending_down:
+            # Exit: Price rises back above Keltner upper or 1w trend changes to up
+            if close[i] > kc_upper[i] or not trending_down:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-# Hypothesis: On 1h timeframe, price breaking above/below Camarilla R1/S1 levels with volume confirmation and 4h EMA50 trend filter captures institutional breakout momentum. Camarilla levels provide mathematically derived support/resistance with institutional relevance. Works in bull markets (breakouts above R1 in 4h uptrend) and bear markets (breakdowns below S1 in 4h downtrend). Session filter (08-20 UTC) reduces noise trades. Target: 60-150 total trades over 4 years (15-37/year) to minimize fee drag while capturing significant moves. 4h trend filter ensures alignment with higher timeframe momentum.
+# Hypothesis: On 6h timeframe, price breaking above/below Keltner Channel (20,2.0) with volume confirmation and 1-week EMA200 trend filter captures institutional breakout momentum. Keltner channels adapt to volatility, providing dynamic support/resistance. Works in bull markets (breakouts above upper in 1w uptrend) and bear markets (breakdowns below lower in 1w downtrend). Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag while capturing significant moves. 1w trend filter ensures alignment with higher timeframe momentum. Volume filter ensures breakouts have institutional participation.
