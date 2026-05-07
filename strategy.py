@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 6H_WeeklyPivot_Breakout_DailyTrend_VolumeConfirm
-# Hypothesis: Combines weekly pivot point breakout with daily EMA trend filter and volume confirmation. 
-# Weekly pivots provide strong institutional support/resistance, daily EMA ensures trend alignment, 
-# and volume confirms institutional participation. Designed for 6h timeframe to capture medium-term 
-# breakouts with low trade frequency (~15-30 trades/year). Works in both bull and bear markets by 
-# following the trend direction from higher timeframes.
+# 4H_KAMA_TRIX_Confluence_v1
+# Hypothesis: Combines KAMA trend direction with TRIX momentum and volume confirmation on 4h timeframe.
+# KAMA adapts to market noise, reducing false signals in ranging markets. TRIX captures momentum shifts.
+# Volume spike confirms institutional participation. Designed for low trade frequency (<30/year) to avoid fee drag.
+# Works in bull markets via KAMA uptrend + TRIX cross-up, and in bear markets via KAMA downtrend + TRIX cross-down.
+# Uses 1d timeframe for trend context to avoid whipsaws.
 
-name = "6H_WeeklyPivot_Breakout_DailyTrend_VolumeConfirm"
-timeframe = "6h"
+name = "4H_KAMA_TRIX_Confluence_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,48 +24,55 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot point calculation
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 1:
+    # Get 1d data for trend context
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate weekly pivot points: P = (H + L + C)/3
-    # R1 = 2*P - L, S1 = 2*P - H
-    # R2 = P + (H - L), S2 = P - (H - L)
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    close_weekly = df_weekly['close'].values
+    # KAMA parameters
+    fast_ema = 2
+    slow_ema = 30
+    # Calculate ER (Efficiency Ratio) and SSC (Smoothing Constant)
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.abs(np.diff(close, prepend=close[0]))
+    for i in range(1, len(volatility)):
+        volatility[i] = volatility[i-1] + np.abs(close[i] - close[i-1])
+    volatility = pd.Series(volatility).rolling(window=10, min_periods=1).sum().values
+    er = np.where(volatility > 0, change / volatility, 0)
+    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
+    # Calculate KAMA
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    pivot_weekly = (high_weekly + low_weekly + close_weekly) / 3.0
-    r1_weekly = 2.0 * pivot_weekly - low_weekly
-    s1_weekly = 2.0 * pivot_weekly - high_weekly
+    # TRIX on 1d close
+    close_1d = df_1d['close'].values
+    # Triple EMA
+    ema1 = pd.Series(close_1d).ewm(span=12, adjust=False, min_periods=12).mean()
+    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean()
+    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean()
+    # TRIX = 100 * (ema3 - ema3_prev) / ema3_prev
+    ema3_values = ema3.values
+    trix = np.zeros_like(ema3_values)
+    trix[1:] = 100 * (ema3_values[1:] - ema3_values[:-1]) / ema3_values[:-1]
+    trix = np.where(np.isnan(trix), 0, trix)
     
-    # Align weekly pivot points to 6h timeframe
-    pivot_weekly_aligned = align_htf_to_ltf(prices, df_weekly, pivot_weekly)
-    r1_weekly_aligned = align_htf_to_ltf(prices, df_weekly, r1_weekly)
-    s1_weekly_aligned = align_htf_to_ltf(prices, df_weekly, s1_weekly)
+    # Align KAMA and TRIX to 4h
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
     
-    # Get daily EMA for trend filter
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 2:
-        return np.zeros(n)
-    
-    close_daily = df_daily['close'].values
-    ema20_daily = pd.Series(close_daily).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_daily_aligned = align_htf_to_ltf(prices, df_daily, ema20_daily)
-    
-    # Volume spike: current volume > 1.5x average volume (30-period)
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Volume spike: current volume > 1.5x average volume (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Ensure we have volume MA data
+    start_idx = 20  # Ensure we have volume MA data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(pivot_weekly_aligned[i]) or np.isnan(r1_weekly_aligned[i]) or 
-            np.isnan(s1_weekly_aligned[i]) or np.isnan(ema20_daily_aligned[i]) or 
+        if (np.isnan(kama_aligned[i]) or np.isnan(trix_aligned[i]) or 
             np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
@@ -76,28 +83,28 @@ def generate_signals(prices):
         volume_filter = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long: price breaks above R1 + uptrend + volume spike
-            if (close[i] > r1_weekly_aligned[i] and 
-                close[i] > ema20_daily_aligned[i] and
+            # Long: price above KAMA + TRIX turning up + volume spike
+            if (close[i] > kama_aligned[i] and 
+                trix_aligned[i] > trix_aligned[i-1] and
                 volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + downtrend + volume spike
-            elif (close[i] < s1_weekly_aligned[i] and 
-                  close[i] < ema20_daily_aligned[i] and
+            # Short: price below KAMA + TRIX turning down + volume spike
+            elif (close[i] < kama_aligned[i] and 
+                  trix_aligned[i] < trix_aligned[i-1] and
                   volume_filter):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price returns below EMA or to S1 level (mean reversion)
-            if close[i] < ema20_daily_aligned[i] or close[i] < s1_weekly_aligned[i]:
+            # Exit: price crosses below KAMA or TRIX turns down
+            if close[i] < kama_aligned[i] or trix_aligned[i] < trix_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price returns above EMA or to R1 level (mean reversion)
-            if close[i] > ema20_daily_aligned[i] or close[i] > r1_weekly_aligned[i]:
+            # Exit: price crosses above KAMA or TRIX turns up
+            if close[i] > kama_aligned[i] or trix_aligned[i] > trix_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
