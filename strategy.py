@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 34:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,7 +19,7 @@ def generate_signals(prices):
     
     # Daily trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
@@ -81,10 +81,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R3/S3 breakouts on 12h timeframe with daily trend filter and volume spike capture strong institutional moves.
+# Hypothesis: Camarilla R3/S3 breakouts on 4h timeframe with daily trend filter and volume spike capture strong institutional moves.
 # Long when price breaks above R3 (strong resistance) with volume confirmation in daily uptrend.
 # Short when price breaks below S3 (strong support) with volume confirmation in daily downtrend.
 # R3/S3 are stronger levels than R1/S1, leading to fewer but higher-quality trades.
 # Volume spike (>2x average) ensures conviction behind the breakout.
-# Designed for 12h timeframe to target 12-37 trades/year, avoiding overtrading.
+# Designed for 4h timeframe to target 20-50 trades/year, avoiding overtrading.
 # Works in bull markets (breaks above R3 in uptrend) and bear markets (breaks below S3 in downtrend).
