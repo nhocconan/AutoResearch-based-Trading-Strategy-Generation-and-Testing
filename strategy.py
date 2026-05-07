@@ -1,13 +1,5 @@
-# 135320: 4h_1d_Camarilla_S1R1_Breakout_Trend_v3
-# Hypothesis: 4h Camarilla S1/R1 breakout with daily trend and volume confirmation.
-# Uses tighter volume threshold (2.0x) and stricter trend filter to reduce trades.
-# Aims for 20-40 trades/year to avoid fee drag while maintaining edge in bull/bear.
-# Entry requires: price breaks S1/R1 + volume > 2.0x 6-bar MA + price >/< daily EMA34.
-# Exit: price returns to S1/R1 or volume drops below 1.5x MA.
-# Position size: 0.25 for balance of return and risk.
-
 #!/usr/bin/env python3
-name = "4h_1d_Camarilla_S1R1_Breakout_Trend_v3"
+name = "4h_1d_Camarilla_S1R1_Breakout_Trend"
 timeframe = "4h"
 leverage = 1.0
 
@@ -68,8 +60,8 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: price above S1 with volume and daily uptrend
-            vol_condition = volume[i] > vol_ma_6[i] * 2.0
-            uptrend = close[i] > ema_34_1d_aligned[i]
+            vol_condition = volume[i] > vol_ma_6[i] * 1.8
+            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
             
             if close[i] > s1_aligned[i] and vol_condition and uptrend:
                 signals[i] = 0.25
@@ -80,14 +72,14 @@ def generate_signals(prices):
                 position = -1
         elif position == 1:
             # Exit: price back below S1 or volume drops
-            if close[i] < s1_aligned[i] or volume[i] < vol_ma_6[i] * 1.5:
+            if close[i] < s1_aligned[i] or volume[i] < vol_ma_6[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Exit: price back above R1 or volume drops
-            if close[i] > r1_aligned[i] or volume[i] < vol_ma_6[i] * 1.5:
+            if close[i] > r1_aligned[i] or volume[i] < vol_ma_6[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -99,12 +91,9 @@ def generate_signals(prices):
 # - Daily Camarilla S1/R1 act as strong support/resistance levels
 # - Breakout above S1 with volume in daily uptrend = long opportunity
 # - Breakdown below R1 with volume in daily downtrend = short opportunity
-# - Volume spike (2.0x average) confirms institutional participation
-# - Trend filter: price above/below daily EMA34 ensures alignment with higher timeframe
+# - Volume spike (1.8x average) confirms institutional participation
 # - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
 # - Exit when price returns to S1/R1 or volume weakens
-# - Position size 0.25 targets ~20-40 trades/year, avoiding fee drag
+# - Position size 0.25 targets ~30-50 trades/year, avoiding fee drag
 # - Uses actual daily Camarilla levels (not weekly) for better responsiveness
 # - Designed to work in BOTH bull and bear markets via trend filter
-# - Tighter volume threshold (2.0x vs 1.8x) and stricter trend filter reduce trades
-# - Exit threshold lowered to 1.5x for quicker exits in choppy markets
