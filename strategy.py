@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-name = "6h_WeeklyPivot_Donchian_Breakout_1dTrend"
-timeframe = "6h"
+name = "12h_1D_Donchian_Breakout_Volume_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_hlf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -17,86 +17,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE for pivot points and trend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load 1d data ONCE for trend, channel, and volume
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate weekly pivot points (standard floor trader's method)
-    # Pivot = (H + L + C) / 3
-    # R1 = 2*P - L, S1 = 2*P - H
-    # R2 = P + (H - L), S2 = P - (H - L)
-    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
-    # R4 = 3*P - 2*L, S4 = 3*H - 2*L
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    # Donchian channel (20 periods) on 1d
+    donchian_high = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    r1 = 2 * pivot - weekly_low
-    s1 = 2 * pivot - weekly_high
-    r2 = pivot + (weekly_high - weekly_low)
-    s2 = pivot - (weekly_high - weekly_low)
-    r3 = weekly_high + 2 * (pivot - weekly_low)
-    s3 = weekly_low - 2 * (weekly_high - pivot)
-    r4 = 3 * pivot - 2 * weekly_low
-    s4 = 3 * weekly_high - 2 * weekly_low
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Align weekly pivot levels to 6h timeframe (wait for weekly close)
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
-    
-    # Daily trend filter: EMA 34
-    ema_34 = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Volume confirmation: 20-period volume MA
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Donchian channel (20-period) for breakout confirmation
-    # Upper band = highest high of last 20 periods
-    # Lower band = lowest low of last 20 periods
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    # 1d volume average (20 periods) for confirmation
+    vol_ma_20_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 34, 20)  # Ensure all indicators are ready
+    start_idx = 50  # warmup for EMA34
     
     for i in range(start_idx, n):
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(s4_aligned[i]) or np.isnan(ema_34[i]) or 
-            np.isnan(vol_ma_20[i]) or np.isnan(donchian_upper[i]) or 
-            np.isnan(donchian_lower[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_condition = volume[i] > vol_ma_20[i] * 1.5
+        # Volume confirmation: current 12h volume > 1.5x 1d average volume
+        vol_condition = volume[i] > vol_ma_20_1d_aligned[i] * 1.5
         
         if position == 0:
-            # Long: price breaks above weekly R4 with volume and daily uptrend
-            if close[i] > r4_aligned[i] and close[i] > donchian_upper[i] and vol_condition and ema_34[i] > ema_34[i-1]:
+            # Long: break above 1d Donchian high in uptrend (close > EMA34)
+            if close[i] > donchian_high_aligned[i] and ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and vol_condition:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly S4 with volume and daily downtrend
-            elif close[i] < s4_aligned[i] and close[i] < donchian_lower[i] and vol_condition and ema_34[i] < ema_34[i-1]:
+            # Short: break below 1d Donchian low in downtrend (close < EMA34)
+            elif close[i] < donchian_low_aligned[i] and ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and vol_condition:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price breaks below weekly pivot or trend reverses
-            if close[i] < pivot_aligned[i] or ema_34[i] < ema_34[i-1]:
+            # Exit: price retouches 1d Donchian low or trend reverses
+            if close[i] <= donchian_low_aligned[i] or ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price breaks above weekly pivot or trend reverses
-            if close[i] > pivot_aligned[i] or ema_34[i] > ema_34[i-1]:
+            # Exit: price retouches 1d Donchian high or trend reverses
+            if close[i] >= donchian_high_aligned[i] or ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -104,15 +78,16 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 6s Weekly Pivot Donchian Breakout with Daily Trend Filter
-# - Uses weekly pivot points (R4/S4) as significant support/resistance levels
-# - Breakouts occur when price closes beyond weekly R4 (for longs) or S4 (for shorts)
-# - Requires Donchian(20) breakout in same direction for momentum confirmation
-# - Volume filter (1.5x average) ensures genuine interest
-# - Daily EMA34 trend filter ensures alignment with intermediate trend
-# - Exits when price returns to weekly pivot or trend reverses
-# - Works in bull markets (buying R4 breakouts in uptrend) and bear markets (selling S4 breakdowns in downtrend)
-# - Weekly pivot levels are widely watched by institutions, increasing reliability
-# - Combines multiple confirmation layers to reduce false signals
-# - Targets 50-150 total trades over 4 years (12-37/year) to minimize fee drag
-# - Weekly timeframe for pivots avoids noise, daily trend for alignment, 6h for execution
+# Hypothesis: 12h Donchian breakout with 1d trend filter and volume confirmation
+# - Uses 1d Donchian channels (20-period high/low) as structural support/resistance
+# - Enters long when 12h price breaks above 1d Donchian high in 1d uptrend (EMA34 rising)
+# - Enters short when 12h price breaks below 1d Donchian low in 1d downtrend (EMA34 falling)
+# - Requires volume confirmation (1.5x 1d average volume) to filter false breakouts
+# - Exits when price returns to opposite Donchian band or trend reverses
+# - Works in bull markets (breakouts in uptrend) and bear markets (breakdowns in downtrend)
+# - Position size 0.25 balances return and risk (max 25% drawdown per position)
+# - Targets 50-150 trades over 4 years (12-37/year) to minimize fee drag
+# - 1d timeframe for signals reduces noise vs lower timeframes
+# - Volume confirmation and trend filter increase signal quality
+# - Donchian breakouts capture momentum after consolidation periods
+# - Simple, robust logic with minimal overfitting risk
