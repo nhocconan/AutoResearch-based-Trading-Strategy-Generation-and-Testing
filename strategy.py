@@ -1,12 +1,5 @@
-# 4h_Camarilla_R3S3_Breakout_1dEMA34_Volume_Spike_v4
-# Hypothesis: Focus on high-probability institutional breakouts by requiring volume > 2.5x 20-period average and
-# extending cooldown to 8 bars (16 hours). This reduces trade frequency to target 15-25 trades per year,
-# minimizing fee drag while maintaining the edge of Camarilla R3/S3 breakouts with 1d EMA34 trend confirmation.
-# Position size set to 0.25 to manage drawdown during volatile periods. Works in both bull (breakouts above R3)
-# and bear (breakdowns below S3) markets by trading with the higher timeframe trend.
-
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Volume_Spike_v4"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Volume_Spike_v5"
 timeframe = "4h"
 leverage = 1.0
 
