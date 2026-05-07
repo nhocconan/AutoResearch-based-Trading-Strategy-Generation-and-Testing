@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_1d_Camarilla_S1R1_Breakout_Trend"
-timeframe = "12h"
+name = "4h_1d_Camarilla_S1R1_Breakout_Trend_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,19 +27,14 @@ def generate_signals(prices):
     prev_low = df_1d['low'].shift(1).values
     prev_close = df_1d['close'].shift(1).values
     
-    # Handle NaN from shift
-    pivot = np.where(np.isnan(prev_high) | np.isnan(prev_low) | np.isnan(prev_close), 
-                     np.nan, (prev_high + prev_low + prev_close) / 3)
-    range_hl = np.where(np.isnan(prev_high) | np.isnan(prev_low), 
-                        np.nan, prev_high - prev_low)
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
     
     # Camarilla levels
-    s1 = np.where(np.isnan(range_hl) | np.isnan(prev_close), 
-                  np.nan, prev_close - (range_hl * 1.08 / 2))
-    r1 = np.where(np.isnan(range_hl) | np.isnan(prev_close), 
-                  np.nan, prev_close + (range_hl * 1.08 / 2))
+    s1 = prev_close - (range_hl * 1.08 / 2)
+    r1 = prev_close + (range_hl * 1.08 / 2)
     
-    # Align daily levels to 12h timeframe
+    # Align daily levels to 4h timeframe
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     
@@ -47,7 +42,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume spike detection: 4-period average (2 days of 12h bars)
+    # Volume spike detection: 4-period average (1 day of 4h bars)
     vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     
     signals = np.zeros(n)
@@ -77,14 +72,14 @@ def generate_signals(prices):
                 position = -1
         elif position == 1:
             # Exit: price back below S1 or volume drops
-            if close[i] < s1_aligned[i] or volume[i] < vol_ma_4[i] * 1.1:
+            if close[i] < s1_aligned[i] or volume[i] < vol_ma_4[i] * 1.3:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Exit: price back above R1 or volume drops
-            if close[i] > r1_aligned[i] or volume[i] < vol_ma_4[i] * 1.1:
+            if close[i] > r1_aligned[i] or volume[i] < vol_ma_4[i] * 1.3:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -92,13 +87,15 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 12h Camarilla S1/R1 breakout with daily trend and volume confirmation
+# Hypothesis: 4h Camarilla S1/R1 breakout with daily trend and volume confirmation
 # - Daily Camarilla S1/R1 act as strong support/resistance levels
 # - Breakout above S1 with volume in daily uptrend = long opportunity
 # - Breakdown below R1 with volume in daily downtrend = short opportunity
 # - Volume spike (2.0x average) confirms institutional participation
 # - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
 # - Exit when price returns to S1/R1 or volume weakens
-# - Position size 0.25 targets ~15-30 trades/year, avoiding fee drag
-# - Uses 12h timeframe to reduce trade frequency vs 4h versions
+# - Position size 0.25 targets ~20-40 trades/year, avoiding fee drag
+# - Uses actual daily Camarilla levels (not weekly) for better responsiveness
 # - Designed to work in BOTH bull and bear markets via trend filter
+# - Reduced volume window (4-period) and higher threshold (2.0x) to reduce trade frequency
+# - Exit volume threshold tightened to 1.3x for faster exits in ranging markets
