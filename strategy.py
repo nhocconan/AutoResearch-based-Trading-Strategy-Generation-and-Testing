@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-# 6h_Camarilla_R3S3_Breakout_1dTrend_Volume
-# Hypothesis: Combines Camarilla pivot levels from daily data with 1-day EMA trend filter and volume confirmation.
-# Goes long when price breaks above R3 with bullish daily trend and volume spike.
-# Goes short when price breaks below S3 with bearish daily trend and volume spike.
-# Uses tight stop via EMA reversal and volume drop. Designed for 6h timeframe to capture multi-day moves
-# while avoiding noise. Works in both bull and bear markets by following the daily trend.
-# Target: 15-30 trades/year to stay within optimal frequency range.
+# 12h_WeeklyPivot_Breakout_1dTrend
+# Hypothesis: Uses weekly pivot points (calculated from prior week's high/low/close) to identify key support/resistance levels.
+# Breakouts above weekly R1 or below S1 with volume confirmation and 1d trend filter (price > EMA50 for longs, < EMA50 for shorts).
+# Weekly pivots provide structure that works in both bull and bear markets by identifying institutional levels.
+# Target: 15-30 trades/year to stay within optimal frequency range and minimize fee drag.
 
-name = "6h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_WeeklyPivot_Breakout_1dTrend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,84 +23,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and trend filter
+    # Get daily data for pivot calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_6h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Calculate Camarilla pivot levels from previous day
-    # R4 = C + ((H-L) * 1.5000)
-    # R3 = C + ((H-L) * 1.2500)
-    # R2 = C + ((H-L) * 1.1666)
-    # R1 = C + ((H-L) * 1.0833)
-    # PP = (H + L + C) / 3
-    # S1 = C - ((H-L) * 1.0833)
-    # S2 = C - ((H-L) * 1.1666)
-    # S3 = C - ((H-L) * 1.2500)
-    # S4 = C - ((H-L) * 1.5000)
-    
-    # We need previous day's H, L, C
+    # Calculate weekly pivot points from 1d data (using prior week's H/L/C)
+    # We'll resample 1d data to weekly manually since we can't use .resample()
+    # Get weekly high, low, close from daily data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Shift by 1 to get previous day's values (avoid look-ahead)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d = np.roll(close_1d, 1)
-    # Set first day's previous values to NaN (no prior day)
-    prev_high_1d[0] = np.nan
-    prev_low_1d[0] = np.nan
-    prev_close_1d[0] = np.nan
+    # Arrays to store weekly pivot levels
+    weekly_high = np.full(len(close_1d), np.nan)
+    weekly_low = np.full(len(close_1d), np.nan)
+    weekly_close = np.full(len(close_1d), np.nan)
     
-    # Calculate Camarilla levels based on previous day
-    camarilla_r3 = prev_close_1d + ((prev_high_1d - prev_low_1d) * 1.2500)
-    camarilla_s3 = prev_close_1d - ((prev_high_1d - prev_low_1d) * 1.2500)
+    # Calculate weekly values (assuming 7 days per week)
+    for i in range(6, len(close_1d)):
+        weekly_high[i] = np.max(high_1d[i-6:i+1])
+        weekly_low[i] = np.min(low_1d[i-6:i+1])
+        weekly_close[i] = close_1d[i]
     
-    # Align Camarilla levels to 6h timeframe
-    camarilla_r3_6h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_6h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Calculate pivot points: P = (H + L + C) / 3
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    # R1 = 2*P - L, S1 = 2*P - H
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    weekly_s1 = 2 * weekly_pivot - weekly_high
     
-    # Calculate volume spike on 6h timeframe (24-period average = 4 days)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > (2.0 * vol_ma_24)  # Require strong volume spike
+    # Align weekly levels to 1d timeframe (already aligned since calculated from 1d)
+    # Now align to 12h timeframe
+    weekly_pivot_12h = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+    weekly_r1_12h = align_htf_to_ltf(prices, df_1d, weekly_r1)
+    weekly_s1_12h = align_htf_to_ltf(prices, df_1d, weekly_s1)
+    
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume confirmation: 20-period volume average on 12h
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.8 * vol_ma_20)  # Higher threshold for fewer trades
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if any critical value is NaN
-        if (np.isnan(camarilla_r3_6h[i]) or np.isnan(camarilla_s3_6h[i]) or 
-            np.isnan(ema_34_1d_6h[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(weekly_r1_12h[i]) or np.isnan(weekly_s1_12h[i]) or 
+            np.isnan(ema_50_12h[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above R3 + bullish daily trend (price > EMA34) + volume spike
-            if close[i] > camarilla_r3_6h[i] and close[i] > ema_34_1d_6h[i] and volume_spike[i]:
+            # Long: Break above weekly R1 with volume and above 1d EMA50
+            if close[i] > weekly_r1_12h[i] and close[i] > ema_50_12h[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S3 + bearish daily trend (price < EMA34) + volume spike
-            elif close[i] < camarilla_s3_6h[i] and close[i] < ema_34_1d_6h[i] and volume_spike[i]:
+            # Short: Break below weekly S1 with volume and below 1d EMA50
+            elif close[i] < weekly_s1_12h[i] and close[i] < ema_50_12h[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Price closes below EMA34 (trend reversal) OR volume drops significantly
-            if close[i] < ema_34_1d_6h[i] or volume[i] < (0.5 * vol_ma_24[i]):
+            # Exit: Price closes below weekly pivot or below 1d EMA50
+            if close[i] < weekly_pivot_12h[i] or close[i] < ema_50_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price closes above EMA34 (trend reversal) OR volume drops significantly
-            if close[i] > ema_34_1d_6h[i] or volume[i] < (0.5 * vol_ma_24[i]):
+            # Exit: Price closes above weekly pivot or above 1d EMA50
+            if close[i] > weekly_pivot_12h[i] or close[i] > ema_50_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
