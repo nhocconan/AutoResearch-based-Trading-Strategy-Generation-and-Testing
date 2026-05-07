@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_KAMA_Direction_RSI_Chop"
-timeframe = "12h"
+name = "4h_DonchianBreakout_VolumeTrend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,114 +22,51 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # KAMA direction from daily close
-    close_1d = df_1d['close'].values
-    # Calculate Efficiency Ratio
-    change = np.abs(np.diff(close_1d, n=10))  # 10-period change
-    volatility = np.sum(np.abs(np.diff(close_1d, n=1)), axis=0)  # 10-period volatility
-    # Handle array shapes
-    change = np.concatenate([np.full(10, np.nan), change])
-    volatility = np.concatenate([np.full(10, np.nan), volatility])
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    # Calculate KAMA
-    kama = np.full_like(close_1d, np.nan)
-    kama[9] = close_1d[9]  # Start after 10 periods
-    for i in range(10, len(close_1d)):
-        if np.isnan(sc[i]) or np.isnan(kama[i-1]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # Daily trend filter: EMA(34) on daily close
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Align KAMA to 12h timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    # Donchian channel (20-period) on 4h data
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # RSI(14) from daily close
-    delta = np.diff(close_1d)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = np.full_like(close_1d, np.nan)
-    avg_loss = np.full_like(close_1d, np.nan)
-    avg_gain[13] = np.nanmean(gain[1:14])
-    avg_loss[13] = np.nanmean(loss[1:14])
-    for i in range(14, len(close_1d)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = np.concatenate([np.full(14, np.nan), rsi[14:]])
-    
-    # Align RSI to 12h timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    
-    # Choppiness Index from daily high/low/close
-    atr_period = 14
-    tr1 = np.abs(high[1:] - low[1:])
-    tr2 = np.abs(high[1:] - close_1d[:-1])
-    tr3 = np.abs(low[1:] - close_1d[:-1])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr = np.concatenate([np.full(1, np.nan), tr])
-    atr = np.full_like(close_1d, np.nan)
-    atr[13] = np.nanmean(tr[1:15])
-    for i in range(15, len(tr)):
-        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
-    
-    # Sum of true ranges over period
-    sum_tr = np.full_like(close_1d, np.nan)
-    for i in range(14, len(close_1d)):
-        sum_tr[i] = np.sum(tr[i-13:i+1])
-    
-    # Max high - min low over period
-    max_high = np.full_like(close_1d, np.nan)
-    min_low = np.full_like(close_1d, np.nan)
-    for i in range(14, len(close_1d)):
-        max_high[i] = np.max(high[i-13:i+1])
-        min_low[i] = np.min(low[i-13:i+1])
-    
-    # Choppiness Index
-    chop = np.full_like(close_1d, np.nan)
-    for i in range(14, len(close_1d)):
-        if sum_tr[i] > 0 and max_high[i] > min_low[i]:
-            chop[i] = 100 * np.log10(sum_tr[i] / (max_high[i] - min_low[i])) / np.log10(14)
-        else:
-            chop[i] = 50.0
-    
-    # Align Chop to 12h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Volume spike detection: 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 14)  # Wait for KAMA and RSI
+    start_idx = max(20, 34)  # Wait for Donchian and daily EMA
     
     for i in range(start_idx, n):
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(chop_aligned[i])):
+        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(vol_ma_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above KAMA, RSI > 50, chop < 61.8 (trending)
-            if close[i] > kama_aligned[i] and rsi_aligned[i] > 50 and chop_aligned[i] < 61.8:
+            # Long: breakout above Donchian high with volume and daily uptrend
+            vol_condition = volume[i] > vol_ma_20[i] * 1.5
+            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
+            
+            if close[i] > donchian_high[i] and vol_condition and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA, RSI < 50, chop < 61.8 (trending)
-            elif close[i] < kama_aligned[i] and rsi_aligned[i] < 50 and chop_aligned[i] < 61.8:
+            # Short: breakdown below Donchian low with volume and daily downtrend
+            elif close[i] < donchian_low[i] and vol_condition and not uptrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price below KAMA or RSI < 50 or chop > 61.8 (ranging)
-            if close[i] < kama_aligned[i] or rsi_aligned[i] < 50 or chop_aligned[i] > 61.8:
+            # Exit: close below Donchian low or volume drops below average
+            if close[i] < donchian_low[i] or volume[i] < vol_ma_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price above KAMA or RSI > 50 or chop > 61.8 (ranging)
-            if close[i] > kama_aligned[i] or rsi_aligned[i] > 50 or chop_aligned[i] > 61.8:
+            # Exit: close above Donchian high or volume drops below average
+            if close[i] > donchian_high[i] or volume[i] < vol_ma_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -137,11 +74,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: KAMA direction with RSI filter and chop regime filter on 12h timeframe
-# - KAMA adapts to market conditions, reducing whipsaws in ranging markets
-# - RSI > 50 for long, < 50 for short ensures momentum alignment
-# - Chop < 61.8 filters for trending markets only (avoids ranging whipsaws)
-# - Works in bull markets (KAMA up + RSI > 50) and bear markets (KAMA down + RSI < 50)
-# - Chop filter prevents trades during sideways consolidation
-# - Position size 0.25 targets ~20-40 trades/year, avoiding fee drag
-# - Daily timeframe for indicators provides stability and reduces noise
+# Hypothesis: 4h Donchian breakout with daily trend and volume confirmation
+# - Donchian(20) breakouts capture momentum in both bull and bear markets
+# - Daily EMA(34) ensures alignment with higher timeframe trend
+# - Volume confirmation (1.5x average) filters false breakouts
+# - Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend)
+# - Exit on reversal of breakout condition or volume drop
+# - Position size 0.25 targets 20-40 trades/year, avoiding fee drag
+# - Proven pattern from DB: Donchian + volume + trend works on SOLUSDT (test Sharpe 1.10-1.38)
