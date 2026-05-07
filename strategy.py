@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_KAMA_Trend_With_Volume_Regime_Filter
-Hypothesis: 12h KAMA trend direction + volume spike + 1d volatility regime filter.
-KAMA adapts to market conditions (trending/ranging) reducing whipsaw. Volume confirms conviction.
-Volatility regime (using ATR ratio) avoids trading in low-volatility chop.
-Target: 20-40 trades/year to minimize fee drag while capturing strong trends.
-Works in bull via trend following, in bear via avoiding false signals during chop.
+6h_ThreeBarReversal_12hTrend_Filter
+Hypothesis: Three-bar reversal pattern (bullish/bearish) on 6h chart with 12h EMA50 trend filter and volume confirmation.
+Works in bull/bear markets by only taking reversals aligned with higher timeframe trend.
+Target: 20-40 trades/year per symbol (80-160 total over 4 years) to minimize fee drag.
 """
 
-name = "12h_KAMA_Trend_With_Volume_Regime_Filter"
-timeframe = "12h"
+name = "6h_ThreeBarReversal_12hTrend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -26,122 +24,96 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate KAMA (12-period) - adapts to market noise
-    # ER = Efficiency Ratio, smoother in trend, faster in range
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0)  # placeholder, will compute properly below
-    
-    # Proper KAMA calculation
-    dir = np.abs(np.diff(close, k=10))  # 10-period net change
-    vol = np.sum(np.abs(np.diff(close)), axis=0)  # placeholder
-    
-    # Recompute properly
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.zeros_like(change)
-    for i in range(1, len(volatility)):
-        volatility[i] = volatility[i-1] + change[i] - (change[i-9] if i >= 9 else 0)
-    
-    er = np.zeros_like(close)
-    er[10:] = dir[10:] / np.where(volatility[10:] == 0, 1, volatility[10:])
-    
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)
-    slow_sc = 2 / (30 + 1)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    kama = np.full_like(close, np.nan)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
-    
-    # Get 1d data for volatility regime filter (ATR ratio)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate ATR(14) for 1d
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = np.full_like(close_1d, np.nan)
-    for i in range(14, len(tr)+14):
-        if i == 14:
-            atr_1d[i] = np.mean(tr[:14])
-        else:
-            atr_1d[i] = (atr_1d[i-1] * 13 + tr[i-14]) / 14
+    # Volume filter: current volume > 1.3x 20-period average
+    vol_ma_20 = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma_20[i] = np.mean(volume[i-20:i])
+    vol_filter = volume > (1.3 * vol_ma_20)
     
-    # ATR ratio: current ATR / 50-period average ATR (volatility regime)
-    atr_ma_50 = np.full_like(atr_1d, np.nan)
-    for i in range(50, len(atr_1d)):
-        atr_ma_50[i] = np.mean(atr_1d[i-50:i])
+    # Three-bar reversal detection
+    # Bullish: low < previous low AND close > previous close (after 2 down bars)
+    # Bearish: high > previous high AND close < previous close (after 2 up bars)
+    bullish_reversal = np.zeros(n, dtype=bool)
+    bearish_reversal = np.zeros(n, dtype=bool)
     
-    atr_ratio = atr_1d / atr_ma_50
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
-    
-    # Volume spike: current volume > 1.8x 30-period average (to reduce frequency)
-    vol_ma_30 = np.full(n, np.nan)
-    for i in range(30, n):
-        vol_ma_30[i] = np.mean(volume[i-30:i])
-    vol_spike = volume > (1.8 * vol_ma_30)
-    
-    # KAMA trend: price above/below KAMA
-    kama_trend_up = close > kama
-    kama_trend_down = close < kama
+    for i in range(2, n):
+        # Bullish reversal: two consecutive lower lows followed by higher close
+        if (low[i-2] > low[i-1] and 
+            low[i-1] > low[i] and 
+            close[i] > close[i-1]):
+            bullish_reversal[i] = True
+        
+        # Bearish reversal: two consecutive higher highs followed by lower close
+        if (high[i-2] < high[i-1] and 
+            high[i-1] < high[i] and 
+            close[i] < close[i-1]):
+            bearish_reversal[i] = True
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    bars_since_last_trade = 0
+    cooldown_bars = 6  # Prevent overtrading (approx 1.5 days)
     
-    start_idx = max(30, 14, 50)  # Warmup for volume, ATR, ATR MA
+    start_idx = max(20, 50)  # Warmup for volume MA and EMA
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if np.isnan(kama[i]) or np.isnan(atr_ratio_aligned[i]) or np.isnan(vol_ma_30[i]):
+        # Skip if any data not ready
+        if (np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-            continue
-        
-        # Regime filter: only trade when volatility is elevated (ATR ratio > 0.8)
-        # Avoids low-volatility chop where whipsaw occurs
-        if atr_ratio_aligned[i] < 0.8:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
+                bars_since_last_trade = 0
             else:
-                signals[i] = 0.0
+                bars_since_last_trade += 1
             continue
         
-        if position == 0:
-            # Long: price above KAMA (uptrend) + volume spike
-            if kama_trend_up[i] and vol_spike[i]:
+        bars_since_last_trade += 1
+        
+        # Determine 12h trend direction
+        close_12h_aligned = align_htf_to_ltf(prices, df_12h, close_12h)
+        trend_12h_up = close_12h_aligned[i] > ema_50_12h_aligned[i]
+        trend_12h_down = close_12h_aligned[i] < ema_50_12h_aligned[i]
+        
+        if position == 0 and bars_since_last_trade >= cooldown_bars:
+            # Long: bullish reversal in 12h uptrend with volume filter
+            if (bullish_reversal[i] and 
+                trend_12h_up and 
+                vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA (downtrend) + volume spike
-            elif kama_trend_down[i] and vol_spike[i]:
+                bars_since_last_trade = 0
+            # Short: bearish reversal in 12h downtrend with volume filter
+            elif (bearish_reversal[i] and 
+                  trend_12h_down and 
+                  vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
-            else:
-                signals[i] = 0.0
+                bars_since_last_trade = 0
         elif position == 1:
-            # Exit long: price crosses below KAMA (trend change)
-            if not kama_trend_up[i]:
+            # Exit conditions: bearish reversal OR trend change
+            if (bearish_reversal[i] or not trend_12h_up):
                 signals[i] = 0.0
                 position = 0
+                bars_since_last_trade = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above KAMA
-            if not kama_trend_down[i]:
+            # Exit conditions: bullish reversal OR trend change
+            if (bullish_reversal[i] or not trend_12h_down):
                 signals[i] = 0.0
                 position = 0
+                bars_since_last_trade = 0
             else:
                 signals[i] = -0.25
     
