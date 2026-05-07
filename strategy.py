@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
-timeframe = "4h"
+name = "6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -30,7 +30,7 @@ def generate_signals(prices):
     r3 = close_prev + 1.1 * (high_prev - low_prev) / 4
     s3 = close_prev - 1.1 * (high_prev - low_prev) / 4
     
-    # Align daily levels to 4h timeframe (with 1-day delay for completed bar)
+    # Align daily levels to 6h timeframe (with 1-day delay for completed bar)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
@@ -47,7 +47,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 2  # ~8 hours for 4h to reduce trades
+    cooldown_bars = 3  # ~18 hours for 6h to reduce trades
     
     start_idx = max(100, 20, 34)
     
@@ -105,9 +105,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Using 4h timeframe with Camarilla R3/S3 breakouts, 1d EMA34 trend filter, and 2.0x volume spike
-# will yield 15-40 trades per year (60-160 total over 4 years), minimizing fee drag. The strategy trades
+# Hypothesis: Using 6h timeframe with Camarilla R3/S3 breakouts, 1d EMA34 trend filter, and 2.0x volume spike
+# will yield 15-35 trades per year (60-140 total over 4 years), minimizing fee drift. The strategy trades
 # with the higher timeframe trend, capturing institutional breakouts in both bull and bear markets.
-# Position size of 0.25 manages drawdown, and cooldown of 2 bars prevents overtrading. Focus on BTC/ETH
+# Position size of 0.25 manages drawdown, and cooldown of 3 bars prevents overtrading. Focus on BTC/ETH
 # as primary targets, avoiding SOL-only bias. This combines proven elements from top performers:
 # Camarilla levels + higher timeframe trend + volume confirmation.
