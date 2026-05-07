@@ -1,9 +1,13 @@
-# 12H_RSI_Overbought_Oversold_MeanReversion_v1
-# Hypothesis: Use 12h RSI for mean reversion signals. Long when RSI < 30 (oversold) and price above 12h EMA50 (uptrend filter). Short when RSI > 70 (overbought) and price below 12h EMA50 (downtrend filter). Volume confirmation: current volume > 1.5x 20-period average volume. Designed to work in both bull and bear markets by combining momentum extremes with trend filter.
-# Timeframe: 12h
-# Expected trades: 15-25 per year (60-100 total over 4 years) to stay within fee-efficient range.
-name = "12H_RSI_Overbought_Oversold_MeanReversion_v1"
-timeframe = "12h"
+#!/usr/bin/env python3
+"""
+4H_RSI_4060_MeanReversion_1D_Volume_Trend_Filter_v1
+Hypothesis: Mean reversion on 4h RSI (40-60 band) with 1d trend filter and volume confirmation.
+Long when RSI crosses above 40 and price is above 1d EMA50; short when RSI crosses below 60 and price is below 1d EMA50.
+Volume confirmation: current volume > 1.3x 20-period average volume.
+This strategy captures mean reversion in ranging markets while filtering for trend direction to avoid whipsaws in strong trends.
+"""
+name = "4H_RSI_4060_MeanReversion_1D_Volume_Trend_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -20,44 +24,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for RSI and EMA
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 12h RSI(14)
-    close_12h = pd.Series(df_12h['close'])
-    delta = close_12h.diff()
+    # Calculate 1d EMA50 for trend filter
+    close_1d = pd.Series(df_1d['close'])
+    ema_1d_50 = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d_50_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_50)
+    
+    # Calculate 4h RSI(14)
+    delta = pd.Series(close).diff()
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
     rs = avg_gain / avg_loss.replace(0, 1e-10)
     rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    rsi_values = rsi.values
     
-    # Calculate 12h EMA50 for trend filter
-    ema50 = close_12h.ewm(span=50, adjust=False).mean().values
-    
-    # Align indicators to 12h timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_12h, rsi)
-    ema50_aligned = align_htf_to_ltf(prices, df_12h, ema50)
-    
-    # Volume filter: current volume > 1.5 * 20-period average volume
+    # Volume filter: current volume > 1.3 * 20-period average volume
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_avg * 1.5)
+    volume_filter = volume > (vol_avg * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_exit = 0  # bars since last exit to prevent overtrading
     
-    start_idx = 50  # Ensure sufficient warmup for indicators
+    start_idx = max(30, 20)  # Ensure sufficient warmup for RSI and volume
     
     for i in range(start_idx, n):
         bars_since_exit += 1
         
         # Skip if any data is not ready
-        if (np.isnan(rsi_aligned[i]) or np.isnan(ema50_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(ema_1d_50_aligned[i]) or np.isnan(rsi_values[i]) or 
+            np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,27 +67,29 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Minimum 24 bars between trades (2 days on 12h TF) to reduce frequency
-            if bars_since_exit < 24:
+            # Minimum 8 bars between trades (1.3 days on 4h TF) to reduce frequency
+            if bars_since_exit < 8:
                 continue
                 
-            # Long: RSI < 30 (oversold) and price above EMA50 (uptrend)
-            if (rsi_aligned[i] < 30 and close[i] > ema50_aligned[i]):
+            # Long: RSI crosses above 40 and price above 1d EMA50
+            if (rsi_values[i] > 40 and rsi_values[i-1] <= 40 and 
+                close[i] > ema_1d_50_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_exit = 0
-            # Short: RSI > 70 (overbought) and price below EMA50 (downtrend)
-            elif (rsi_aligned[i] > 70 and close[i] < ema50_aligned[i]):
+            # Short: RSI crosses below 60 and price below 1d EMA50
+            elif (rsi_values[i] < 60 and rsi_values[i-1] >= 60 and 
+                  close[i] < ema_1d_50_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_exit = 0
         elif position != 0:
-            # Exit: RSI returns to neutral zone (40-60)
-            if position == 1 and rsi_aligned[i] > 40:
+            # Exit: RSI returns to neutral zone (50) or trend reversal
+            if position == 1 and (rsi_values[i] >= 50 or close[i] < ema_1d_50_aligned[i]):
                 signals[i] = 0.0
                 position = 0
                 bars_since_exit = 0
-            elif position == -1 and rsi_aligned[i] < 60:
+            elif position == -1 and (rsi_values[i] <= 50 or close[i] > ema_1d_50_aligned[i]):
                 signals[i] = 0.0
                 position = 0
                 bars_since_exit = 0
