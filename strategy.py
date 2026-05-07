@@ -1,12 +1,10 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 """
-4h_LinearRegressionTrend_1dATR_Stop
-Hypothesis: A 4-hour linear regression slope crossing zero with 1-day ATR-based stop and volume confirmation
-captures strong trend changes while minimizing whipsaws. Works in both bull and bear markets by following
-the trend direction with dynamic exits. Targets 20-50 trades/year.
+6h_Camarilla_R4_S4_Breakout_1wTrend_Volume
+Hypothesis: Breaking above R4 or below S4 on 1-day Camarilla levels with weekly trend confirmation (price above/below weekly EMA50) and volume spike (2.0x average) captures strong institutional breakouts with follow-through. Weekly trend filter ensures alignment with higher timeframe momentum, reducing false signals in ranging markets. Designed for 6h to achieve 15-30 trades/year with high win rate, suitable for both bull and bear markets by following weekly trend.
 """
-name = "4h_LinearRegressionTrend_1dATR_Stop"
-timeframe = "4h"
+name = "6h_Camarilla_R4_S4_Breakout_1wTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,89 +13,87 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_price = prices['open'].values
     
-    # Get 1d data for ATR-based stop calculation
+    # Get 1d data for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    # Calculate 1-day OHLC for Camarilla pivot (R4/S4 levels)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # 1-day True Range and ATR(14)
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period has no previous close
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14[0:13] = np.nan  # Ensure proper NaN for insufficient data
+    # Camarilla pivot levels calculation
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    r4_1d = close_1d + (range_1d * 1.1)
+    s4_1d = close_1d - (range_1d * 1.1)
     
-    # 4-hour Linear Regression Slope (20-period)
-    def linreg_slope(arr, window):
-        slopes = np.full_like(arr, np.nan, dtype=np.float64)
-        for i in range(window - 1, len(arr)):
-            y = arr[i - window + 1:i + 1]
-            x = np.arange(window)
-            if np.all(np.isnan(y)):
-                continue
-            # Use only valid (non-NaN) points
-            mask = ~np.isnan(y)
-            if np.sum(mask) < 2:
-                continue
-            x_valid = x[mask]
-            y_valid = y[mask]
-            slope = np.polyfit(x_valid, y_valid, 1)[0]
-            slopes[i] = slope
-        return slopes
+    # Align Camarilla levels to 6h timeframe
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     
-    lr_slope = linreg_slope(close, 20)
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
     
-    # Volume filter: current volume > 1.5 * 20-period average
+    # Weekly EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Volume filter: current volume > 2.0 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_avg * 1.5)
+    volume_filter = volume > (vol_avg * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need sufficient warmup for LR and ATR
+    start_idx = 50  # Need sufficient warmup for averages
     
     for i in range(start_idx, n):
         # Skip if any data is not ready
-        if (np.isnan(lr_slope[i]) or np.isnan(atr_14[i]) or 
-            np.isnan(vol_avg[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(r4_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_avg[i]) or 
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: positive LR slope + volume filter
-            if lr_slope[i] > 0 and volume_filter[i]:
+            # Long: price breaks above R4 + weekly uptrend + volume spike
+            if (close[i] > r4_1d_aligned[i] and 
+                close[i] > ema_50_1w_aligned[i] and 
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: negative LR slope + volume filter
-            elif lr_slope[i] < 0 and volume_filter[i]:
+            # Short: price breaks below S4 + weekly downtrend + volume spike
+            elif (close[i] < s4_1d_aligned[i] and 
+                  close[i] < ema_50_1w_aligned[i] and 
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Dynamic stop: 1.5 * 1-day ATR from entry price
-            # We don't track entry price, so use a time-based trailing approach:
-            # Exit when LR slope changes sign (trend reversal)
+            # Exit: price returns to opposite Camarilla level (S4 for long, R4 for short)
             if position == 1:
-                if lr_slope[i] <= 0:
+                if close[i] <= s4_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if lr_slope[i] >= 0:
+                if close[i] >= r4_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
