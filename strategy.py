@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Trix_VolumeSpike_Regime"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,68 +17,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for Camarilla pivots and trend filter
+    # Load 1-day data for regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous 1d candle
-    # Pivot = (H + L + C) / 3
-    # R3 = Pivot + (H - L) * 1.1/2
-    # S3 = Pivot - (H - L) * 1.1/2
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    pivot = typical_price.values
-    hl_range = (df_1d['high'] - df_1d['low']).values
-    r3 = pivot + hl_range * 1.1 / 2
-    s3 = pivot - hl_range * 1.1 / 2
+    # Calculate TRIX (15,9) on 4h close
+    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
+    trix = ema3.pct_change(periods=1)
+    trix_signal = trix.ewm(span=9, adjust=False, min_periods=9).mean()
+    trix_hist = (trix - trix_signal).values
     
-    # Align to 12h timeframe (previous day's levels available at open)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Daily chop regime: CHOP(14) > 61.8 = range, < 38.2 = trend
+    atr_1d = pd.Series(np.maximum(np.maximum(df_1d['high'] - df_1d['low'], 
+                                              np.abs(df_1d['high'] - df_1d['close'].shift(1))),
+                                  np.abs(df_1d['low'] - df_1d['close'].shift(1)))).rolling(14, min_periods=14).mean()
+    max_high_1d = df_1d['high'].rolling(14, min_periods=14).max()
+    min_low_1d = df_1d['low'].rolling(14, min_periods=14).min()
+    chop = 100 * np.log10((atr_1d.sum() / (max_high_1d - min_low_1d))) / np.log10(14)
+    chop_values = chop.values
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_values)
     
-    # 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume spike detection (2x 20-period average)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume spike detection on 4h
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    vol_ratio = volume / vol_ma_20
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0
     
-    start_idx = max(34, 20)
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(trix_hist[i]) or np.isnan(chop_aligned[i]) or 
+            np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_condition = volume[i] > vol_ma_20[i] * 2.0
+        trix_long = trix_hist[i] > 0 and trix_hist[i-1] <= 0
+        trix_short = trix_hist[i] < 0 and trix_hist[i-1] >= 0
+        vol_spike = vol_ratio[i] > 2.0
+        chop_condition = chop_aligned[i] > 61.8  # range regime for mean reversion
         
         if position == 0:
-            # Long: price breaks above R3 in uptrend with volume
-            if close[i] > r3_aligned[i] and vol_condition and ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]:
+            if trix_long and vol_spike and chop_condition:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 in downtrend with volume
-            elif close[i] < s3_aligned[i] and vol_condition and ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]:
+            elif trix_short and vol_spike and chop_condition:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price returns to pivot or trend reverses
-            if close[i] < pivot_aligned[i] or ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]:
+            if trix_hist[i] < 0:  # TRIX histogram crosses below zero
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price returns to pivot or trend reverses
-            if close[i] > pivot_aligned[i] or ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]:
+            if trix_hist[i] > 0:  # TRIX histogram crosses above zero
                 signals[i] = 0.0
                 position = 0
             else:
@@ -86,12 +84,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d trend filter and volume confirmation
-# - Camarilla R3/S3 are key institutional levels from previous day's price action
-# - Breakouts above R3 or below S3 with volume indicate institutional participation
-# - 1d EMA34 trend filter ensures we only trade in direction of higher timeframe trend
-# - Volume confirmation (2x average) reduces false breakouts
-# - Works in both bull (R3 breakouts in uptrend) and bear (S3 breakdowns in downtrend)
-# - Exit when price returns to pivot level or trend reverses
-# - Position size 0.25 targets ~20-50 trades/year to stay within limits
-# - Proven pattern: Camarilla pivot + volume + trend = high edge on ETH/SOL (test Sharpe up to 2.05)
+# Hypothesis: TRIX histogram crossovers with volume spikes in choppy (range) markets
+# - TRIX (15,9) histogram zero cross provides momentum signal
+# - Volume spike (>2x 20-period average) confirms conviction
+# - Chop regime filter (CHOP(14) > 61.8) ensures ranging market for mean reversion
+# - Works in both bull and bear markets as it captures short-term reversals in ranges
+# - Exit on TRIX histogram sign change
+# - Position size 0.25 limits risk and reduces trade frequency
+# - Target: 20-50 trades/year to avoid fee drag on 4h timeframe
