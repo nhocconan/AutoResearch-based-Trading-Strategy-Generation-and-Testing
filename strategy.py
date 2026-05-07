@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3S3_Breakout_1dTrend_Volume
-Hypothesis: 4h Camarilla R3/S3 breakout filtered by 1d ADX trend (>25) and volume spike (>2x 20-day average).
+6h_Camarilla_R3S3_Breakout_1dTrend_Volume
+Hypothesis: 6h Camarilla R3/S3 breakout filtered by 1d ADX trend (>25) and volume spike (>2x 20-day average).
 Exits on opposite Camarilla level (R2/S2) touch. Designed for low-frequency, high-conviction trades in both bull and bear markets.
 Target: 20-50 trades/year per symbol to avoid fee drag.
 """
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -29,7 +29,7 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 4h Camarilla levels (R3, S3, R2, S2) using previous 4h candle
+    # Calculate 6h Camarilla levels (R3, S3, R2, S2) using previous 6h candle
     camarilla_R3 = np.full(n, np.nan)
     camarilla_S3 = np.full(n, np.nan)
     camarilla_R2 = np.full(n, np.nan)
@@ -95,7 +95,7 @@ def generate_signals(prices):
     for i in range(20, len(vol_1d)):
         vol_ma_1d[i] = np.mean(vol_1d[i-20:i])
     
-    # Align 1d indicators to 4h
+    # Align 1d indicators to 6h
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
