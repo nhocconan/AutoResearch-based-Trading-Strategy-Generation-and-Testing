@@ -1,17 +1,10 @@
 #!/usr/bin/env python3
-# 6h_Liquidity_Imbalance_Fade
-# Hypothesis: Large price gaps create liquidity imbalances that get filled by mean-reversion.
-# Fade gaps against the 1-week trend using volume confirmation.
-# Uses weekly trend filter (EMA50 on weekly close) to determine bias.
-# Targets 10-25 trades/year with position size 0.25 to avoid fee drag.
-# Works in both bull/bear: fades gaps against weekly trend (mean reversion in trends).
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Liquidity_Imbalance_Fade"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,43 +17,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Weekly EMA50 for trend filter
-    weekly_close = df_1w['close'].values
-    weekly_ema50 = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    weekly_uptrend = weekly_ema50 > 0  # Will be replaced with actual comparison
-    weekly_uptrend = weekly_close > weekly_ema50
-    
-    # Load daily data ONCE for gap detection
+    # Load daily data ONCE for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Daily gap detection: today's open vs yesterday's close
-    daily_open = df_1d['open'].values
+    # Calculate Camarilla pivot levels (R3, S3) from daily data
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
     daily_close = df_1d['close'].values
-    gap_up = (daily_open > daily_close).astype(float)  # Gap up when open > prior close
-    gap_down = (daily_open < daily_close).astype(float)  # Gap down when open < prior close
     
-    # Align weekly trend and daily gaps to 6h timeframe
-    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend.astype(float))
-    gap_up_aligned = align_htf_to_ltf(prices, df_1d, gap_up)
-    gap_down_aligned = align_htf_to_ltf(prices, df_1d, gap_down)
+    # Camarilla formulas: R3 = close + (high - low) * 1.1/4, S3 = close - (high - low) * 1.1/4
+    camarilla_r3 = daily_close + (daily_high - daily_low) * 1.1 / 4
+    camarilla_s3 = daily_close - (daily_high - daily_low) * 1.1 / 4
     
-    # Volume spike detection: current volume > 2.5x 20-period average
+    # Align Camarilla levels to 12h timeframe (breakout on close above/below)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Daily EMA34 for trend filter (more stable than shorter EMAs)
+    daily_ema34 = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, daily_ema34)
+    
+    # Volume spike: current volume > 2x 20-period average on 12h chart
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = np.where(vol_ma > 0, volume / vol_ma, 1.0) > 2.5
-    
-    # Mean reversion signal: price deviation from 24-period VWAP
-    typical_price = (high + low + close) / 3.0
-    vwap_num = pd.Series(typical_price * volume).rolling(window=24, min_periods=24).sum().values
-    vwap_den = pd.Series(volume).rolling(window=24, min_periods=24).sum().values
-    vwap = np.where(vwap_den > 0, vwap_num / vwap_den, typical_price)
-    price_dev = (close - vwap) / vwap  # Normalized deviation
+    vol_spike = np.where(vol_ma > 0, volume / vol_ma, 1.0) > 2.0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -68,19 +49,22 @@ def generate_signals(prices):
     start_idx = 100  # Sufficient warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(weekly_uptrend_aligned[i]) or np.isnan(gap_up_aligned[i]) or 
-            np.isnan(gap_down_aligned[i]) or np.isnan(vol_spike[i]) or
-            np.isnan(price_dev[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema34_aligned[i]) or np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Trend filter: price above/below daily EMA34
+        uptrend = close[i] > ema34_aligned[i]
+        downtrend = close[i] < ema34_aligned[i]
+        
         if position == 0:
-            # Long: gap down during weekly uptrend + volume spike + price below VWAP
-            long_condition = (gap_down_aligned[i] > 0.5) and weekly_uptrend_aligned[i] and vol_spike[i] and (price_dev[i] < -0.015)
-            # Short: gap up during weekly downtrend + volume spike + price above VWAP
-            short_condition = (gap_up_aligned[i] > 0.5) and (not weekly_uptrend_aligned[i]) and vol_spike[i] and (price_dev[i] > 0.015)
+            # Long: price breaks above R3 with volume spike in uptrend
+            long_condition = (close[i] > r3_aligned[i]) and vol_spike[i] and uptrend
+            # Short: price breaks below S3 with volume spike in downtrend
+            short_condition = (close[i] < s3_aligned[i]) and vol_spike[i] and downtrend
             
             if long_condition:
                 signals[i] = 0.25
@@ -89,18 +73,20 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: gap up or price reverts to VWAP
-            if (gap_up_aligned[i] > 0.5) or (price_dev[i] > -0.005):
+            # Exit: price falls back below R3 or trend turns down
+            if (close[i] < r3_aligned[i]) or (not uptrend):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: gap down or price reverts to VWAP
-            if (gap_down_aligned[i] > 0.5) or (price_dev[i] < 0.005):
+            # Exit: price rises back above S3 or trend turns up
+            if (close[i] > s3_aligned[i]) or (not downtrend):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
+
+#!/usr/bin/env python3
