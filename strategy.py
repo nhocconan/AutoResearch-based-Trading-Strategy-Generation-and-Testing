@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_Turtle_Soup_Reversal
-Hypothesis: Turtle Soup pattern exploits false breakouts at daily highs/lows. On 6h timeframe, enter short when price makes a new 20-bar high but fails to close above it (indicating weakness), and enter long when price makes a new 20-bar low but fails to close below it (indicating strength). Uses 1d ATR for stop placement and volatility filter. Designed to work in both bull and bear markets by capturing mean reversion at extremes. Expects 80-150 total trades over 4 years.
+12h_Camarilla_R3S3_1dTrend_Volume_Refined
+Hypothesis: On 12h timeframe, buy when price breaks above Camarilla R3 level with daily uptrend (close > EMA34) and volume confirmation; sell when breaks below S3 level with daily downtrend (close < EMA34) and volume confirmation. Uses daily EMA34 for trend filter to avoid whipsaws and volume spike for confirmation. Designed for 12h timeframe with expected 50-150 trades over 4 years to minimize fee drag while capturing trends in both bull and bear markets.
 """
-name = "6h_Turtle_Soup_Reversal"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_1dTrend_Volume_Refined"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,63 +21,74 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for ATR filter
+    # Get daily data for trend filter
     df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 14:
+    if len(df_daily) < 34:
         return np.zeros(n)
     
-    high_daily = df_daily['high'].values
-    low_daily = df_daily['low'].values
     close_daily = df_daily['close'].values
     
-    # Calculate daily ATR(14)
-    tr1 = high_daily - low_daily
-    tr2 = np.abs(high_daily - np.roll(close_daily, 1))
-    tr3 = np.abs(low_daily - np.roll(close_daily, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
-    atr14_daily = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr14_daily_aligned = align_htf_to_ltf(prices, df_daily, atr14_daily)
+    # Calculate daily EMA34 for trend filter
+    ema34_daily = pd.Series(close_daily).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_daily_aligned = align_htf_to_ltf(prices, df_daily, ema34_daily)
     
-    # Calculate 20-period highest high and lowest low for Turtle Soup
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels from previous day's OHLC
+    # Camarilla levels use previous day's data
+    prev_close = df_daily['close'].shift(1).values
+    prev_high = df_daily['high'].shift(1).values
+    prev_low = df_daily['low'].shift(1).values
+    
+    # Calculate Camarilla levels for each day
+    # R3 = C + (H-L)*1.1/2
+    # S3 = C - (H-L)*1.1/2
+    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 2
+    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_daily, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_daily, camarilla_s3)
+    
+    # Volume filter: current volume > 1.5 * 50-period average volume
+    vol_avg = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    volume_filter = volume > (vol_avg * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 14)
+    start_idx = max(50, 34)  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any data is not ready
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(atr14_daily_aligned[i])):
+        if (np.isnan(ema34_daily_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Turtle Soup Long: new 20-bar low but close above the low (failed breakdown)
-            if low[i] == lowest_low[i] and close[i] > lowest_low[i]:
+            # Long: price breaks above Camarilla R3 + daily uptrend + volume filter
+            if (close[i] > camarilla_r3_aligned[i] and 
+                close[i] > ema34_daily_aligned[i] and 
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Turtle Soup Short: new 20-bar high but close below the high (failed breakout)
-            elif high[i] == highest_high[i] and close[i] < highest_high[i]:
+            # Short: price breaks below Camarilla S3 + daily downtrend + volume filter
+            elif (close[i] < camarilla_s3_aligned[i] and 
+                  close[i] < ema34_daily_aligned[i] and 
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit on opposite signal or time-based exit (max 10 bars)
+            # Exit: price returns to opposite Camarilla level
             if position == 1:
-                # Exit on Turtle Soup Short signal or after 10 bars
-                if (high[i] == highest_high[i] and close[i] < highest_high[i]) or (i - entry_bar >= 10):
+                if close[i] < camarilla_s3_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                # Exit on Turtle Soup Long signal or after 10 bars
-                if (low[i] == lowest_low[i] and close[i] > lowest_low[i]) or (i - entry_bar >= 10):
+                if close[i] > camarilla_r3_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
