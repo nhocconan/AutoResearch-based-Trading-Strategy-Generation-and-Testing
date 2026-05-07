@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 6h_TripleBarrier_Breakout_Volume
-# Hypothesis: Breakout of 6h Donchian(20) channel with 1d trend filter (price > 1d EMA34) and volume confirmation.
-# Uses multiple timeframes to filter noise: only trade when 6h price breaks 20-period high/low
-# AND is aligned with 1d trend. Volume spike confirms institutional participation.
-# Designed for low trade frequency (target 15-35/year) to minimize fee drag in 60-400 range.
-# Works in bull/bear: trend filter adapts, volatility breakouts occur in all regimes.
+# 12h_RSI_ElderRay_Confluence
+# Hypothesis: Combines RSI mean reversion with Elder Ray bull/bear power on 12h timeframe, filtered by 1d trend (EMA34) and volume confirmation.
+# Works in both bull and bear markets: RSI captures overextended moves while Elder Ray confirms institutional buying/selling pressure.
+# The 1d EMA34 trend filter ensures we only trade in the direction of the higher timeframe trend, reducing whipsaws.
+# Targets 15-30 trades/year on 12h timeframe to minimize fee drag.
 
-name = "6h_TripleBarrier_Breakout_Volume"
-timeframe = "6h"
+name = "12h_RSI_ElderRay_Confluence"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,30 +23,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 6h Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Get 1d data for trend filter
+    # Get 1d data for trend filter (as specified in experiment)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # 1d EMA34 for trend filter
+    
+    # Calculate 1d EMA34 for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Calculate RSI(14) on 12h
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Calculate Elder Ray on 12h: Bull Power = High - EMA13, Bear Power = EMA13 - Low
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = ema13 - low
+    
+    # Align 1d EMA34 to 12h timeframe
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume spike (2.0x 20-period average)
+    # Volume spike filter on 12h (20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)
+    volume_spike = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if any critical value is NaN
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+        if (np.isnan(rsi[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
             np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -55,24 +69,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: break above Donchian high, above 1d EMA34 trend, volume spike
-            if close[i] > high_20[i] and close[i] > ema_34_1d_aligned[i] and volume_spike[i]:
+            # Long: RSI < 30 (oversold), Bull Power > 0 (buying pressure), above 1d EMA34 trend, volume spike
+            if rsi[i] < 30 and bull_power[i] > 0 and close[i] > ema_34_1d_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below Donchian low, below 1d EMA34 trend, volume spike
-            elif close[i] < low_20[i] and close[i] < ema_34_1d_aligned[i] and volume_spike[i]:
+            # Short: RSI > 70 (overbought), Bear Power > 0 (selling pressure), below 1d EMA34 trend, volume spike
+            elif rsi[i] > 70 and bear_power[i] > 0 and close[i] < ema_34_1d_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price breaks below Donchian low or below 1d EMA34
-            if close[i] < low_20[i] or close[i] < ema_34_1d_aligned[i]:
+            # Exit: RSI > 50 (mean reversion) OR Bear Power > 0 (selling pressure emerges)
+            if rsi[i] > 50 or bear_power[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price breaks above Donchian high or above 1d EMA34
-            if close[i] > high_20[i] or close[i] > ema_34_1d_aligned[i]:
+            # Exit: RSI < 50 (mean reversion) OR Bull Power > 0 (buying pressure emerges)
+            if rsi[i] < 50 or bull_power[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
