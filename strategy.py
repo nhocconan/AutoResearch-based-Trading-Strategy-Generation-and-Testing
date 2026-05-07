@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dTrend_Volume_v3
-Hypothesis: Price breaking above/below daily Camarilla R1/S1 on 12h timeframe with 1d EMA34 trend filter and volume spike (2.2x average) captures institutional breakouts. Added stricter volume filter (2.2x) and minimum hold period (3 bars) to reduce trade frequency and improve edge in both bull and bear markets by following higher timeframe trend.
+4h_Camarilla_R1S1_Breakout_1dTrend_Volume
+Hypothesis: Price breaking above/below daily Camarilla R1/S1 on 4h timeframe with 1d EMA34 trend filter and volume spike (2x average) captures institutional breakouts. Designed for 4h to balance trade frequency and performance, avoiding excessive trades that cause fee drag while maintaining edge in both bull and bear markets by following higher timeframe trend.
 """
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume_v3"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -37,7 +37,7 @@ def generate_signals(prices):
     r1 = pivot + 1.1 * (prev_high - prev_low) / 12
     s1 = pivot - 1.1 * (prev_high - prev_low) / 12
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
@@ -45,13 +45,12 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume filter: current volume > 2.2 * 24-period average (stricter to reduce trades)
+    # Volume filter: current volume > 2.0 * 24-period average (stricter)
     vol_avg = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_filter = volume > (vol_avg * 2.2)
+    volume_filter = volume > (vol_avg * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_entry = 0
     
     start_idx = 50  # Need sufficient warmup for averages
     
@@ -63,7 +62,6 @@ def generate_signals(prices):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             continue
         
         if position == 0:
@@ -71,31 +69,22 @@ def generate_signals(prices):
             if close[i] > r1_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-                bars_since_entry = 0
             # Short: price breaks below S1 + 1d downtrend + volume spike
             elif close[i] < s1_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
-                bars_since_entry = 0
         elif position != 0:
-            bars_since_entry += 1
-            # Minimum hold period: 3 bars
-            if bars_since_entry < 3:
-                signals[i] = 0.25 if position == 1 else -0.25
-                continue
             # Exit: price returns to opposite Camarilla level (mean reversion)
             if position == 1:
                 if close[i] <= s1_aligned[i]:
                     signals[i] = 0.0
                     position = 0
-                    bars_since_entry = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
                 if close[i] >= r1_aligned[i]:
                     signals[i] = 0.0
                     position = 0
-                    bars_since_entry = 0
                 else:
                     signals[i] = -0.25
     
