@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 """
-1d_Weekly_Donchian_Breakout_Trend_Filter
-Hypothesis: Weekly Donchian channel breakout with daily trend filter and volume confirmation.
-In bull markets (price > daily EMA50), long on weekly upper band breakout with volume.
-In bear markets (price < daily EMA50), short on weekly lower band breakout with volume.
-Uses weekly Donchian channels for structure and daily EMA for trend filter to avoid counter-trend trades.
-Target: 15-25 trades per year (~60-100 over 4 years) with position size 0.25.
+6h_RSI_Pullback_Trend_1d
+Hypothesis: RSI(14) pullback in trending markets with 1-day EMA50 trend filter and volume confirmation.
+In uptrend (price > 1d EMA50), long when RSI crosses above 40 from below with volume.
+In downtrend (price < 1d EMA50), short when RSI crosses below 60 from above with volume.
+Aims to capture trend continuations during pullbacks with reduced false signals in range markets.
+Target: 10-30 trades per year (~40-120 over 4 years) with position size 0.25.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_Weekly_Donchian_Breakout_Trend_Filter"
-timeframe = "1d"
+name = "6h_RSI_Pullback_Trend_1d"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,31 +26,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE for Donchian channels
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 20:
+    # Load 1-day data ONCE for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Weekly Donchian channels: 20-period high/low
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
+    # 1-day EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate weekly Donchian channels
-    upper_channel = np.full_like(weekly_high, np.nan, dtype=np.float64)
-    lower_channel = np.full_like(weekly_low, np.nan, dtype=np.float64)
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
     
-    for i in range(20, len(weekly_high)):
-        upper_channel[i] = np.max(weekly_high[i-20:i])
-        lower_channel[i] = np.min(weekly_low[i-20:i])
-    
-    # Align weekly channels to daily timeframe
-    upper_channel_aligned = align_htf_to_ltf(prices, df_weekly, upper_channel)
-    lower_channel_aligned = align_htf_to_ltf(prices, df_weekly, lower_channel)
-    
-    # Daily EMA50 for trend filter
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Volume ratio: current volume / 20-day average volume
+    # Volume ratio: current volume / 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.where(vol_ma > 0, volume / vol_ma, 1.0)
     
@@ -60,24 +54,24 @@ def generate_signals(prices):
     start_idx = 50  # Need 50 periods for EMA50 and sufficient warmup
     
     for i in range(start_idx, n):
-        if np.isnan(ema_50[i]) or np.isnan(upper_channel_aligned[i]) or np.isnan(lower_channel_aligned[i]) or np.isnan(vol_ratio[i]):
+        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_ratio[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine market regime from daily EMA50
-        uptrend_regime = close[i] > ema_50[i]
-        downtrend_regime = close[i] < ema_50[i]
+        # Determine market regime from 1-day EMA50
+        uptrend_regime = close[i] > ema_50_1d_aligned[i]
+        downtrend_regime = close[i] < ema_50_1d_aligned[i]
         
         # Volume confirmation: volume > 1.5x average
         volume_confirm = vol_ratio[i] > 1.5
         
         if position == 0:
-            # Long: close breaks above weekly upper channel in uptrend regime + volume
-            long_entry = (close[i] > upper_channel_aligned[i]) and uptrend_regime and volume_confirm
-            # Short: close breaks below weekly lower channel in downtrend regime + volume
-            short_entry = (close[i] < lower_channel_aligned[i]) and downtrend_regime and volume_confirm
+            # Long: RSI crosses above 40 from below in uptrend regime + volume
+            long_entry = (rsi[i] > 40) and (rsi[i-1] <= 40) and uptrend_regime and volume_confirm
+            # Short: RSI crosses below 60 from above in downtrend regime + volume
+            short_entry = (rsi[i] < 60) and (rsi[i-1] >= 60) and downtrend_regime and volume_confirm
             
             if long_entry:
                 signals[i] = 0.25
@@ -86,15 +80,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: close crosses below weekly lower channel or regime changes to downtrend
-            if (close[i] < lower_channel_aligned[i]) or (not uptrend_regime):
+            # Exit: RSI crosses above 70 (overbought) or trend changes to downtrend
+            if (rsi[i] >= 70) or (not uptrend_regime):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: close crosses above weekly upper channel or regime changes to uptrend
-            if (close[i] > upper_channel_aligned[i]) or (not downtrend_regime):
+            # Exit: RSI crosses below 30 (oversold) or trend changes to uptrend
+            if (rsi[i] <= 30) or (not downtrend_regime):
                 signals[i] = 0.0
                 position = 0
             else:
