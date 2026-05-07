@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3S3_Breakout_1wTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,19 +17,10 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Get daily data for Camarilla levels
+    # Get 1d data for Camarilla levels and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
-    
-    # Calculate weekly EMA50 trend filter
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Calculate Camarilla R3 and S3 levels from previous day
     high_prev = df_1d['high'].shift(1).values
@@ -39,9 +30,13 @@ def generate_signals(prices):
     r3 = close_prev + 1.1 * (high_prev - low_prev) / 4
     s3 = close_prev - 1.1 * (high_prev - low_prev) / 4
     
-    # Align daily levels to 12h timeframe (with 1-day delay for completed bar)
+    # Align daily levels to 4h timeframe (with 1-day delay for completed bar)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # 1d EMA34 trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume filter: current volume > 2.0x 20-period average
     vol_ma_20 = np.full(n, np.nan)
@@ -52,15 +47,15 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 4  # ~2 days for 12h to reduce trades
+    cooldown_bars = 2  # ~8 hours for 4h to reduce trades
     
-    start_idx = max(100, 20, 50)
+    start_idx = max(100, 20, 34)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(r3_aligned[i]) or 
             np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -72,9 +67,9 @@ def generate_signals(prices):
         
         bars_since_last_trade += 1
         
-        # Determine weekly trend direction
-        trend_up = close > ema_50_1w_aligned[i]
-        trend_down = close < ema_50_1w_aligned[i]
+        # Determine 1d trend direction
+        trend_up = close > ema_34_1d_aligned[i]
+        trend_down = close < ema_34_1d_aligned[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
             # Long: Break above R3 in uptrend with strong volume
@@ -110,9 +105,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Using 12h timeframe with Camarilla R3/S3 breakouts, 1w EMA50 trend filter, and 2.0x volume spike
-# will yield 12-37 trades per year (50-150 total over 4 years), minimizing fee drag. The strategy trades
+# Hypothesis: Using 4h timeframe with Camarilla R3/S3 breakouts, 1d EMA34 trend filter, and 2.0x volume spike
+# will yield 15-40 trades per year (60-160 total over 4 years), minimizing fee drag. The strategy trades
 # with the higher timeframe trend, capturing institutional breakouts in both bull and bear markets.
-# Position size of 0.25 manages drawdown, and cooldown of 4 bars prevents overtrading. Focus on BTC/ETH
+# Position size of 0.25 manages drawdown, and cooldown of 2 bars prevents overtrading. Focus on BTC/ETH
 # as primary targets, avoiding SOL-only bias. This combines proven elements from top performers:
 # Camarilla levels + higher timeframe trend + volume confirmation.
