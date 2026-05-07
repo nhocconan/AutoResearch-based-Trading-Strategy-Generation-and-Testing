@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_4h1d_Camarilla_Trend_Volume"
-timeframe = "1h"
+name = "4h_Donchian20_VolumeTrend_12hTrendFilter_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,77 +17,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Camarilla levels
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # 12h EMA200 for trend filter
+    ema_200_12h = pd.Series(df_12h['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # 4h Camarilla R3/S3 levels
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    range_4h = high_4h - low_4h
-    r3_4h = close_4h + 1.1666 * range_4h * 1.1 / 2
-    s3_4h = close_4h - 1.1666 * range_4h * 1.1 / 2
-    
-    # 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align all to 1h timeframe
-    r3_4h_aligned = align_htf_to_ltf(prices, df_4h, r3_4h)
-    s3_4h_aligned = align_htf_to_ltf(prices, df_4h, s3_4h)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Donchian channels (20-period) on 4h
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume filter: current volume > 1.5 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_avg * 1.5)
     
-    # Session filter: 8-20 UTC
-    hours = prices.index.hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Align 12h EMA200 to 4h timeframe
+    ema_200_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_200_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 50, 50)
+    start_idx = max(200, 20, 20)
     
     for i in range(start_idx, n):
         # Skip if any data is not ready
-        if (np.isnan(r3_4h_aligned[i]) or np.isnan(s3_4h_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(ema_200_12h_aligned[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R3 + daily uptrend + volume + session
-            if close[i] > r3_4h_aligned[i] and close[i] > ema_50_1d_aligned[i] and volume_filter[i] and session_filter[i]:
-                signals[i] = 0.20
+            # Long: price breaks above Donchian high + 12h uptrend + volume
+            if close[i] > high_20[i] and close[i] > ema_200_12h_aligned[i] and volume_filter[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 + daily downtrend + volume + session
-            elif close[i] < s3_4h_aligned[i] and close[i] < ema_50_1d_aligned[i] and volume_filter[i] and session_filter[i]:
-                signals[i] = -0.20
+            # Short: price breaks below Donchian low + 12h downtrend + volume
+            elif close[i] < low_20[i] and close[i] < ema_200_12h_aligned[i] and volume_filter[i]:
+                signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: price crosses back through the opposite S3/R3 level
+            # Exit: price crosses back through the opposite Donchian level
             if position == 1:
-                if close[i] < s3_4h_aligned[i]:
+                if close[i] < low_20[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
             else:  # position == -1
-                if close[i] > r3_4h_aligned[i]:
+                if close[i] > high_20[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
