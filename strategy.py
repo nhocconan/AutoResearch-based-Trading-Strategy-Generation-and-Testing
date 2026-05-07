@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dTrend_Volume
-Hypothesis: Enter long/short when price breaks above/below daily Camarilla R1/S1 levels on 4h timeframe with volume confirmation (>2x 20-bar average) and in direction of daily EMA34 trend. Exit when price crosses opposite Camarilla level or volume drops below average. Designed for low trade frequency (~20-40/year) to minimize flood. Works in both bull and bear markets by aligning with daily trend.
+6h_WeeklyPivot_Trend_Breakout
+Hypothesis: Enter long/short when price breaks above/below weekly pivot-based resistance/support levels on 6h timeframe with volume confirmation (>2x 20-bar average) and in direction of daily EMA34 trend. Uses weekly pivots for structure, daily EMA for trend filter, and volume for confirmation. Designed to work in both bull and bear markets by aligning with daily trend while using weekly structure for breakout validation. Target: 15-30 trades/year to minimize fee drag.
 """
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_WeeklyPivot_Trend_Breakout"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -22,29 +22,41 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter and pivot calculation
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
+        return np.zeros(n)
+    
+    # Get weekly data for pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
     # Calculate daily EMA34 for trend filter
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Previous day's OHLC for Camarilla calculation (based on completed daily bar)
-    prev_daily_high = df_1d['high'].shift(1).values
-    prev_daily_low = df_1d['low'].shift(1).values
-    prev_daily_close = df_1d['close'].shift(1).values
+    # Previous week's OHLC for weekly pivot calculation (based on completed weekly bar)
+    prev_weekly_high = df_1w['high'].shift(1).values
+    prev_weekly_low = df_1w['low'].shift(1).values
+    prev_weekly_close = df_1w['close'].shift(1).values
     
-    # Align previous day's OHLC to 4h timeframe
-    prev_daily_high_aligned = align_htf_to_ltf(prices, df_1d, prev_daily_high)
-    prev_daily_low_aligned = align_htf_to_ltf(prices, df_1d, prev_daily_low)
-    prev_daily_close_aligned = align_htf_to_ltf(prices, df_1d, prev_daily_close)
+    # Align previous week's OHLC to 6h timeframe
+    prev_weekly_high_aligned = align_htf_to_ltf(prices, df_1w, prev_weekly_high)
+    prev_weekly_low_aligned = align_htf_to_ltf(prices, df_1w, prev_weekly_low)
+    prev_weekly_close_aligned = align_htf_to_ltf(prices, df_1w, prev_weekly_close)
     
-    # Calculate Camarilla levels: R1 and S1
-    camarilla_range = prev_daily_high_aligned - prev_daily_low_aligned
-    r1 = prev_daily_close_aligned + camarilla_range * 1.1 / 12
-    s1 = prev_daily_close_aligned - camarilla_range * 1.1 / 12
+    # Calculate weekly pivot point and support/resistance levels
+    # Standard pivot: (H + L + C) / 3
+    pp = (prev_weekly_high_aligned + prev_weekly_low_aligned + prev_weekly_close_aligned) / 3.0
+    
+    # Resistance and support levels
+    r1 = 2 * pp - prev_weekly_low_aligned
+    s1 = 2 * pp - prev_weekly_high_aligned
+    r2 = pp + (prev_weekly_high_aligned - prev_weekly_low_aligned)
+    s2 = pp - (prev_weekly_high_aligned - prev_weekly_low_aligned)
+    r3 = prev_weekly_high_aligned + 2 * (pp - prev_weekly_low_aligned)
+    s3 = prev_weekly_low_aligned - 2 * (prev_weekly_high_aligned - pp)
     
     # Volume confirmation: 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -57,7 +69,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r1[i]) or np.isnan(s1[i]) or 
+        if (np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(r2[i]) or np.isnan(s2[i]) or
             np.isnan(vol_ratio[i]) or np.isnan(ema_34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
