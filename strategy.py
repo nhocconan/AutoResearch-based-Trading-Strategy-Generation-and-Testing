@@ -1,6 +1,10 @@
+# 12h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Spike
+# Hypothesis: Camarilla R3/S3 levels on 12h act as strong support/resistance. Breakout with volume spike and aligned with 1d trend (via EMA34) provides high-probability entries. Works in bull markets (breakouts above R3 in uptrend) and bear markets (breakdowns below S3 in downtrend). Volume spike filters weak breakouts. Target 12-37 trades/year to minimize fee drag.
+# Timeframe: 12h, HTF: 1d
+
 #!/usr/bin/env python3
-name = "1d_KAMA_Trend_With_RSI_Momentum"
-timeframe = "1d"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Spike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,79 +21,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Load 12h and 1d data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
+    
+    if len(df_12h) < 5 or len(df_1d) < 2:
         return np.zeros(n)
     
-    # 1d KAMA for trend direction
-    def kama(close_series, er_len=10, fast_len=2, slow_len=30):
-        close_s = pd.Series(close_series)
-        change = abs(close_s.diff(er_len))
-        volatility = close_s.diff().abs().rolling(er_len).sum()
-        er = change / volatility.replace(0, np.nan)
-        er = er.fillna(0)
-        sc = (er * (2/(fast_len+1) - 2/(slow_len+1)) + 2/(slow_len+1)) ** 2
-        kama_vals = np.zeros_like(close_s, dtype=np.float64)
-        kama_vals[0] = close_s.iloc[0]
-        for i in range(1, len(close_s)):
-            kama_vals[i] = kama_vals[i-1] + sc.iloc[i] * (close_s.iloc[i] - kama_vals[i-1])
-        return kama_vals
+    # 12h Camarilla levels: R3, S3 from previous day
+    # Camarilla: R3 = close + (high - low) * 1.1/2, S3 = close - (high - low) * 1.1/2
+    prev_close = df_12h['close'].shift(1).values
+    prev_high = df_12h['high'].shift(1).values
+    prev_low = df_12h['low'].shift(1).values
+    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 2
+    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 2
     
-    kama_vals = kama(close, 10, 2, 30)
+    # Align Camarilla levels to 12h timeframe (already on 12h, no alignment needed for same TF)
+    # But we need to shift by 1 because levels are based on previous day
+    camarilla_r3 = np.roll(camarilla_r3, 1)
+    camarilla_s3 = np.roll(camarilla_s3, 1)
+    camarilla_r3[0] = np.nan
+    camarilla_s3[0] = np.nan
     
-    # 1d RSI(14) for momentum
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # 1w KAMA for higher timeframe trend filter
-    kama_1w = kama(df_1w['close'].values, 10, 2, 30)
-    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
-    
-    # Volume filter: above 20-day average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > vol_ma
+    # 12h volume spike: > 2.0x 20-period average (~10 days)
+    vol_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike_12h = volume > 2.0 * vol_ma_12h
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # Wait for KAMA and RSI
+    start_idx = max(20, 34)  # Wait for volume MA and EMA34
     
     for i in range(start_idx, n):
-        if np.isnan(kama_1w_aligned[i]) or np.isnan(rsi[i]):
+        if np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or np.isnan(ema34_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: KAMA up, RSI > 50, volume filter, price above KAMA
-            if kama_vals[i] > kama_vals[i-1] and rsi[i] > 50 and close[i] > kama_vals[i] and vol_filter[i] and close[i] > kama_1w_aligned[i]:
+            # Long: Break above R3 with volume spike and 1d uptrend
+            if close[i] > camarilla_r3[i] and vol_spike_12h[i] and close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA down, RSI < 50, volume filter, price below KAMA
-            elif kama_vals[i] < kama_vals[i-1] and rsi[i] < 50 and close[i] < kama_vals[i] and vol_filter[i] and close[i] < kama_1w_aligned[i]:
+            # Short: Break below S3 with volume spike and 1d downtrend
+            elif close[i] < camarilla_s3[i] and vol_spike_12h[i] and close[i] < ema34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: KAMA turns down or RSI < 40
-            if kama_vals[i] < kama_vals[i-1] or rsi[i] < 40:
+            # Exit: Price below S3 or trend reversal
+            if close[i] < camarilla_s3[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: KAMA turns up or RSI > 60
-            if kama_vals[i] > kama_vals[i-1] or rsi[i] > 60:
+            # Exit: Price above R3 or trend reversal
+            if close[i] > camarilla_r3[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
+
+# Note: Camarilla levels calculated from previous 12h period's high/low/close.
+# Volume spike threshold set to 2.0x to ensure only strong breakouts trigger entries.
+# Position size 0.25 limits risk per trade. Exit on retrace to S3/R3 or trend reversal.
+# Designed for 12-37 trades/year on 12h timeframe.
