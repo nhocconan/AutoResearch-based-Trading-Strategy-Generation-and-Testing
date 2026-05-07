@@ -1,6 +1,7 @@
+# Solution: 4h_1wPivot_1dEMA34_VolumeSpike_v3
 #!/usr/bin/env python3
-name = "12h_1wPivot_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_1wPivot_1dEMA34_VolumeSpike_v3"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -63,7 +64,7 @@ def generate_signals(prices):
     r2_per_week[1:] = r2
     s2_per_week[1:] = s2
     
-    # Align to 12h timeframe (only complete weekly levels available)
+    # Align to 4h timeframe (only complete weekly levels available)
     pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_per_week)
     r1_aligned = align_htf_to_ltf(prices, df_1w, r1_per_week)
     s1_aligned = align_htf_to_ltf(prices, df_1w, s1_per_week)
@@ -75,7 +76,7 @@ def generate_signals(prices):
     ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Volume spike detection (20-period average on 12h)
+    # Volume spike detection (20-period average on 4h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # ATR for volatility filter (14-period)
@@ -138,7 +139,7 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 12h weekly pivot breakout with daily trend filter, volume confirmation, and volatility filter.
+# Hypothesis: 4h weekly pivot breakout with daily trend filter, volume confirmation, and volatility filter.
 # Weekly pivot levels (R1/S1) from previous week identify key support/resistance.
 # Breakout above R1 with volume suggests bullish momentum; breakdown below S1 suggests bearish.
 # Daily EMA(34) filter ensures we only trade in the direction of the daily trend.
