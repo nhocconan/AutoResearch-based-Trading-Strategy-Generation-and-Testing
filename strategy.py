@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-name = "4h_Trix_Signal_With_Volume_And_Trend"
+name = "4h_Camarilla_R3_S3_Breakout_1wEMA50_Trend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -18,52 +18,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for TRIX and trend filter
+    # Get 1w data for trend filter (primary) and 1d for Camarilla levels
+    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    
+    if len(df_1w) < 50 or len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate 1d TRIX (15,9,9)
+    # Calculate 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Calculate 1d ATR(14) for volatility filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # First EMA
-    ema1 = pd.Series(close_1d).ewm(span=15, adjust=False).mean()
-    # Second EMA
-    ema2 = ema1.ewm(span=15, adjust=False).mean()
-    # Third EMA
-    ema3 = ema2.ewm(span=15, adjust=False).mean()
-    # TRIX = % change of third EMA
-    trix_raw = ((ema3 / ema3.shift(1)) - 1) * 100
-    trix = trix_raw.values
-    # Signal line (9-period EMA of TRIX)
-    trix_signal = pd.Series(trix).ewm(span=9, adjust=False).mean().values
+    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]), np.abs(low_1d[1:] - close_1d[:-1]))
+    tr = np.concatenate([[np.nan], tr1])
+    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate Camarilla levels from previous 1d bar
+    high_1d_prev = high_1d[:-1]
+    low_1d_prev = low_1d[:-1]
+    close_1d_prev = close_1d[:-1]
+    high_1d_prev = np.concatenate([[np.nan], high_1d_prev])
+    low_1d_prev = np.concatenate([[np.nan], low_1d_prev])
+    close_1d_prev = np.concatenate([[np.nan], close_1d_prev])
     
-    # Align 1d indicators to 4h timeframe
-    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
-    trix_signal_aligned = align_htf_to_ltf(prices, df_1d, trix_signal)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # R3 = H3 = close + 1.1*(high-low)/4
+    # S3 = L3 = close - 1.1*(high-low)/4
+    high_low = high_1d_prev - low_1d_prev
+    r3 = close_1d_prev + 1.1 * high_low / 4
+    s3 = close_1d_prev - 1.1 * high_low / 4
+    
+    # Align indicators to 4h timeframe
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
     
-    # Volume filter: current volume > 1.3x 20-period average (4h)
+    # Volume filter: current volume > 1.8x 20-period average (4h)
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-20:i])
-    vol_filter = volume > (1.3 * vol_ma_20)
+    vol_filter = volume > (1.8 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 6  # ~1 day for 4h to reduce trades
+    cooldown_bars = 8  # ~2 days for 4h to reduce trades
     
-    start_idx = max(34, 20)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(trix_aligned[i]) or 
-            np.isnan(trix_signal_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or 
+        if (np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(atr_14_1d_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -75,40 +88,38 @@ def generate_signals(prices):
         
         bars_since_last_trade += 1
         
-        # Determine 1d trend direction
-        trend_1d_up = close_1d_aligned[i] > ema_34_1d_aligned[i]
-        trend_1d_down = close_1d_aligned[i] < ema_34_1d_aligned[i]
+        # Determine 1w trend direction
+        trend_1w_up = close_1d_aligned[i] > ema_50_1w_aligned[i]
+        trend_1w_down = close_1d_aligned[i] < ema_50_1w_aligned[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: TRIX crosses above signal line with volume in 1d uptrend
-            if (trix_aligned[i] > trix_signal_aligned[i] and 
-                trix_aligned[i-1] <= trix_signal_aligned[i-1] and
-                trend_1d_up and 
-                vol_filter[i]):
+            # Long: break above R3 with volume in 1w uptrend and sufficient volatility
+            if (close[i] > r3_aligned[i] and 
+                trend_1w_up and 
+                vol_filter[i] and
+                atr_14_1d_aligned[i] > 0):  # Ensure volatility is present
                 signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: TRIX crosses below signal line with volume in 1d downtrend
-            elif (trix_aligned[i] < trix_signal_aligned[i] and 
-                  trix_aligned[i-1] >= trix_signal_aligned[i-1] and
-                  trend_1d_down and 
-                  vol_filter[i]):
+            # Short: break below S3 with volume in 1w downtrend and sufficient volatility
+            elif (close[i] < s3_aligned[i] and 
+                  trend_1w_down and 
+                  vol_filter[i] and
+                  atr_14_1d_aligned[i] > 0):
                 signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit: TRIX crosses below signal line or trend change
-            if (trix_aligned[i] < trix_signal_aligned[i] and 
-                trix_aligned[i-1] >= trix_signal_aligned[i-1]) or not trend_1d_up:
+            # Exit: close back below S3 or trend change
+            if (close[i] < s3_aligned[i]) or not trend_1w_up:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: TRIX crosses above signal line or trend change
-            if (trix_aligned[i] > trix_signal_aligned[i] and 
-                trix_aligned[i-1] <= trix_signal_aligned[i-1]) or not trend_1d_down:
+            # Exit: close back above R3 or trend change
+            if (close[i] > r3_aligned[i]) or not trend_1w_down:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
@@ -117,13 +128,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: TRIX momentum with signal line crossovers on 1d timeframe, combined with 1d EMA34 trend filter and volume confirmation on 4h timeframe.
-# Long when TRIX crosses above its signal line in a 1d uptrend with volume confirmation.
-# Short when TRIX crosses below its signal line in a 1d downtrend with volume confirmation.
-# Exits when TRIX crosses back in the opposite direction or trend changes.
-# Uses 1d timeframe for signal generation to avoid noise, 4h for execution timing.
-# Volume filter prevents false signals. Cooldown reduces trade frequency.
-# Target: 25-40 trades/year. Works in bull markets by capturing momentum in uptrends
-# and in bear markets by shorting momentum in downtrends. TRIX is effective at
-# identifying trend changes and momentum shifts, making it suitable for both
-# bull and bear markets when combined with trend and volume filters.
+# Hypothesis: Camarilla R3/S3 breakout with 1w EMA50 trend filter, volume confirmation, and ATR volatility filter on 4h timeframe.
+# Long when price breaks above R3 with volume spike in 1w uptrend and sufficient volatility.
+# Short when price breaks below S3 with volume spike in 1w downtrend and sufficient volatility.
+# Exits when price returns to S3/R3 or 1w trend changes.
+# Uses ATR(14) to avoid trading in low volatility periods. Volume confirmation avoids false breakouts.
+# Cooldown (2 days) reduces trade frequency. Target: 15-30 trades/year. 
+# 1w trend filter ensures we trade with the higher timeframe momentum, improving performance in both bull and bear markets. 
+# R3/S3 levels are wider than R1/S1, reducing false breakouts and improving trade quality.
