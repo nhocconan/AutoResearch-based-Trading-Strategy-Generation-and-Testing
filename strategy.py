@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-1D_Williams_Alligator_Trend_Filter_v1
-Hypothesis: Use weekly Williams Alligator (3 SMAs: Jaw-Teeth-Lips) for trend direction and daily price action for entries.
-Long when price > Alligator Teeth and price > previous day's high (breakout); 
-Short when price < Alligator Teeth and price < previous day's low (breakdown).
-Volume confirmation: current volume > 1.3x 20-day average volume.
-Williams Alligator smooths noise and identifies strong trends, reducing whipsaws in both bull and bear markets.
+6h_KAMA_Trend_1D_Camarilla_R3_S3_Breakout_With_Volume_Filter
+Hypothesis: Use 6h KAMA (ER=10) for trend direction and 1d Camarilla R3/S3 levels for breakout entries.
+Long when price crosses above 6h KAMA and breaks above 1d R3; short when price crosses below 6h KAMA and breaks below 1d S3.
+Volume confirmation: current volume > 2.0x 20-period average volume to filter weak breakouts.
+KAMA adapts to market noise, reducing false signals in chop, while Camarilla R3/S3 provide strong intraday support/resistance.
+Volume filter ensures only significant breakouts trigger entries, reducing whipsaws in both bull and bear markets.
+Designed for 6h timeframe to target 12-37 trades/year (50-150 total over 4 years).
 """
-name = "1D_Williams_Alligator_Trend_Filter_v1"
-timeframe = "1d"
+name = "6h_KAMA_Trend_1D_Camarilla_R3_S3_Breakout_With_Volume_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -25,64 +26,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Williams Alligator
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 13:
+    # Get 6h data for KAMA trend
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 10:
         return np.zeros(n)
     
-    # Calculate Williams Alligator (3 SMAs: 13, 8, 5 periods with future shifts)
-    close_1w = pd.Series(df_1w['close'])
-    # Jaw: 13-period SMA, shifted 8 bars forward
-    jaw = close_1w.rolling(window=13, min_periods=13).mean().shift(8)
-    # Teeth: 8-period SMA, shifted 5 bars forward
-    teeth = close_1w.rolling(window=8, min_periods=8).mean().shift(5)
-    # Lips: 5-period SMA, shifted 3 bars forward
-    lips = close_1w.rolling(window=5, min_periods=5).mean().shift(3)
+    # Calculate 6h KAMA (ER=10)
+    close_6h = pd.Series(df_6h['close'])
+    change = abs(close_6h.diff(10))
+    volatility = close_6h.diff().abs().rolling(window=10).sum()
+    er = change / volatility.replace(0, 1e-10)
+    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
+    kama = [close_6h.iloc[0]]
+    for i in range(1, len(close_6h)):
+        kama.append(kama[-1] + sc.iloc[i] * (close_6h.iloc[i] - kama[-1]))
+    kama = np.array(kama)
+    kama_aligned = align_htf_to_ltf(prices, df_6h, kama)
     
-    # Align to daily timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1w, jaw.values)
-    teeth_aligned = align_htf_to_ltf(prices, df_1w, teeth.values)
-    lips_aligned = align_htf_to_ltf(prices, df_1w, lips.values)
+    # Get 1d data for Camarilla levels (R3, S3)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
+        return np.zeros(n)
     
-    # Volume filter: current volume > 1.3 * 20-day average volume
+    # Calculate 1d Camarilla levels (R3, S3)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    r3 = pivot + (range_1d * 1.1 / 4)  # R3 = pivot + 1.1*(H-L)/4
+    s3 = pivot - (range_1d * 1.1 / 4)  # S3 = pivot - 1.1*(H-L)/4
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Volume filter: current volume > 2.0 * 20-period average volume
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_avg * 1.3)
+    volume_filter = volume > (vol_avg * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    bars_since_exit = 0  # bars since last exit to prevent overtrading
     
-    start_idx = max(20, 13+8)  # Ensure sufficient warmup for Alligator
+    start_idx = max(10, 20)  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
+        bars_since_exit += 1
+        
         # Skip if any data is not ready
-        if (np.isnan(teeth_aligned[i]) or np.isnan(vol_avg[i]) or 
-            np.isnan(jaw_aligned[i]) or np.isnan(lips_aligned[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                bars_since_exit = 0
             continue
         
         if position == 0:
-            # Long: price > Teeth and breakout above previous day's high
-            if (close[i] > teeth_aligned[i] and 
-                high[i] > high[i-1] and 
-                volume_filter[i]):
+            # Minimum 24 bars between trades (4 days on 6h TF) to reduce frequency
+            if bars_since_exit < 24:
+                continue
+                
+            # Long: price crosses above KAMA and breaks above R3
+            if (close[i] > kama_aligned[i] and close[i-1] <= kama_aligned[i-1] and 
+                close[i] > r3_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price < Teeth and breakdown below previous day's low
-            elif (close[i] < teeth_aligned[i] and 
-                  low[i] < low[i-1] and 
-                  volume_filter[i]):
+                bars_since_exit = 0
+            # Short: price crosses below KAMA and breaks below S3
+            elif (close[i] < kama_aligned[i] and close[i-1] >= kama_aligned[i-1] and 
+                  close[i] < s3_aligned[i]):
                 signals[i] = -0.25
                 position = -1
+                bars_since_exit = 0
         elif position != 0:
-            # Exit: price crosses Teeth in opposite direction
-            if position == 1 and close[i] < teeth_aligned[i]:
+            # Exit: price returns to opposite KAMA side
+            if position == 1 and close[i] < kama_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and close[i] > teeth_aligned[i]:
+                bars_since_exit = 0
+            elif position == -1 and close[i] > kama_aligned[i]:
                 signals[i] = 0.0
                 position = 0
+                bars_since_exit = 0
             else:
                 # Hold position
                 signals[i] = 0.25 if position == 1 else -0.25
