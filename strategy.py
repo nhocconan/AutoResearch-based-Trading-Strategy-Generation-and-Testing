@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 6h_Camarilla_R3S3_Breakout_1dTrend_Volume
-# Hypothesis: 6h chart strategy using daily Camarilla R3/S3 breakouts filtered by 1d EMA34 trend and volume confirmation (1.5x average volume).
-# Daily R3/S3 act as strong support/resistance with high probability of reversal or breakout.
-# 1d EMA34 provides trend filter to avoid counter-trend trades. Volume confirms breakout validity.
-# Designed to work in both bull and bear markets by filtering with trend and requiring volume confirmation.
-# Target: 20-40 trades/year per symbol to minimize fee drag while maintaining edge.
+# 1h_TripleFilter_RSI_CCI_Trend
+# Hypothesis: 1h strategy combining RSI oversold/overbought, CCI momentum, and 4h EMA trend filter. 
+# Uses 4h EMA50 for trend direction to avoid counter-trend trades, RSI(14) for mean-reversion signals, 
+# and CCI(20) for momentum confirmation. Volume filter ensures breakouts have conviction.
+# Designed for low trade frequency (15-30/year) with high win rate in both bull/bear markets.
+# Timeframe: 1h, uses 4h for trend filter, 1h for entry timing.
 
-timeframe = "6h"
-name = "6h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "1h"
+name = "1h_TripleFilter_RSI_CCI_Trend"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,70 +24,76 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot points (R3, S3) and trend filter (EMA34)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) == 0:
+    # Get 4h data for trend filter (EMA50)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) == 0:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 4h EMA50 for trend filter
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Calculate daily pivot points: R3, S3
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate RSI(14) on 1h
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    pivot_r3 = close_1d + 1.1 * (high_1d - low_1d)
-    pivot_s3 = close_1d - 1.1 * (high_1d - low_1d)
+    # Calculate CCI(20) on 1h
+    tp = (high + low + close) / 3
+    sma_tp = pd.Series(tp).rolling(window=20, min_periods=20).mean().values
+    mad = pd.Series(tp).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
+    cci = (tp - sma_tp) / (0.015 * mad + 1e-10)
     
-    pivot_r3_aligned = align_htf_to_ltf(prices, df_1d, pivot_r3)
-    pivot_s3_aligned = align_htf_to_ltf(prices, df_1d, pivot_s3)
-    
-    # Volume spike detection: 1.5x average volume (3-period = 1 day on 6h chart)
-    vol_ma = pd.Series(volume).rolling(window=3, min_periods=3).mean().values
+    # Volume filter: 1.5x average volume (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 3)  # Ensure we have EMA34 and volume MA data
+    start_idx = max(50, 20)  # Ensure we have EMA50, RSI, CCI data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(pivot_r3_aligned[i]) or 
-            np.isnan(pivot_s3_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(rsi[i]) or np.isnan(cci[i]) or 
+            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above daily R3 with volume, and 1d trend is bullish (price > EMA34)
-            if (high[i] > pivot_r3_aligned[i] and 
+            # Long: RSI oversold (<30), CCI bullish (> -100), volume confirmation, 4h trend bullish
+            if (rsi[i] < 30 and 
+                cci[i] > -100 and 
                 volume[i] > 1.5 * vol_ma[i] and 
-                close[i] > ema_34_1d_aligned[i]):
-                signals[i] = 0.25
+                close[i] > ema_50_4h_aligned[i]):
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below daily S3 with volume, and 1d trend is bearish (price < EMA34)
-            elif (low[i] < pivot_s3_aligned[i] and 
+            # Short: RSI overbought (>70), CCI bearish (< 100), volume confirmation, 4h trend bearish
+            elif (rsi[i] > 70 and 
+                  cci[i] < 100 and 
                   volume[i] > 1.5 * vol_ma[i] and 
-                  close[i] < ema_34_1d_aligned[i]):
-                signals[i] = -0.25
+                  close[i] < ema_50_4h_aligned[i]):
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit: price breaks below daily S3 (reversal signal)
-            if low[i] < pivot_s3_aligned[i]:
+            # Exit: RSI overbought (>70) or trend turns bearish
+            if rsi[i] > 70 or close[i] < ema_50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit: price breaks above daily R3 (reversal signal)
-            if high[i] > pivot_r3_aligned[i]:
+            # Exit: RSI oversold (<30) or trend turns bullish
+            if rsi[i] < 30 or close[i] > ema_50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
