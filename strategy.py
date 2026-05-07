@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-4H_Camarilla_R1_S1_Breakout_1DTrend_VolumeS_Rev3
-Hypothesis: Add momentum filter (Stochastic RSI) to reduce whipsaws and overtrading while maintaining 
-the proven edge of Camarilla breakout with volume confirmation. Use StochRSI < 20 for long (oversold) 
-and > 80 for short (overbought) to enter only at momentum extremes. This should reduce false breakouts 
-and improve win rate in both bull and bear markets by avoiding entries during weak momentum.
-Target: 50-150 trades/year on 4H timeframe with disciplined entries.
+1H_Camarilla_4hTrend_1dSMA50
+Hypothesis: Use 4h Camarilla levels (R3/S3) for entry timing in 1h timeframe, with 1d SMA50 as trend filter.
+In bull market: price above daily SMA50, look for long entries when 1h closes above 4h R3.
+In bear market: price below daily SMA50, look for short entries when 1h closes below 4h S3.
+This reduces overtrading by requiring alignment between 1h timing and higher timeframe structure.
+Target: 15-30 trades/year per symbol (60-120 total over 4 years).
 """
-name = "4H_Camarilla_R1_S1_Breakout_1DTrend_VolumeS_Rev3"
-timeframe = "4h"
+name = "1H_Camarilla_4hTrend_1dSMA50"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -25,107 +25,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1D data for Camarilla levels and EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 4h data for Camarilla levels
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend filter
+    # Calculate 4h Camarilla levels (R3, S3)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    # Camarilla: R3 = close + (high - low) * 1.1 / 4, S3 = close - (high - low) * 1.1 / 4
+    r3 = close_4h + (high_4h - low_4h) * 1.1 / 4
+    s3 = close_4h - (high_4h - low_4h) * 1.1 / 4
+    
+    r3_aligned = align_htf_to_ltf(prices, df_4h, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_4h, s3)
+    
+    # Get 1d data for SMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    # Calculate daily SMA50
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    sma_50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
+    sma_50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_50_1d)
     
-    # Calculate daily Camarilla levels (R1, S1)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Camarilla: R1 = close + (high - low) * 1.1 / 12, S1 = close - (high - low) * 1.1 / 12
-    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
-    
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Volume filter: current 4h volume > 1.5 x 20-period average volume
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_avg * 1.5)
-    
-    # Stochastic RSI (14,14,3,3) to identify momentum extremes
-    rsi_period = 14
-    stoch_period = 14
-    k_period = 3
-    d_period = 3
-    
-    # Calculate RSI
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
-    
-    # Calculate Stochastic RSI
-    rsi_min = pd.Series(rsi_values).rolling(window=stoch_period, min_periods=stoch_period).min()
-    rsi_max = pd.Series(rsi_values).rolling(window=stoch_period, min_periods=stoch_period).max()
-    stoch_rsi = (rsi_values - rsi_min) / (rsi_max - rsi_min) * 100
-    # Handle division by zero when rsi_max == rsi_min
-    stoch_rsi = np.where(rsi_max == rsi_min, 50, stoch_rsi)
-    
-    # Calculate %K and %D
-    k = pd.Series(stoch_rsi).rolling(window=k_period, min_periods=k_period).mean()
-    d = pd.Series(k).rolling(window=d_period, min_periods=d_period).mean()
-    stoch_k = k.values
-    stoch_d = d.values
+    # Session filter: 08:00-20:00 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20, 14, 14, 3, 3)  # Ensure sufficient warmup
+    start_idx = 50  # Ensure sufficient warmup for SMA50
     
     for i in range(start_idx, n):
         # Skip if any data is not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(vol_avg[i]) or 
-            np.isnan(stoch_k[i]) or 
-            np.isnan(stoch_d[i])):
+        if (np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or 
+            np.isnan(sma_50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above daily EMA34, 4h close above daily R1, volume confirmation, and StochRSI K < 20 (oversold)
-            if (close[i] > ema_34_1d_aligned[i] and 
-                close[i] > r1_aligned[i] and 
-                volume_filter[i] and 
-                stoch_k[i] < 20):
-                signals[i] = 0.25
+            # Long: price above daily SMA50, 1h close above 4h R3, and in session
+            if (close[i] > sma_50_1d_aligned[i] and 
+                close[i] > r3_aligned[i] and 
+                session_filter[i]):
+                signals[i] = 0.20
                 position = 1
-            # Short: price below daily EMA34, 4h close below daily S1, volume confirmation, and StochRSI K > 80 (overbought)
-            elif (close[i] < ema_34_1d_aligned[i] and 
-                  close[i] < s1_aligned[i] and 
-                  volume_filter[i] and 
-                  stoch_k[i] > 80):
-                signals[i] = -0.25
+            # Short: price below daily SMA50, 1h close below 4h S3, and in session
+            elif (close[i] < sma_50_1d_aligned[i] and 
+                  close[i] < s3_aligned[i] and 
+                  session_filter[i]):
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below daily EMA34
-            if close[i] < ema_34_1d_aligned[i]:
+            # Exit long: price crosses below daily SMA50
+            if close[i] < sma_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: price crosses above daily EMA34
-            if close[i] > ema_34_1d_aligned[i]:
+            # Exit short: price crosses above daily SMA50
+            if close[i] > sma_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
