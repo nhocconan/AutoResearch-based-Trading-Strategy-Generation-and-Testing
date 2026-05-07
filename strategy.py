@@ -1,13 +1,12 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-6h_Camarilla_R4_S4_Breakout_1dTrend
-Hypothesis: Trade breakouts of Camarilla R4/S4 levels only when aligned with daily trend (EMA200) and confirmed by volume spike. 
-R4/S4 represent strong breakout levels; daily EMA200 filters counter-trend moves; volume confirms breakout strength. 
-Designed for 15-25 trades/year on 6h timeframe to minimize fee drag. Works in bull/bear via daily trend filter.
+6h_TurtleTrader_20_10_Exit
+Hypothesis: Turtle Trading system adapted for 6h - Donchian breakouts (20-period) with 10-period exit.
+Works in all regimes: breakouts capture trends, tight exits prevent whipsaw. Volume filter ensures breakout strength.
+Designed for 50-100 trades over 4 years (~12-25/year) to minimize fee drag.
 """
 
-name = "6h_Camarilla_R4_S4_Breakout_1dTrend"
+name = "6h_TurtleTrader_20_10_Exit"
 timeframe = "6h"
 leverage = 1.0
 
@@ -17,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,86 +24,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
-        return np.zeros(n)
+    # Donchian channels (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate Camarilla pivot points (using prior day's OHLC)
-    # R4 = C + ((H-L) * 1.1/2), S4 = C - ((H-L) * 1.1/2)
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    # Exit channels (10-period)
+    high_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values
+    low_10 = pd.Series(low).rolling(window=10, min_periods=10).min().values
     
-    camarilla_range = daily_high - daily_low
-    r4 = daily_close + (camarilla_range * 1.1 / 2)
-    s4 = daily_close - (camarilla_range * 1.1 / 2)
-    
-    # Align Camarilla levels to 6h timeframe (with 1-day delay for completed bar)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4, additional_delay_bars=1)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4, additional_delay_bars=1)
-    
-    # Get daily data for trend filter (EMA200)
-    if len(df_1d) < 200:
-        return np.zeros(n)
-    
-    ema_200_1d = pd.Series(daily_close).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
-    
-    # Get 6h volume for confirmation
+    # Volume confirmation (20-period average)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.divide(volume, vol_ma20, out=np.zeros_like(volume), where=vol_ma20!=0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # Warmup
+    start_idx = 20  # Wait for Donchian calculation
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r4_aligned[i]) or 
-            np.isnan(s4_aligned[i]) or 
-            np.isnan(ema_200_1d_aligned[i]) or 
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(high_10[i]) or np.isnan(low_10[i]) or 
             np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine daily trend
-        close_1d_aligned = align_htf_to_ltf(prices, df_1d, daily_close)
-        if np.isnan(close_1d_aligned[i]):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-            
-        trend_up = close_1d_aligned[i] > ema_200_1d_aligned[i]
-        trend_down = close_1d_aligned[i] < ema_200_1d_aligned[i]
-        
         if position == 0:
-            # Long breakout: price breaks above R4 with upward trend and volume spike
-            if (close[i] > r4_aligned[i] and 
-                trend_up and 
-                vol_ratio[i] > 2.0):
+            # Long entry: break above 20-day high with volume confirmation
+            if close[i] > high_20[i] and vol_ratio[i] > 1.5:
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: price breaks below S4 with downward trend and volume spike
-            elif (close[i] < s4_aligned[i] and 
-                  trend_down and 
-                  vol_ratio[i] > 2.0):
+            # Short entry: break below 20-day low with volume confirmation
+            elif close[i] < low_20[i] and vol_ratio[i] > 1.5:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to daily close or trend turns down
-            if close[i] < daily_close[-1] if i == len(prices)-1 else close_1d_aligned[i] or not trend_up:
+            # Long exit: price returns to 10-day low
+            if close[i] < low_10[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to daily close or trend turns up
-            if close[i] > daily_close[-1] if i == len(prices)-1 else close_1d_aligned[i] or not trend_down:
+            # Short exit: price returns to 10-day high
+            if close[i] > high_10[i]:
                 signals[i] = 0.0
                 position = 0
             else:
