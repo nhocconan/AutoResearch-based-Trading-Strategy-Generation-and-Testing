@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_WeeklyPivot_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,28 +17,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w trend filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # 1d trend filter (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    sma50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
-    sma50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma50_1w)
-    trend_up = close > sma50_1w_aligned
-    trend_down = close < sma50_1w_aligned
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    trend_up = close > ema34_1d_aligned
+    trend_down = close < ema34_1d_aligned
     
-    # Daily pivot points (from previous day)
-    high_prev = prices['high'].shift(1).values
-    low_prev = prices['low'].shift(1).values
-    close_prev = prices['close'].shift(1).values
+    # Daily Camarilla pivot levels (R1/S1)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_prev = df_1d['close'].shift(1).values
+    close_1d_prev = np.concatenate([[close_1d_prev[0]], close_1d_prev[:-1]])
     
-    PP = (high_prev + low_prev + close_prev) / 3.0
-    R1 = PP * 2 - low_prev
-    S1 = PP * 2 - high_prev
-    # Align pivot levels (they are based on previous day, so no additional alignment needed)
-    # Since pivot is based on previous day, it's already known at current day open
-    # But we align to be safe with any data misalignment
+    R1 = close_1d_prev + (high_1d - low_1d) * 1.1 / 12
+    S1 = close_1d_prev - (high_1d - low_1d) * 1.1 / 12
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
     # Volume confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -47,44 +46,44 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Wait for SMA and volume MA
+    start_idx = max(34, 20)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(sma50_1w_aligned[i]) or np.isnan(PP[i]) or np.isnan(R1[i]) or np.isnan(S1[i]):
+        if np.isnan(ema34_1d_aligned[i]) or np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Close breaks above R1 with volume surge and 1w uptrend
-            if close[i] > R1[i] and vol_surge[i] and trend_up[i]:
-                signals[i] = 0.25
+            # Long: Close breaks above R1 with volume surge and 1d uptrend
+            if close[i] > R1_aligned[i] and vol_surge[i] and trend_up[i]:
+                signals[i] = 0.30
                 position = 1
-            # Short: Close breaks below S1 with volume surge and 1w downtrend
-            elif close[i] < S1[i] and vol_surge[i] and trend_down[i]:
-                signals[i] = -0.25
+            # Short: Close breaks below S1 with volume surge and 1d downtrend
+            elif close[i] < S1_aligned[i] and vol_surge[i] and trend_down[i]:
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
             # Exit: Close below S1 or trend turns down
-            if close[i] < S1[i] or not trend_up[i]:
+            if close[i] < S1_aligned[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
             # Exit: Close above R1 or trend turns up
-            if close[i] > R1[i] or not trend_down[i]:
+            if close[i] > R1_aligned[i] or not trend_down[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-# Hypothesis: Weekly trend filter with daily pivot breakouts captures institutional moves in both bull and bear markets.
-# Long when price breaks above daily R1 with volume confirmation in weekly uptrend.
-# Short when price breaks below daily S1 with volume confirmation in weekly downtrend.
-# Uses weekly SMA50 for trend, daily pivot points for institutional levels, and volume surge for conviction.
-# Designed for 1d timeframe to target 15-25 trades per year with low frequency to minimize fee drag.
+# Hypothesis: Camarilla R1/S1 breakouts with 1d trend filter and volume surge capture institutional breakout moves.
+# Long when price breaks above R1 (first resistance) with volume confirmation in 1d uptrend.
+# Short when price breaks below S1 (first support) with volume confirmation in 1d downtrend.
+# Uses daily Camarilla levels for institutional relevance, 1d EMA34 for trend, and volume surge for conviction.
+# Designed for 4h timeframe to balance trade frequency (~20-50/year) and capture multi-day trends.
 # Works in bull markets (breaks above R1 in uptrend) and bear markets (breaks below S1 in downtrend).
