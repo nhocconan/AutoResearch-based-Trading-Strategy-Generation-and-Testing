@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_KAMA_RSI_ChopFilter_v1"
-timeframe = "1d"
+name = "6h_AroonTrend_1dPullback"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,76 +17,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 1w KAMA(10) for trend filter
-    # KAMA calculation: efficiency ratio (ER), smoothing constants
-    change = np.abs(np.diff(df_1w['close'], prepend=df_1w['close'][0]))
-    volatility = np.abs(np.diff(df_1w['close'])).rolling(window=10, min_periods=10).sum()
-    er = change / (volatility + 1e-10)
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2  # fast=2, slow=30
-    kama = np.zeros_like(df_1w['close'])
-    kama[0] = df_1w['close'][0]
-    for i in range(1, len(kama)):
-        kama[i] = kama[i-1] + sc[i] * (df_1w['close'][i] - kama[i-1])
-    kama_1w = kama
-    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
+    # 1d Aroon indicators for trend direction
+    high_series = pd.Series(df_1d['high'])
+    low_series = pd.Series(df_1d['low'])
+    aroon_up = high_series.rolling(window=25, min_periods=25).apply(
+        lambda x: 100 * (24 - x.argmax()) / 24, raw=False
+    ).values
+    aroon_down = low_series.rolling(window=25, min_periods=25).apply(
+        lambda x: 100 * (24 - x.argmin()) / 24, raw=False
+    ).values
+    aroon_up_1d = align_htf_to_ltf(prices, df_1d, aroon_up)
+    aroon_down_1d = align_htf_to_ltf(prices, df_1d, aroon_down)
     
-    # 1d RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # 1d Choppiness Index(14)
-    atr = np.zeros(n)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first bar
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(highest_high - lowest_low) / (np.log10(atr * 14) + np.log10(1))
+    # 6h EMA(20) for pullback entry
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Wait for indicators
+    start_idx = 30  # Wait for Aroon and EMA
     
     for i in range(start_idx, n):
-        if np.isnan(kama_1w_aligned[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]):
+        if np.isnan(aroon_up_1d[i]) or np.isnan(aroon_down_1d[i]) or np.isnan(ema_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above KAMA (uptrend), RSI < 30 (oversold), chop > 61.8 (range)
-            if close[i] > kama_1w_aligned[i] and rsi[i] < 30 and chop[i] > 61.8:
+            # Long: 1d uptrend (Aroon Up > 70) + price pulls back to EMA(20)
+            if aroon_up_1d[i] > 70 and close[i] <= ema_20[i] * 1.005 and close[i] >= ema_20[i] * 0.995:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA (downtrend), RSI > 70 (overbought), chop > 61.8 (range)
-            elif close[i] < kama_1w_aligned[i] and rsi[i] > 70 and chop[i] > 61.8:
+            # Short: 1d downtrend (Aroon Down > 70) + price pulls back to EMA(20)
+            elif aroon_down_1d[i] > 70 and close[i] <= ema_20[i] * 1.005 and close[i] >= ema_20[i] * 0.995:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: RSI > 50 or chop < 38.2 (trending)
-            if rsi[i] > 50 or chop[i] < 38.2:
+            # Exit: 1d trend reversal (Aroon Down > 50) or strong adverse move
+            if aroon_down_1d[i] > 50 or close[i] < ema_20[i] * 0.98:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: RSI < 50 or chop < 38.2 (trending)
-            if rsi[i] < 50 or chop[i] < 38.2:
+            # Exit: 1d trend reversal (Aroon Up > 50) or strong adverse move
+            if aroon_up_1d[i] > 50 or close[i] > ema_20[i] * 1.02:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -94,10 +75,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 1d KAMA trend filter with RSI mean reversion in choppy markets
-# - KAMA(10) on weekly timeframe identifies dominant trend direction
-# - RSI(14) extremes (<30/>70) provide mean-reversion entries within the trend
-# - Choppiness Index > 61.8 ensures ranging conditions suitable for mean reversion
-# - Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend)
-# - Position size 0.25 targets ~15-25 trades/year, minimizing fee drag
-# - Exit when RSI returns to neutral (50) or market starts trending (chop < 38.2)
+# Hypothesis: 6s Aroon trend filter with 6h EMA pullback entry
+# - Aroon(25) on 1d identifies strong trends (>70) and weakening trends (<50)
+# - Enter on 6h pullbacks to EMA(20) during strong 1d trends
+# - Works in bull (buy pullbacks in uptrend) and bear (sell pullbacks in downtrend)
+# - Aroon exit provides timely trend reversal signals
+# - Position size 0.25 targets 15-25 trades/year, avoiding fee drag
+# - Pullback entry improves risk-reward vs breakout chasing
