@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume_v2"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -56,7 +56,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 12  # ~2 days for 4h to reduce trades
+    cooldown_bars = 24  # ~4 days for 4h to reduce trades
     
     start_idx = max(40, 50, 20)
     
@@ -122,6 +122,6 @@ def generate_signals(prices):
 # Short when price breaks below S1 level (with 0.5% buffer) with volume spike in 12h downtrend.
 # Exits on reversal to S1/R1 levels or trend change.
 # Uses 1d Camarilla levels for intraday support/resistance and 12h EMA50 for trend.
-# Volume confirmation filters false breakouts. Increased cooldown (2 days) and breakout threshold
-# reduce trade frequency to avoid fee drag. Target: 15-25 trades/year to work in bull/bear markets
+# Volume confirmation filters false breakouts. Increased cooldown (4 days) and breakout threshold
+# reduce trade frequency to avoid fee drag. Target: 10-15 trades/year to work in bull/bear markets
 # by capturing significant intraday moves with trend alignment. 4h timeframe reduces noise vs 12h.
