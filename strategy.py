@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_Donchian20_Breakout_1wEMA50_Trend_Volume"
-timeframe = "1d"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume_Spike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,41 +17,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for Camarilla pivot and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # 1w EMA50 trend filter
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # 1d EMA34 trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Donchian channels from 1d data (20-period)
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
+    # Camarilla pivot levels from 1d data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Volume filter: current volume > 1.5x 20-period average (for 1d)
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma_20[i] = np.mean(volume[i-20:i])
-    vol_filter = volume > (1.5 * vol_ma_20)
+    # Calculate Camarilla levels: R1, R3, S1, S3
+    # Pivot = (H + L + C) / 3
+    # Range = H - L
+    # R1 = Close + (Range * 1.0833)
+    # R3 = Close + (Range * 1.2500)
+    # S1 = Close - (Range * 1.0833)
+    # S3 = Close - (Range * 1.2500)
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    r1_1d = close_1d + (range_1d * 1.0833)
+    r3_1d = close_1d + (range_1d * 1.2500)
+    s1_1d = close_1d - (range_1d * 1.0833)
+    s3_1d = close_1d - (range_1d * 1.2500)
+    
+    # Align Camarilla levels to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    
+    # Volume filter: current volume > 1.8x 24-period average (for 12h)
+    vol_ma_24 = np.full(n, np.nan)
+    for i in range(24, n):
+        vol_ma_24[i] = np.mean(volume[i-24:i])
+    vol_filter = volume > (1.8 * vol_ma_24)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 1  # 1 day cooldown to reduce trades
+    cooldown_bars = 2  # ~1 day for 12h to reduce trades
     
-    start_idx = max(100, 20, 50)
+    start_idx = max(100, 24, 34)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or 
+            np.isnan(vol_ma_24[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,36 +82,36 @@ def generate_signals(prices):
         
         bars_since_last_trade += 1
         
-        # Determine 1w trend direction
-        trend_up = close > ema_50_1w_aligned[i]
-        trend_down = close < ema_50_1w_aligned[i]
+        # Determine 1d trend direction
+        trend_up = close > ema_34_1d_aligned[i]
+        trend_down = close < ema_34_1d_aligned[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: Price breaks above Donchian high with volume in uptrend
-            if (close[i] > donchian_high[i] and 
+            # Long: Price breaks above R1 with volume in uptrend
+            if (close[i] > r1_aligned[i] and 
                 trend_up[i] and 
                 vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: Price breaks below Donchian low with volume in downtrend
-            elif (close[i] < donchian_low[i] and 
+            # Short: Price breaks below S1 with volume in downtrend
+            elif (close[i] < s1_aligned[i] and 
                   trend_down[i] and 
                   vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit: Price falls below Donchian low or trend changes
-            if close[i] < donchian_low[i] or not trend_up[i]:
+            # Exit: Price falls below S1 or trend changes
+            if close[i] < s1_aligned[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price rises above Donchian high or trend changes
-            if close[i] > donchian_high[i] or not trend_down[i]:
+            # Exit: Price rises above R1 or trend changes
+            if close[i] > r1_aligned[i] or not trend_down[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
@@ -100,9 +120,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation on 1d timeframe.
-# Long when price breaks above Donchian high in uptrend with volume confirmation.
-# Short when price breaks below Donchian low in downtrend with volume confirmation.
-# Uses 1d timeframe to balance trade frequency and capture meaningful trends.
+# Hypothesis: Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume confirmation on 12h timeframe.
+# Long when price breaks above Camarilla R1 in uptrend with volume confirmation.
+# Short when price breaks below Camarilla S1 in downtrend with volume confirmation.
+# Uses 12h timeframe to balance trade frequency and capture meaningful trends.
+# Target: 50-150 total trades over 4 years (12-37/year) as per experiment guidelines.
 # Works in bull markets (breakouts in uptrend) and bear markets (breakdowns in downtrend).
-# Target: 30-100 total trades over 4 years (7-25/year) as per experiment guidelines.
+# Based on top-performing pattern from DB: Camarilla breakout + volume + trend filter.
