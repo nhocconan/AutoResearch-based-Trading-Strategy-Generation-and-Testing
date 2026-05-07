@@ -1,7 +1,6 @@
-#%%
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_v15"
-timeframe = "4h"
+name = "6h_RangeBreakout_WeeklyPivot_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -18,42 +17,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for trend filter and pivots
+    # 1d data for weekly pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 7:
         return np.zeros(n)
     
-    # 1d EMA34 trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate weekly pivot points from previous week
+    week_high = df_1d['high'].rolling(window=7, min_periods=7).max().shift(1).values
+    week_low = df_1d['low'].rolling(window=7, min_periods=7).min().shift(1).values
+    week_close = df_1d['close'].shift(1).values
     
-    # Previous day's OHLC for pivot calculation
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Classic pivot points for weekly range
+    weekly_pivot = (week_high + week_low + week_close) / 3
+    r1 = 2 * weekly_pivot - week_low
+    s1 = 2 * weekly_pivot - week_high
     
-    # Classic pivot points
-    pivot = (prev_high + prev_low + prev_close) / 3
-    r1 = 2 * pivot - prev_low
-    s1 = 2 * pivot - prev_high
-    
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume confirmation: current volume > 1.5 * 20-period average
+    # 6h range breakout detection
+    range_high = pd.Series(high).rolling(window=4, min_periods=4).max().shift(1).values  # Previous 4 periods (24h)
+    range_low = pd.Series(low).rolling(window=4, min_periods=4).min().shift(1).values
+    
+    range_high_aligned = range_high  # Already aligned to 6h
+    range_low_aligned = range_low
+    
+    # Volume confirmation: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > (vol_ma * 1.5)
+    volume_ok = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)
+    start_idx = max(4, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r1_aligned[i]) or 
+        if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
             np.isnan(s1_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -61,29 +61,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 + above 1d EMA34 + volume confirmation
-            if close[i] > r1_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_ok[i]:
+            # Long: price breaks above weekly R1 AND above 6h range high + volume spike
+            if close[i] > r1_aligned[i] and close[i] > range_high_aligned[i] and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + below 1d EMA34 + volume confirmation
-            elif close[i] < s1_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_ok[i]:
+            # Short: price breaks below weekly S1 AND below 6h range low + volume spike
+            elif close[i] < s1_aligned[i] and close[i] < range_low_aligned[i] and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: price returns to pivot or trend fails
+            # Exit: price returns to weekly pivot or range breaks in opposite direction
             if position == 1:
-                if close[i] < pivot_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+                if close[i] < weekly_pivot_aligned[i] or close[i] < range_low_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > pivot_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+                if close[i] > weekly_pivot_aligned[i] or close[i] > range_high_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = -0.25
     
     return signals
-
-#%%
