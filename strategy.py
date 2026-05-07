@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_24hBreakout_12hTrend_Volume"
-timeframe = "4h"
+name = "1h_Camarilla_R1S1_Breakout_4hTrend_VolumeFilter"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -16,19 +16,38 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Pre-calc session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(open_time).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # 12h EMA50 trend filter
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # 4h EMA50 trend filter
+    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # 24-hour high/low breakout (6 periods of 4h)
-    high_24h = pd.Series(high).rolling(window=6, min_periods=6).max().shift(1).values
-    low_24h = pd.Series(low).rolling(window=6, min_periods=6).min().shift(1).values
+    # Get daily data for Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Previous day's high, low, close for Camarilla calculation
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    
+    # Calculate Camarilla R1 and S1 levels
+    R1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    S1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    
+    # Align Camarilla levels to 1h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
     # Volume filter: current volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -37,37 +56,46 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(6, 20)  # Need 6 for 24h breakout, 20 for volume MA
+    start_idx = max(20, 50)  # Need 20 for volume MA, 50 for EMA
     
     for i in range(start_idx, n):
-        if np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma[i]):
+        # Skip if not in trading session
+        if not in_session[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+            
+        # Skip if any required data is NaN
+        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(R1_aligned[i]) or 
+            np.isnan(S1_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above 24h high AND above 12h EMA50 + volume
-            if close[i] > high_24h[i] and close[i] > ema_50_12h_aligned[i] and volume_ok[i]:
-                signals[i] = 0.25
+            # Long: price breaks above R1 AND above 4h EMA50 + volume
+            if close[i] > R1_aligned[i] and close[i] > ema_50_4h_aligned[i] and volume_ok[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below 24h low AND below 12h EMA50 + volume
-            elif close[i] < low_24h[i] and close[i] < ema_50_12h_aligned[i] and volume_ok[i]:
-                signals[i] = -0.25
+            # Short: price breaks below S1 AND below 4h EMA50 + volume
+            elif close[i] < S1_aligned[i] and close[i] < ema_50_4h_aligned[i] and volume_ok[i]:
+                signals[i] = -0.20
                 position = -1
         elif position != 0:
-            # Exit: price returns to 24h range or breaks in opposite direction
+            # Exit: price returns to opposite Camarilla level or breaks trend
             if position == 1:
-                if close[i] < low_24h[i] or close[i] < ema_50_12h_aligned[i]:
+                if close[i] < S1_aligned[i] or close[i] < ema_50_4h_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
             else:  # position == -1
-                if close[i] > high_24h[i] or close[i] > ema_50_12h_aligned[i]:
+                if close[i] > R1_aligned[i] or close[i] > ema_50_4h_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
