@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_WeeklyPivot_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_WeeklyPivot_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -39,7 +39,7 @@ def generate_signals(prices):
     s1 = pivot - range_hl
     r1 = pivot + range_hl
     
-    # Align weekly levels to 12h timeframe
+    # Align weekly levels to 4h timeframe
     s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
     r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
     
@@ -47,17 +47,17 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume spike detection: 2-period average (1 day of 12h bars)
-    vol_ma_2 = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
+    # Volume spike detection: 3-period average (3/4 day of 4h bars)
+    vol_ma_3 = pd.Series(volume).rolling(window=3, min_periods=3).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 2)  # Wait for EMA and volume MA
+    start_idx = max(34, 3)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
         if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(vol_ma_2[i])):
+            np.isnan(r1_aligned[i]) or np.isnan(vol_ma_3[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,7 +65,7 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: price above S1 with volume and daily uptrend
-            vol_condition = volume[i] > vol_ma_2[i] * 2.0
+            vol_condition = volume[i] > vol_ma_3[i] * 2.0
             uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
             
             if close[i] > s1_aligned[i] and vol_condition and uptrend:
@@ -77,14 +77,14 @@ def generate_signals(prices):
                 position = -1
         elif position == 1:
             # Exit: price back below S1 or volume drops
-            if close[i] < s1_aligned[i] or volume[i] < vol_ma_2[i] * 1.3:
+            if close[i] < s1_aligned[i] or volume[i] < vol_ma_3[i] * 1.3:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.30
         elif position == -1:
             # Exit: price back above R1 or volume drops
-            if close[i] > r1_aligned[i] or volume[i] < vol_ma_2[i] * 1.3:
+            if close[i] > r1_aligned[i] or volume[i] < vol_ma_3[i] * 1.3:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -92,17 +92,17 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 12h Weekly Pivot S1/R1 breakout with 1d trend and volume confirmation
+# Hypothesis: 4h Weekly Pivot S1/R1 breakout with 1d trend and volume confirmation
 # - Weekly Pivot S1/R1 act as key support/resistance levels from prior week
 # - Breakout above S1 with volume in daily uptrend = long opportunity
 # - Breakdown below R1 with volume in daily downtrend = short opportunity
 # - Volume spike (2.0x average) confirms institutional participation
 # - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
 # - Exit when price returns to S1/R1 or volume weakens
-# - Position size 0.30 targets ~15-40 trades/year, avoiding fee drag
+# - Position size 0.30 targets ~25-40 trades/year, avoiding fee drag
 # - Uses actual weekly Pivot levels (not daily) for better stability
 # - Daily trend filter reduces whipsaws vs using same timeframe
 # - Designed to work in BOTH bull and bear markets via trend filter
 # - Volume confirmation reduces false breakouts
-# - Novel combination: Weekly Pivot (1w) + trend (1d) + volume (12h) not recently tried
-# - Aims for 50-150 total trades over 4 years (12-37/year) to stay within limits
+# - Novel combination: Weekly Pivot (1w) + trend (1d) + volume (4h) not recently tried
+# - Aims for 100-160 total trades over 4 years (25-40/year) to stay within limits
