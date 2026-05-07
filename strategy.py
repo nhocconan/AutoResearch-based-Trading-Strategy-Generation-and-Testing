@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_4h_1d_Camarilla_R1S1_Breakout_Trend_Volume_v1"
-timeframe = "1h"
+name = "6h_1w_1d_Camarilla_WeeklyTrend_DailyPivot_Breakout"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,95 +17,96 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
+    # Load weekly and daily data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1w) < 30 or len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels from previous day
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Weekly trend filter: EMA(50) on weekly close
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
+    # Daily pivot levels from previous day
+    prev_high_1d = df_1d['high'].shift(1).values
+    prev_low_1d = df_1d['low'].shift(1).values
+    prev_close_1d = df_1d['close'].shift(1).values
     
-    # Camarilla levels
-    s1 = prev_close - (range_hl * 1.08 / 2)
-    r1 = prev_close + (range_hl * 1.08 / 2)
+    pivot_1d = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
+    range_1d = prev_high_1d - prev_low_1d
     
-    # Align daily levels to 1h timeframe
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    # Camarilla levels (S3/R3 for reversal, S4/R4 for breakout)
+    s3 = prev_close_1d - (range_1d * 1.1 / 4)
+    r3 = prev_close_1d + (range_1d * 1.1 / 4)
+    s4 = prev_close_1d - (range_1d * 1.1 / 2)
+    r4 = prev_close_1d + (range_1d * 1.1 / 2)
     
-    # Daily trend filter: EMA(34) on daily close
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align daily levels to 6h timeframe
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     
-    # 4h timeframe for signal direction
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
-    
-    # 4h EMA(21) for trend
-    ema_21_4h = pd.Series(df_4h['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
-    
-    # Volume spike detection: 12-period average (6 hours)
-    vol_ma_12 = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
+    # Volume spike: 4-period average (1 day of 6h bars)
+    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 21, 12)  # Wait for indicators
+    start_idx = max(50, 4)  # Wait for weekly EMA and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(ema_21_4h_aligned[i]) or 
-            np.isnan(vol_ma_12[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(r4_aligned[i]) or np.isnan(vol_ma_4[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above S1 with volume and daily/4h uptrend
-            vol_condition = volume[i] > vol_ma_12[i] * 2.0
-            daily_uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
-            fourh_uptrend = ema_21_4h_aligned[i] > ema_21_4h_aligned[i-1]
+            # Long: price above R3 with weekly uptrend and volume
+            # OR price breaks above S4 with weekly uptrend (strong breakout)
+            vol_condition = volume[i] > vol_ma_4[i] * 2.0
+            weekly_uptrend = ema_50_1w_aligned[i] > ema_50_1w_aligned[i-1]
             
-            if close[i] > s1_aligned[i] and vol_condition and daily_uptrend and fourh_uptrend:
-                signals[i] = 0.20
+            long_signal = (close[i] > r3_aligned[i] or close[i] > s4_aligned[i]) and vol_condition and weekly_uptrend
+            
+            # Short: price below S3 with weekly downtrend and volume
+            # OR price breaks below R4 with weekly downtrend (strong breakdown)
+            short_signal = (close[i] < s3_aligned[i] or close[i] < r4_aligned[i]) and vol_condition and not weekly_uptrend
+            
+            if long_signal:
+                signals[i] = 0.25
                 position = 1
-            # Short: price below R1 with volume and daily/4h downtrend
-            elif close[i] < r1_aligned[i] and vol_condition and not daily_uptrend and not fourh_uptrend:
-                signals[i] = -0.20
+            elif short_signal:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below S1 or volume drops
-            if close[i] < s1_aligned[i] or volume[i] < vol_ma_12[i] * 1.3:
+            # Exit: price returns to R3 or weekly trend turns down
+            if close[i] < r3_aligned[i] or ema_50_1w_aligned[i] < ema_50_1w_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above R1 or volume drops
-            if close[i] > r1_aligned[i] or volume[i] < vol_ma_12[i] * 1.3:
+            # Exit: price returns to S3 or weekly trend turns up
+            if close[i] > s3_aligned[i] or ema_50_1w_aligned[i] > ema_50_1w_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-# Hypothesis: 1h Camarilla S1/R1 breakout with daily and 4h trend + volume confirmation
-# - Daily Camarilla S1/R1 act as strong support/resistance levels
-# - Breakout above S1 with volume in daily and 4h uptrend = long opportunity
-# - Breakdown below R1 with volume in daily and 4h downtrend = short opportunity
-# - Volume spike (2.0x average) confirms institutional participation
-# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
-# - Exit when price returns to S1/R1 or volume weakens
-# - Position size 0.20 targets ~15-30 trades/year, avoiding fee drag
-# - Uses actual daily and 4h data for proper multi-timeframe alignment
-# - Strict conditions to prevent overtrading while maintaining edge in BTC/ETH
-# - Added 4h trend filter to improve signal quality and reduce false breakouts
+# Hypothesis: 6h Camarilla S3/R3/S4/R4 breakout with weekly trend filter
+# - Weekly EMA(50) determines primary trend (bull/bear regime)
+# - In weekly uptrend: long when price breaks above R3 (reversal) or S4 (breakout) with volume
+# - In weekly downtrend: short when price breaks below S3 (reversal) or R4 (breakdown) with volume
+# - Uses S3/R3 for mean-reversion entries in trend, S4/R4 for momentum breakouts
+# - Volume spike (2x average) confirms institutional participation
+# - Exits when price returns to S3/R3 or weekly trend changes
+# - Position size 0.25 targets ~20-40 trades/year, avoiding fee drag
+# - Works in both bull (buy breaks in uptrend) and bear (sell breaks in downtrend)
+# - Weekly trend filter avoids counter-trend trades in strong regimes
+# - Combines reversal and breakout logic for adaptability to market conditions
