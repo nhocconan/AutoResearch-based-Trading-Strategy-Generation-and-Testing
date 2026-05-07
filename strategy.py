@@ -1,8 +1,5 @@
-# 1d_WeeklyPivot_Momentum_Breakout
-# Hypothesis: On daily timeframe, price breaking above/below weekly pivot levels with volume confirmation and weekly trend filter captures institutional order flow. Weekly pivot levels (R1/S1) act as key support/resistance where breakouts often continue in the direction of the weekly trend. This approach works in bull markets (breakouts above pivot in uptrend) and bear markets (breakdowns below pivot in downtrend) by aligning with higher timeframe momentum. Target: 30-100 trades over 4 years (7-25/year) to minimize fee drag while capturing significant moves.
-
 #!/usr/bin/env python3
-name = "1d_WeeklyPivot_Momentum_Breakout"
+name = "1d_WeeklyPivot_Momentum_Breakout_v2"
 timeframe = "1d"
 leverage = 1.0
 
