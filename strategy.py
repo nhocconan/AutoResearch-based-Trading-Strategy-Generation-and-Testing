@@ -1,18 +1,6 @@
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: Camarilla R1/S1 breakouts on 12h with daily trend filter and volume confirmation
-# - Camarilla R1/S1 represent key intraday support/resistance levels from previous day
-# - Breakout above R1 in daily uptrend (price > EMA34) signals bullish continuation
-# - Breakdown below S1 in daily downtrend (price < EMA34) signals bearish continuation
-# - Volume confirmation (1.5x average) reduces false breakouts
-# - Exit when price returns to pivot point or daily trend reverses
-# - Uses 1d timeframe for structure and trend, 12h for execution (lower frequency = less fee drag)
-# - Target: 20-40 trades/year to stay within optimal range for 12h timeframe
-# - Works in both bull (breakouts in uptrend) and bear (breakdowns in downtrend)
-# - Focus on BTC/ETH as primary targets to avoid overtrading pitfalls
-
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Williams_Alligator_ElderRay_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -29,71 +17,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE for Camarilla pivot and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Load 4h data for Williams Alligator
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 13:
         return np.zeros(n)
     
-    # Camarilla pivot levels from previous day (standard formula)
-    c_high = df_1d['high'].values
-    c_low = df_1d['low'].values
-    c_close = df_1d['close'].values
+    # Williams Alligator lines (median price)
+    median_price_4h = (df_4h['high'].values + df_4h['low'].values) / 2
+    jaw = pd.Series(median_price_4h).rolling(window=13, center=False, min_periods=13).mean().values
+    teeth = pd.Series(median_price_4h).rolling(window=8, center=False, min_periods=8).mean().values
+    lips = pd.Series(median_price_4h).rolling(window=5, center=False, min_periods=5).mean().values
     
-    pivot = (c_high + c_low + c_close) / 3
-    range_val = c_high - c_low
-    r1 = pivot + (range_val * 1.1 / 12)
-    s1 = pivot - (range_val * 1.1 / 12)
+    # Align to lower timeframe
+    jaw_4h = align_htf_to_ltf(prices, df_4h, jaw)
+    teeth_4h = align_htf_to_ltf(prices, df_4h, teeth)
+    lips_4h = align_htf_to_ltf(prices, df_4h, lips)
     
-    # Align pivot levels to 12h timeframe
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
-    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
+    # Elder Ray: Bull/Bear Power (13-period EMA of high/low minus EMA)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    # Daily EMA34 for trend filter
-    ema_34_1d = pd.Series(c_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Trend filter: 50 EMA on 1d
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Volume spike detection (1.5x 20-period average)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)
+    start_idx = max(50, 13)
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or 
-            np.isnan(ema_34_12h[i]) or np.isnan(vol_ma_20[i]) or
-            np.isnan(pivot_12h[i])):
+        if (np.isnan(jaw_4h[i]) or np.isnan(teeth_4h[i]) or np.isnan(lips_4h[i]) or
+            np.isnan(ema_50_4h[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_condition = volume[i] > vol_ma_20[i] * 1.5
+        # Williams Alligator: Lips > Teeth > Jaw = bullish alignment
+        # Lips < Teeth < Jaw = bearish alignment
+        alligator_bull = lips_4h[i] > teeth_4h[i] and teeth_4h[i] > jaw_4h[i]
+        alligator_bear = lips_4h[i] < teeth_4h[i] and teeth_4h[i] < jaw_4h[i]
         
         if position == 0:
-            # Long: break above R1 in daily uptrend with volume
-            if close[i] > r1_12h[i] and close[i] > ema_34_12h[i] and vol_condition:
-                signals[i] = 0.30
+            # Long: Bullish Alligator + Bull Power > 0 + price above 1d EMA50
+            if alligator_bull and bull_power[i] > 0 and close[i] > ema_50_4h[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: break below S1 in daily downtrend with volume
-            elif close[i] < s1_12h[i] and close[i] < ema_34_12h[i] and vol_condition:
-                signals[i] = -0.30
+            # Short: Bearish Alligator + Bear Power < 0 + price below 1d EMA50
+            elif alligator_bear and bear_power[i] < 0 and close[i] < ema_50_4h[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price returns to pivot or trend reverses
-            if close[i] < pivot_12h[i] or close[i] < ema_34_12h[i]:
+            # Exit: Alligator turns bearish or Bull Power turns negative
+            if not alligator_bull or bull_power[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: price returns to pivot or trend reverses
-            if close[i] > pivot_12h[i] or close[i] > ema_34_12h[i]:
+            # Exit: Alligator turns bullish or Bear Power turns positive
+            if not alligator_bear or bear_power[i] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
