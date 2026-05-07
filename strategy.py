@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
-timeframe = "4h"
+name = "1d_WeeklyTrend_DailyBreakout"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,49 +17,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA34 trend filter and Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get weekly data for trend filter (EMA20)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate weekly EMA20 for trend filter
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Calculate Camarilla levels from previous 1d candle (R3 and S3)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate daily Donchian breakout levels (20-period)
+    # We need the last 20 daily closes to calculate the channel
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Shift to get previous 1d period's values
-    high_1d_shifted = np.roll(high_1d, 1)
-    low_1d_shifted = np.roll(low_1d, 1)
-    close_1d_shifted = np.roll(close_1d, 1)
-    
-    # Calculate Camarilla width for R3/S3: (H-L)*1.1/4
-    camarilla_width = (high_1d_shifted - low_1d_shifted) * 1.1 / 4
-    r3 = close_1d_shifted + camarilla_width  # R3 level
-    s3 = close_1d_shifted - camarilla_width  # S3 level
-    
-    # Align Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # Volume confirmation: current volume vs 20-period average
+    # Calculate volume confirmation (current volume vs 20-period average)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / vol_ma20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Ensure sufficient warmup
+    start_idx = 20  # Wait for Donchian calculation
     
     for i in range(start_idx, n):
         # Skip if any data is not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or 
+        if (np.isnan(ema_20_1w_aligned[i]) or 
+            np.isnan(high_20[i]) or 
+            np.isnan(low_20[i]) or 
             np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -67,31 +53,31 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R3 level, uptrend (price > EMA34), volume spike
-            if (close[i] > r3_aligned[i] and 
-                close[i] > ema_34_1d_aligned[i] and 
-                volume_ratio[i] > 2.5):
-                signals[i] = 0.30
+            # Long: price breaks above 20-day high, weekly uptrend (price > weekly EMA20), volume confirmation
+            if (close[i] > high_20[i] and 
+                close[i] > ema_20_1w_aligned[i] and 
+                volume_ratio[i] > 1.5):
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 level, downtrend (price < EMA34), volume spike
-            elif (close[i] < s3_aligned[i] and 
-                  close[i] < ema_34_1d_aligned[i] and 
-                  volume_ratio[i] > 2.5):
-                signals[i] = -0.30
+            # Short: price breaks below 20-day low, weekly downtrend (price < weekly EMA20), volume confirmation
+            elif (close[i] < low_20[i] and 
+                  close[i] < ema_20_1w_aligned[i] and 
+                  volume_ratio[i] > 1.5):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below S3 level (reversal signal)
-            if close[i] < s3_aligned[i]:
+            # Exit long: price breaks below 20-day low (reversal signal)
+            if close[i] < low_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above R3 level (reversal signal)
-            if close[i] > r3_aligned[i]:
+            # Exit short: price breaks above 20-day high (reversal signal)
+            if close[i] > high_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
