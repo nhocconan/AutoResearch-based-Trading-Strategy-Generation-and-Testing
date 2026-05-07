@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_TRIX_Trend_Filter_With_Volume
-Hypothesis: TRIX momentum on 4h with 1-day trend filter and volume confirmation.
-Works in bull/bear via trend filter. Targets 20-30 trades/year to minimize fee drag.
+1d_RSI_Trend_Filter_With_Volume
+Hypothesis: On daily timeframe, RSI(14) below 40 with price above 200-day EMA and volume confirmation generates long signals; RSI above 60 with price below 200-day EMA and volume confirmation generates short signals. Trend filter avoids counter-trend trades, reducing whipsaw in sideways markets. Designed for low trade frequency to minimize fee drag, targeting 10-20 trades/year.
 """
 
-name = "4h_TRIX_Trend_Filter_With_Volume"
-timeframe = "4h"
+name = "1d_RSI_Trend_Filter_With_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -23,38 +22,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # TRIX: triple smoothed EMA of price, then ROC
-    # EMA1 = EMA(close, 12)
-    # EMA2 = EMA(EMA1, 12)
-    # EMA3 = EMA(EMA2, 12)
-    # TRIX = (EMA3 - EMA3[1]) / EMA3[1] * 100
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
-    
-    # Calculate TRIX as percentage change
-    trix_raw = np.zeros_like(close)
-    trix_raw[1:] = (ema3[1:] - ema3[:-1]) / ema3[:-1] * 100
-    
-    # 1-day trend filter: EMA of daily close
+    # 200-day EMA trend filter (using 1d data aligned to 1d timeframe)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    ema_200 = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
     
-    # Volume confirmation: current volume > 20-period average
+    # Volume confirmation: current volume > 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(200, n):
         # Skip if any critical value is NaN
-        if (np.isnan(trix_raw[i]) or np.isnan(ema_1d_aligned[i]) or 
+        if (np.isnan(rsi[i]) or np.isnan(ema_200_aligned[i]) or 
             np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
@@ -62,24 +56,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: TRIX crosses above zero AND above 1-day EMA with volume confirmation
-            if trix_raw[i] > 0 and trix_raw[i-1] <= 0 and close[i] > ema_1d_aligned[i] and volume[i] > vol_ma[i]:
+            # Long: RSI < 40, price above 200 EMA, volume confirmation
+            if rsi[i] < 40 and close[i] > ema_200_aligned[i] and volume[i] > vol_ma[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX crosses below zero AND below 1-day EMA with volume confirmation
-            elif trix_raw[i] < 0 and trix_raw[i-1] >= 0 and close[i] < ema_1d_aligned[i] and volume[i] > vol_ma[i]:
+            # Short: RSI > 60, price below 200 EMA, volume confirmation
+            elif rsi[i] > 60 and close[i] < ema_200_aligned[i] and volume[i] > vol_ma[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: TRIX crosses below zero
-            if trix_raw[i] < 0 and trix_raw[i-1] >= 0:
+            # Exit: RSI crosses above 60 (overbought) or price below 200 EMA
+            if rsi[i] > 60 or close[i] < ema_200_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: TRIX crosses above zero
-            if trix_raw[i] > 0 and trix_raw[i-1] <= 0:
+            # Exit: RSI crosses below 40 (oversold) or price above 200 EMA
+            if rsi[i] < 40 or close[i] > ema_200_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
