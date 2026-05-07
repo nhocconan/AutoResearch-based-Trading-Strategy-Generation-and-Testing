@@ -1,14 +1,9 @@
-#!/usr/bin/env python3
-"""
-4H_KAMA_Trend_R1_S1_Breakout_12H_Trend_Filter_v1
-Hypothesis: Use 4h KAMA (ER=10) for trend direction and 12h Camarilla R1/S1 levels for entry.
-Long when price crosses above 4h KAMA and touches 12h R1 level; 
-Short when price crosses below 4h KAMA and touches 12h S1 level.
-Volume confirmation: current volume > 1.5x 20-period average volume.
-This combines adaptive trend-following with pivot point precision to reduce false signals and work in both bull and bear markets.
-"""
-name = "4H_KAMA_Trend_R1_S1_Breakout_12H_Trend_Filter_v1"
-timeframe = "4h"
+# 12H_RSI_Overbought_Oversold_MeanReversion_v1
+# Hypothesis: Use 12h RSI for mean reversion signals. Long when RSI < 30 (oversold) and price above 12h EMA50 (uptrend filter). Short when RSI > 70 (overbought) and price below 12h EMA50 (downtrend filter). Volume confirmation: current volume > 1.5x 20-period average volume. Designed to work in both bull and bear markets by combining momentum extremes with trend filter.
+# Timeframe: 12h
+# Expected trades: 15-25 per year (60-100 total over 4 years) to stay within fee-efficient range.
+name = "12H_RSI_Overbought_Oversold_MeanReversion_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,38 +20,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for KAMA trend
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 10:
-        return np.zeros(n)
-    
-    # Calculate 4h KAMA (ER=10)
-    close_4h = pd.Series(df_4h['close'])
-    change = abs(close_4h.diff(10))
-    volatility = close_4h.diff().abs().rolling(window=10).sum()
-    er = change / volatility.replace(0, 1e-10)
-    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
-    kama = [close_4h.iloc[0]]
-    for i in range(1, len(close_4h)):
-        kama.append(kama[-1] + sc.iloc[i] * (close_4h.iloc[i] - kama[-1]))
-    kama = np.array(kama)
-    kama_aligned = align_htf_to_ltf(prices, df_4h, kama)
-    
-    # Get 12h data for Camarilla levels
+    # Get 12h data for RSI and EMA
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 1:
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 12h Camarilla levels (R1, S1)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    pivot = (high_12h + low_12h + close_12h) / 3
-    range_12h = high_12h - low_12h
-    r1 = pivot + (range_12h * 1.1 / 12)
-    s1 = pivot - (range_12h * 1.1 / 12)
-    r1_aligned = align_htf_to_ltf(prices, df_12h, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_12h, s1)
+    # Calculate 12h RSI(14)
+    close_12h = pd.Series(df_12h['close'])
+    delta = close_12h.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
+    
+    # Calculate 12h EMA50 for trend filter
+    ema50 = close_12h.ewm(span=50, adjust=False).mean().values
+    
+    # Align indicators to 12h timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_12h, rsi)
+    ema50_aligned = align_htf_to_ltf(prices, df_12h, ema50)
     
     # Volume filter: current volume > 1.5 * 20-period average volume
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -66,14 +51,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_exit = 0  # bars since last exit to prevent overtrading
     
-    start_idx = max(10, 20)  # Ensure sufficient warmup
+    start_idx = 50  # Ensure sufficient warmup for indicators
     
     for i in range(start_idx, n):
         bars_since_exit += 1
         
         # Skip if any data is not ready
-        if (np.isnan(kama_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(vol_avg[i])):
+        if (np.isnan(rsi_aligned[i]) or np.isnan(ema50_aligned[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -81,29 +65,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Minimum 12 bars between trades (2 days on 4h TF) to reduce frequency
-            if bars_since_exit < 12:
+            # Minimum 24 bars between trades (2 days on 12h TF) to reduce frequency
+            if bars_since_exit < 24:
                 continue
                 
-            # Long: price crosses above KAMA and touches R1 level
-            if (close[i] > kama_aligned[i] and close[i-1] <= kama_aligned[i-1] and 
-                low[i] <= r1_aligned[i]):
+            # Long: RSI < 30 (oversold) and price above EMA50 (uptrend)
+            if (rsi_aligned[i] < 30 and close[i] > ema50_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_exit = 0
-            # Short: price crosses below KAMA and touches S1 level
-            elif (close[i] < kama_aligned[i] and close[i-1] >= kama_aligned[i-1] and 
-                  high[i] >= s1_aligned[i]):
+            # Short: RSI > 70 (overbought) and price below EMA50 (downtrend)
+            elif (rsi_aligned[i] > 70 and close[i] < ema50_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_exit = 0
         elif position != 0:
-            # Exit: price returns to opposite KAMA side
-            if position == 1 and close[i] < kama_aligned[i]:
+            # Exit: RSI returns to neutral zone (40-60)
+            if position == 1 and rsi_aligned[i] > 40:
                 signals[i] = 0.0
                 position = 0
                 bars_since_exit = 0
-            elif position == -1 and close[i] > kama_aligned[i]:
+            elif position == -1 and rsi_aligned[i] < 60:
                 signals[i] = 0.0
                 position = 0
                 bars_since_exit = 0
