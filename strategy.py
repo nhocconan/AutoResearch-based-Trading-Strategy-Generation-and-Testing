@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -50,10 +50,13 @@ def generate_signals(prices):
         vol_ma_20[i] = np.mean(volume[i-20:i])
     vol_filter = volume > (1.5 * vol_ma_20)
     
+    # Additional filter: require stronger breakout (at least 0.5% above/below level)
+    breakout_threshold = 0.005  # 0.5%
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 6  # ~1 day for 4h
+    cooldown_bars = 12  # ~2 days for 4h to reduce trades
     
     start_idx = max(40, 50, 20)
     
@@ -79,16 +82,16 @@ def generate_signals(prices):
         trend_12h_down = close_12h_aligned[i] < ema_50_12h_aligned[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: Break above R1 with volume in 12h uptrend
-            if (close[i] > R1_aligned[i] and 
+            # Long: Break above R1 with volume in 12h uptrend (stronger breakout)
+            if (close[i] > R1_aligned[i] * (1 + breakout_threshold) and 
                 close[i-1] <= R1_aligned[i-1] and 
                 trend_12h_up and 
                 vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: Break below S1 with volume in 12h downtrend
-            elif (close[i] < S1_aligned[i] and 
+            # Short: Break below S1 with volume in 12h downtrend (stronger breakout)
+            elif (close[i] < S1_aligned[i] * (1 - breakout_threshold) and 
                   close[i-1] >= S1_aligned[i-1] and 
                   trend_12h_down and 
                   vol_filter[i]):
@@ -115,10 +118,10 @@ def generate_signals(prices):
     return signals
 
 # Hypothesis: Camarilla R1/S1 breakout with 12h trend filter and volume confirmation on 4h timeframe.
-# Long when price breaks above R1 level with volume spike in 12h uptrend.
-# Short when price breaks below S1 level with volume spike in 12h downtrend.
+# Long when price breaks above R1 level (with 0.5% buffer) with volume spike in 12h uptrend.
+# Short when price breaks below S1 level (with 0.5% buffer) with volume spike in 12h downtrend.
 # Exits on reversal to S1/R1 levels or trend change.
 # Uses 1d Camarilla levels for intraday support/resistance and 12h EMA50 for trend.
-# Volume confirmation filters false breakouts. Cooldown prevents overtrading.
-# Target: 20-40 trades/year to avoid fee drag. Works in bull/bear by capturing
-# significant intraday moves with trend alignment. 4h timeframe reduces noise vs 12h.
+# Volume confirmation filters false breakouts. Increased cooldown (2 days) and breakout threshold
+# reduce trade frequency to avoid fee drag. Target: 15-25 trades/year to work in bull/bear markets
+# by capturing significant intraday moves with trend alignment. 4h timeframe reduces noise vs 12h.
