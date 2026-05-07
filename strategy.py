@@ -3,14 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R with 1d ADX trend filter and volume confirmation.
-# Long when Williams %R crosses above -20 (oversold recovery) AND 1d ADX > 25 (trending) AND 1d volume spike.
-# Short when Williams %R crosses below -80 (overbought breakdown) AND 1d ADX > 25 AND 1d volume spike.
-# Williams %R identifies momentum reversals, ADX filters for trending markets to avoid whipsaws,
-# volume confirms institutional interest. Designed for 6h timeframe to balance signal frequency and noise.
-# Works in bull markets (captures oversold bounces) and bear markets (captures overbought breakdowns).
-name = "6h_WilliamsR_ADX_Volume"
-timeframe = "6h"
+# Hypothesis: 1h strategy using 4h trend (EMA21) and 1d volatility regime (ATR ratio) for direction,
+# with 1h RSI for entry timing. Long in uptrend + low volatility on RSI pullback,
+# Short in downtrend + low volatility on RSI bounce. Designed for 15-30 trades/year.
+# Works in bull/bear by following 4h trend and avoiding high volatility whipsaws.
+name = "1h_4hTrend_1dVolRegime_RSI"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,105 +19,93 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Load 1d data for ADX and volume spike
+    # Load 4h data for trend (EMA21)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
+        return np.zeros(n)
+    
+    # 4h EMA21 for trend direction
+    ema_21_4h = pd.Series(df_4h['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
+    
+    # Load 1d data for volatility regime (ATR ratio)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d ADX calculation (14-period)
+    # 1d ATR(14) and ATR(50) for volatility regime
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]  # first period
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Calculate True Range
+    tr = []
+    for i in range(len(close_1d)):
+        if i == 0:
+            tr.append(high_1d[0] - low_1d[0])
+        else:
+            tr.append(max(high_1d[i] - low_1d[i], abs(high_1d[i] - close_1d[i-1]), abs(low_1d[i] - close_1d[i-1])))
+    tr = np.array(tr)
     
-    # Directional Movement
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    up_move[0] = 0
-    down_move[0] = 0
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
     
-    # Smoothed values
-    def smooth_wilder(arr, period):
-        result = np.zeros_like(arr)
-        result[period-1] = np.nansum(arr[:period])
-        for i in range(period, len(arr)):
-            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
-        return result
+    # ATR ratio: short-term / long-term volatility
+    atr_ratio = np.where(atr_50 > 0, atr_14 / atr_50, 1.0)
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
-    atr = smooth_wilder(tr, 14)
-    plus_di = 100 * smooth_wilder(plus_dm, 14) / atr
-    minus_di = 100 * smooth_wilder(minus_dm, 14) / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = smooth_wilder(dx, 14)
+    # 1h RSI(14) for entry timing
+    rsi_period = 14
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # 1d volume spike: current volume > 2.0 * 20-period EMA
-    vol_ema_20 = pd.Series(df_1d['volume']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike_1d = np.where(vol_ema_20 > 0, df_1d['volume'].values / vol_ema_20, 1.0) > 2.0
-    
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
-    
-    # 6h Williams %R (14-period)
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14)
-    williams_r = np.where((highest_high_14 - lowest_low_14) > 0, williams_r, -50.0)  # avoid division by zero
+    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Sufficient warmup for calculations
+    start_idx = 100  # Sufficient warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(adx_aligned[i]) or np.isnan(vol_spike_1d_aligned[i]) or 
-            np.isnan(williams_r[i])):
+        if (np.isnan(ema_21_4h_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or 
+            np.isnan(rsi[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Williams %R cross signals
-        williams_r_prev = williams_r[i-1] if i > 0 else -50
-        wr_cross_above_20 = (williams_r_prev <= -20) and (williams_r[i] > -20)
-        wr_cross_below_80 = (williams_r_prev >= -80) and (williams_r[i] < -80)
+        # Determine trend and volatility regime
+        uptrend = close[i] > ema_21_4h_aligned[i]
+        downtrend = close[i] < ema_21_4h_aligned[i]
+        low_volatility = atr_ratio_aligned[i] < 0.8  # Volatility contraction
         
         if position == 0:
-            # Long condition: WR crosses above -20, ADX > 25 (trending), volume spike
-            long_condition = wr_cross_above_20 and (adx_aligned[i] > 25) and vol_spike_1d_aligned[i]
-            # Short condition: WR crosses below -80, ADX > 25 (trending), volume spike
-            short_condition = wr_cross_below_80 and (adx_aligned[i] > 25) and vol_spike_1d_aligned[i]
-            
-            if long_condition:
-                signals[i] = 0.25
+            # Long: uptrend + low volatility + RSI oversold (<30)
+            if uptrend and low_volatility and rsi[i] < 30:
+                signals[i] = 0.20
                 position = 1
-            elif short_condition:
-                signals[i] = -0.25
+            # Short: downtrend + low volatility + RSI overbought (>70)
+            elif downtrend and low_volatility and rsi[i] > 70:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit: WR crosses below -50 (momentum loss) or ADX weakens (< 20)
-            if (williams_r[i] < -50) or (adx_aligned[i] < 20):
+            # Exit long: trend reversal or volatility expansion or RSI overbought
+            if (not uptrend) or (atr_ratio_aligned[i] > 1.2) or (rsi[i] > 70):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit: WR crosses above -50 (momentum loss) or ADX weakens (< 20)
-            if (williams_r[i] > -50) or (adx_aligned[i] < 20):
+            # Exit short: trend reversal or volatility expansion or RSI oversold
+            if (not downtrend) or (atr_ratio_aligned[i] > 1.2) or (rsi[i] < 30):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
