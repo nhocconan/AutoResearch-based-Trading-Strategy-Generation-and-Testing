@@ -1,6 +1,6 @@
-#/usr/bin/env python3
-name = "12h_Donchian_20_Breakout_1wTrend_Volume"
-timeframe = "12h"
+#!/usr/bin/env python3
+name = "4h_TRIX_Zero_Cross_Volume_Confirm_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,66 +17,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
-    # Weekly EMA34 for trend filter
-    close_1w = df_1w['close'].values
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
-    
-    # Load daily data for Donchian calculation
+    # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # Donchian channels (20-day)
-    upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # TRIX on 1d: TRIX = EMA(EMA(EMA(close, 15), 15), 15) then percent change
+    ema1 = pd.Series(close_1d).ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean()
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean()
+    trix_raw = (ema3 / ema3.shift(1) - 1) * 100
+    trix = trix_raw.values
+    trix_signal = pd.Series(trix).ewm(span=9, adjust=False, min_periods=9).mean().values
     
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower)
+    # Align TRIX signal line to 4h (needs extra delay for signal confirmation)
+    trix_signal_aligned = align_htf_to_ltf(prices, df_1d, trix_signal, additional_delay_bars=1)
     
-    # Volume spike: > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > 1.5 * vol_ma
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Volume spike: > 2.0x 24-period average (6 trading days)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_spike = volume > 2.0 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)  # Wait for Donchian and EMA34
+    start_idx = max(30, 50)  # Wait for TRIX and EMA50
     
     for i in range(start_idx, n):
-        if np.isnan(ema34_1w_aligned[i]) or np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]):
+        if np.isnan(trix_signal_aligned[i]) or np.isnan(ema50_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above upper Donchian with volume spike in weekly uptrend
-            if close[i] > upper_aligned[i] and vol_spike[i] and close[i] > ema34_1w_aligned[i]:
+            # Long: TRIX crosses above zero with volume spike in uptrend
+            if trix_signal_aligned[i] > 0 and trix_signal_aligned[i-1] <= 0 and vol_spike[i] and close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below lower Donchian with volume spike in weekly downtrend
-            elif close[i] < lower_aligned[i] and vol_spike[i] and close[i] < ema34_1w_aligned[i]:
+            # Short: TRIX crosses below zero with volume spike in downtrend
+            elif trix_signal_aligned[i] < 0 and trix_signal_aligned[i-1] >= 0 and vol_spike[i] and close[i] < ema50_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Price closes below lower Donchian or weekly trend turns down
-            if close[i] < lower_aligned[i] or close[i] < ema34_1w_aligned[i]:
+            # Exit: TRIX crosses below zero or trend turns down
+            if trix_signal_aligned[i] < 0 or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price closes above upper Donchian or weekly trend turns up
-            if close[i] > upper_aligned[i] or close[i] > ema34_1w_aligned[i]:
+            # Exit: TRIX crosses above zero or trend turns up
+            if trix_signal_aligned[i] > 0 or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -84,10 +83,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Donchian(20) breakout on 12h with 1w EMA34 trend filter and volume confirmation.
-# Long when price breaks above 20-day high with volume spike in weekly uptrend.
-# Short when price breaks below 20-day low with volume spike in weekly downtrend.
-# Uses discrete position size (0.25) to minimize churn. Target 12-37 trades/year.
-# Works in bull markets (breakouts in uptrend) and bear markets (breakdowns in downtrend).
-# Volume spike (>1.5x average) ensures conviction behind the move.
-# Designed for 12h timeframe to target 50-150 total trades over 4 years, avoiding overtrading.
+# Hypothesis: TRIX (triple exponential moving average) zero-cross with volume confirmation and 1d EMA50 trend filter.
+# TRIX is a momentum oscillator that filters out insignificant cycles. Zero-cross signals momentum shifts.
+# Long when TRIX crosses above zero with volume spike in uptrend (price > EMA50).
+# Short when TRIX crosses below zero with volume spike in downtrend (price < EMA50).
+# Volume spike (>2.0x 24-period average) ensures conviction behind the momentum shift.
+# Works in both bull and bear markets by capturing momentum shifts in either direction.
+# Discrete position size (0.25) minimizes churn. Target ~25-40 trades/year (~100-160 total over 4 years).
