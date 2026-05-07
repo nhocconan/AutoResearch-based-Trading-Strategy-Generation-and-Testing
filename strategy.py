@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeS
-Hypothesis: Uses daily Camarilla pivot levels (R1/S1) for breakout entries with
-1-day EMA34 trend filter and volume confirmation. Targets 20-30 trades/year to
-minimize fee drift. Camarilla levels provide institutional support/resistance
-that work in both trending and ranging markets. EMA34 filters direction,
-volume confirms breakout strength.
+12h_12h_EMA_Crossover_Trend
+Hypothesis: Uses 12h EMA crossover (34/89) for trend direction, with 1d volume confirmation
+and 1w trend filter to reduce false signals. Targets 15-30 trades/year to minimize
+fee drift and perform well in both bull and bear markets by avoiding whipsaws.
 """
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeS"
-timeframe = "4h"
+name = "12h_12h_EMA_Crossover_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -18,78 +16,59 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # 12h EMA crossover: fast EMA(34) and slow EMA(89)
+    fast_ema = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    slow_ema = pd.Series(close).ewm(span=89, adjust=False, min_periods=89).mean().values
+    
+    # 1d volume confirmation: current volume > 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # 1w trend filter: EMA of weekly close
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day's OHLC
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # Previous day's values (shift by 1 to avoid look-ahead)
-    prev_close = np.roll(close_1d, 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close[0] = np.nan  # First day has no previous
-    
-    # Calculate Camarilla levels
-    camarilla_range = prev_high - prev_low
-    r1 = prev_close + camarilla_range * 1.1 / 12
-    s1 = prev_close - camarilla_range * 1.1 / 12
-    
-    # Align to 4h timeframe (wait for daily close)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # 1-day EMA34 trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume confirmation: current volume > 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(34, n):
+    for i in range(89, n):
         # Skip if any critical value is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(fast_ema[i]) or np.isnan(slow_ema[i]) or 
+            np.isnan(vol_ma[i]) or vol_ma[i] == 0 or np.isnan(ema_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above R1 with EMA34 uptrend and volume confirmation
-            if close[i] > r1_aligned[i] and close[i] > ema_34_aligned[i] and volume[i] > vol_ma[i]:
+            # Long: fast EMA crosses above slow EMA with volume confirmation and 1w trend up
+            if fast_ema[i] > slow_ema[i] and fast_ema[i-1] <= slow_ema[i-1] and volume[i] > vol_ma[i] and close[i] > ema_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 with EMA34 downtrend and volume confirmation
-            elif close[i] < s1_aligned[i] and close[i] < ema_34_aligned[i] and volume[i] > vol_ma[i]:
+            # Short: fast EMA crosses below slow EMA with volume confirmation and 1w trend down
+            elif fast_ema[i] < slow_ema[i] and fast_ema[i-1] >= slow_ema[i-1] and volume[i] > vol_ma[i] and close[i] < ema_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price breaks below S1 or EMA34 turns down
-            if close[i] < s1_aligned[i] or close[i] < ema_34_aligned[i]:
+            # Exit: fast EMA crosses below slow EMA
+            if fast_ema[i] < slow_ema[i] and fast_ema[i-1] >= slow_ema[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price breaks above R1 or EMA34 turns up
-            if close[i] > r1_aligned[i] or close[i] > ema_34_aligned[i]:
+            # Exit: fast EMA crosses above slow EMA
+            if fast_ema[i] > slow_ema[i] and fast_ema[i-1] <= slow_ema[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
