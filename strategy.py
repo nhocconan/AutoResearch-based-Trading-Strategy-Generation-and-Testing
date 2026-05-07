@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_Donchian20_Breakout_1wEMA50_Trend_Volume"
-timeframe = "1d"
+name = "6h_ChaikinMoneyFlow_Pullback_1dTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,40 +17,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for trend filter and CMF
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 1w EMA50 trend filter
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # 1d EMA50 trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Donchian channels from 1d data (20-period)
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
+    # 1d Chaikin Money Flow (20-period) for accumulation/distribution
+    mf_multiplier = np.where((df_1d['high'] - df_1d['low']) != 0, 
+                             ((df_1d['close'] - df_1d['low']) - (df_1d['high'] - df_1d['close'])) / (df_1d['high'] - df_1d['low']), 
+                             0)
+    mf_volume = mf_multiplier * df_1d['volume'].values
+    cmf_20 = pd.Series(mf_volume).rolling(window=20, min_periods=20).sum() / \
+             pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).sum()
+    cmf_20_values = cmf_20.values
+    cmf_20_aligned = align_htf_to_ltf(prices, df_1d, cmf_20_values)
     
-    # Volume filter: current volume > 1.5x 20-period average (for 1d)
+    # 6h volume filter: current volume > 2.0x 20-period average
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-20:i])
-    vol_filter = volume > (1.5 * vol_ma_20)
+    vol_filter = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 1  # 1 day cooldown to reduce trades
+    cooldown_bars = 4  # ~1 day for 6h to reduce trades
     
     start_idx = max(100, 20, 50)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(cmf_20_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -62,36 +64,38 @@ def generate_signals(prices):
         
         bars_since_last_trade += 1
         
-        # Determine 1w trend direction
-        trend_up = close > ema_50_1w_aligned[i]
-        trend_down = close < ema_50_1w_aligned[i]
+        # Determine 1d trend direction
+        trend_up = close > ema_50_1d_aligned[i]
+        trend_down = close < ema_50_1d_aligned[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: Price breaks above Donchian high with volume in uptrend
-            if (close[i] > donchian_high[i] and 
+            # Long: Price pulls back to EMA50 in uptrend with positive CMF and volume spike
+            if (low[i] <= ema_50_1d_aligned[i] <= high[i] and 
                 trend_up[i] and 
+                cmf_20_aligned[i] > 0.05 and 
                 vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: Price breaks below Donchian low with volume in downtrend
-            elif (close[i] < donchian_low[i] and 
+            # Short: Price pulls back to EMA50 in downtrend with negative CMF and volume spike
+            elif (low[i] <= ema_50_1d_aligned[i] <= high[i] and 
                   trend_down[i] and 
+                  cmf_20_aligned[i] < -0.05 and 
                   vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit: Price falls below Donchian low or trend changes
-            if close[i] < donchian_low[i] or not trend_up[i]:
+            # Exit: Price closes below EMA50 or CMF turns negative
+            if close[i] < ema_50_1d_aligned[i] or cmf_20_aligned[i] < -0.05:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price rises above Donchian high or trend changes
-            if close[i] > donchian_high[i] or not trend_down[i]:
+            # Exit: Price closes above EMA50 or CMF turns positive
+            if close[i] > ema_50_1d_aligned[i] or cmf_20_aligned[i] > 0.05:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
@@ -100,10 +104,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation on 1d timeframe.
-# Long when price breaks above Donchian high in uptrend with volume confirmation.
-# Short when price breaks below Donchian low in downtrend with volume confirmation.
-# Uses 1d timeframe to balance trade frequency and capture meaningful trends.
-# Target: 30-100 total trades over 4 years (7-25/year) as per experiment guidelines.
-# Works in bull markets (breakouts in uptrend) and bear markets (breakdowns in downtrend).
-# Based on top-performing pattern from DB: Donchian breakout + volume + trend filter.
+# Hypothesis: Chaikin Money Flow pullback strategy on 6h timeframe.
+# Long when price pulls back to 1d EMA50 during uptrend with CMF > 0.05 (accumulation) and volume spike.
+# Short when price pulls back to 1d EMA50 during downtrend with CMF < -0.05 (distribution) and volume spike.
+# Uses 1d trend filter and CMF for institutional flow confirmation. Works in both bull (buy pullbacks) and bear (sell rallies).
+# Volume spike ensures institutional participation. Target: 50-150 total trades over 4 years (12-37/year).
+# Based on successful volume+trend patterns from DB, adding CMF as a novel institutional flow filter.
