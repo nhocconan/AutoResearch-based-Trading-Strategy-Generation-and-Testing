@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-name = "1h_HTF_Direction_1h_Pullback_Volume"
-timeframe = "1h"
+name = "6h_WeeklyPivot_Momentum_Breakout"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mta_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -17,62 +17,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter (direction)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get weekly data for pivot points
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # 4h EMA50 trend filter
-    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Weekly pivot points (using previous week)
+    prev_high_w = df_1w['high'].shift(1).values
+    prev_low_w = df_1w['low'].shift(1).values
+    prev_close_w = df_1w['close'].shift(1).values
+    pivot_w = (prev_high_w + prev_low_w + prev_close_w) / 3.0
+    r1_w = 2 * pivot_w - prev_low_w
+    s1_w = 2 * pivot_w - prev_high_w
     
-    # Get 1d data for higher timeframe bias
+    # Align weekly pivots to 6h
+    pivot_w_aligned = align_htf_to_ltf(prices, df_1w, pivot_w)
+    r1_w_aligned = align_htf_to_ltf(prices, df_1w, r1_w)
+    s1_w_aligned = align_htf_to_ltf(prices, df_1w, s1_w)
+    
+    # Get daily data for momentum filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 1d EMA50 trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # 1h RSI for pullback entries
-    delta = np.diff(close, prepend=close[0])
+    # Daily RSI(14) for momentum
+    delta = np.diff(df_1d['close'].values, prepend=np.nan)
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_loss / (avg_gain + 1e-10)
+    rsi_14 = 100 - (100 / (1 + rs))
+    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
     
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    
-    for i in range(1, n):
-        if i < 14:
-            avg_gain[i] = np.mean(gain[:i+1]) if i+1 > 0 else 0
-            avg_loss[i] = np.mean(loss[:i+1]) if i+1 > 0 else 0
-        else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Volume filter: current volume > 1.5x 20-period average
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma_20[i] = np.mean(volume[i-20:i])
-    vol_filter = volume > (1.5 * vol_ma_20)
+    # Volume filter: current volume > 1.5x 24-period average (6 days for 6h)
+    vol_ma_24 = np.full(n, np.nan)
+    for i in range(24, n):
+        vol_ma_24[i] = np.mean(volume[i-24:i])
+    vol_filter = volume > (1.5 * vol_ma_24)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 4  # 4 hours cooldown
+    cooldown_bars = 4  # ~1 day for 6h to reduce trades
     
-    start_idx = max(100, 50, 20)
+    start_idx = max(100, 24, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(rsi[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(pivot_w_aligned[i]) or 
+            np.isnan(r1_w_aligned[i]) or 
+            np.isnan(s1_w_aligned[i]) or 
+            np.isnan(rsi_14_aligned[i]) or 
+            np.isnan(vol_ma_24[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -83,53 +80,42 @@ def generate_signals(prices):
         
         bars_since_last_trade += 1
         
-        # Determine trend direction from both 4h and 1d
-        trend_4h_up = close > ema_50_4h_aligned[i]
-        trend_4h_down = close < ema_50_4h_aligned[i]
-        trend_1d_up = close > ema_50_1d_aligned[i]
-        trend_1d_down = close < ema_50_1d_aligned[i]
-        
-        # Require alignment between 4h and 1d trend
-        trend_up = trend_4h_up and trend_1d_up
-        trend_down = trend_4h_down and trend_1d_down
-        
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: Pullback in uptrend - RSI < 40 with volume
-            if (rsi[i] < 40 and 
-                trend_up and 
+            # Long: Price breaks above weekly R1 with bullish momentum (RSI > 50)
+            if (close[i] > r1_w_aligned[i] and 
+                rsi_14_aligned[i] > 50 and 
                 vol_filter[i]):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: Pullback in downtrend - RSI > 60 with volume
-            elif (rsi[i] > 60 and 
-                  trend_down and 
+            # Short: Price breaks below weekly S1 with bearish momentum (RSI < 50)
+            elif (close[i] < s1_w_aligned[i] and 
+                  rsi_14_aligned[i] < 50 and 
                   vol_filter[i]):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit: RSI > 60 (overbought) or trend breaks down
-            if rsi[i] > 60 or not trend_up:
+            # Exit: Price falls below weekly pivot or momentum turns bearish
+            if close[i] < pivot_w_aligned[i] or rsi_14_aligned[i] < 50:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: RSI < 40 (oversold) or trend breaks up
-            if rsi[i] < 40 or not trend_down:
+            # Exit: Price rises above weekly pivot or momentum turns bullish
+            if close[i] > pivot_w_aligned[i] or rsi_14_aligned[i] > 50:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-# Hypothesis: 1h pullback strategy using 4h/1d trend alignment for direction.
-# Enters on RSI extremes (<40 for long, >60 for short) during pullbacks in aligned trends.
-# Uses volume confirmation to ensure momentum behind the move.
-# Works in bull markets (buy pullbacks in uptrend) and bear markets (sell rallies in downtrend).
-# Target: 60-150 total trades over 4 years = 15-37/year for 1h timeframe.
-# Holds through trend continuation, exits on mean reversion signals.
+# Hypothesis: Weekly pivot points provide strong support/resistance levels that work across market regimes.
+# In bull markets: buy breakouts above weekly R1 with bullish momentum (RSI>50).
+# In bear markets: sell breakdowns below weekly S1 with bearish momentum (RSI<50).
+# Uses 6h timeframe for lower trade frequency (~15-30 trades/year) to minimize fee drag.
+# Weekly pivot avoids noise of daily pivots; RSI filters false breakouts.
