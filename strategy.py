@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Spike"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,20 +23,22 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Calculate 1d EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 1d Camarilla levels (R3, S3)
+    # Calculate 1d high, low, close for Camarilla levels (R3, S3)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    r3 = (high_1d - low_1d) * 1.1 / 6 + close_1d
-    s3 = close_1d - (high_1d - low_1d) * 1.1 / 6
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_ = high_1d - low_1d
+    r3 = close_1d + (range_ * 1.1 / 4)
+    s3 = close_1d - (range_ * 1.1 / 4)
+    
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Volume spike detection (20-period average on 12h)
+    # Volume spike detection (20-period average on 4h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -45,47 +47,49 @@ def generate_signals(prices):
     start_idx = 30  # Wait for EMA and Camarilla
     
     for i in range(start_idx, n):
-        if np.isnan(ema_34_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Close > R3, price above EMA34, volume spike
+            # Long: Break above R3, 1d trend up, volume spike
             if (close[i] > r3_aligned[i] and 
-                close[i] > ema_34_aligned[i] and 
+                close[i] > ema_34_1d_aligned[i] and 
                 volume[i] > vol_ma[i] * 2.0):
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
-            # Short: Close < S3, price below EMA34, volume spike
+            # Short: Break below S3, 1d trend down, volume spike
             elif (close[i] < s3_aligned[i] and 
-                  close[i] < ema_34_aligned[i] and 
+                  close[i] < ema_34_1d_aligned[i] and 
                   volume[i] > vol_ma[i] * 2.0):
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit: Close < S3 or price below EMA34
-            if (close[i] < s3_aligned[i] or 
-                close[i] < ema_34_aligned[i]):
+            # Exit: Close below R3 or 1d trend down
+            if (close[i] < r3_aligned[i] or 
+                close[i] < ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit: Close > R3 or price above EMA34
-            if (close[i] > r3_aligned[i] or 
-                close[i] > ema_34_aligned[i]):
+            # Exit: Close above S3 or 1d trend up
+            if (close[i] > s3_aligned[i] or 
+                close[i] > ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike.
-# Camarilla levels provide high-probability reversal/breakout points.
-# EMA34 filter ensures trades align with daily trend, reducing counter-trend entries.
-# Volume spike (2x average) confirms strong participation in the breakout.
-# Works in bull markets (buy breakouts above R3 in uptrend) and bear markets (sell breakdowns below S3 in downtrend).
-# Position size 0.25 limits risk while maintaining sufficient trade frequency for 12h timeframe.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Camarilla levels identify key support/resistance from prior day's action.
+# Breakout above R3 with 1d uptrend and volume confirms bullish momentum.
+# Breakout below S3 with 1d downtrend and volume confirms bearish momentum.
+# EMA34 ensures we only trade with the higher timeframe trend.
+# Volume spike (2x average) ensures strong participation in the breakout.
+# Position size 0.30 balances risk and keeps trade frequency manageable.
+# Works in both bull and bear markets by following the 1d trend direction.
