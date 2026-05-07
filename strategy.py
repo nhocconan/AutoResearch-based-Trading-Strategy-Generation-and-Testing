@@ -1,11 +1,12 @@
-# 1d_RSI2_Trend_Filter_Volume_Spike
-# Hypothesis: Uses 1d RSI(2) with trend filter (1w EMA50) and volume confirmation for high-probability entries.
-# RSI(2) identifies short-term extremes while the 1w EMA50 ensures trend alignment.
-# Volume spike confirms institutional participation. Designed for low trade frequency (<25/year) to minimize fee drag.
-# Works in bull/bear markets by following the weekly trend direction.
+#!/usr/bin/env python3
+# 6h_Engulfing_1dTrend_Volume
+# Hypothesis: Uses daily bullish/bearish engulfing candles to signal trend direction, combined with 6-hour price action and volume confirmation.
+# Engulfing candles on the daily chart indicate strong institutional sentiment. We only take trades in the direction of the daily engulfing candle,
+# entering on 6-hour breakouts of the engulfing candle's body with volume confirmation. This filters noise and aligns with higher timeframe momentum.
+# Works in both bull and bear markets by following the daily trend. Target: 15-30 trades/year per symbol to minimize fee drag.
 
-timeframe = "1d"
-name = "1d_RSI2_Trend_Filter_Volume_Spike"
+timeframe = "6h"
+name = "6h_Engulfing_1dTrend_Volume"
 leverage = 1.0
 
 import numpy as np
@@ -22,67 +23,65 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter (EMA50)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) == 0:
+    # Get daily data for engulfing candle detection
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) == 0:
         return np.zeros(n)
     
-    # Calculate weekly EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    open_1d = df_1d['open'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate daily RSI(2) for entry signals
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
-    avg_loss = loss.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi_2 = 100 - (100 / (1 + rs))
-    rsi_2_values = rsi_2.fillna(50).values  # Neutral RSI when insufficient data
+    # Bullish engulfing: current day closes above prior day's open AND opens below prior day's close
+    bullish_engulf = (close_1d > open_1d) & (open_1d < close_1d) & (close_1d > open_1d) & (open_1d < close_1d)
+    bullish_engulf = (close_1d > open_1d.shift(1)) & (open_1d < close_1d.shift(1))
+    # Bearish engulfing: current day closes below prior day's open AND opens above prior day's close
+    bearish_engulf = (close_1d < open_1d.shift(1)) & (open_1d > close_1d.shift(1))
     
-    # Volume spike detection: 2x average volume (20-day average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align engulfing signals to 6h timeframe (use the engulfing candle's signal for the entire day)
+    bullish_engulf_aligned = align_htf_to_ltf(prices, df_1d, bullish_engulf.astype(float))
+    bearish_engulf_aligned = align_htf_to_ltf(prices, df_1d, bearish_engulf.astype(float))
+    
+    # 6-hour moving average for dynamic support/resistance (20-period = ~5 days)
+    ma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    
+    # Volume confirmation: 1.5x average volume (6-period = 1 day on 6h chart)
+    vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Ensure we have EMA50 and volume MA data
+    start_idx = max(20, 6)  # Ensure we have MA and volume data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(rsi_2_values[i]) or 
-            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(bullish_engulf_aligned[i]) or np.isnan(bearish_engulf_aligned[i]) or 
+            np.isnan(ma_20[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: RSI(2) oversold (<10), price above weekly EMA50 (bullish trend), volume spike
-            if (rsi_2_values[i] < 10 and 
-                close[i] > ema_50_1w_aligned[i] and 
-                volume[i] > 2.0 * vol_ma[i]):
+            # Long: daily bullish engulfing + price above 6h MA + volume confirmation
+            if bullish_engulf_aligned[i] > 0.5 and close[i] > ma_20[i] and volume[i] > 1.5 * vol_ma[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI(2) overbought (>90), price below weekly EMA50 (bearish trend), volume spike
-            elif (rsi_2_values[i] > 90 and 
-                  close[i] < ema_50_1w_aligned[i] and 
-                  volume[i] > 2.0 * vol_ma[i]):
+            # Short: daily bearish engulfing + price below 6h MA + volume confirmation
+            elif bearish_engulf_aligned[i] > 0.5 and close[i] < ma_20[i] and volume[i] > 1.5 * vol_ma[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: RSI(2) overbought (>70) or trend reversal (price below weekly EMA50)
-            if rsi_2_values[i] > 70 or close[i] < ema_50_1w_aligned[i]:
+            # Exit: price crosses below 6h MA (trend reversal)
+            if close[i] < ma_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: RSI(2) oversold (<30) or trend reversal (price above weekly EMA50)
-            if rsi_2_values[i] < 30 or close[i] > ema_50_1w_aligned[i]:
+            # Exit: price crosses above 6h MA (trend reversal)
+            if close[i] > ma_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
