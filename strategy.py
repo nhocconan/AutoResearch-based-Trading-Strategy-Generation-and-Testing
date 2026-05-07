@@ -1,11 +1,6 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R3_S3_Breakout_1dTrend_Volume_2point5
-# Hypothesis: Price breaks above R3 or below S3 daily Camarilla levels with 1-day trend confirmation (EMA34) and volume spike >2.5x average.
-# Uses higher volume threshold to reduce trade frequency and improve edge. Works in both bull/bear markets by aligning with daily trend.
-# Targets 10-20 trades/year to minimize fee drift. 12h timeframe reduces noise and improves signal quality.
-
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume_2point5"
-timeframe = "12h"
+name = "6h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -36,7 +31,7 @@ def generate_signals(prices):
     camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 2
     camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 2
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 6h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
@@ -44,8 +39,8 @@ def generate_signals(prices):
     ema_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Volume confirmation: current volume > 2.5 * 20-period average (higher threshold)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: current volume > 2.0 * 24-period average (balanced threshold)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -63,13 +58,13 @@ def generate_signals(prices):
             # Long: price breaks above R3 with 1d uptrend and volume spike
             if (close[i] > camarilla_r3_aligned[i] and 
                 close[i] > ema_1d_aligned[i] and 
-                volume[i] > 2.5 * vol_ma[i]):
+                volume[i] > 2.0 * vol_ma[i]):
                 signals[i] = 0.25
                 position = 1
             # Short: price breaks below S3 with 1d downtrend and volume spike
             elif (close[i] < camarilla_s3_aligned[i] and 
                   close[i] < ema_1d_aligned[i] and 
-                  volume[i] > 2.5 * vol_ma[i]):
+                  volume[i] > 2.0 * vol_ma[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
