@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-# 4H_Camarilla_R3_S3_Breakout_1DTrend_Volume_Signal_v5
-# Hypothesis: Combines daily Camarilla R3/S3 breakouts with 1-day EMA34 trend filter and volume spike confirmation. Only enters long when price breaks above R3 in an uptrend (close > EMA34) with volume > 2x average, or short when price breaks below S3 in a downtrend (close < EMA34) with volume spike. Exits when price returns inside the S3-R3 range. Designed for low trade frequency and robustness in both bull and bear markets by following the higher timeframe trend.
+# 12H_Camarilla_R3_S3_1DTrend_Volume_Spike
+# Hypothesis: Uses Camarilla R3/S3 levels from daily timeframe with a 1-day EMA34 trend filter and volume spike confirmation.
+# Enters long on breakout above R3 in uptrend (close > EMA34) or short on breakdown below S3 in downtrend (close < EMA34).
+# Exits when price returns inside the pivot range (S3 to R3) to avoid overtrading.
+# Designed for low trade frequency (12-37/year) and works in both bull and bear markets by following the higher timeframe trend.
 
-name = "4H_Camarilla_R3_S3_Breakout_1DTrend_Volume_Signal_v5"
-timeframe = "4h"
+name = "12H_Camarilla_R3_S3_1DTrend_Volume_Spike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -38,7 +41,7 @@ def generate_signals(prices):
     # 1-day EMA34 for trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align Camarilla levels and EMA to 4h timeframe
+    # Align Camarilla levels and EMA to 12h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
