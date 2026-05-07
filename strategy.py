@@ -1,12 +1,5 @@
-# 12h_DailyPivotBreakout_TrendVol_v1
-# Hypothesis: Daily pivot levels (PP, S1, R1) act as strong support/resistance on 12h timeframe.
-# Breakout above S1 with volume confirmation and daily uptrend = long.
-# Breakdown below R1 with volume confirmation and daily downtrend = short.
-# Exit when price returns to daily pivot (PP) or volume weakens.
-# Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend).
-# Uses daily pivot for structure, reducing whipsaw. Targets 20-40 trades/year to avoid fee drag.
-
-name = "12h_DailyPivotBreakout_TrendVol_v1"
+#!/usr/bin/env python3
+name = "12h_WeeklyPivot_DailyTrend_VolumeBreak"
 timeframe = "12h"
 leverage = 1.0
 
@@ -16,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,45 +19,49 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Daily pivot points from previous day's data
-    # Use previous day's high, low, close to avoid look-ahead
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Weekly pivot points from daily data (last completed week)
+    # Approximate week: last 5 trading days of daily data
+    weekly_high = pd.Series(df_1d['high']).rolling(window=5, min_periods=5).max().values
+    weekly_low = pd.Series(df_1d['low']).rolling(window=5, min_periods=5).min().values
+    weekly_close = pd.Series(df_1d['close']).rolling(window=5, min_periods=5).mean().values
     
     # Pivot levels
-    pp = (prev_high + prev_low + prev_close) / 3
-    r1 = 2 * pp - prev_low
-    s1 = 2 * pp - prev_high
-    r2 = pp + (prev_high - prev_low)
-    s2 = pp - (prev_high - prev_low)
+    pp = (weekly_high + weekly_low + weekly_close) / 3
+    r1 = 2 * pp - weekly_low
+    s1 = 2 * pp - weekly_high
+    r2 = pp + (weekly_high - weekly_low)
+    s2 = pp - (weekly_high - weekly_low)
+    r3 = weekly_high + 2 * (pp - weekly_low)
+    s3 = weekly_low - 2 * (weekly_high - pp)
     
-    # Align daily pivot levels to 12h timeframe
+    # Align weekly pivot levels to 12h timeframe
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
     s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Daily trend filter: EMA(34) on daily close (using previous day's close for alignment)
+    # Daily trend filter: EMA(34) on daily close
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume spike detection: 24-period average (12 days of 12h bars = 6 days)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume spike detection: 4-period average (2 days of 12h bars)
+    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 24)  # Wait for EMA and volume MA
+    start_idx = max(5, 34, 4)  # Wait for all indicators
     
     for i in range(start_idx, n):
         if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(pp_aligned[i]) or 
             np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(vol_ma_24[i])):
+            np.isnan(vol_ma_4[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,7 +69,7 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: price above S1 with volume and daily uptrend
-            vol_condition = volume[i] > vol_ma_24[i] * 2.0
+            vol_condition = volume[i] > vol_ma_4[i] * 2.0
             uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
             
             if close[i] > s1_aligned[i] and vol_condition and uptrend:
@@ -84,17 +81,28 @@ def generate_signals(prices):
                 position = -1
         elif position == 1:
             # Exit: price back below pivot or volume drops
-            if close[i] < pp_aligned[i] or volume[i] < vol_ma_24[i] * 1.5:
+            if close[i] < pp_aligned[i] or volume[i] < vol_ma_4[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Exit: price back above pivot or volume drops
-            if close[i] > pp_aligned[i] or volume[i] < vol_ma_24[i] * 1.5:
+            if close[i] > pp_aligned[i] or volume[i] < vol_ma_4[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
+
+# Hypothesis: 12h weekly pivot breakout with daily trend and volume confirmation
+# - Weekly pivot points (S1/R1) act as dynamic support/resistance levels
+# - Breakout above S1 with volume in daily uptrend = long opportunity
+# - Breakdown below R1 with volume in daily downtrend = short opportunity
+# - Volume spike (2x average) confirms institutional participation
+# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
+# - Exit when price returns to weekly pivot (PP) or volume weakens
+# - Position size 0.25 targets 12-37 trades/year, avoiding fee drag
+# - Weekly pivot provides structure that works across market regimes
+# - 12h timeframe reduces trade frequency, minimizing fee drag while capturing swings
