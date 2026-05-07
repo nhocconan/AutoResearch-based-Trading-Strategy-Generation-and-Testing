@@ -1,261 +1,123 @@
 #!/usr/bin/env python3
-# 4h_RSI_Div_Bull_Bear_30mVolume
-# Hypothesis: RSI divergence on 30m with 4h trend filter and volume spike. 
-# Bullish: price makes lower low but RSI makes higher low on 30m, 4h EMA50 up, volume spike.
-# Bearish: price makes higher high but RSI makes lower high on 30m, 4h EMA50 down, volume spike.
-# Exit: RSI crosses 50 in opposite direction. Designed for low frequency and high win rate.
+# 1d_KAMA_RSI_Chop_Filter_v4
+# Hypothesis: Daily KAMA trend with RSI mean-reversion and Choppiness index regime filter.
+# KAMA adapts to market noise - effective in both trending and ranging markets.
+# RSI provides mean-reversion signals within the trend context.
+# Choppiness index filters for ranging markets (CHOP > 61.8) where mean reversion works best.
+# Designed for low trade frequency (10-25/year) with high win rate in ranging markets.
 
-name = "4h_RSI_Div_Bull_Bear_30mVolume"
-timeframe = "4h"
-leverage = 1.0
-
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_htf
-
-def rsi(series, period=14):
-    delta = np.diff(series, prepend=series[0])
-    up = np.where(delta > 0, delta, 0)
-    down = np.where(delta < 0, -delta, 0)
-    roll_up = pd.Series(up).ewm(alpha=1/period, adjust=False).mean()
-    roll_down = pd.Series(down).ewm(alpha=1/period, adjust=False).mean()
-    rs = roll_up / (roll_down + 1e-10)
-    return (100 - (100 / (1 + rs))).values
-
-def find_divergence(price, rsi_vals, lookback=14):
-    # Bullish divergence: price lower low, RSI higher low
-    # Bearish divergence: price higher high, RSI lower high
-    min_price_idx = np.argmin(price[-lookback:])
-    max_price_idx = np.argmax(price[-lookback:])
-    min_rsi_idx = np.argmin(rsi_vals[-lookback:])
-    max_rsi_idx = np.argmax(rsi_vals[-lookback:])
-    
-    bull_div = (price[-lookback:][min_price_idx] < price[-lookback:][0] and 
-                rsi_vals[-lookback:][min_rsi_idx] > rsi_vals[-lookback:][0])
-    bear_div = (price[-lookback:][max_price_idx] > price[-lookback:][0] and 
-                rsi_vals[-lookback:][max_rsi_idx] < rsi_vals[-lookback:][0])
-    return bull_div, bear_div
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 50:
-        return np.zeros(n)
-    
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # Get 30m data for RSI and divergence
-    df_30m = get_htf_data(prices, '30m')
-    if len(df_30m) == 0:
-        return np.zeros(n)
-    
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) == 0:
-        return np.zeros(n)
-    
-    # Calculate RSI on 30m close
-    rsi_30m = rsi(df_30m['close'], 14)
-    rsi_30m_aligned = align_ltf_to_htf(prices, df_30m, rsi_30m)
-    
-    # Calculate EMA50 on 4h close for trend
-    ema50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_ltf_to_htf(prices, df_4h, ema50_4h)
-    
-    # Volume spike: 2.0x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    
-    start_idx = max(30, 50, 20)  # 30m RSI, 4h EMA50, vol MA
-    
-    for i in range(start_idx, n):
-        # Align indices for 30m and 4h data
-        idx_30m = i // 2  # 2 x 30m = 1h, 4 x 30m = 2h, 8 x 30m = 4h
-        idx_4h = i // 16  # 16 x 15m = 4h
-        
-        if idx_30m < 14 or idx_4h < 50:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Get window for divergence check
-        price_window = df_30m['close'].values[max(0, idx_30m-14):idx_30m+1]
-        rsi_window = rsi_30m_aligned[max(0, i-28):i+1:2]  # Every other 15m bar = 30m
-        
-        if len(price_window) < 15 or len(rsi_window) < 15:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        bull_div, bear_div = find_divergence(price_window, rsi_window, 14)
-        
-        if position == 0:
-            # Long: bullish divergence, price above EMA50 (uptrend), volume spike
-            if (bull_div and 
-                close[i] > ema50_4h_aligned[i] and 
-                volume[i] > 2.0 * vol_ma[i]):
-                signals[i] = 0.25
-                position = 1
-            # Short: bearish divergence, price below EMA50 (downtrend), volume spike
-            elif (bear_div and 
-                  close[i] < ema50_4h_aligned[i] and 
-                  volume[i] > 2.0 * vol_ma[i]):
-                signals[i] = -0.25
-                position = -1
-        elif position == 1:
-            # Exit: RSI crosses below 50
-            if rsi_30m_aligned[i] < 50:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:
-            # Exit: RSI crosses above 50
-            if rsi_30m_aligned[i] > 50:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
-    
-    return signals
-
-# Note: align_ltf_to_htf function is used as inverse of align_htf_to_ltf
-# If not available, we'll implement it or use align_htf_to_ltf with inverse logic
-# For simplicity in this context, assuming it exists or we adjust indices accordingly
-# In practice, we would use align_htf_to_ltf and access by index directly
-# Let's correct the approach to use align_htf_to_ltf properly
-
-#!/usr/bin/env python3
-# 4h_RSI_Div_Bull_Bear_30mVolume
-# Hypothesis: RSI divergence on 30m with 4h trend filter and volume spike. 
-# Bullish: price makes lower low but RSI makes higher low on 30m, 4h EMA50 up, volume spike.
-# Bearish: price makes higher high but RSI makes lower high on 30m, 4h EMA50 down, volume spike.
-# Exit: RSI crosses 50 in opposite direction. Designed for low frequency and high win rate.
-
-name = "4h_RSI_Div_Bull_Bear_30mVolume"
-timeframe = "4h"
+name = "1d_KAMA_RSI_Chop_Filter_v4"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def rsi(series, period=14):
-    delta = np.diff(series, prepend=series[0])
-    up = np.where(delta > 0, delta, 0)
-    down = np.where(delta < 0, -delta, 0)
-    roll_up = pd.Series(up).ewm(alpha=1/period, adjust=False).mean()
-    roll_down = pd.Series(down).ewm(alpha=1/period, adjust=False).mean()
-    rs = roll_up / (roll_down + 1e-10)
-    return (100 - (100 / (1 + rs))).values
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 30m data for RSI and price
-    df_30m = get_htf_data(prices, '30m')
-    if len(df_30m) == 0:
+    # Get weekly data for trend filter and chop calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) == 0:
         return np.zeros(n)
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) == 0:
-        return np.zeros(n)
+    # Calculate KAMA (Kaufman Adaptive Moving Average) on weekly close
+    close_1w = df_1w['close'].values
+    # Efficiency Ratio
+    change = np.abs(np.diff(close_1w, 10))  # 10-period change
+    volatility = np.sum(np.abs(np.diff(close_1w)), axis=1)  # 10-period volatility
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2  # fast=2, slow=30
+    # KAMA calculation
+    kama = np.full_like(close_1w, np.nan)
+    kama[29] = close_1w[29]  # seed
+    for i in range(30, len(close_1w)):
+        kama[i] = kama[i-1] + sc[i] * (close_1w[i] - kama[i-1])
+    kama_1w = kama
     
-    # Calculate RSI on 30m close
-    rsi_30m = rsi(df_30m['close'], 14)
-    rsi_30m_aligned = align_htf_to_ltf(prices, df_30m, rsi_30m)
+    # Align KAMA to daily timeframe
+    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
     
-    # Get 30m close for price action
-    close_30m = df_30m['close'].values
-    close_30m_aligned = align_htf_to_ltf(prices, df_30m, close_30m)
+    # Calculate RSI(14) on daily close
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate EMA50 on 4h close for trend
-    ema50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Calculate Choppiness Index on weekly data
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    # True Range
+    tr1 = high_1w[1:] - low_1w[1:]
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.maximum.reduce([tr1, tr2, tr3])
+    tr = np.concatenate([[np.nan], tr])  # align with index
+    # ATR(14)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Highest high and lowest low over 14 periods
+    hh = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
+    ll = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
+    # Chop calculation
+    chop = np.where((hh - ll) != 0, 100 * np.log10(np.sum(atr, axis=1) / (hh - ll)) / np.log10(14), 50)
+    chop = np.concatenate([[np.nan] * 13, chop[13:]])  # align with index
+    chop_1w = chop
     
-    # Volume spike: 2.0x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align Chop to daily timeframe
+    chop_1w_aligned = align_htf_to_ltf(prices, df_1w, chop_1w)
+    
+    # Volume spike detection: 1.5x average volume (50-period for stability)
+    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 50, 20)  # Need data for calculations
+    start_idx = max(50, 50)  # Ensure we have KAMA, RSI, Chop, and volume MA data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(rsi_30m_aligned[i]) or np.isnan(close_30m_aligned[i]) or 
-            np.isnan(ema50_4h_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(kama_1w_aligned[i]) or np.isnan(rsi[i]) or 
+            np.isnan(chop_1w_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Check for RSI divergence on 30m chart (need to look back)
-            # We'll check last few 30m bars for divergence
-            lookback = 6  # Last few 30m periods
-            start_look = max(0, i - lookback*2)  # Each 30m bar = 2x 15m bars
-            
-            # Extract windows for divergence check
-            price_window = close_30m_aligned[start_look:i+1:2]  # Every other = 30m
-            rsi_window = rsi_30m_aligned[start_look:i+1:2]
-            
-            if len(price_window) >= 5 and len(rsi_window) >= 5:
-                # Find recent lows and highs
-                price_min_idx = np.argmin(price_window[-5:])
-                price_max_idx = np.argmax(price_window[-5:])
-                rsi_min_idx = np.argmin(rsi_window[-5:])
-                rsi_max_idx = np.argmax(rsi_window[-5:])
-                
-                # Current values (most recent in window)
-                curr_price = price_window[-1]
-                curr_rsi = rsi_window[-1]
-                prev_min_price = price_window[-5:][price_min_idx] if len(price_window) >=5 else price_window[0]
-                prev_max_price = price_window[-5:][price_max_idx] if len(price_window) >=5 else price_window[0]
-                prev_min_rsi = rsi_window[-5:][rsi_min_idx] if len(rsi_window) >=5 else rsi_window[0]
-                prev_max_rsi = rsi_window[-5:][rsi_max_idx] if len(rsi_window) >=5 else rsi_window[0]
-                
-                bull_div = (curr_price < prev_min_price and curr_rsi > prev_min_rsi)
-                bear_div = (curr_price > prev_max_price and curr_rsi < prev_max_rsi)
-            else:
-                bull_div = bear_div = False
-            
-            # Long: bullish divergence, price above EMA50 (uptrend), volume spike
-            if (bull_div and 
-                close[i] > ema50_4h_aligned[i] and 
-                volume[i] > 2.0 * vol_ma[i]):
+            # Long: price below KAMA (dip in uptrend), RSI oversold, choppy market (mean reversion regime)
+            if (close[i] < kama_1w_aligned[i] and 
+                rsi[i] < 30 and 
+                chop_1w_aligned[i] > 61.8):
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish divergence, price below EMA50 (downtrend), volume spike
-            elif (bear_div and 
-                  close[i] < ema50_4h_aligned[i] and 
-                  volume[i] > 2.0 * vol_ma[i]):
+            # Short: price above KAMA (pullback in downtrend), RSI overbought, choppy market
+            elif (close[i] > kama_1w_aligned[i] and 
+                  rsi[i] > 70 and 
+                  chop_1w_aligned[i] > 61.8):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: RSI crosses below 50
-            if rsi_30m_aligned[i] < 50:
+            # Exit: price crosses above KAMA or RSI overbought
+            if (close[i] > kama_1w_aligned[i] or rsi[i] > 70):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: RSI crosses above 50
-            if rsi_30m_aligned[i] > 50:
+            # Exit: price crosses below KAMA or RSI oversold
+            if (close[i] < kama_1w_aligned[i] or rsi[i] < 30):
                 signals[i] = 0.0
                 position = 0
             else:
