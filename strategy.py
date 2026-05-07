@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_4h_1d_Camarilla_S1R1_Breakout_Trend"
-timeframe = "1h"
+name = "12h_1d_Camarilla_S1R1_Breakout_VolumeTrend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,98 +17,94 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for trend filter
+    # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily EMA(34) for trend filter
+    # Calculate daily Camarilla pivot levels from previous day
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
+    
+    # Camarilla levels
+    s1 = prev_close - (range_hl * 1.08 / 2)
+    r1 = prev_close + (range_hl * 1.08 / 2)
+    s2 = prev_close - (range_hl * 1.16 / 2)
+    r2 = prev_close + (range_hl * 1.16 / 2)
+    s3 = prev_close - (range_hl * 1.26 / 4)
+    r3 = prev_close + (range_hl * 1.26 / 4)
+    
+    # Align daily levels to 12h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    
+    # Daily trend filter: EMA(34) on daily close
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 4h data for Camarilla pivot levels (from previous 4h bar)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 5:
-        return np.zeros(n)
-    
-    # Calculate 4h Camarilla pivot levels from previous 4h bar
-    prev_high_4h = df_4h['high'].shift(1).values
-    prev_low_4h = df_4h['low'].shift(1).values
-    prev_close_4h = df_4h['close'].shift(1).values
-    
-    pivot_4h = (prev_high_4h + prev_low_4h + prev_close_4h) / 3
-    range_4h = prev_high_4h - prev_low_4h
-    
-    # Camarilla S1 and R1 levels (most significant)
-    s1_4h = prev_close_4h - (range_4h * 1.08 / 2)
-    r1_4h = prev_close_4h + (range_4h * 1.08 / 2)
-    
-    # Align 4h levels to 1h timeframe
-    s1_4h_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
-    r1_4h_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
-    
-    # Volume spike detection (20-period average for 1h = ~3.3 hours)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    # Volume spike detection: 2-period average (1 period of 12h bars)
+    vol_ma_2 = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Wait for EMA and volume MA
+    start_idx = max(34, 2)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(s1_4h_aligned[i]) or 
-            np.isnan(r1_4h_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(vol_ma_2[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
-        if position == 0 and in_session:
+        if position == 0:
             # Long: price above S1 with volume and daily uptrend
-            vol_condition = volume[i] > vol_ma_20[i] * 2.0
+            vol_condition = volume[i] > vol_ma_2[i] * 1.5
             uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
             
-            if close[i] > s1_4h_aligned[i] and vol_condition and uptrend:
-                signals[i] = 0.20
+            if close[i] > s1_aligned[i] and vol_condition and uptrend:
+                signals[i] = 0.30
                 position = 1
             # Short: price below R1 with volume and daily downtrend
-            elif close[i] < r1_4h_aligned[i] and vol_condition and not uptrend:
-                signals[i] = -0.20
+            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit: price back below S1 or volume drops or outside session
-            if (close[i] < s1_4h_aligned[i] or 
-                volume[i] < vol_ma_20[i] * 1.3 or 
-                not in_session):
+            # Exit: price back below S1 or volume drops
+            if close[i] < s1_aligned[i] or volume[i] < vol_ma_2[i] * 0.8:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.30
         elif position == -1:
-            # Exit: price back above R1 or volume drops or outside session
-            if (close[i] > r1_4h_aligned[i] or 
-                volume[i] < vol_ma_20[i] * 1.3 or 
-                not in_session):
+            # Exit: price back above R1 or volume drops
+            if close[i] > r1_aligned[i] or volume[i] < vol_ma_2[i] * 0.8:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.30
     
     return signals
 
-# Hypothesis: 1h Camarilla S1/R1 breakout with daily trend filter and volume confirmation
-# - Uses 4h Camarilla S1/R1 levels from previous 4h bar as support/resistance
-# - Entry only during 08-20 UTC session to avoid low-liquidity hours
-# - Long when price breaks above S1 with volume spike (2x avg) in daily uptrend
-# - Short when price breaks below R1 with volume spike in daily downtrend
-# - Exit when price returns to S1/R1, volume weakens, or outside session
-# - Position size 0.20 limits risk per trade
-# - Designed for 1h timeframe with 15-37 trades/year target to avoid fee drag
-# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend) markets
+# Hypothesis: 12h Camarilla S1/R1 breakout with daily trend and volume confirmation
+# - Daily Camarilla S1/R1 act as strong support/resistance levels
+# - Breakout above S1 with volume in daily uptrend = long opportunity
+# - Breakdown below R1 with volume in daily downtrend = short opportunity
+# - Volume spike (1.5x average) confirms institutional participation
+# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
+# - Exit when price returns to S1/R1 or volume weakens
+# - Position size 0.30 targets ~15-25 trades/year, avoiding fee drag
+# - Uses actual daily Camarilla levels (not weekly) for better responsiveness
+# - Designed to work in BOTH bull and bear markets via trend filter
+# - Timeframe 12h reduces trade frequency to minimize fee drag
+# - Volume condition uses 2-period MA for responsiveness on 12h chart
