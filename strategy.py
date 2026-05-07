@@ -1,10 +1,10 @@
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: Uses 12h timeframe with daily Camarilla pivot levels (R1/S1) and 1d EMA trend filter.
-# Breakouts of R1/S1 with volume confirmation in direction of daily trend capture institutional flow.
-# Works in both bull/bear markets by following the 1d trend direction. Target: 15-25 trades/year per symbol.
+# 6h_RSI_Divergence_4HTrend_1DVolume
+# Hypothesis: Detects momentum exhaustion via RSI divergence on 6h chart, with 4h trend filter and 1d volume confirmation.
+# RSI divergence signals potential reversals in both bull and bear markets. The 4h trend filter ensures trades align with intermediate-term momentum,
+# while 1d volume surge confirms institutional participation. Target: 15-25 trades/year per symbol to minimize fee drag.
 
-timeframe = "12h"
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "6h"
+name = "6h_RSI_Divergence_4HTrend_1DVolume"
 leverage = 1.0
 
 import numpy as np
@@ -21,75 +21,80 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots and trend filter
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) == 0:
+        return np.zeros(n)
+    
+    # Get 1d data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) == 0:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day (using typical price)
-    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # Where C = (H+L+C)/3 of previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 14-period RSI on 6h close
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Typical price of previous day
-    typical_price_1d = (high_1d + low_1d + close_1d) / 3
-    # Range of previous day
-    range_1d = high_1d - low_1d
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    # Prepend NaN for first element
+    rsi = np.concatenate([[np.nan], rsi])
     
-    # Camarilla R1 and S1 levels
-    camarilla_r1 = typical_price_1d + range_1d * 1.1 / 12
-    camarilla_s1 = typical_price_1d - range_1d * 1.1 / 12
+    # Calculate 20-period EMA on 4h close for trend filter
+    ema_20_4h = pd.Series(df_4h['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
     
-    # Align Camarilla levels to 12h timeframe (use previous day's levels)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # 1d EMA34 for trend filter (proven effective in backtests)
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume spike detection: 2x average volume (2-period = 1 day on 12h chart)
-    vol_ma = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
+    # Calculate 20-period average volume on 1d
+    vol_ma_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d, additional_delay_bars=0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 2)  # Ensure we have EMA34 and volume MA data
+    start_idx = 15  # Need at least 14+1 for RSI
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(rsi[i]) or np.isnan(rsi[i-1]) or np.isnan(rsi[i-2]) or
+            np.isnan(ema_20_4h_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or vol_ma_1d_aligned[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Check for RSI divergence over last 3 bars
+        bullish_div = False
+        bearish_div = False
+        
+        # Bullish divergence: price makes lower low, RSI makes higher low
+        if low[i] < low[i-1] < low[i-2] and rsi[i] > rsi[i-1] > rsi[i-2]:
+            bullish_div = True
+        # Bearish divergence: price makes higher high, RSI makes lower high
+        elif high[i] > high[i-1] > high[i-2] and rsi[i] < rsi[i-1] < rsi[i-2]:
+            bearish_div = True
+        
         if position == 0:
-            # Long: price breaks above Camarilla R1 with volume, and 1d trend is bullish (price > EMA34)
-            if (high[i] > camarilla_r1_aligned[i] and 
-                volume[i] > 2.0 * vol_ma[i] and 
-                close[i] > ema_34_1d_aligned[i]):
+            # Long: bullish RSI divergence + price above 4h EMA20 (uptrend) + volume surge
+            if bullish_div and close[i] > ema_20_4h_aligned[i] and volume[i] > 1.5 * vol_ma_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Camarilla S1 with volume, and 1d trend is bearish (price < EMA34)
-            elif (low[i] < camarilla_s1_aligned[i] and 
-                  volume[i] > 2.0 * vol_ma[i] and 
-                  close[i] < ema_34_1d_aligned[i]):
+            # Short: bearish RSI divergence + price below 4h EMA20 (downtrend) + volume surge
+            elif bearish_div and close[i] < ema_20_4h_aligned[i] and volume[i] > 1.5 * vol_ma_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price breaks below Camarilla S1 (mean reversion to pivot)
-            if low[i] < camarilla_s1_aligned[i]:
+            # Exit: bearish RSI divergence or price breaks below 4h EMA20
+            if bearish_div or close[i] < ema_20_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price breaks above Camarilla R1 (mean reversion to pivot)
-            if high[i] > camarilla_r1_aligned[i]:
+            # Exit: bullish RSI divergence or price breaks above 4h EMA20
+            if bullish_div or close[i] > ema_20_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
