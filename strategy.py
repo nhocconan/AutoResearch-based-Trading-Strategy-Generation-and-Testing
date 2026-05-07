@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_1d_Camarilla_S1R1_Breakout_Trend"
-timeframe = "12h"
+name = "4h_1d_Camarilla_S1R1_Breakout_Trend_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -34,7 +34,7 @@ def generate_signals(prices):
     s1 = prev_close - (range_hl * 1.08 / 2)
     r1 = prev_close + (range_hl * 1.08 / 2)
     
-    # Align daily levels to 12h timeframe
+    # Align daily levels to 4h timeframe
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     
@@ -42,44 +42,51 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume spike detection: 4-period average (2 days of 12h bars)
-    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    # Volume spike detection: 6-period average (1.5 days of 4h bars)
+    vol_ma_6 = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
+    
+    # Chop filter: 14-period EMA of high-low range to detect ranging markets
+    hl_range = high - low
+    chop_ema = pd.Series(hl_range).ewm(span=14, adjust=False, min_periods=14).mean().values
+    chop_ma = pd.Series(chop_ema).rolling(window=14, min_periods=14).mean().values
+    chop_ratio = chop_ema / chop_ma  # >1.2 = choppy, <0.8 = trending
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 4)  # Wait for EMA and volume MA
+    start_idx = max(34, 6, 14)  # Wait for EMA, volume MA, and chop
     
     for i in range(start_idx, n):
         if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(vol_ma_4[i])):
+            np.isnan(r1_aligned[i]) or np.isnan(vol_ma_6[i]) or np.isnan(chop_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above S1 with volume and daily uptrend
-            vol_condition = volume[i] > vol_ma_4[i] * 2.0
+            # Long: price above S1 with volume, daily uptrend, and NOT choppy
+            vol_condition = volume[i] > vol_ma_6[i] * 2.0  # Increased threshold
             uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
+            not_choppy = chop_ratio[i] < 0.8  # Trending market
             
-            if close[i] > s1_aligned[i] and vol_condition and uptrend:
+            if close[i] > s1_aligned[i] and vol_condition and uptrend and not_choppy:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below R1 with volume and daily downtrend
-            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
+            # Short: price below R1 with volume, daily downtrend, and NOT choppy
+            elif close[i] < r1_aligned[i] and vol_condition and not uptrend and not_choppy:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below S1 or volume drops
-            if close[i] < s1_aligned[i] or volume[i] < vol_ma_4[i] * 1.5:
+            # Exit: price back below S1 or volume drops or chop increases
+            if close[i] < s1_aligned[i] or volume[i] < vol_ma_6[i] * 1.2 or chop_ratio[i] > 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above R1 or volume drops
-            if close[i] > r1_aligned[i] or volume[i] < vol_ma_4[i] * 1.5:
+            # Exit: price back above R1 or volume drops or chop increases
+            if close[i] > r1_aligned[i] or volume[i] < vol_ma_6[i] * 1.2 or chop_ratio[i] > 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -87,14 +94,15 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 12h Camarilla S1/R1 breakout with daily trend and volume confirmation
+# Hypothesis: 4h Camarilla S1/R1 breakout with daily trend, volume confirmation, and chop filter
 # - Daily Camarilla S1/R1 act as strong support/resistance levels
 # - Breakout above S1 with volume in daily uptrend = long opportunity
 # - Breakdown below R1 with volume in daily downtrend = short opportunity
 # - Volume spike (2.0x average) confirms institutional participation
+# - Chop filter avoids whipsaws in ranging markets (chop_ratio > 1.2)
 # - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
-# - Exit when price returns to S1/R1 or volume weakens
-# - Position size 0.25 targets ~15-25 trades/year, avoiding fee drag
+# - Exit when price returns to S1/R1, volume weakens, or market becomes choppy
+# - Position size 0.25 targets ~30-50 trades/year, avoiding fee drag
 # - Uses actual daily Camarilla levels (not weekly) for better responsiveness
-# - Designed to work in BOTH bull and bear markets via trend filter
-# - 12h timeframe targets 50-150 total trades over 4 years (12-37/year) as per requirements
+# - Designed to work in BOTH bull and bear markets via trend and chop filters
+# - Increased volume threshold and added chop filter to reduce trade frequency and improve quality
