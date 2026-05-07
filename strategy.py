@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_Camarilla_R3S3_1dTrend_VolumeSpike_v8"
-timeframe = "1h"
+name = "6h_Donchian20_WeeklyPivot_Direction_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,32 +17,32 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Camarilla levels (structure)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # Get weekly data for pivot direction (structure)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Get 1d data for trend filter
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate weekly high/low/close for pivot
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Calculate previous 4h bar's high, low, close for Camarilla R3/S3
-    prev_high = df_4h['high'].values
-    prev_low = df_4h['low'].values
-    prev_close = df_4h['close'].values
+    # Weekly pivot point (classic)
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
     
-    # Camarilla R3 = C + (H-L) * 1.1/2 * 1.1, S3 = C - (H-L) * 1.1/2 * 1.1
-    range_hl = prev_high - prev_low
-    r3 = prev_close + range_hl * 1.1 / 2 * 1.1
-    s3 = prev_close - range_hl * 1.1 / 2 * 1.1
+    # Daily EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    r3_aligned = align_htf_to_ltf(prices, df_4h, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_4h, s3)
+    # Donchian channel (20-period) on 6h data
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume filter: 20-period average volume for spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -62,11 +62,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)  # Ensure volume MA and EMA data
+    start_idx = max(20, 50)  # Ensure Donchian and EMA data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN or invalid
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+        if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
             np.isnan(vol_ma[i]) or vol_ma[i] == 0 or
             np.isnan(vol_filter[i]) or not vol_filter[i] or
             not session_filter[i]):
@@ -79,37 +80,34 @@ def generate_signals(prices):
         volume_spike = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long: Price breaks above R3, above 1d EMA34 (uptrend), with volume spike
+            # Long: Price breaks above Donchian high, above weekly pivot (bullish bias), above EMA50 (uptrend), with volume spike
             buffer = 0.001 * close[i]  # 0.1% buffer to avoid whipsaws
-            if (close[i] > r3_aligned[i] + buffer and 
-                close[i] > ema_34_1d_aligned[i] + buffer and   # 1d uptrend
+            if (close[i] > donchian_high[i] + buffer and 
+                close[i] > weekly_pivot_aligned[i] + buffer and   # above weekly pivot
+                close[i] > ema_50_1d_aligned[i] + buffer and   # uptrend
                 volume_spike):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S3, below 1d EMA34 (downtrend), with volume spike
-            elif (close[i] < s3_aligned[i] - buffer and 
-                  close[i] < ema_34_1d_aligned[i] - buffer and   # 1d downtrend
+            # Short: Price breaks below Donchian low, below weekly pivot (bearish bias), below EMA50 (downtrend), with volume spike
+            elif (close[i] < donchian_low[i] - buffer and 
+                  close[i] < weekly_pivot_aligned[i] - buffer and   # below weekly pivot
+                  close[i] < ema_50_1d_aligned[i] - buffer and   # downtrend
                   volume_spike):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: Price returns to midpoint of prior 4h range (H4/L4)
-            range_hl = prev_high - prev_low
-            h4 = prev_close + range_hl * 1.1 / 6 * 1.1
-            l4 = prev_close - range_hl * 1.1 / 6 * 1.1
-            h4_aligned = align_htf_to_ltf(prices, df_4h, h4)
-            l4_aligned = align_htf_to_ltf(prices, df_4h, l4)
-            
-            camarilla_mid = (h4_aligned[i] + l4_aligned[i]) / 2
-            range_hl_4h = h4_aligned[i] - l4_aligned[i]
-            # Exit when within 40% of midpoint (balanced to reduce churn)
-            at_mid = abs(close[i] - camarilla_mid) < range_hl_4h * 0.40
-            
-            if at_mid:
-                signals[i] = 0.0
-                position = 0
-            else:
-                # Maintain position
-                signals[i] = 0.20 if position == 1 else -0.20
+            # Exit: Price returns to weekly pivot (mean reversion to weekly bias)
+            if position == 1:  # Long exit
+                if close[i] < weekly_pivot_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            else:  # Short exit
+                if close[i] > weekly_pivot_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
