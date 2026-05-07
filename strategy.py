@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R3_S3_1dTrend_Volume
-# Hypothesis: 12h strategy using daily Camarilla R3/S3 levels with daily trend filter and volume confirmation.
+# 4H_Camarilla_R3S3_1DTrend_Volume
+# Hypothesis: 4h strategy using daily Camarilla R3/S3 levels with daily trend filter and volume confirmation.
 # Enters long when price breaks above daily R3, close > daily EMA34 (uptrend), and volume > 2x average.
 # Enters short when price breaks below daily S3, close < daily EMA34 (downtrend), and volume > 2x average.
 # Exits when price returns to opposite S3/R3 level. Designed to avoid overtrading with strict entry conditions.
 # Uses daily trend filter to work in both bull and bear markets by only trading in direction of higher timeframe trend.
-# Target: 12h timeframe with daily HTF for trend and levels.
+# Target: 4h timeframe with daily HTF for trend and levels.
 
-name = "12h_Camarilla_R3_S3_1dTrend_Volume"
-timeframe = "12h"
+name = "4H_Camarilla_R3S3_1DTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -40,7 +40,7 @@ def generate_signals(prices):
     r3_1d = close_1d + 1.1 * hl_range / 2
     s3_1d = close_1d - 1.1 * hl_range / 2
     
-    # Align all levels to 12h timeframe (use previous daily period's levels)
+    # Align all levels to 4h timeframe (use previous daily period's levels)
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
