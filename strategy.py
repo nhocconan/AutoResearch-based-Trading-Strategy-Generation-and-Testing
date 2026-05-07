@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_1DTrend_VolumeSpike_v24"
-timeframe = "4h"
+name = "1d_WeeklyMATrend_RSIFilter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -12,102 +12,62 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for structure (R3/S3 levels)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
-        return np.zeros(n)
+    # Weekly EMA50 for trend filter
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate daily EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Daily RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate previous 4h bar's high, low, close for Camarilla levels
-    prev_high = df_4h['high'].values
-    prev_low = df_4h['low'].values
-    prev_close = df_4h['close'].values
-    
-    # Calculate Camarilla levels: R3 and S3 (correct formula)
-    # R3 = C + (H-L) * 1.1/2 * 1.1, S3 = C - (H-L) * 1.1/2 * 1.1
-    range_hl = prev_high - prev_low
-    r3 = prev_close + range_hl * 1.1 / 2 * 1.1
-    s3 = prev_close - range_hl * 1.1 / 2 * 1.1
-    
-    r3_aligned = align_htf_to_ltf(prices, df_4h, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_4h, s3)
-    
-    # Volume filter: current volume > 2.0x average volume (20-period)
+    # Daily volume filter: volume > 1.5x 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Volatility filter: avoid low volatility periods (ATR > 0.3% of price)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    vol_filter = atr > 0.003 * close  # ATR > 0.3% of price
-    
-    # Session filter: 08:00 - 20:00 UTC (80% of day)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)  # Ensure we have volume MA data
+    start_idx = max(20, 14)  # Ensure we have volume MA and RSI data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(vol_ma[i]) or vol_ma[i] == 0 or
-            np.isnan(vol_filter[i]) or not vol_filter[i] or
-            not session_filter[i]):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume filter: spike confirmation (2.0x average volume)
-        volume_filter = volume[i] > 2.0 * vol_ma[i]
+        # Volume filter: spike confirmation (1.5x average volume)
+        volume_filter = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long: Price closes beyond R3 + beyond daily EMA34 by buffer + volume spike
-            buffer = 0.001 * close[i]  # 0.1% buffer
-            if (close[i] > r3_aligned[i] + buffer and 
-                close[i] > ema_34_1d_aligned[i] + buffer and   # Daily uptrend with buffer
+            # Long: Price above weekly EMA50 + RSI < 30 (oversold) + volume spike
+            if (close[i] > ema_50_1w_aligned[i] and 
+                rsi[i] < 30 and 
                 volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price closes below S3 + below daily EMA34 by buffer + volume spike
-            elif (close[i] < s3_aligned[i] - buffer and 
-                  close[i] < ema_34_1d_aligned[i] - buffer and   # Daily downtrend with buffer
+            # Short: Price below weekly EMA50 + RSI > 70 (overbought) + volume spike
+            elif (close[i] < ema_50_1w_aligned[i] and 
+                  rsi[i] > 70 and 
                   volume_filter):
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: Price returns to the middle of the prior 4h range (H4/L4)
-            # H4 = close + 1.1*(high-low)*1.1/6, L4 = close - 1.1*(high-low)*1.1/6
-            range_hl = prev_high - prev_low
-            h4 = prev_close + range_hl * 1.1 / 6 * 1.1
-            l4 = prev_close - range_hl * 1.1 / 6 * 1.1
-            h4_aligned = align_htf_to_ltf(prices, df_4h, h4)
-            l4_aligned = align_htf_to_ltf(prices, df_4h, l4)
-            
-            camarilla_mid = (h4_aligned[i] + l4_aligned[i]) / 2
-            range_hl_4h = h4_aligned[i] - l4_aligned[i]
-            # Exit when within 35% of the mid-point (wider band to reduce churn)
-            at_mid = abs(close[i] - camarilla_mid) < range_hl_4h * 0.35
-            
-            if at_mid:
+            # Exit: RSI returns to neutral zone (40-60)
+            if 40 <= rsi[i] <= 60:
                 signals[i] = 0.0
                 position = 0
             else:
