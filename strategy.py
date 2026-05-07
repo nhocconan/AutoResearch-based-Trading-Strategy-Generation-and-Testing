@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_TRIX_14_ZeroCross_12hTrend_VolumeFilter
-Hypothesis: Use TRIX(14) zero crossovers as momentum signals, filtered by 12h EMA trend and volume spike (>1.5x average). TRIX captures momentum reversals early, while 12h trend ensures directional alignment and volume filter avoids false breakouts. Designed for fewer trades (~20-30/year) with clear entry/exit rules. Works in bull/bear by requiring trend alignment.
+4h_Keltner_Channel_Breakout_12hTrend_VolumeSpike
+Hypothesis: Keltner Channel breakouts with 12h EMA trend filter and volume spike (>1.5x 20-period average). 
+Keltner Channels adapt to volatility, providing dynamic support/resistance. Breakouts above upper channel signal bullish momentum, 
+breakouts below lower channel signal bearish momentum. 12h EMA ensures alignment with higher timeframe trend, reducing false signals. 
+Volume spike confirms breakout strength. Designed for moderate trade frequency (15-25/year) with clear trend-following logic.
+Works in bull/bear markets by requiring trend alignment and volatility-based channels.
 """
 
-name = "4h_TRIX_14_ZeroCross_12hTrend_VolumeFilter"
+name = "4h_Keltner_Channel_Breakout_12hTrend_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
 
@@ -18,6 +22,8 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
     
     # Get 12h data for trend filter
@@ -31,12 +37,18 @@ def generate_signals(prices):
     ema_50_12h = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate TRIX(14) on close
-    # TRIX = EMA(EMA(EMA(close, 14), 14), 14) then % change
-    ema1 = pd.Series(close).ewm(span=14, adjust=False, min_periods=14).mean().values
-    ema2 = pd.Series(ema1).ewm(span=14, adjust=False, min_periods=14).mean().values
-    ema3 = pd.Series(ema2).ewm(span=14, adjust=False, min_periods=14).mean().values
-    trix = np.diff(ema3, prepend=ema3[0]) / ema3 * 100
+    # Calculate Keltner Channel (20, 2.0)
+    # Middle line: EMA(20) of close
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # ATR(20)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Upper and lower bands
+    kc_upper = ema_20 + 2.0 * atr
+    kc_lower = ema_20 - 2.0 * atr
     
     # Volume confirmation: 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -50,7 +62,9 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(trix[i]) or 
+            np.isnan(ema_20[i]) or 
+            np.isnan(kc_upper[i]) or 
+            np.isnan(kc_lower[i]) or 
             np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -69,24 +83,24 @@ def generate_signals(prices):
         trend_down = daily_close_aligned[i] < ema_50_12h_aligned[i]
         
         if position == 0:
-            # Long: TRIX crosses above zero with uptrend and volume spike
-            if trix[i] > 0 and trix[i-1] <= 0 and trend_up and vol_ratio[i] > 1.5:
+            # Long: Close breaks above upper Keltner with uptrend and volume spike
+            if close[i] > kc_upper[i] and trend_up and vol_ratio[i] > 1.5:
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX crosses below zero with downtrend and volume spike
-            elif trix[i] < 0 and trix[i-1] >= 0 and trend_down and vol_ratio[i] > 1.5:
+            # Short: Close breaks below lower Keltner with downtrend and volume spike
+            elif close[i] < kc_lower[i] and trend_down and vol_ratio[i] > 1.5:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: TRIX crosses below zero or trend turns down
-            if trix[i] < 0 and trix[i-1] >= 0 or not trend_up:
+            # Exit long: Close crosses below middle line or trend turns down
+            if close[i] < ema_20[i] or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: TRIX crosses above zero or trend turns up
-            if trix[i] > 0 and trix[i-1] <= 0 or not trend_down:
+            # Exit short: Close crosses above middle line or trend turns up
+            if close[i] > ema_20[i] or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
