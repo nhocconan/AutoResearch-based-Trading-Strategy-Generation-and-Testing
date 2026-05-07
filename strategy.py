@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_Pressure_Pattern_Reversal_v1
-Hypothesis: Combines multi-timeframe pressure analysis with mean reversion at extreme levels.
-Uses 12h pressure index (close position within 12h range) for regime detection and
-6h Williams %R for entry timing. In high-pressure regimes (trending), we fade extremes.
-In low-pressure regimes (ranging), we follow momentum. Targets 15-30 trades/year.
-Works in both bull/bear by adapting to market regime via pressure dynamics.
+4h_RSI_Stochastic_Combo_v1
+Hypothesis: Combines RSI(14) for overbought/oversold conditions with Stochastic(14,3,3)
+for momentum confirmation on 4h timeframe. Uses 1-day trend filter to align with higher
+timeframe direction. Designed for low trade frequency (target: 20-40 trades/year) to
+minimize fee drag while capturing reversals in both bull and bear markets.
 """
 
-name = "6h_Pressure_Pattern_Reversal_v1"
-timeframe = "6h"
+name = "4h_RSI_Stochastic_Combo_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,78 +23,67 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 12h data for pressure index calculation (regime filter)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 14:
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Stochastic(14,3,3)
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    k_percent = np.divide((close - lowest_low) * 100, (highest_high - lowest_low), 
+                          out=np.zeros_like(close), where=(highest_high - lowest_low)!=0)
+    d_percent = pd.Series(k_percent).rolling(window=3, min_periods=3).mean().values
+    
+    # 1-day trend filter: EMA of daily close
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 12h Pressure Index: (close - low) / (high - low) averaged over 14 periods
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Avoid division by zero
-    range_12h = high_12h - low_12h
-    range_12h = np.where(range_12h == 0, 1e-10, range_12h)
-    pressure_12h = (close_12h - low_12h) / range_12h
-    
-    # Smooth pressure index with 14-period average
-    pressure_ma = pd.Series(pressure_12h).rolling(window=14, min_periods=14).mean().values
-    pressure_ma_aligned = align_htf_to_ltf(prices, df_12h, pressure_ma)
-    
-    # Calculate 6h Williams %R for entry timing (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    
-    # Avoid division by zero
-    wr_range = highest_high - lowest_low
-    wr_range = np.where(wr_range == 0, 1e-10, wr_range)
-    williams_r = -100 * (highest_high - close) / wr_range
+    # Volume confirmation: current volume > 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(14, n):
+    for i in range(20, n):
         # Skip if any critical value is NaN
-        if (np.isnan(pressure_ma_aligned[i]) or np.isnan(williams_r[i]) or
-            np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
+        if (np.isnan(rsi[i]) or np.isnan(d_percent[i]) or 
+            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        pressure = pressure_ma_aligned[i]
-        wr = williams_r[i]
-        
         if position == 0:
-            # High pressure regime (>0.7) = trending: fade extreme Williams %R
-            if pressure > 0.7:
-                if wr <= -80:  # Oversold in uptrend -> long
-                    signals[i] = 0.25
-                    position = 1
-                elif wr >= -20:  # Overbought in uptrend -> short
-                    signals[i] = -0.25
-                    position = -1
-            # Low pressure regime (<0.3) = ranging: momentum follow
-            elif pressure < 0.3:
-                if wr >= -20 and close[i] > close[i-1]:  # Overbought with upward momentum
-                    signals[i] = 0.25
-                    position = 1
-                elif wr <= -80 and close[i] < close[i-1]:  # Oversold with downward momentum
-                    signals[i] = -0.25
-                    position = -1
-            # Medium pressure: no trade
+            # Long: RSI < 30 (oversold) AND Stochastic %D < 20 AND price > 1-day EMA with volume confirmation
+            if rsi[i] < 30 and d_percent[i] < 20 and close[i] > ema_1d_aligned[i] and volume[i] > vol_ma[i]:
+                signals[i] = 0.25
+                position = 1
+            # Short: RSI > 70 (overbought) AND Stochastic %D > 80 AND price < 1-day EMA with volume confirmation
+            elif rsi[i] > 70 and d_percent[i] > 80 and close[i] < ema_1d_aligned[i] and volume[i] > vol_ma[i]:
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Long exit: Williams %R returns from extreme OR pressure shifts significantly
-            if wr >= -50 or pressure < 0.4:  # Return from oversold or pressure drops
+            # Exit: RSI > 50 (momentum shift) OR price crosses below 1-day EMA
+            if rsi[i] > 50 or close[i] < ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Williams %R returns from extreme OR pressure shifts significantly
-            if wr <= -50 or pressure > 0.6:  # Return from overbought or pressure rises
+            # Exit: RSI < 50 (momentum shift) OR price crosses above 1-day EMA
+            if rsi[i] < 50 or close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
