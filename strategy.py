@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "1H_Camarilla_R3S3_1DTrend_VolumeSpike_v6"
+name = "1H_Camarilla_R3S3_1DTrend_VolumeSpike_v7"
 timeframe = "1h"
 leverage = 1.0
 
@@ -36,7 +36,7 @@ def generate_signals(prices):
     prev_low = df_4h['low'].values
     prev_close = df_4h['close'].values
     
-    # Calculate Camarilla levels: R3 and S3 (corrected formula)
+    # Calculate Camarilla levels: R3 and S3 (correct formula)
     r3 = prev_close + 1.1 * (prev_high - prev_low) * 1.1 / 2
     s3 = prev_close - 1.1 * (prev_high - prev_low) * 1.1 / 2
     
