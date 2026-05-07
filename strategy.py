@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +17,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla levels and trend filter
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    # Get daily data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -31,15 +36,15 @@ def generate_signals(prices):
     r3 = close_prev + 1.1 * (high_prev - low_prev) / 6
     s3 = close_prev - 1.1 * (high_prev - low_prev) / 6
     
-    # Align daily levels to 6h timeframe (with 1-day delay for completed bar)
+    # Align daily levels to 12h timeframe (with 1-day delay for completed bar)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Daily trend filter: EMA34
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Weekly trend filter: EMA20
+    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Volume filter: current volume > 1.5x 20-period average (6h)
+    # Volume filter: current volume > 1.5x 20-period average (12h)
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-20:i])
@@ -48,7 +53,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 1  # ~6 hours for 6h to reduce trades
+    cooldown_bars = 6  # ~3 days for 12h to reduce trades
     
     start_idx = max(100, 20)
     
@@ -56,7 +61,7 @@ def generate_signals(prices):
         # Skip if any data not ready
         if (np.isnan(r3_aligned[i]) or 
             np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(ema_20_1w_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -68,9 +73,9 @@ def generate_signals(prices):
         
         bars_since_last_trade += 1
         
-        # Determine daily trend direction
-        trend_up = close > ema_34_1d_aligned[i]
-        trend_down = close < ema_34_1d_aligned[i]
+        # Determine weekly trend direction
+        trend_up = close > ema_20_1w_aligned[i]
+        trend_down = close < ema_20_1w_aligned[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
             # Long: Break above R3 in uptrend with volume
@@ -106,8 +111,8 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R3/S3 breakouts with daily trend alignment capture institutional
-# breakouts in both bull and bear markets. The 6h timeframe provides sufficient
+# Hypothesis: Camarilla R3/S3 breakouts with weekly trend alignment capture institutional
+# breakouts in both bull and bear markets. The 12h timeframe provides sufficient
 # noise filtering while capturing multi-day moves. Volume confirmation ensures
 # genuine institutional participation. Conservative sizing (0.25) limits drawdown
-# during false breaks. Target: 20-40 trades/year to minimize fee drag.
+# during false breaks. Target: 20-30 trades/year to minimize fee drag.
