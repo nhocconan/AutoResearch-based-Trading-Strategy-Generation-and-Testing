@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_Keltner_Breakout_Trend_Volume"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,75 +17,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE for trend filter and Keltner
+    # Load daily data ONCE before loop for Camarilla and trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Daily EMA(20) for Keltner center and trend
-    ema_20_1d = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    atr_1d = pd.Series(high - low).rolling(window=14, min_periods=14).mean().values
-    upper_keltner = ema_20_1d + 2 * atr_1d
-    lower_keltner = ema_20_1d - 2 * atr_1d
+    # Calculate Camarilla levels (R3, S3) from previous day
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Align daily indicators to 4h timeframe
-    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
-    upper_keltner_aligned = align_htf_to_ltf(prices, df_1d, upper_keltner)
-    lower_keltner_aligned = align_htf_to_ltf(prices, df_1d, lower_keltner)
+    range_hl = prev_high - prev_low
+    r3 = prev_close + range_hl * 1.1 / 2
+    s3 = prev_close - range_hl * 1.1 / 2
     
-    # Volume spike: 4-period average (1 day of 4h bars)
-    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    # Align daily Camarilla levels to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Daily EMA(34) for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume spike detection: 3-period average (3*4h = 12h)
+    vol_ma_3 = pd.Series(volume).rolling(window=3, min_periods=3).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 4)  # Wait for EMA and volume MA
+    start_idx = max(34, 3)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_20_aligned[i]) or np.isnan(upper_keltner_aligned[i]) or 
-            np.isnan(lower_keltner_aligned[i]) or np.isnan(vol_ma_4[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(vol_ma_3[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above upper Keltner with volume and daily uptrend
-            vol_condition = volume[i] > vol_ma_4[i] * 1.8
-            uptrend = ema_20_aligned[i] > ema_20_aligned[i-1]
+            # Long: price above S3 with volume and daily uptrend
+            vol_condition = volume[i] > vol_ma_3[i] * 2.0
+            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
             
-            if close[i] > upper_keltner_aligned[i] and vol_condition and uptrend:
-                signals[i] = 0.25
+            if close[i] > s3_aligned[i] and vol_condition and uptrend:
+                signals[i] = 0.30
                 position = 1
-            # Short: price below lower Keltner with volume and daily downtrend
-            elif close[i] < lower_keltner_aligned[i] and vol_condition and not uptrend:
-                signals[i] = -0.25
+            # Short: price below R3 with volume and daily downtrend
+            elif close[i] < r3_aligned[i] and vol_condition and not uptrend:
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit: price back below EMA(20) or volume drops
-            if close[i] < ema_20_aligned[i] or volume[i] < vol_ma_4[i] * 1.2:
+            # Exit: price back below S3 or volume drops
+            if close[i] < s3_aligned[i] or volume[i] < vol_ma_3[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit: price back above EMA(20) or volume drops
-            if close[i] > ema_20_aligned[i] or volume[i] < vol_ma_4[i] * 1.2:
+            # Exit: price back above R3 or volume drops
+            if close[i] > r3_aligned[i] or volume[i] < vol_ma_3[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-# Hypothesis: 4h Keltner channel breakout with daily trend and volume confirmation
-# - Keltner(20,2) uses ATR-based bands that adapt to volatility
-# - Breakout above upper band with volume in daily uptrend = long opportunity
-# - Breakdown below lower band with volume in daily downtrend = short opportunity
-# - Volume spike (1.8x average) confirms institutional participation
-# - Exit when price returns to EMA(20) or volume weakens
-# - Position size 0.25 targets ~20-50 trades/year, avoiding fee drag
-# - Works in both bull and bear markets via daily trend filter
-# - ATR-based bands provide better volatility adaptation than fixed percentage bands
-# - Novel combination: Keltner breakout (4h) + trend (1d) + volume (4h) not recently tried
-# - Aims for 50-150 total trades over 4 years (12-37/year) to stay within limits
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d trend and volume confirmation
+# - Camarilla R3/S3 are strong support/resistance levels from prior day
+# - Breakout above S3 with volume in daily uptrend = long opportunity
+# - Breakdown below R3 with volume in daily downtrend = short opportunity
+# - Volume spike (2.0x average) confirms institutional participation
+# - Works in both bull (buy S3 breaks in uptrend) and bear (sell R3 breaks in downtrend)
+# - Exit when price returns to S3/R3 or volume weakens
+# - Position size 0.30 targets ~20-40 trades/year, avoiding fee drag
+# - Uses daily Camarilla levels (not weekly) for more frequent but still controlled signals
+# - Daily trend filter reduces whipsaws vs using same timeframe
+# - Designed to work in BOTH bull and bear markets via trend filter
+# - Volume confirmation reduces false breakouts
+# - Target: Camarilla R3/S3 levels are less frequently touched than R1/S1, reducing trade frequency
+# - Aims for 50-120 total trades over 4 years (12-30/year) to stay within limits
+# - Proven pattern: similar to top performer 4h_Camarilla_R3S3_1dEMA34_Volume_v1 (test_sharpe=1.960)
