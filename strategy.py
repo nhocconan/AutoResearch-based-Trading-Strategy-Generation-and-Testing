@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_1w_RSI_Momentum_Trend_Filter"
-timeframe = "1d"
+name = "6h_ElderRay_BullPower_BearPower_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,23 +17,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Weekly RSI(14) for trend filter - only use completed weekly bars
-    rsi_14 = 100 - (100 / (1 + (pd.Series(df_1w['close']).diff().clip(lower=0).ewm(alpha=1/14, adjust=False).mean() / 
-                                     pd.Series(df_1w['close']).diff().clip(upper=0).abs().ewm(alpha=1/14, adjust=False).mean())))
-    rsi_14 = rsi_14.fillna(50).values
-    rsi_14_aligned = align_htf_to_ltf(prices, df_1w, rsi_14)
+    # Calculate 1d EMA(34) for trend filter
+    ema_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Daily RSI(14) for entry signal
-    rsi_daily = 100 - (100 / (1 + (pd.Series(close).diff().clip(lower=0).ewm(alpha=1/14, adjust=False).mean() / 
-                                    pd.Series(close).diff().clip(upper=0).abs().ewm(alpha=1/14, adjust=False).mean())))
-    rsi_daily = rsi_daily.fillna(50).values
+    # Calculate 13-period EMA for Elder Ray (standard period)
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Volume confirmation - 20-day average
+    # Elder Ray components
+    bull_power = high - ema_13
+    bear_power = low - ema_13
+    
+    # Volume spike detection (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -42,37 +42,37 @@ def generate_signals(prices):
     start_idx = 20  # Wait for volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(rsi_14_aligned[i]) or np.isnan(rsi_daily[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: RSI < 30 (oversold) + weekly RSI > 50 (bullish trend) + volume spike
-            if (rsi_daily[i] < 30 and 
-                rsi_14_aligned[i] > 50 and 
-                volume[i] > vol_ma[i] * 1.5):
+            # Long: Bull Power > 0 with volume spike and 1d uptrend
+            if (bull_power[i] > 0 and 
+                volume[i] > vol_ma[i] * 1.5 and 
+                close[i] > ema_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI > 70 (overbought) + weekly RSI < 50 (bearish trend) + volume spike
-            elif (rsi_daily[i] > 70 and 
-                  rsi_14_aligned[i] < 50 and 
-                  volume[i] > vol_ma[i] * 1.5):
+            # Short: Bear Power < 0 with volume spike and 1d downtrend
+            elif (bear_power[i] < 0 and 
+                  volume[i] > vol_ma[i] * 1.5 and 
+                  close[i] < ema_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: RSI > 50 (overbought) or trend changes
-            if (rsi_daily[i] > 50 or 
-                rsi_14_aligned[i] < 50):
+            # Exit: Bull Power turns negative or trend changes
+            if (bull_power[i] <= 0 or 
+                close[i] < ema_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: RSI < 50 (oversold) or trend changes
-            if (rsi_daily[i] < 50 or 
-                rsi_14_aligned[i] > 50):
+            # Exit: Bear Power turns positive or trend changes
+            if (bear_power[i] >= 0 or 
+                close[i] > ema_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -80,10 +80,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Daily RSI mean reversion with weekly trend filter and volume confirmation.
-# In bear markets (2025+), RSI extremes often precede short-term reversals.
-# The weekly RSI filter ensures we only trade counter-trend when the higher timeframe
-# trend is still intact, reducing false signals during strong trends.
-# Volume confirmation adds validity to reversal signals.
-# Works in both bull and bear markets by adapting to the weekly trend direction.
-# Position size 0.25 limits drawdown during adverse moves.
+# Hypothesis: 6h Elder Ray (Bull Power/Bear Power) with 1d EMA(34) trend filter and volume confirmation.
+# Elder Ray measures the power of bulls (high - EMA13) and bears (low - EMA13) relative to trend.
+# Bull Power > 0 indicates bulls are stronger than the trend; Bear Power < 0 indicates bears are stronger.
+# Combined with 1d trend filter to ensure we trade with the higher timeframe direction.
+# Volume confirmation validates the strength of the move.
+# Works in bull markets (buying when Bull Power > 0) and bear markets (selling when Bear Power < 0).
+# Position size 0.25 balances risk and keeps trade frequency manageable (target: 50-150 trades over 4 years).
