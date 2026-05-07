@@ -1,7 +1,6 @@
-# %%
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSurge"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSurge"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -37,22 +36,22 @@ def generate_signals(prices):
     camarilla_r3 = daily_close + (daily_high - daily_low) * 1.1 / 4
     camarilla_s3 = daily_close - (daily_high - daily_low) * 1.1 / 4
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Volume surge filter: current volume > 2.0x 24-period average (12-day equivalent)
-    vol_ma_24 = np.full(n, np.nan)
-    for i in range(24, n):
-        vol_ma_24[i] = np.mean(volume[i-24:i])
-    vol_surge = volume > (2.0 * vol_ma_24)
+    # Volume surge filter: current volume > 2.0x 6-period average (1-day equivalent in 4h)
+    vol_ma_6 = np.full(n, np.nan)
+    for i in range(6, n):
+        vol_ma_6[i] = np.mean(volume[i-6:i])
+    vol_surge = volume > (2.0 * vol_ma_6)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 6  # ~3 days (6*12h) to prevent overtrading
+    cooldown_bars = 6  # ~1 day (6*4h) to prevent overtrading
     
-    start_idx = max(24, 34)  # Ensure enough data for volume MA and EMA
+    start_idx = max(6, 34)  # Ensure enough data for volume MA and EMA
     
     for i in range(start_idx, n):
         # Skip if any data not ready
@@ -107,4 +106,4 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: On 12h timeframe, price breaking above/below Camarilla R3/S3 levels with volume surge confirmation and daily EMA34 trend filter captures institutional breakout momentum. Camarilla R3/S3 represent stronger support/resistance, reducing false breakouts. Daily trend filter ensures alignment with higher timeframe momentum. Volume surge filter (2.0x 24-period average) confirms institutional participation. Cooldown period prevents overtrading. Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag. Works in bull markets (breakouts above R3 in daily uptrend) and bear markets (breakdowns below S3 in daily downtrend). Uses discrete position sizing (0.28) to balance risk and reward while reducing fee churn.
+# Hypothesis: On 4h timeframe, price breaking above/below Camarilla R3/S3 levels with volume surge confirmation and daily EMA34 trend filter captures institutional breakout momentum. Camarilla R3/S3 represent stronger support/resistance, reducing false breakouts. Daily trend filter ensures alignment with higher timeframe momentum. Volume surge filter (2.0x 6-period average) confirms institutional participation. Cooldown period prevents overtrading. Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag. Works in bull markets (breakouts above R3 in daily uptrend) and bear markets (breakdowns below S3 in daily downtrend). Uses discrete position sizing (0.28) to balance risk and reward while reducing fee churn.
