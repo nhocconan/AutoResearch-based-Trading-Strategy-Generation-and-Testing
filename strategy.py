@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-name = "4h_Trix_Momentum_With_Volume_And_Trend"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeS"
 timeframe = "4h"
 leverage = 1.0
 
@@ -18,21 +18,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for TRIX and trend filter
+    # Get daily data for Camarilla and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate TRIX (triple EMA) on daily close
+    # Calculate Camarilla levels from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema1 = pd.Series(close_1d).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
-    trix_raw = np.zeros_like(ema3)
-    trix_raw[1:] = (ema3[1:] - ema3[:-1]) / ema3[:-1] * 100
     
-    # Align TRIX to 4h timeframe
-    trix = align_htf_to_ltf(prices, df_1d, trix_raw)
+    # Previous day's levels
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
+    
+    # Calculate Camarilla R3, R4, S3, S4
+    range_ = prev_high - prev_low
+    R3 = prev_close + range_ * 1.1 / 4
+    R4 = prev_close + range_ * 1.1 / 2
+    S3 = prev_close - range_ * 1.1 / 4
+    S4 = prev_close - range_ * 1.1 / 2
+    
+    # Align Camarilla levels to 4h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
     
     # Daily EMA34 for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
@@ -53,7 +68,10 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(trix[i]) or 
+        if (np.isnan(R3_aligned[i]) or 
+            np.isnan(R4_aligned[i]) or 
+            np.isnan(S3_aligned[i]) or 
+            np.isnan(S4_aligned[i]) or 
             np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
@@ -72,31 +90,33 @@ def generate_signals(prices):
         trend_1d_down = close_1d_aligned[i] < ema_34_1d_aligned[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: TRIX crosses above zero in daily uptrend with volume spike
-            if (trix[i] > 0 and trix[i-1] <= 0 and 
+            # Long: Break above R3 with volume spike in daily uptrend
+            if (close[i] > R3_aligned[i] and 
+                close[i-1] <= R3_aligned[i-1] and 
                 trend_1d_up and 
                 vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: TRIX crosses below zero in daily downtrend with volume spike
-            elif (trix[i] < 0 and trix[i-1] >= 0 and 
+            # Short: Break below S3 with volume spike in daily downtrend
+            elif (close[i] < S3_aligned[i] and 
+                  close[i-1] >= S3_aligned[i-1] and 
                   trend_1d_down and 
                   vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit: TRIX crosses below zero OR trend change
-            if (trix[i] < 0 and trix[i-1] >= 0) or not trend_1d_up:
+            # Exit: Close below S4 OR trend change
+            if (close[i] < S4_aligned[i]) or not trend_1d_up:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: TRIX crosses above zero OR trend change
-            if (trix[i] > 0 and trix[i-1] <= 0) or not trend_1d_down:
+            # Exit: Close above R4 OR trend change
+            if (close[i] > R4_aligned[i]) or not trend_1d_down:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
@@ -105,9 +125,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: TRIX zero-cross on 4h timeframe, confirmed by daily trend and volume spike.
-# Long when TRIX crosses above zero in daily uptrend with volume spike (>2x average).
-# Short when TRIX crosses below zero in daily downtrend with volume spike.
-# Daily EMA34 filter ensures we trade with the higher timeframe trend.
-# Volume confirmation filters out false signals. Cooldown prevents overtrading.
-# Target: 20-40 trades/year to avoid fee drag. Works in both bull and bear markets by capturing momentum in direction of daily trend.
+# Hypothesis: Camarilla R3/S3 breakout with volume confirmation and daily trend filter.
+# Long when price breaks above R3 (1.1*range/4) with volume spike (>2x avg) in daily uptrend.
+# Short when price breaks below S3 with volume spike in daily downtrend.
+# Exits on close below S4 (long) or above R4 (short) or trend reversal.
+# Uses daily EMA34 for trend filter to ensure trading with higher timeframe momentum.
+# Volume confirmation filters false breakouts. Cooldown prevents overtrading.
+# Target: 20-40 trades/year to avoid fee drag. Works in both bull and bear markets
+# by capturing institutional breakout levels with trend alignment.
