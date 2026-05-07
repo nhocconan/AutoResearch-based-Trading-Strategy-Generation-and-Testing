@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6s Elders Ray (Bull/Bear Power) with 12h trend filter and volume confirmation.
-# Long when Bull Power > 0, Bear Power < 0 (bullish momentum), 12h EMA50 rising (uptrend), and volume spike.
-# Short when Bear Power < 0, Bull Power < 0 (bearish momentum), 12h EMA50 falling (downtrend), and volume spike.
-# Uses Elder Ray for momentum strength, 12h EMA50 for trend filter, volume to confirm participation.
+# Hypothesis: 4h Choppiness Index regime filter + 1d Donchian(20) breakout with volume confirmation.
+# Long when price breaks above Donchian(20) high AND Choppiness Index > 61.8 (range) AND volume spike.
+# Short when price breaks below Donchian(20) low AND Choppiness Index > 61.8 (range) AND volume spike.
+# Uses mean reversion in ranging markets (Chop > 61.8) with Donchian breakouts for entry and volume for confirmation.
 # Designed for low trade frequency (target: 20-30/year) to minimize fee drag and improve generalization.
-# Works in bull markets via long positions in uptrend and in bear markets via short positions in downtrend.
-name = "6s_ElderRay_12hTrend_Volume"
-timeframe = "6h"
+# Works in ranging markets via mean reversion at channel extremes and avoids trending markets (Chop < 38.2) to reduce whipsaw.
+name = "4h_ChopRange_Donchian20_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,25 +23,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # EMA13 for Elder Ray calculation
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13  # Bull Power: High - EMA13
-    bear_power = low - ema13   # Bear Power: Low - EMA13
+    # Choppiness Index (14) - range: 0-100, >61.8 = ranging, <38.2 = trending
+    atr = np.abs(high - low)
+    atr_sum = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
+    chop[highest_high == lowest_low] = 50  # avoid division by zero
     
-    # Load 12h data for trend filter (EMA50)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
+    # Chop regime: ranging (Chop > 61.8)
+    chop_range = chop > 61.8
     
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_prev = np.roll(ema_50_12h, 1)
-    ema_50_12h_prev[0] = ema_50_12h[0]
-    ema_rising = ema_50_12h > ema_50_12h_prev
-    ema_falling = ema_50_12h < ema_50_12h_prev
-    ema_rising_aligned = align_htf_to_ltf(prices, df_12h, ema_rising)
-    ema_falling_aligned = align_htf_to_ltf(prices, df_12h, ema_falling)
+    # Donchian(20) channels
+    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
+    # Donchian breakout signals
+    long_breakout = close > highest_high_20
+    short_breakout = close < lowest_low_20
+    
+    # Load 1d data for Donchian reference (optional, using same 4h for simplicity)
     # Volume confirmation: current volume > 2.0 * 20-period EMA
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ema_20)
@@ -49,21 +50,21 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Sufficient warmup for EMA13 and EMA50
+    start_idx = 50  # Sufficient warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(ema_rising_aligned[i]) or np.isnan(ema_falling_aligned[i])):
+        if (np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i]) or 
+            np.isnan(chop_range[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Bull Power > 0, Bear Power < 0, EMA rising, volume spike
-            long_condition = (bull_power[i] > 0) and (bear_power[i] < 0) and ema_rising_aligned[i] and volume_spike[i]
-            # Short: Bear Power < 0, Bull Power < 0, EMA falling, volume spike
-            short_condition = (bear_power[i] < 0) and (bull_power[i] < 0) and ema_falling_aligned[i] and volume_spike[i]
+            # Long: Donchian breakout up + Chop range + volume spike
+            long_condition = long_breakout[i] and chop_range[i] and volume_spike[i]
+            # Short: Donchian breakout down + Chop range + volume spike
+            short_condition = short_breakout[i] and chop_range[i] and volume_spike[i]
             
             if long_condition:
                 signals[i] = 0.25
@@ -72,15 +73,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Bull Power <= 0 or EMA turns flat/falling
-            if bull_power[i] <= 0 or not ema_rising_aligned[i]:
+            # Exit: price closes below Donchian(20) low or Chop becomes trending (< 38.2)
+            if close[i] < lowest_low_20[i] or chop[i] < 38.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Bear Power >= 0 or EMA turns flat/rising
-            if bear_power[i] >= 0 or not ema_falling_aligned[i]:
+            # Exit: price closes above Donchian(20) high or Chop becomes trending (< 38.2)
+            if close[i] > highest_high_20[i] or chop[i] < 38.2:
                 signals[i] = 0.0
                 position = 0
             else:
