@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-4H_Camarilla_R1_S1_Breakout_12H_Trend_Filter_v2
-Hypothesis: Use 12h EMA50 trend filter combined with 4h Camarilla R1/S1 breakouts.
-Long when price breaks above R1 with 12h EMA50 uptrend; Short when price breaks below S1 with 12h EMA50 downtrend.
-Volume confirmation: current volume > 1.5x 20-period average volume.
-Minimum 12 bars between trades to reduce frequency and avoid overtrading.
-Designed to work in both bull and bear markets by following higher timeframe trend.
+1H_EMA_Crossover_4hTrend_1dVolFilter_v1
+Hypothesis: Use 1h EMA crossover for entry timing, filtered by 4h EMA trend direction and 1d volume spike.
+Long when 1h EMA(8) crosses above EMA(21) AND 4h EMA(50) is rising AND 1d volume > 1.5x 20-day average.
+Short when 1h EMA(8) crosses below EMA(21) AND 4h EMA(50) is falling AND 1d volume > 1.5x 20-day average.
+This combines faster entry timing with higher timeframe trend and volume confirmation to reduce false signals and work in both bull and bear markets.
 """
-name = "4H_Camarilla_R1_S1_Breakout_12H_Trend_Filter_v2"
-timeframe = "4h"
+name = "1H_EMA_Crossover_4hTrend_1dVolFilter_v1"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,48 +24,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Camarilla levels
+    # Calculate 1h EMA(8) and EMA(21)
+    close_s = pd.Series(close)
+    ema8 = close_s.ewm(span=8, adjust=False, min_periods=8).values
+    ema21 = close_s.ewm(span=21, adjust=False, min_periods=21).values
+    
+    # Get 4h data for EMA(50) trend
     df_4h = get_htf_data(prices, '4h')
     if len(df_4h) < 10:
         return np.zeros(n)
     
-    # Calculate 4h Camarilla levels (R1, S1)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    pivot = (high_4h + low_4h + close_4h) / 3
-    range_4h = high_4h - low_4h
-    r1 = pivot + (range_4h * 1.1 / 12)
-    s1 = pivot - (range_4h * 1.1 / 12)
-    r1_aligned = align_htf_to_ltf(prices, df_4h, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_4h, s1)
+    close_4h = pd.Series(df_4h['close'])
+    ema50_4h = close_4h.ewm(span=50, adjust=False, min_periods=50).values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data for volume filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # Calculate 12h EMA50
-    close_12h = pd.Series(df_12h['close'])
-    ema_12h = close_12h.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
-    
-    # Volume filter: current volume > 1.5 * 20-period average volume
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_avg * 1.5)
+    vol_1d = pd.Series(df_1d['volume'])
+    vol_avg_1d = vol_1d.rolling(window=20, min_periods=20).mean().values
+    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_exit = 0  # bars since last exit to prevent overtrading
     
-    start_idx = max(50, 20)  # Ensure sufficient warmup
+    start_idx = max(21, 50)  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
         bars_since_exit += 1
         
         # Skip if any data is not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_12h_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(ema8[i]) or np.isnan(ema21[i]) or np.isnan(ema50_4h_aligned[i]) or 
+            np.isnan(vol_avg_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,34 +66,37 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Minimum 12 bars between trades (2 days on 4h TF) to reduce frequency
-            if bars_since_exit < 12:
+            # Minimum 6 bars between trades to reduce frequency
+            if bars_since_exit < 6:
                 continue
                 
-            # Long: price breaks above R1 with 12h EMA50 uptrend
-            if (close[i] > r1_aligned[i] and close[i-1] <= r1_aligned[i-1] and 
-                ema_12h_aligned[i] > ema_12h_aligned[i-1] and volume_filter[i]):
-                signals[i] = 0.25
+            # Check 1d volume filter
+            vol_filter = volume[i] > (vol_avg_1d_aligned[i] * 1.5)
+            
+            # Long: EMA8 crosses above EMA21 AND 4h EMA50 rising AND volume filter
+            if (ema8[i] > ema21[i] and ema8[i-1] <= ema21[i-1] and 
+                ema50_4h_aligned[i] > ema50_4h_aligned[i-1] and vol_filter):
+                signals[i] = 0.20
                 position = 1
                 bars_since_exit = 0
-            # Short: price breaks below S1 with 12h EMA50 downtrend
-            elif (close[i] < s1_aligned[i] and close[i-1] >= s1_aligned[i-1] and 
-                  ema_12h_aligned[i] < ema_12h_aligned[i-1] and volume_filter[i]):
-                signals[i] = -0.25
+            # Short: EMA8 crosses below EMA21 AND 4h EMA50 falling AND volume filter
+            elif (ema8[i] < ema21[i] and ema8[i-1] >= ema21[i-1] and 
+                  ema50_4h_aligned[i] < ema50_4h_aligned[i-1] and vol_filter):
+                signals[i] = -0.20
                 position = -1
                 bars_since_exit = 0
         elif position != 0:
-            # Exit: price returns to opposite Camarilla level (R1 for long, S1 for short)
-            if position == 1 and close[i] < s1_aligned[i]:
+            # Exit: EMA8 crosses back in opposite direction
+            if position == 1 and ema8[i] < ema21[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_exit = 0
-            elif position == -1 and close[i] > r1_aligned[i]:
+            elif position == -1 and ema8[i] > ema21[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_exit = 0
             else:
                 # Hold position
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.20 if position == 1 else -0.20
     
     return signals
