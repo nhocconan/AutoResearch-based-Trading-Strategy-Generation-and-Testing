@@ -1,3 +1,6 @@
+# 4h_Camarilla_R3S3_Breakout_1dTrend_Volume
+# Hypothesis: Breakouts beyond Camarilla R3/S3 levels on 4h timeframe, confirmed by daily trend and volume spikes, capture strong momentum moves in both bull and bear markets. The strategy targets fewer than 400 total trades over 4 years to minimize fee drag, using a daily EMA trend filter and volume confirmation to ensure trades align with higher timeframe momentum and avoid false breakouts. Works in bull markets by capturing upside breakouts and in bear markets by capturing downside breakdowns.
+
 #!/usr/bin/env python3
 
 name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
