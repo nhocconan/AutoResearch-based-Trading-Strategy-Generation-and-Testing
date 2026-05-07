@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -108,3 +108,10 @@ def generate_signals(prices):
                 signals[i] = -0.25
     
     return signals
+
+# Hypothesis: This strategy combines Camarilla pivot breakouts (from daily levels) with 
+# daily trend filtering (EMA34) and volume confirmation to capture high-probability 
+# breakout moves in both bull and bear markets. The cooldown period prevents overtrading, 
+# while the volume filter ensures entries occur with institutional participation. 
+# The use of daily timeframe for regime and pivot levels ensures alignment with 
+# institutional trading cycles, making it robust across market regimes.
