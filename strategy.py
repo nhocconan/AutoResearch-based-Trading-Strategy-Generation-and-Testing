@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -16,18 +16,20 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = pd.to_datetime(prices['open_time'])
     
-    # Load 12h data ONCE for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    # Daily data for Camarilla pivot levels
+    # Load 4h data ONCE for trend filter and 1d for Camarilla pivot
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_4h) < 34 or len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
+    # 4h EMA34 for trend filter
+    close_4h = df_4h['close'].values
+    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1h = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    
+    # 1d Camarilla pivot levels from previous day (standard formula)
     c_high = df_1d['high'].values
     c_low = df_1d['low'].values
     c_close = df_1d['close'].values
@@ -37,27 +39,32 @@ def generate_signals(prices):
     r1 = pivot + (range_val * 1.1 / 12)
     s1 = pivot - (range_val * 1.1 / 12)
     
-    # Align Camarilla levels to 4h timeframe
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
-    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
-    
-    # 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Align pivot levels to 1h timeframe
+    r1_1h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_1h = align_htf_to_ltf(prices, df_1d, s1)
+    pivot_1h = align_htf_to_ltf(prices, df_1d, pivot)
     
     # Volume spike detection (1.5x 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # Session filter: 08:00-20:00 UTC
+    session_mask = (open_time.hour >= 8) & (open_time.hour <= 20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or 
-            np.isnan(ema_50_4h[i]) or np.isnan(vol_ma_20[i]) or
-            np.isnan(pivot_4h[i])):
+        if (np.isnan(r1_1h[i]) or np.isnan(s1_1h[i]) or 
+            np.isnan(ema_34_1h[i]) or np.isnan(vol_ma_20[i]) or
+            np.isnan(pivot_1h[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        if not session_mask[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,27 +73,27 @@ def generate_signals(prices):
         vol_condition = volume[i] > vol_ma_20[i] * 1.5
         
         if position == 0:
-            # Long: break above R1 in 12h uptrend with volume
-            if close[i] > r1_4h[i] and close[i] > ema_50_4h[i] and vol_condition:
-                signals[i] = 0.25
+            # Long: break above R1 in 4h uptrend with volume
+            if close[i] > r1_1h[i] and close[i] > ema_34_1h[i] and vol_condition:
+                signals[i] = 0.20
                 position = 1
-            # Short: break below S1 in 12h downtrend with volume
-            elif close[i] < s1_4h[i] and close[i] < ema_50_4h[i] and vol_condition:
-                signals[i] = -0.25
+            # Short: break below S1 in 4h downtrend with volume
+            elif close[i] < s1_1h[i] and close[i] < ema_34_1h[i] and vol_condition:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
             # Exit: price returns to pivot or trend reverses
-            if close[i] < pivot_4h[i] or close[i] < ema_50_4h[i]:
+            if close[i] < pivot_1h[i] or close[i] < ema_34_1h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
             # Exit: price returns to pivot or trend reverses
-            if close[i] > pivot_4h[i] or close[i] > ema_50_4h[i]:
+            if close[i] > pivot_1h[i] or close[i] > ema_34_1h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
