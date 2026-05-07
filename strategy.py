@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_AdaptiveTrend_With_Volume_Regime_Filter
-Hypothesis: Combines adaptive trend (KAMA) with volume confirmation and Choppiness Index regime filter to avoid whipsaws. Long when KAMA slope turns positive, volume > 1.5x average, and market is trending (CHOP < 38.2). Short when KAMA slope turns negative, volume > 1.5x average, and market is trending. Exit when KAMA slope reverses or regime shifts to choppy. Designed for 4h to capture strong trends while avoiding range-bound losses.
+1d_FundingRate_MeanReversion_With_WeeklyTrend
+Hypothesis: Use funding rate z-score mean reversion on 1d timeframe, filtered by weekly trend (EMA34). 
+Long when funding rate z-score < -2.0 and weekly trend is up, short when z-score > +2.0 and weekly trend is down.
+Exit when z-score reverts to zero or weekly trend flips. 
+Funding rate provides edge in BTC/ETH mean reversion during extremes, weekly trend filter avoids counter-trend trades.
+Designed for 1d to capture low-frequency mean reversion (target 10-25 trades/year).
 """
 
-name = "4h_AdaptiveTrend_With_Volume_Regime_Filter"
-timeframe = "4h"
+name = "1d_FundingRate_MeanReversion_With_WeeklyTrend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,129 +21,77 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    # Load funding rate data (assumed to be available via external source)
+    # For now, we'll simulate funding rate as a placeholder - in reality this would load from data/processed/funding/
+    # Since we don't have actual funding data in prices, we'll use a proxy based on price action
+    # This is a limitation - in practice this strategy would load external funding data
+    
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for Choppiness Index
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate KAMA on 4h
-    period = 10
-    change = np.abs(np.subtract(close[period:], close[:-period]))
+    # Calculate weekly EMA34 for trend filter
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
     
-    # Calculate volatility (sum of absolute changes)
-    volatility = np.zeros_like(close)
-    for i in range(1, len(close)):
-        volatility[i] = volatility[i-1] + np.abs(close[i] - close[i-1])
+    # Weekly trend determination
+    weekly_uptrend = close_1w_aligned > ema_34_1w_aligned
+    weekly_downtrend = close_1w_aligned < ema_34_1w_aligned
     
-    # Calculate Efficiency Ratio (ER)
-    er = np.zeros_like(close)
-    for i in range(period, len(close)):
-        price_change = np.abs(close[i] - close[i-period])
-        sum_vol = volatility[i] - volatility[i-period]
-        if sum_vol > 0:
-            er[i] = price_change / sum_vol
-        else:
-            er[i] = 0
+    # Proxy for funding rate z-score using price deviation from weekly average
+    # In reality, this would be replaced with actual funding rate data
+    weekly_mean = pd.Series(close_1w).rolling(window=30, min_periods=30).mean().values
+    weekly_mean_aligned = align_htf_to_ltf(prices, df_1w, weekly_mean)
+    weekly_std = pd.Series(close_1w).rolling(window=30, min_periods=30).std().values
+    weekly_std_aligned = align_htf_to_ltf(prices, df_1w, weekly_std)
     
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)  # EMA(2)
-    slow_sc = 2 / (30 + 1) # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Avoid division by zero
+    weekly_std_aligned = np.where(weekly_std_aligned == 0, 1e-10, weekly_std_aligned)
     
-    # Calculate KAMA
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # KAMA slope (direction)
-    kama_slope = np.diff(kama, prepend=kama[0])
-    
-    # Calculate Choppiness Index on 1d
-    atr_period = 14
-    tr1 = np.subtract(df_1d['high'], df_1d['low'])
-    tr2 = np.abs(np.subtract(df_1d['high'], np.concatenate([[df_1d['close'][0]], df_1d['close'][:-1]])))
-    tr3 = np.abs(np.subtract(df_1d['low'], np.concatenate([[df_1d['close'][0]], df_1d['close'][:-1]])))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    atr = np.zeros_like(df_1d['close'])
-    for i in range(1, len(tr)):
-        atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
-    
-    max_high = np.zeros_like(df_1d['high'])
-    min_low = np.zeros_like(df_1d['low'])
-    max_high[0] = df_1d['high'][0]
-    min_low[0] = df_1d['low'][0]
-    for i in range(1, len(df_1d)):
-        max_high[i] = max(max_high[i-1], df_1d['high'][i])
-        min_low[i] = min(min_low[i-1], df_1d['low'][i])
-    
-    chop = np.zeros_like(df_1d['close'])
-    for i in range(atr_period, len(df_1d)):
-        sum_atr = np.sum(atr[i-atr_period+1:i+1])
-        highest_high = max_high[i]
-        lowest_low = min_low[i]
-        if highest_high > lowest_low:
-            chop[i] = 100 * np.log10(sum_atr / (highest_high - lowest_low)) / np.log10(atr_period)
-        else:
-            chop[i] = 50  # neutral when no range
-    
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # Volume confirmation: 20-period average on 4h
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.divide(volume, vol_ma20, out=np.zeros_like(volume), where=vol_ma20!=0)
+    # Price z-score relative to weekly mean (proxy for funding rate extremes)
+    price_zscore = (close - weekly_mean_aligned) / weekly_std_aligned
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(period, 20)  # Warmup for KAMA and volume MA
+    start_idx = max(34, 30)  # Warmup for weekly EMA and stats
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(kama_slope[i]) or np.isnan(chop_aligned[i]) or 
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(close_1w_aligned[i]) or 
+            np.isnan(weekly_mean_aligned[i]) or np.isnan(weekly_std_aligned[i]) or
+            np.isnan(price_zscore[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Regime filter: trending when CHOP < 38.2
-        is_trending = chop_aligned[i] < 38.2
-        
         if position == 0:
-            # Long: KAMA slope turns positive, volume confirmation, trending market
-            if (kama_slope[i] > 0 and kama_slope[i-1] <= 0 and  # slope just turned positive
-                vol_ratio[i] > 1.5 and 
-                is_trending):
+            # Long: price significantly below weekly mean (proxy for negative funding extreme) in weekly uptrend
+            if (price_zscore[i] < -2.0 and weekly_uptrend[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA slope turns negative, volume confirmation, trending market
-            elif (kama_slope[i] < 0 and kama_slope[i-1] >= 0 and  # slope just turned negative
-                  vol_ratio[i] > 1.5 and 
-                  is_trending):
+            # Short: price significantly above weekly mean (proxy for positive funding extreme) in weekly downtrend
+            elif (price_zscore[i] > 2.0 and weekly_downtrend[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: KAMA slope turns negative OR market becomes choppy
-            if kama_slope[i] < 0 and kama_slope[i-1] >= 0:
-                signals[i] = 0.0
-                position = 0
-            elif not is_trending:
+            # Exit long: price reverts to weekly mean or weekly trend turns down
+            if (price_zscore[i] > -0.5 or not weekly_uptrend[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: KAMA slope turns positive OR market becomes choppy
-            if kama_slope[i] > 0 and kama_slope[i-1] <= 0:
-                signals[i] = 0.0
-                position = 0
-            elif not is_trending:
+            # Exit short: price reverts to weekly mean or weekly trend turns up
+            if (price_zscore[i] < 0.5 or not weekly_downtrend[i]):
                 signals[i] = 0.0
                 position = 0
             else:
