@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_Donchian20_1wTrend_VolumeSpike_v1"
-timeframe = "1d"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,18 +17,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
+    # Get daily data for Camarilla pivot and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # 1w EMA21 trend filter
-    ema_21_1w = pd.Series(df_1w['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    # 1d EMA34 trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Donchian(20) breakout
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    # Daily Camarilla pivot levels (R1, S1)
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    r1 = pivot + (prev_high - prev_low) * 1.1 / 12
+    s1 = pivot - (prev_high - prev_low) * 1.1 / 12
+    
+    # Align Camarilla levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
     # Volume filter: current volume > 1.8 * 30-period average
     vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
@@ -37,37 +45,37 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(21, 31)  # 20 for Donchian + 1 shift, 30 for volume MA + 1
+    start_idx = max(31, 30)  # 30 for volume MA, 30 for daily data shift
     
     for i in range(start_idx, n):
-        if np.isnan(ema_21_1w_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: breakout above Donchian high + above weekly EMA21 + volume spike
-            if close[i] > high_20[i] and close[i] > ema_21_1w_aligned[i] and volume_ok[i]:
-                signals[i] = 0.30
+            # Long: break above R1 + above daily EMA34 + volume spike
+            if close[i] > r1_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_ok[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: breakdown below Donchian low + below weekly EMA21 + volume spike
-            elif close[i] < low_20[i] and close[i] < ema_21_1w_aligned[i] and volume_ok[i]:
-                signals[i] = -0.30
+            # Short: break below S1 + below daily EMA34 + volume spike
+            elif close[i] < s1_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_ok[i]:
+                signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: price returns to Donchian range or breaks in opposite direction
+            # Exit: price returns to opposite Camarilla level or breaks in opposite direction
             if position == 1:
-                if close[i] < low_20[i] or close[i] < ema_21_1w_aligned[i]:
+                if close[i] < s1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.30
+                    signals[i] = 0.25
             else:  # position == -1
-                if close[i] > high_20[i] or close[i] > ema_21_1w_aligned[i]:
+                if close[i] > r1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.30
+                    signals[i] = -0.25
     
     return signals
