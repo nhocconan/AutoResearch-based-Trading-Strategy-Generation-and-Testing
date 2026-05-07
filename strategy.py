@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian channel breakout with 12h EMA50 trend filter and volume confirmation.
-# Long when price breaks above upper Donchian(20), price > 12h EMA50, and volume > 1.5x 20-period average.
-# Short when price breaks below lower Donchian(20), price < 12h EMA50, and volume > 1.5x 20-period average.
-# Exit when price crosses back through the opposite Donchian band or volume drops below average.
-# Designed for 4h timeframe with target trade frequency of 25-50/year to minimize fee drag.
-# Uses 12h EMA50 for trend filter to avoid counter-trend trades in strong trends.
-# Volume filter ensures participation and avoids low-conviction moves.
-# Works in both bull and bear markets by following the trend on higher timeframe.
-name = "4h_Donchian_20_12hEMA50_Volume"
-timeframe = "4h"
+# Hypothesis: 1h price position relative to 4h Bollinger Bands with 1d trend filter and volume confirmation.
+# Long when price touches lower 4h BB AND 1d EMA50 rising AND volume > 1.5x 20-period average.
+# Short when price touches upper 4h BB AND 1d EMA50 falling AND volume > 1.5x 20-period average.
+# Exit when price crosses 4h SMA20 or volume filter fails.
+# Uses 4h BB for mean reversion in ranging markets and 1d EMA50 for trend filter.
+# Designed for 1h timeframe with controlled trade frequency (target: 15-30/year) to avoid fee drag.
+
+name = "1h_BB_Touch_1dEMA50_VolumeFilter"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,22 +24,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # 4h Bollinger Bands (20, 2)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    close_4h = df_4h['close'].values
+    sma20_4h = pd.Series(close_4h).rolling(window=20, min_periods=20).mean().values
+    std20_4h = pd.Series(close_4h).rolling(window=20, min_periods=20).std().values
+    upper_bb_4h = sma20_4h + 2 * std20_4h
+    lower_bb_4h = sma20_4h - 2 * std20_4h
+    
+    # Align 4h BB to 1h
+    upper_bb_4h_aligned = align_htf_to_ltf(prices, df_4h, upper_bb_4h)
+    lower_bb_4h_aligned = align_htf_to_ltf(prices, df_4h, lower_bb_4h)
+    sma20_4h_aligned = align_htf_to_ltf(prices, df_4h, sma20_4h)
+    
+    # 1d EMA50 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma20)
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -48,38 +63,45 @@ def generate_signals(prices):
     start_idx = 50  # Sufficient warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(ema50_12h_aligned[i]) or 
+        if (np.isnan(upper_bb_4h_aligned[i]) or np.isnan(lower_bb_4h_aligned[i]) or 
+            np.isnan(sma20_4h_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
             np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        if position == 0:
-            # Long conditions: price breaks above upper Donchian, price > 12h EMA50, volume filter
-            long_cond = (close[i] > high_20[i]) and (close[i] > ema50_12h_aligned[i]) and volume_filter[i]
-            # Short conditions: price breaks below lower Donchian, price < 12h EMA50, volume filter
-            short_cond = (close[i] < low_20[i]) and (close[i] < ema50_12h_aligned[i]) and volume_filter[i]
-            
-            if long_cond:
-                signals[i] = 0.25
-                position = 1
-            elif short_cond:
-                signals[i] = -0.25
-                position = -1
-        elif position == 1:
-            # Long exit: price crosses below lower Donchian OR volume filter fails
-            if (close[i] < low_20[i]) or not volume_filter[i]:
+        if session_filter[i]:
+            if position == 0:
+                # Long conditions: price touches lower 4h BB AND 1d EMA50 rising AND volume filter
+                long_cond = (low[i] <= lower_bb_4h_aligned[i]) and (ema50_1d_aligned[i] > ema50_1d_aligned[i-1]) and volume_filter[i]
+                # Short conditions: price touches upper 4h BB AND 1d EMA50 falling AND volume filter
+                short_cond = (high[i] >= upper_bb_4h_aligned[i]) and (ema50_1d_aligned[i] < ema50_1d_aligned[i-1]) and volume_filter[i]
+                
+                if long_cond:
+                    signals[i] = 0.20
+                    position = 1
+                elif short_cond:
+                    signals[i] = -0.20
+                    position = -1
+            elif position == 1:
+                # Long exit: price crosses 4h SMA20 OR volume filter fails
+                if (close[i] >= sma20_4h_aligned[i]) or not volume_filter[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.20
+            elif position == -1:
+                # Short exit: price crosses 4h SMA20 OR volume filter fails
+                if (close[i] <= sma20_4h_aligned[i]) or not volume_filter[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.20
+        else:
+            # Outside session: flatten position
+            if position != 0:
                 signals[i] = 0.0
                 position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:
-            # Short exit: price crosses above upper Donchian OR volume filter fails
-            if (close[i] > high_20[i]) or not volume_filter[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
     
     return signals
