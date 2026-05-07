@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_WeeklyPivot_Breakout_Trend_Volume"
-timeframe = "12h"
+name = "6h_WeeklyPivot_DailyTrend_VolumeSpike_v2"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -19,10 +19,11 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop for weekly pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 5:
         return np.zeros(n)
     
     # Calculate weekly pivot points using Monday's OHLC (start of week)
+    # For each day, use the Monday of that week's OHLC
     days = pd.to_datetime(df_1d.index)
     week_start = days - pd.to_timedelta(days.weekday, unit='D')
     unique_weeks = week_start.unique()
@@ -59,13 +60,13 @@ def generate_signals(prices):
     # Calculate daily EMA(34) for trend filter
     ema_34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align weekly pivot levels and daily EMA to 12h timeframe
+    # Align weekly pivot levels and daily EMA to 6h timeframe
     weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
     weekly_r1_aligned = align_htf_to_ltf(prices, df_1d, weekly_r1)
     weekly_s1_aligned = align_htf_to_ltf(prices, df_1d, weekly_s1)
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Volume spike detection (24-period average on 12h = 12 days)
+    # Volume spike detection (24-period average on 6h)
     vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
@@ -109,9 +110,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 12h Weekly Pivot Breakout with Trend and Volume Confirmation
-# Weekly pivot points calculated from Monday's OHLC provide significant weekly support/resistance.
+# Hypothesis: 6s Weekly Pivot (using Monday OHLC) + Daily EMA(34) trend + Volume Spike (2x)
+# Weekly pivot from Monday's OHLC provides significant weekly support/resistance.
 # Breaks above R1 or below S1 with 2x volume indicate institutional interest.
 # Daily EMA(34) ensures trades align with daily trend direction.
 # Works in bull (buy R1 breaks in uptrend) and bear (sell S1 breaks in downtrend).
-# Position size 0.25 balances risk and keeps trade frequency ~12-30/year on 12h timeframe.
+# Position size 0.25 balances risk and keeps trade frequency ~15-35/year.
