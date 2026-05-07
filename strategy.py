@@ -1,6 +1,9 @@
+# 4h_Camarilla_R3S3_Breakout_1dEMA34_Volume_Spike_v4 - Improved version with stricter entry and better risk management
+# Hypothesis: By tightening the volume filter to 3x average volume, reducing position size to 0.20, and adding a minimum hold period of 3 bars, we reduce trade frequency to target 15-25 trades per year while maintaining the edge of Camarilla R3/S3 breakouts with 1d EMA34 trend confirmation. This should improve generalization to the test period by focusing only on the strongest institutional breakouts with clear trend alignment.
+
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Volume_Spike_v4"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,7 +25,7 @@ def generate_signals(prices):
     if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate Camarilla R3 and S3 levels from previous day
+    # Calculate Camarilla R3 and S3 levels from previous day (wider range for stronger breakouts)
     high_prev = df_1d['high'].shift(1).values
     low_prev = df_1d['low'].shift(1).values
     close_prev = df_1d['close'].shift(1).values
@@ -30,7 +33,7 @@ def generate_signals(prices):
     r3 = close_prev + 1.1 * (high_prev - low_prev) / 4
     s3 = close_prev - 1.1 * (high_prev - low_prev) / 4
     
-    # Align daily levels to 12h timeframe (with 1-day delay for completed bar)
+    # Align daily levels to 4h timeframe (with 1-day delay for completed bar)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
@@ -38,16 +41,18 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume filter: current volume > 2.0x 20-period average
+    # Volume filter: current volume > 3.0x 20-period average (stricter to reduce trades)
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-20:i])
-    vol_filter = volume > (2.0 * vol_ma_20)
+    vol_filter = volume > (3.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 4  # ~2 days for 12h to reduce trades
+    cooldown_bars = 8  # ~16 hours for 4h to reduce trades
+    min_hold_bars = 3  # Minimum hold period to prevent whipsaws
+    bars_since_entry = 0
     
     start_idx = max(100, 20, 34)
     
@@ -61,11 +66,15 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
+                bars_since_entry = 0
             else:
                 bars_since_last_trade += 1
+                bars_since_entry += 1
             continue
         
         bars_since_last_trade += 1
+        if position != 0:
+            bars_since_entry += 1
         
         # Determine 1d trend direction
         trend_up = close > ema_34_1d_aligned[i]
@@ -76,31 +85,43 @@ def generate_signals(prices):
             if (close[i] > r3_aligned[i] and 
                 trend_up[i] and 
                 vol_filter[i]):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
                 bars_since_last_trade = 0
+                bars_since_entry = 0
             # Short: Break below S3 in downtrend with strong volume
             elif (close[i] < s3_aligned[i] and 
                   trend_down[i] and 
                   vol_filter[i]):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
                 bars_since_last_trade = 0
+                bars_since_entry = 0
         elif position == 1:
-            # Exit: Price re-enters Camarilla body (between R3 and S3) or trend change
-            if (close[i] < r3_aligned[i] and close[i] > s3_aligned[i]) or not trend_up[i]:
-                signals[i] = 0.0
-                position = 0
-                bars_since_last_trade = 0
+            # Exit: Price re-enters Camarilla body (between R3 and S3) or trend change, but only after minimum hold
+            if bars_since_entry >= min_hold_bars:
+                if (close[i] < r3_aligned[i] and close[i] > s3_aligned[i]) or not trend_up[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_last_trade = 0
+                    bars_since_entry = 0
+                else:
+                    signals[i] = 0.20
             else:
-                signals[i] = 0.25
+                # Hold position until minimum hold period is met
+                signals[i] = 0.20
         elif position == -1:
-            # Exit: Price re-enters Camarilla body or trend change
-            if (close[i] < r3_aligned[i] and close[i] > s3_aligned[i]) or not trend_down[i]:
-                signals[i] = 0.0
-                position = 0
-                bars_since_last_trade = 0
+            # Exit: Price re-enters Camarilla body or trend change, but only after minimum hold
+            if bars_since_entry >= min_hold_bars:
+                if (close[i] < r3_aligned[i] and close[i] > s3_aligned[i]) or not trend_down[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_last_trade = 0
+                    bars_since_entry = 0
+                else:
+                    signals[i] = -0.20
             else:
-                signals[i] = -0.25
+                # Hold position until minimum hold period is met
+                signals[i] = -0.20
     
     return signals
