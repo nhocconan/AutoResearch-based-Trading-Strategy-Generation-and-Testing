@@ -3,19 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian(20) breakout with 1-day volume confirmation and
-#   chop regime filter. Long when price breaks above 20-period high with volume
-#   spike and chop > 61.8 (range); short when breaks below 20-period low with
-#   volume spike and chop > 61.8. This structure captures volatility expansion
-#   in ranging markets, works in both bull and bear regimes by filtering for
-#   high-probability mean-reversion bursts. Target: 20-50 trades/year.
-name = "12h_Donchian20_VolumeChop"
-timeframe = "12h"
+# Hypothesis: 4h Camarilla Pivot R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Long when price breaks above R3 with volume spike and price > 1d EMA34 (uptrend).
+# Short when price breaks below S3 with volume spike and price < 1d EMA34 (downtrend).
+# Exit when price crosses back through the pivot point (CP) or volume drops below average.
+# Target: 20-50 trades/year to avoid fee drag. Uses 1d EMA34 for trend filter to avoid counter-trend trades.
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,55 +22,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    high_max20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Chop index (14-period) for regime filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first bar
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    highest_high20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    chop = 100 * np.log10(atr14.sum() / (highest_high20 - lowest_low20)) / np.log10(14)
-    # Fix: correct chop calculation using rolling sum
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    hh_ll_diff = highest_high20 - lowest_low20
-    chop = np.where(hh_ll_diff != 0, 100 * np.log10(atr_sum / hh_ll_diff) / np.log10(14), 50)
-    
-    # 1-day volume average for spike detection
+    # Calculate Camarilla levels from previous day (using 1d data)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    vol_1d = df_1d['volume'].values
-    vol_avg20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg20_1d)
+    # Previous day's OHLC for Camarilla calculation
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    
+    # Camarilla levels: H = high, L = low, C = close
+    H = prev_high
+    L = prev_low
+    C = prev_close
+    
+    # Calculate levels
+    R3 = C + (H - L) * 1.1 / 2
+    S3 = C - (H - L) * 1.1 / 2
+    CP = (H + L + C) / 3  # Pivot point
+    
+    # Align to 4h timeframe
+    R3_4h = align_htf_to_ltf(prices, df_1d, R3)
+    S3_4h = align_htf_to_ltf(prices, df_1d, S3)
+    CP_4h = align_htf_to_ltf(prices, df_1d, CP)
+    
+    # 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Volume filter: current volume > 2.0x 20-period average (higher threshold to reduce trades)
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # sufficient warmup
+    start_idx = 1  # Start from second bar to have previous day data
     
     for i in range(start_idx, n):
-        if (np.isnan(high_max20[i]) or np.isnan(low_min20[i]) or 
-            np.isnan(chop[i]) or np.isnan(vol_avg20_1d_aligned[i])):
+        if (np.isnan(R3_4h[i]) or np.isnan(S3_4h[i]) or np.isnan(CP_4h[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume spike: current 12h volume > 2x daily average volume (approximation)
-        vol_spike = volume[i] > (2.0 * vol_avg20_1d_aligned[i])
-        
         if position == 0:
-            # Long: breakout above 20-period high, volume spike, chop > 61.8 (range)
-            long_cond = (close[i] > high_max20[i]) and vol_spike and (chop[i] > 61.8)
-            # Short: breakdown below 20-period low, volume spike, chop > 61.8
-            short_cond = (close[i] < low_min20[i]) and vol_spike and (chop[i] > 61.8)
+            # Long conditions: price breaks above R3, volume spike, price > 1d EMA34 (uptrend)
+            long_cond = (close[i] > R3_4h[i]) and volume_spike[i] and (close[i] > ema34_1d_aligned[i])
+            # Short conditions: price breaks below S3, volume spike, price < 1d EMA34 (downtrend)
+            short_cond = (close[i] < S3_4h[i]) and volume_spike[i] and (close[i] < ema34_1d_aligned[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -80,15 +82,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price returns to 20-period low or chop drops (trend emerging)
-            if close[i] < low_min20[i] or chop[i] < 40:
+            # Long exit: price crosses below pivot point OR volume spike ends
+            if close[i] < CP_4h[i] or not volume_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price returns to 20-period high or chop drops
-            if close[i] > high_max20[i] or chop[i] < 40:
+            # Short exit: price crosses above pivot point OR volume spike ends
+            if close[i] > CP_4h[i] or not volume_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
