@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """
-4H_Camarilla_R3_S3_Breakout_1dEMA34_Trend_Filter_v2
-Hypothesis: Trade breakouts of 1d Camarilla R3/S3 levels with 1d EMA34 trend filter and volume confirmation.
-Long when price breaks above R3 and 1d EMA34 is rising; short when price breaks below S3 and 1d EMA34 is falling.
-Volume filter: current volume > 1.5x 20-period average volume.
-This strategy targets high-probability breakouts in trending markets while avoiding false signals in chop.
-Designed for 4h timeframe with 1d HTF for trend and pivot levels.
+12H_Triple_Crossover_Volume_Squeeze_Exit_v1
+Hypothesis: On 12h timeframe, use a triple EMA crossover system (8/21/55) for trend direction,
+with volume confirmation and Bollinger Band squeeze exit. The triple EMA provides robust
+trend filtering, volume confirms institutional participation, and BB squeeze identifies
+low volatility breakouts. Works in both bull and bear markets by capturing strong
+trends while avoiding choppy conditions.
 """
-name = "4H_Camarilla_R3_S3_Breakout_1dEMA34_Trend_Filter_v2"
-timeframe = "4h"
+name = "12H_Triple_Crossover_Volume_Squeeze_Exit_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mta_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,42 +25,53 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and EMA
+    # Get 1d data for trend filter (avoid false signals in weak trends)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 55:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla levels (R3, S3)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r3 = pivot + (range_1d * 1.1 / 4)  # R3 level
-    s3 = pivot - (range_1d * 1.1 / 4)  # S3 level
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Calculate 1d EMA55 for trend filter
+    close_1d = pd.Series(df_1d['close'])
+    ema55_1d = close_1d.ewm(span=55, adjust=False, min_periods=55).mean().values
+    ema55_1d_aligned = align_htf_to_ltf(prices, df_1d, ema55_1d)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # Get 12h data for EMA8/EMA21 crossover
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 21:
+        return np.zeros(n)
     
-    # Volume filter: current volume > 1.5 * 20-period average volume
+    # Calculate 12h EMA8 and EMA21
+    close_12h = pd.Series(df_12h['close'])
+    ema8_12h = close_12h.ewm(span=8, adjust=False, min_periods=8).mean().values
+    ema21_12h = close_12h.ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema8_12h_aligned = align_htf_to_ltf(prices, df_12h, ema8_12h)
+    ema21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema21_12h)
+    
+    # Bollinger Bands on 12h for squeeze detection (exit signal)
+    sma20_12h = close_12h.rolling(window=20, min_periods=20).mean().values
+    std20_12h = close_12h.rolling(window=20, min_periods=20).std().values
+    upper_bb = sma20_12h + (2 * std20_12h)
+    lower_bb = sma20_12h - (2 * std20_12h)
+    bb_width = (upper_bb - lower_bb) / sma20_12h
+    bb_width_aligned = align_htf_to_ltf(prices, df_12h, bb_width)
+    
+    # Volume filter: current volume > 1.3x 20-period average volume
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_avg * 1.5)
+    volume_filter = volume > (vol_avg * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_exit = 0  # bars since last exit to prevent overtrading
     
-    start_idx = max(34, 20)  # Ensure sufficient warmup
+    start_idx = max(55, 20)  # Ensure sufficient warmup for all indicators
     
     for i in range(start_idx, n):
         bars_since_exit += 1
         
         # Skip if any data is not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(ema8_12h_aligned[i]) or np.isnan(ema21_12h_aligned[i]) or 
+            np.isnan(ema55_1d_aligned[i]) or np.isnan(bb_width_aligned[i]) or 
+            np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,29 +79,47 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Minimum 8 bars between trades (1.33 days on 4h TF) to reduce frequency
-            if bars_since_exit < 8:
+            # Minimum 24 bars between trades (12 days on 12h TF) to reduce frequency
+            if bars_since_exit < 24:
                 continue
                 
-            # Long: price breaks above R3 with rising EMA34 and volume
-            if (close[i] > r3_aligned[i] and close[i-1] <= r3_aligned[i-1] and 
-                ema_34_aligned[i] > ema_34_aligned[i-1] and volume_filter[i]):
+            # Bullish trend: EMA8 > EMA21 > EMA55(1d)
+            bullish_trend = (ema8_12h_aligned[i] > ema21_12h_aligned[i] and 
+                           ema21_12h_aligned[i] > ema55_1d_aligned[i])
+            
+            # Bearish trend: EMA8 < EMA21 < EMA55(1d)
+            bearish_trend = (ema8_12h_aligned[i] < ema21_12h_aligned[i] and 
+                           ema21_12h_aligned[i] < ema55_1d_aligned[i])
+            
+            # Long: bullish crossover + volume confirmation
+            if (bullish_trend and 
+                ema8_12h_aligned[i-1] <= ema21_12h_aligned[i-1] and  # crossover just happened
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_exit = 0
-            # Short: price breaks below S3 with falling EMA34 and volume
-            elif (close[i] < s3_aligned[i] and close[i-1] >= s3_aligned[i-1] and 
-                  ema_34_aligned[i] < ema_34_aligned[i-1] and volume_filter[i]):
+            # Short: bearish crossover + volume confirmation
+            elif (bearish_trend and 
+                  ema8_12h_aligned[i-1] >= ema21_12h_aligned[i-1] and  # crossover just happened
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_exit = 0
         elif position != 0:
-            # Exit: price returns to opposite S3/R3 level
-            if position == 1 and close[i] < s3_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-                bars_since_exit = 0
-            elif position == -1 and close[i] > r3_aligned[i]:
+            # Exit conditions
+            exit_signal = False
+            
+            # Exit 1: Bollinger Band squeeze (low volatility breakout fading)
+            if bb_width_aligned[i] < 0.02:  # Very tight Bollinger Bands
+                exit_signal = True
+            
+            # Exit 2: Trend reversal (EMA8 crosses back through EMA21)
+            elif position == 1 and ema8_12h_aligned[i] < ema21_12h_aligned[i]:
+                exit_signal = True
+            elif position == -1 and ema8_12h_aligned[i] > ema21_12h_aligned[i]:
+                exit_signal = True
+            
+            if exit_signal:
                 signals[i] = 0.0
                 position = 0
                 bars_since_exit = 0
