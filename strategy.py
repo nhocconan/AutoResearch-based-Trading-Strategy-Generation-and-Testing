@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_4h1d_DonchianBreakout_VolumeTrend"
-timeframe = "1h"
+name = "6h_WeeklyPivot_DailyTrend_VolumeBreak"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -8,8 +8,8 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
-    n = len(prices)
-    if n < 100:
+    n = len(prrices)
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,90 +17,92 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
-    
-    # Load 1d data ONCE before loop
+    # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 4h Donchian channel (20-period)
-    high_4h = pd.Series(df_4h['high'].values)
-    low_4h = pd.Series(df_4h['low'].values)
-    donch_high_4h = high_4h.rolling(window=20, min_periods=20).max().values
-    donch_low_4h = low_4h.rolling(window=20, min_periods=20).min().values
-    donch_high_4h_aligned = align_htf_to_ltf(prices, df_4h, donch_high_4h)
-    donch_low_4h_aligned = align_htf_to_ltf(prices, df_4h, donch_low_4h)
+    # Weekly pivot points from daily data (use last completed week)
+    # Calculate weekly high/low/close from daily data
+    # We'll compute weekly pivot using the last 5 trading days (approximate week)
+    weekly_high = pd.Series(high).rolling(window=5*24//6, min_periods=5*24//6).max().values  # 5 days of 6h bars
+    weekly_low = pd.Series(low).rolling(window=5*24//6, min_periods=5*24//6).min().values
+    weekly_close = pd.Series(close).rolling(window=5*24//6, min_periods=5*24//6).mean().values
     
-    # 1d EMA(34) trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Pivot levels
+    pp = (weekly_high + weekly_low + weekly_close) / 3
+    r1 = 2 * pp - weekly_low
+    s1 = 2 * pp - weekly_high
+    r2 = pp + (weekly_high - weekly_low)
+    s2 = pp - (weekly_high - weekly_low)
+    r3 = weekly_high + 2 * (pp - weekly_low)
+    s3 = weekly_low - 2 * (weekly_high - pp)
+    
+    # Align weekly pivot levels to 6h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp.values)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2.values)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2.values)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3.values)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3.values)
+    
+    # Daily trend filter: EMA(34) on daily close
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 1h volume spike filter (24-period = 1 day)
+    # Volume spike detection: 24-period average (4 days of 6h bars)
     vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34, 24)  # Wait for all indicators
+    start_idx = max(34, 24, 5*24//6)  # Wait for all indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(donch_high_4h_aligned[i]) or np.isnan(donch_low_4h_aligned[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_24[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
-        if not in_session:
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(pp_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(vol_ma_24[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above 4h Donchian high + 1d uptrend + volume spike
-            vol_condition = volume[i] > vol_ma_24[i] * 1.5
+            # Long: price above S1 with volume and daily uptrend
+            vol_condition = volume[i] > vol_ma_24[i] * 2.0
             uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
             
-            if close[i] > donch_high_4h_aligned[i] and vol_condition and uptrend:
-                signals[i] = 0.20
+            if close[i] > s1_aligned[i] and vol_condition and uptrend:
+                signals[i] = 0.25
                 position = 1
-            # Short: break below 4h Donchian low + 1d downtrend + volume spike
-            elif close[i] < donch_low_4h_aligned[i] and vol_condition and not uptrend:
-                signals[i] = -0.20
+            # Short: price below R1 with volume and daily downtrend
+            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: break below 4h Donchian low or trend reversal
-            if close[i] < donch_low_4h_aligned[i] or ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]:
+            # Exit: price back below pivot or volume drops
+            if close[i] < pp_aligned[i] or volume[i] < vol_ma_24[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: break above 4h Donchian high or trend reversal
-            if close[i] > donch_high_4h_aligned[i] or ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]:
+            # Exit: price back above pivot or volume drops
+            if close[i] > pp_aligned[i] or volume[i] < vol_ma_24[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-# Hypothesis: 1h Donchian breakout with 4h structure and 1d trend filter
-# - Uses 4h Donchian channel (20-period) for structural support/resistance
-# - 1d EMA(34) filters for higher timeframe trend alignment
-# - Volume spike (1.5x 24-period average) confirms institutional participation
-# - Session filter (08-20 UTC) reduces noise during low-liquidity hours
-# - Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend)
-# - Position size 0.20 limits drawdown while allowing meaningful participation
-# - Target: 15-35 trades/year to avoid fee drag (max 200 total over 4 years)
+# Hypothesis: 6s weekly pivot breakout with daily trend and volume confirmation
+# - Weekly pivot points (S1/R1) act as dynamic support/resistance levels
+# - Breakout above S1 with volume in daily uptrend = long opportunity
+# - Breakdown below R1 with volume in daily downtrend = short opportunity
+# - Volume spike (2x average) confirms institutional participation
+# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
+# - Exit when price returns to weekly pivot (PP) or volume weakens
+# - Position size 0.25 targets 20-40 trades/year, avoiding fee drag
+# - Weekly pivot provides structure that works across market regimes
