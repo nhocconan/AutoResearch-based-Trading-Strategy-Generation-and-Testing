@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-# 1D_Camarilla_R3_S3_WeeklyTrend_Volume
-# Hypothesis: Weekly trend filter with daily Camarilla R3/S3 breakout and volume confirmation.
-# Uses weekly EMA40 for trend direction to reduce false signals in sideways markets.
-# Targets 10-20 trades/year to minimize fee drag while capturing major trends.
-# Works in bull/bear via weekly trend filter and volatility-adjusted position sizing.
+# 6h_Turtle_Soup_Reversal_1dTrend
+# Hypothesis: Turtle Soup reversal pattern on 6h with 1-day trend filter.
+# Turtle Soup: false breakout of 20-bar high/low followed by reversal.
+# Long: price makes new 20-bar low then closes above that low (stop run reversal).
+# Short: price makes new 20-bar high then closes below that high.
+# Uses 1-day EMA50 as trend filter to align with higher timeframe bias.
+# Targets 15-25 trades/year to minimize fee drag while capturing reversal edges.
 
-name = "1D_Camarilla_R3_S3_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "6h_Turtle_Soup_Reversal_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,75 +25,58 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) == 0:
-        return np.zeros(n)
-    
-    # Get daily data for Camarilla pivot calculation
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) == 0:
         return np.zeros(n)
     
-    # Calculate weekly EMA40 for trend filter
-    close_1w = df_1w['close'].values
-    ema40_1w = pd.Series(close_1w).ewm(span=40, adjust=False, min_periods=40).mean().values
-    ema40_1w_aligned = align_htf_to_ltf(prices, df_1w, ema40_1w)
+    # Calculate EMA50 for trend filter (daily)
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate daily Camarilla pivot levels from previous day's OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla levels
-    hl_range = high_1d - low_1d
-    r3_1d = close_1d + 1.1 * hl_range / 2
-    s3_1d = close_1d - 1.1 * hl_range / 2
-    
-    # Align Camarilla levels to daily timeframe (use previous day's levels)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    
-    # Volume spike detection: 2.5x average volume (100-period for stability)
-    vol_ma = pd.Series(volume).rolling(window=100, min_periods=100).mean().values
+    # Calculate 20-bar highest high and lowest low for Turtle Soup
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    highest_20 = high_series.rolling(window=20, min_periods=20).max().values
+    lowest_20 = low_series.rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 40)  # Ensure we have volume MA and weekly EMA data
+    start_idx = 20  # Need 20 bars for highest/lowest calculation
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
-            np.isnan(ema40_1w_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
+            np.isnan(ema50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R3, price above weekly EMA40 (uptrend), volume spike (>2.5x)
-            if (close[i] > r3_1d_aligned[i] and 
-                close[i] > ema40_1w_aligned[i] and 
-                volume[i] > 2.5 * vol_ma[i]):
+            # Turtle Soup Long: false breakdown below 20-bar low, then reversal
+            # Condition: current low <= 20-bar low (breakdown) AND close > 20-bar low (reversal)
+            if (low[i] <= lowest_20[i] and close[i] > lowest_20[i] and 
+                close[i] > ema50_1d_aligned[i]):  # Uptrend filter
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3, price below weekly EMA40 (downtrend), volume spike (>2.5x)
-            elif (close[i] < s3_1d_aligned[i] and 
-                  close[i] < ema40_1w_aligned[i] and 
-                  volume[i] > 2.5 * vol_ma[i]):
+            # Turtle Soup Short: false breakout above 20-bar high, then reversal
+            # Condition: current high >= 20-bar high (breakout) AND close < 20-bar high (reversal)
+            elif (high[i] >= highest_20[i] and close[i] < highest_20[i] and 
+                  close[i] < ema50_1d_aligned[i]):  # Downtrend filter
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price returns to or below S3 (mean reversion to center)
-            if close[i] <= s3_1d_aligned[i]:
+            # Exit: price returns to or below the 20-bar low (failure of reversal)
+            if close[i] <= lowest_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price returns to or above R3 (mean reversion to center)
-            if close[i] >= r3_1d_aligned[i]:
+            # Exit: price returns to or above the 20-bar high (failure of reversal)
+            if close[i] >= highest_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
