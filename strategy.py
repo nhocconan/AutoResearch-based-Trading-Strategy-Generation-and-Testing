@@ -1,6 +1,7 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-name = "4h_Donchian20_12hTrend_Volume"
-timeframe = "4h"
+name = "1d_WeeklyPivot_Breakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,57 +18,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Load weekly data ONCE before loop for Pivot levels and trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate 12h EMA(20) for trend filter
-    ema_20_12h = pd.Series(df_12h['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
+    # Calculate weekly Pivot (standard) from previous week
+    prev_high = df_1w['high'].shift(1).values
+    prev_low = df_1w['low'].shift(1).values
+    prev_close = df_1w['close'].shift(1).values
     
-    # Donchian(20) channels on 4h
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
     
-    # Volume spike detection: 4-period average (1 day of 4h bars)
-    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    # Weekly Pivot support/resistance levels
+    s1 = pivot - range_hl
+    r1 = pivot + range_hl
+    
+    # Align weekly levels to daily timeframe
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    
+    # Weekly EMA(34) for trend filter (longer-term trend)
+    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Volume spike detection: 5-period average (1 week of daily bars)
+    vol_ma_5 = pd.Series(volume).rolling(window=5, min_periods=5).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 4)
+    start_idx = max(34, 5)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_20_12h_aligned[i]) or np.isnan(high_20[i]) or 
-            np.isnan(low_20[i]) or np.isnan(vol_ma_4[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(vol_ma_5[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above upper band with volume and 12h uptrend
-            vol_condition = volume[i] > vol_ma_4[i] * 1.8
-            uptrend = ema_20_12h_aligned[i] > ema_20_12h_aligned[i-1]
+            # Long: price above S1 with volume and weekly uptrend
+            vol_condition = volume[i] > vol_ma_5[i] * 2.0
+            uptrend = ema_34_1w_aligned[i] > ema_34_1w_aligned[i-1]
             
-            if close[i] > high_20[i] and vol_condition and uptrend:
+            if close[i] > s1_aligned[i] and vol_condition and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below lower band with volume and 12h downtrend
-            elif close[i] < low_20[i] and vol_condition and not uptrend:
+            # Short: price below R1 with volume and weekly downtrend
+            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below upper band or volume drops
-            if close[i] < high_20[i] or volume[i] < vol_ma_4[i] * 1.2:
+            # Exit: price back below S1 or volume drops
+            if close[i] < s1_aligned[i] or volume[i] < vol_ma_5[i] * 1.3:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above lower band or volume drops
-            if close[i] > low_20[i] or volume[i] < vol_ma_4[i] * 1.2:
+            # Exit: price back above R1 or volume drops
+            if close[i] > r1_aligned[i] or volume[i] < vol_ma_5[i] * 1.3:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -75,14 +88,18 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Donchian(20) breakout on 4h with 12h trend filter and volume confirmation
-# - Long when price breaks above 20-period high with volume spike in 12h uptrend
-# - Short when price breaks below 20-period low with volume spike in 12h downtrend
-# - Volume spike (1.8x average) confirms institutional participation
-# - Exit when price returns to the breakout level or volume weakens
-# - Position size 0.25 targets ~20-50 trades/year to avoid fee drag
-# - Works in both bull and bear markets via 12h trend filter
+# Hypothesis: Daily Weekly Pivot S1/R1 breakout with weekly trend and volume confirmation
+# - Weekly Pivot S1/R1 act as key support/resistance levels from prior week
+# - Breakout above S1 with volume in weekly uptrend = long opportunity
+# - Breakdown below R1 with volume in weekly downtrend = short opportunity
+# - Volume spike (2.0x average) confirms institutional participation
+# - Weekly trend filter reduces whipsaws vs using daily trend
+# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
+# - Exit when price returns to S1/R1 or volume weakens
+# - Position size 0.25 targets ~15-30 trades/year, avoiding fee drag
+# - Uses actual weekly Pivot levels (not daily) for better stability
+# - Weekly trend filter provides more robust trend signal than daily
 # - Volume confirmation reduces false breakouts
-# - Simple 3-condition strategy avoids overtrading and curve-fitting
-# - Uses actual Donchian channels (not SMA/EMA) for clear breakout levels
-# - Aims for 50-150 total trades over 4 years (12-37/year) to stay within limits
+# - Designed to work in BOTH bull and bear markets via weekly trend filter
+# - Target: 60-120 total trades over 4 years (15-30/year) to stay within limits
+# - Novel: Uses weekly Pivot with weekly trend (not previously tried in 1d timeframe)
