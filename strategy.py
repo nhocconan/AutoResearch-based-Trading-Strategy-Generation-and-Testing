@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_WeeklyPivot_Direction_VolumeBreakout"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 25:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,43 +17,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly pivot levels (from previous week)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate pivot and levels
-    pivot_1w = (high_1w + low_1w + close_1w) / 3
-    r1 = 2 * pivot_1w - low_1w
-    s1 = 2 * pivot_1w - high_1w
-    r2 = pivot_1w + (high_1w - low_1w)
-    s2 = pivot_1w - (high_1w - low_1w)
-    r3 = high_1w + 2 * (pivot_1w - low_1w)
-    s3 = low_1w - 2 * (high_1w - pivot_1w)
-    
-    # Align pivot levels to 6h
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
-    r4 = pivot_1w + 3 * (high_1w - low_1w)
-    s4 = pivot_1w - 3 * (high_1w - low_1w)
-    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
-    
-    # Daily trend filter
+    # 1d trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 22:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
+    # 1d EMA34 trend
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     trend_up = close > ema_34_1d_aligned
     trend_down = close < ema_34_1d_aligned
+    
+    # Camarilla levels from previous 1d
+    close_prev_1d = df_1d['close'].values
+    high_prev_1d = df_1d['high'].values
+    low_prev_1d = df_1d['low'].values
+    range_prev_1d = high_prev_1d - low_prev_1d
+    # R3 and S3 levels
+    r3 = close_prev_1d + range_prev_1d * 1.1 / 4
+    s3 = close_prev_1d - range_prev_1d * 1.1 / 4
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
     # Volume spike: current volume > 2.0x 20-period average
     vol_ma_20 = np.full(n, np.nan)
@@ -64,18 +49,15 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 4  # ~1 day (4*6h) to reduce trade frequency
+    cooldown_bars = 2  # ~1 day (2*12h) to reduce trade frequency
     
-    start_idx = max(20, 1)  # Ensure enough data for volume
+    start_idx = max(20, 1)  # Ensure enough data for volume and Camarilla
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(pivot_1w_aligned[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(r3_aligned[i]) or 
             np.isnan(s3_aligned[i]) or 
-            np.isnan(r4_aligned[i]) or 
-            np.isnan(s4_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -92,15 +74,15 @@ def generate_signals(prices):
         trending_down = trend_down[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: price breaks above R4 with volume spike in 1d uptrend
-            if (close[i] > r4_aligned[i] and 
+            # Long: price breaks above R3 with volume spike in 1d uptrend
+            if (close[i] > r3_aligned[i] and 
                 trending_up and 
                 vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: price breaks below S4 with volume spike in 1d downtrend
-            elif (close[i] < s4_aligned[i] and 
+            # Short: price breaks below S3 with volume spike in 1d downtrend
+            elif (close[i] < s3_aligned[i] and 
                   trending_down and 
                   vol_spike[i]):
                 signals[i] = -0.25
@@ -125,11 +107,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Weekly pivot R4/S4 breakouts capture strong momentum moves in both bull and bear markets.
-# Long when price breaks above weekly R4 with volume spike and 1d uptrend.
-# Short when price breaks below weekly S4 with volume spike and 1d downtrend.
-# Weekly pivots provide institutional reference points; R4/S4 represent extreme levels where breakouts often occur.
-# Volume spike confirms institutional participation. 6h timeframe reduces noise vs lower TFs.
-# Exits at R3/S3 to capture mean reversion after extreme moves, avoiding overstaying in reversals.
+# Hypothesis: Camarilla R3/S3 breakout captures institutional breakout moves in both bull and bear markets.
+# Long when price breaks above 1d Camarilla R3 with volume spike and 1d uptrend.
+# Short when price breaks below 1d Camarilla S3 with volume spike and 1d downtrend.
+# Works in bull markets (sustained uptrend with breakouts above R3) and bear markets (sustained downtrend with breakdowns below S3).
+# Volume spike confirms institutional participation. 12h timeframe reduces noise and limits trades to target range.
 # Discrete position sizing (0.25) balances risk and minimizes fee churn.
 # Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
