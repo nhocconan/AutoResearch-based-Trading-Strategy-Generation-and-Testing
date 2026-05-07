@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_Alligator_ElderRay_TripleFilter
-Hypothesis: Combine Williams Alligator (trend filter) with Elder Ray (bull/bear power) and volume confirmation on 6h timeframe. Uses 1d trend to avoid counter-trend trades. Works in bull/bear markets by requiring alignment between 6h momentum and 1d trend. Targets 15-30 trades/year with low frequency to minimize fee impact.
+12h_Keltner_Channel_Breakout_1wTrend_Volume_v1
+Hypothesis: Trade 12-hour breakouts of weekly Keltner Channel (EMA20 + 2*ATR) only when aligned with weekly trend (EMA50) and confirmed by volume spike (>2x average). Uses weekly timeframe for trend direction and 12h for precise entry. Targets 15-30 trades/year with low fee impact. Designed to work in both bull and bear markets by requiring trend alignment and volume confirmation.
 """
 
-name = "6h_Alligator_ElderRay_TripleFilter"
-timeframe = "6h"
+name = "12h_Keltner_Channel_Breakout_1wTrend_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -22,84 +22,92 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Elder Ray calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for Keltner Channel and trend filter
+    df_w = get_htf_data(prices, '1w')
+    if len(df_w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA13 for trend filter
-    close_1d = df_1d['close'].values
-    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    weekly_high = df_w['high'].values
+    weekly_low = df_w['low'].values
+    weekly_close = df_w['close'].values
     
-    # Calculate Williams Alligator on 6h (13,8,5 SMAs with future shifts)
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
+    # Calculate weekly EMA20 for Keltner Channel middle
+    ema_20_w = pd.Series(weekly_close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate Elder Ray Power on 1d
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    ema_13_1d_for_power = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high_1d - ema_13_1d_for_power
-    bear_power = low_1d - ema_13_1d_for_power
+    # Calculate weekly ATR (14-period) for Keltner Channel width
+    tr1 = np.abs(weekly_high - weekly_low)
+    tr2 = np.abs(weekly_high - np.roll(weekly_close, 1))
+    tr3 = np.abs(weekly_low - np.roll(weekly_close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period: just high-low
+    atr_14_w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align 1d indicators to 6h timeframe
-    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    # Calculate Keltner Channel bounds
+    upper_kc = ema_20_w + (2 * atr_14_w)
+    lower_kc = ema_20_w - (2 * atr_14_w)
     
-    # Volume confirmation on 6h
+    # Align Keltner Channel levels to 12h timeframe (with 1-bar delay for completed weekly bar)
+    upper_kc_aligned = align_htf_to_ltf(prices, df_w, upper_kc, additional_delay_bars=1)
+    lower_kc_aligned = align_htf_to_ltf(prices, df_w, lower_kc, additional_delay_bars=1)
+    
+    # Get weekly trend filter (EMA50)
+    ema_50_w = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_w_aligned = align_htf_to_ltf(prices, df_w, ema_50_w)
+    
+    # Get 12h volume for confirmation
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.divide(volume, vol_ma20, out=np.zeros_like(volume), where=vol_ma20!=0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Warmup for all indicators
+    start_idx = 50  # Warmup
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
-            np.isnan(ema_13_1d_aligned[i]) or np.isnan(bull_power_aligned[i]) or 
-            np.isnan(bear_power_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(upper_kc_aligned[i]) or 
+            np.isnan(lower_kc_aligned[i]) or 
+            np.isnan(ema_50_w_aligned[i]) or 
+            np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Alligator alignment: lips > teeth > jaw = bullish, lips < teeth < jaw = bearish
-        bullish_alignment = lips[i] > teeth[i] > jaw[i]
-        bearish_alignment = lips[i] < teeth[i] < jaw[i]
-        
-        # 1d trend filter
-        trend_up = close[i] > ema_13_1d_aligned[i]  # Using 6h close vs 1d EMA13
-        trend_down = close[i] < ema_13_1d_aligned[i]
-        
-        # Elder Ray confirmation
-        strong_bull_power = bull_power_aligned[i] > 0
-        strong_bear_power = bear_power_aligned[i] < 0
+        # Determine weekly trend using aligned close
+        weekly_close_aligned = align_htf_to_ltf(prices, df_w, weekly_close)
+        if np.isnan(weekly_close_aligned[i]):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+            
+        trend_up = weekly_close_aligned[i] > ema_50_w_aligned[i]
+        trend_down = weekly_close_aligned[i] < ema_50_w_aligned[i]
         
         if position == 0:
-            # Long: Alligator bullish + 1d uptrend + strong bull power + volume
-            if (bullish_alignment and trend_up and strong_bull_power and 
-                vol_ratio[i] > 1.5):
+            # Long breakout: price breaks above upper KC with upward trend and volume spike
+            if (close[i] > upper_kc_aligned[i] and 
+                trend_up and 
+                vol_ratio[i] > 2.0):
                 signals[i] = 0.25
                 position = 1
-            # Short: Alligator bearish + 1d downtrend + strong bear power + volume
-            elif (bearish_alignment and trend_down and strong_bear_power and 
-                  vol_ratio[i] > 1.5):
+            # Short breakdown: price breaks below lower KC with downward trend and volume spike
+            elif (close[i] < lower_kc_aligned[i] and 
+                  trend_down and 
+                  vol_ratio[i] > 2.0):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Alligator turns bearish OR bear power becomes strong
-            if not bullish_alignment or strong_bear_power:
+            # Exit long: price returns to lower KC level or trend turns down
+            if close[i] < lower_kc_aligned[i] or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Alligator turns bullish OR bull power becomes strong
-            if not bearish_alignment or strong_bull_power:
+            # Exit short: price returns to upper KC level or trend turns up
+            if close[i] > upper_kc_aligned[i] or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
