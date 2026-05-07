@@ -1,7 +1,6 @@
-#3/usd/2025-06-08
 #!/usr/bin/env python3
-name = "6h_RSI_20_EMA50_Crossover_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -18,74 +17,125 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
+    # Load 12h and 1d data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 50:
+    if len(df_12h) < 20 or len(df_1d) < 20:
         return np.zeros(n)
     
-    # 1d EMA50 for trend filter
-    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # 1d ADX for trend filter (ADX > 25 indicates strong trend)
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
+        
+        for i in range(1, len(high)):
+            plus_dm[i] = max(0, high[i] - high[i-1])
+            minus_dm[i] = max(0, low[i-1] - low[i])
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        # Smooth using Wilder's smoothing (alpha = 1/period)
+        atr = np.zeros_like(tr)
+        plus_dm_smooth = np.zeros_like(plus_dm)
+        minus_dm_smooth = np.zeros_like(minus_dm)
+        
+        atr[period] = np.nansum(tr[1:period+1])
+        plus_dm_smooth[period] = np.nansum(plus_dm[1:period+1])
+        minus_dm_smooth[period] = np.nansum(plus_dm[1:period+1])
+        
+        for i in range(period+1, len(tr)):
+            atr[i] = atr[i-1] - (atr[i-1] / period) + tr[i]
+            plus_dm_smooth[i] = plus_dm_smooth[i-1] - (plus_dm_smooth[i-1] / period) + plus_dm[i]
+            minus_dm_smooth[i] = minus_dm_smooth[i-1] - (minus_dm_smooth[i-1] / period) + minus_dm[i]
+        
+        # Avoid division by zero
+        plus_di = np.where(atr != 0, 100 * plus_dm_smooth / atr, 0)
+        minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
+        dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+        
+        # Smooth DX to get ADX
+        adx = np.zeros_like(dx)
+        adx[2*period] = np.nansum(dx[period+1:2*period+1]) / period
+        for i in range(2*period+1, len(dx)):
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
     
-    # 6h RSI(20)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[20] = np.mean(gain[1:21])
-    avg_loss[20] = np.mean(loss[1:21])
+    # 1d ATR for volatility filter (ATR > 0.5 * 20-period median ATR indicates high volatility)
+    def calculate_atr(high, low, close, period=14):
+        tr = np.zeros_like(high)
+        for i in range(1, len(high)):
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        atr = np.zeros_like(tr)
+        atr[period] = np.nansum(tr[1:period+1])
+        for i in range(period+1, len(tr)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        return atr
     
-    for i in range(21, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 19 + gain[i]) / 20
-        avg_loss[i] = (avg_loss[i-1] * 19 + loss[i]) / 20
+    atr_1d = calculate_atr(high_1d, low_1d, close_1d, 14)
+    median_atr_1d = np.nanmedian(atr_1d[-20:]) if len(atr_1d) >= 20 else np.nan
+    high_vol_1d = atr_1d > 0.5 * median_atr_1d
+    high_vol_1d_aligned = align_htf_to_ltf(prices, df_1d, high_vol_1d)
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # 12h volume spike: > 2.0x 20-period average
+    vol_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike_12h = volume > 2.0 * vol_ma_12h
     
-    # 6h EMA50
-    ema50_6h = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 12h EMA50 for trend filter
+    ema50_12h = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # 6h volume spike: > 2x 20-period average
-    vol_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike_6h = volume > 2.0 * vol_ma_6h
+    # 1d Camarilla levels: R3, S3 from previous day
+    prev_close_1d = df_1d['close'].shift(1).values
+    prev_high_1d = df_1d['high'].shift(1).values
+    prev_low_1d = df_1d['low'].shift(1).values
+    camarilla_r3_1d = prev_close_1d + (prev_high_1d - prev_low_1d) * 1.1 / 2
+    camarilla_s3_1d = prev_close_1d - (prev_high_1d - prev_low_1d) * 1.1 / 2
+    
+    # Align 1d Camarilla levels to 12h timeframe
+    camarilla_r3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
+    camarilla_s3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Wait for indicators
+    start_idx = max(50, 34)  # Wait for EMA50 and ATR
     
     for i in range(start_idx, n):
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(ema50_6h[i]) or np.isnan(vol_ma_6h[i])):
+        if (np.isnan(camarilla_r3_1d_aligned[i]) or np.isnan(camarilla_s3_1d_aligned[i]) or 
+            np.isnan(adx_1d_aligned[i]) or np.isnan(high_vol_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: RSI > 50, price above EMA50, bullish trend (price > EMA50_1d), volume spike
-            if (rsi[i] > 50 and close[i] > ema50_6h[i] and 
-                close[i] > ema50_1d_aligned[i] and vol_spike_6h[i]):
+            # Long: Break above R3 with volume spike, strong trend (ADX > 25), high volatility, and price above EMA50
+            if (close[i] > camarilla_r3_1d_aligned[i] and vol_spike_12h[i] and 
+                adx_1d_aligned[i] > 25 and high_vol_1d_aligned[i] and close[i] > ema50_12h[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI < 50, price below EMA50, bearish trend (price < EMA50_1d), volume spike
-            elif (rsi[i] < 50 and close[i] < ema50_6h[i] and 
-                  close[i] < ema50_1d_aligned[i] and vol_spike_6h[i]):
+            # Short: Break below S3 with volume spike, strong trend (ADX > 25), high volatility, and price below EMA50
+            elif (close[i] < camarilla_s3_1d_aligned[i] and vol_spike_12h[i] and 
+                  adx_1d_aligned[i] > 25 and high_vol_1d_aligned[i] and close[i] < ema50_12h[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: RSI < 40 or price below EMA50
-            if rsi[i] < 40 or close[i] < ema50_6h[i]:
+            # Exit: Price below S3 or trend weakening (ADX < 20) or low volatility
+            if close[i] < camarilla_s3_1d_aligned[i] or adx_1d_aligned[i] < 20 or not high_vol_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: RSI > 60 or price above EMA50
-            if rsi[i] > 60 or close[i] > ema50_6h[i]:
+            # Exit: Price above R3 or trend weakening (ADX < 20) or low volatility
+            if close[i] > camarilla_r3_1d_aligned[i] or adx_1d_aligned[i] < 20 or not high_vol_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -93,7 +143,7 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: RSI(20) > 50 indicates bullish momentum, < 50 bearish.
-# Combined with EMA50 crossover and 1d trend filter for direction.
-# Volume spike confirms momentum. Works in bull/bear by following 1d trend.
-# Target: 20-40 trades/year to minimize fee drift. Position size 0.25 limits risk.
+# Hypothesis: 12h Camarilla R3/S3 breakouts with volume spike, ADX trend filter, volatility filter, and EMA50 trend filter.
+# Uses 1d Camarilla levels for stronger S/R, 2.0x volume filter, ADX > 25 for trend, ATR-based volatility filter, and EMA50.
+# Position size 0.25 limits risk. Target 15-30 trades/year to minimize fee drift.
+# Exit on retrace to S3/R3 or trend weakening (ADX < 20) or low volatility.
