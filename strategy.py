@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Regime
-Hypothesis: Breakouts beyond Camarilla R1/S1 levels with 1-day trend alignment and volume confirmation capture strong momentum moves. Uses chop filter to avoid range-bound periods. Works in bull (breakouts above R1 in uptrend) and bear (breakdowns below S1 in downtrend). Designed for low trade frequency (<400 total) to minimize fee drag.
+6h_IK_CloudBreakout_1wTrend
+Hypothesis: Ichimoku cloud breakouts with weekly trend filter capture major momentum moves. 
+In bull markets: price breaks above cloud with weekly uptrend = long. 
+In bear markets: price breaks below cloud with weekly downtrend = short. 
+The cloud acts as dynamic support/resistance, reducing false breakouts. 
+Weekly trend filter ensures we only trade in the direction of higher timeframe momentum.
+Low frequency via 6h timeframe and strict entry criteria (cloud breakout + weekly trend + volume).
+Target: 50-150 total trades over 4 years.
 """
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Regime"
-timeframe = "4h"
+name = "6h_IK_CloudBreakout_1wTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -21,75 +27,75 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels from previous day
-    prev_close = np.roll(close, 1)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close[0] = np.nan
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
+    # Ichimoku components (9, 26, 52 periods)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan = (high_9 + low_9) / 2
     
-    rang = prev_high - prev_low
-    r1 = prev_close + 1.1 * rang / 4.0  # R1 = close + 1.1*(high-low)/4
-    s1 = prev_close - 1.1 * rang / 4.0  # S1 = close - 1.1*(high-low)/4
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun = (high_26 + low_26) / 2
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan + kijun) / 2)
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    high_52 = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    low_52 = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_b = ((high_52 + low_52) / 2)
+    
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 1w EMA50 for trend filter
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Volume filter: current volume > 1.5 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_avg * 1.5)
     
-    # Chop filter: avoid trading in high chop (>61.8)
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(np.roll(high, 1) - close)
-    tr3 = np.abs(np.roll(low, 1) - close)
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    high14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    low14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10((high14 - low14) / (atr14 * 14)) / np.log10(14)
-    chop_filter = chop < 61.8  # Only trade when NOT choppy
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 20)
+    start_idx = max(100, 52 + 26)  # Need enough data for Ichimoku
     
     for i in range(start_idx, n):
         # Skip if any data is not ready
-        if (np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(vol_avg[i]) or np.isnan(chop[i])):
+        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or np.isnan(senkou_a[i]) or 
+            np.isnan(senkou_b[i]) or np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Determine cloud boundaries (Senkou Span A and B)
+        upper_cloud = np.maximum(senkou_a[i], senkou_b[i])
+        lower_cloud = np.minimum(senkou_a[i], senkou_b[i])
+        
         if position == 0:
-            # Long: breakout above R1 + 1d uptrend + volume + low chop
-            if close[i] > r1[i] and close[i] > ema_34_1d_aligned[i] and volume_filter[i] and chop_filter[i]:
+            # Long: price breaks above cloud + weekly uptrend + volume
+            if close[i] > upper_cloud and close[i] > ema_50_1w_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakdown below S1 + 1d downtrend + volume + low chop
-            elif close[i] < s1[i] and close[i] < ema_34_1d_aligned[i] and volume_filter[i] and chop_filter[i]:
+            # Short: price breaks below cloud + weekly downtrend + volume
+            elif close[i] < lower_cloud and close[i] < ema_50_1w_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: price returns to previous day's close (mean reversion)
+            # Exit: price returns to Kijun-sen (mean reversion to baseline)
             if position == 1:
-                if close[i] <= prev_close[i]:
+                if close[i] <= kijun[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] >= prev_close[i]:
+                if close[i] >= kijun[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
