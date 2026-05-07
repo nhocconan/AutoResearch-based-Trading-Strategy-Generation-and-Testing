@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Wilder's RSI with 14-period, combined with 1w EMA50 trend filter and volume confirmation.
-# Long when RSI < 30 (oversold) AND price > 1w EMA50 (uptrend) AND volume > 1.5x 20-period average.
-# Short when RSI > 70 (overbought) AND price < 1w EMA50 (downtrend) AND volume > 1.5x 20-period average.
-# Exit when RSI crosses back to neutral (40 for long exit, 60 for short exit).
-# Designed for 1d timeframe with low trade frequency (target: 10-25/year) to avoid fee drag.
-# Uses 1w EMA50 for trend filter to avoid counter-trend trades in strong trends.
-# Volume filter ensures participation and avoids low-conviction moves.
-name = "1d_RSI14_1wEMA50_VolumeFilter"
-timeframe = "1d"
+# Hypothesis: 12h Chaikin Oscillator with 1d EMA34 trend filter and volume confirmation.
+# Chaikin Oscillator = EMA3(ADL) - EMA10(ADL), where ADL = Money Flow Volume cumulative.
+# Long when Chaikin > 0 AND EMA13 rising AND price > 1d EMA34 AND volume > 1.5x 20-period average.
+# Short when Chaikin < 0 AND EMA13 falling AND price < 1d EMA34 AND volume > 1.5x 20-period average.
+# Exit when Chaikin crosses zero or volume filter fails.
+# Designed for 12h timeframe with low trade frequency (target: 15-25/year) to avoid fee drag.
+# Uses 1d EMA34 for trend filter and Chaikin Oscillator for institutional flow confirmation.
+name = "12h_ChaikinOscillator_1dEMA34_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,33 +24,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Wilder's RSI (14-period)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Money Flow Volume = ((Close - Low) - (High - Close)) / (High - Low) * Volume
+    # Avoid division by zero
+    hl_range = high - low
+    mf_multiplier = np.where(hl_range != 0, ((close - low) - (high - close)) / hl_range, 0.0)
+    mf_volume = mf_multiplier * volume
     
-    # Use Wilder's smoothing (alpha = 1/period)
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])  # First average of first 14 periods
-    avg_loss[13] = np.mean(loss[1:14])
-    for i in range(14, n):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # ADL = cumulative sum of Money Flow Volume
+    adl = np.cumsum(mf_volume)
     
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    # For periods where avg_loss is 0, RSI = 100
-    rsi[avg_loss == 0] = 100
+    # Chaikin Oscillator = EMA3(ADL) - EMA10(ADL)
+    adl_series = pd.Series(adl)
+    ema3_adl = adl_series.ewm(span=3, adjust=False, min_periods=3).mean().values
+    ema10_adl = adl_series.ewm(span=10, adjust=False, min_periods=10).mean().values
+    chaikin = ema3_adl - ema10_adl
     
-    # 1w EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # EMA13 for trend and zero-cross confirmation
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema13_rising = ema13[1:] > ema13[:-1]
+    ema13_falling = ema13[1:] < ema13[:-1]
+    ema13_rising = np.concatenate([[False], ema13_rising])
+    ema13_falling = np.concatenate([[False], ema13_falling])
+    
+    # 1d EMA34 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -59,20 +62,21 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Sufficient warmup for indicators
+    start_idx = 34  # Sufficient warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(rsi[i]) or np.isnan(ema50_1w_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(chaikin[i]) or np.isnan(ema13[i]) or np.isnan(ema13_rising[i]) or 
+            np.isnan(ema13_falling[i]) or np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: RSI < 30 (oversold), price > 1w EMA50 (uptrend), volume filter
-            long_cond = (rsi[i] < 30) and (close[i] > ema50_1w_aligned[i]) and volume_filter[i]
-            # Short conditions: RSI > 70 (overbought), price < 1w EMA50 (downtrend), volume filter
-            short_cond = (rsi[i] > 70) and (close[i] < ema50_1w_aligned[i]) and volume_filter[i]
+            # Long conditions: Chaikin > 0, EMA13 rising, price > 1d EMA34, volume filter
+            long_cond = (chaikin[i] > 0) and ema13_rising[i] and (close[i] > ema34_1d_aligned[i]) and volume_filter[i]
+            # Short conditions: Chaikin < 0, EMA13 falling, price < 1d EMA34, volume filter
+            short_cond = (chaikin[i] < 0) and ema13_falling[i] and (close[i] < ema34_1d_aligned[i]) and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -81,15 +85,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: RSI crosses back above 40 (mean reversion)
-            if rsi[i] >= 40:
+            # Long exit: Chaikin crosses below zero OR volume filter fails
+            if chaikin[i] <= 0 or not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI crosses back below 60 (mean reversion)
-            if rsi[i] <= 60:
+            # Short exit: Chaikin crosses above zero OR volume filter fails
+            if chaikin[i] >= 0 or not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
