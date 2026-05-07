@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSurge"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 25:
+    if n < 20:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,7 +19,7 @@ def generate_signals(prices):
     
     # 1d trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 22:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
@@ -40,16 +40,16 @@ def generate_signals(prices):
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Volume spike: current volume > 2.0x 20-period average
+    # Volume surge: current volume > 2.0x 20-period average
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-20:i])
-    vol_spike = volume > (2.0 * vol_ma_20)
+    vol_surge = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 2  # ~1 day (2*12h) to reduce trade frequency
+    cooldown_bars = 4  # ~2 days (4*4h) to reduce trade frequency
     
     start_idx = max(20, 1)  # Ensure enough data for volume and Camarilla
     
@@ -74,17 +74,17 @@ def generate_signals(prices):
         trending_down = trend_down[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: price breaks above R3 with volume spike in 1d uptrend
+            # Long: price breaks above R3 with volume surge in 1d uptrend
             if (close[i] > r3_aligned[i] and 
                 trending_up and 
-                vol_spike[i]):
+                vol_surge[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: price breaks below S3 with volume spike in 1d downtrend
+            # Short: price breaks below S3 with volume surge in 1d downtrend
             elif (close[i] < s3_aligned[i] and 
                   trending_down and 
-                  vol_spike[i]):
+                  vol_surge[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
@@ -108,9 +108,9 @@ def generate_signals(prices):
     return signals
 
 # Hypothesis: Camarilla R3/S3 breakout captures institutional breakout moves in both bull and bear markets.
-# Long when price breaks above 1d Camarilla R3 with volume spike and 1d uptrend.
-# Short when price breaks below 1d Camarilla S3 with volume spike and 1d downtrend.
+# Long when price breaks above 1d Camarilla R3 with volume surge and 1d uptrend.
+# Short when price breaks below 1d Camarilla S3 with volume surge and 1d downtrend.
 # Works in bull markets (sustained uptrend with breakouts above R3) and bear markets (sustained downtrend with breakdowns below S3).
-# Volume spike confirms institutional participation. 12h timeframe reduces noise and limits trades to target range.
+# Volume surge confirms institutional participation. 4h timeframe balances signal quality and trade frequency.
 # Discrete position sizing (0.25) balances risk and minimizes fee churn.
-# Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
+# Target: 75-200 total trades over 4 years (19-50/year) to avoid fee drag.
