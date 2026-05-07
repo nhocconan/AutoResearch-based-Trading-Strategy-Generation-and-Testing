@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_KAMA_Trend_Direction_12h_TrendFilter_v2
-Hypothesis: Use KAMA (Kaufman Adaptive Moving Average) on 4h to determine trend direction, filtered by 12h EMA trend and volume confirmation. Long when KAMA slope turns positive in 12h uptrend with volume above average, short when slope turns negative in 12h downtrend with volume above average. Exit when KAMA slope reverses. Designed for 4h to capture trend changes with low frequency (target 20-50 trades/year).
+12h_WeeklyDonchianBreakout_TrendFilter
+Hypothesis: Trade 12h timeframe using weekly Donchian breakouts (20-period) filtered by daily trend (price above/below EMA50). 
+Long when price breaks above weekly Donchian high and daily close > daily EMA50; short when price breaks below weekly Donchian low and daily close < daily EMA50. 
+Exit when price crosses back through the weekly Donchian midpoint. 
+Uses weekly structure for trend and daily filter to avoid counter-trend trades. Designed for low frequency (target 15-30 trades/year) to minimize fee drag and work in both bull and bear markets.
 """
 
-name = "4h_KAMA_Trend_Direction_12h_TrendFilter_v2"
-timeframe = "4h"
+name = "12h_WeeklyDonchianBreakout_TrendFilter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -18,95 +21,74 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    volume = prices['volume'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # Get weekly data for Donchian channels
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 20:
         return np.zeros(n)
     
-    # Calculate KAMA on 4h
-    period = 10
-    # Vectorized efficiency ratio calculation
-    change = np.abs(np.subtract(close[period:], close[:-period]))
-    # Calculate volatility using cumulative sum of absolute differences
-    diff = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.cumsum(diff)
-    # Calculate efficiency ratio
-    er = np.zeros_like(close)
-    for i in range(period, len(close)):
-        price_change = np.abs(close[i] - close[i-period])
-        sum_vol = volatility[i] - volatility[i-period]
-        if sum_vol > 0:
-            er[i] = price_change / sum_vol
-        else:
-            er[i] = 0
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)  # EMA(2)
-    slow_sc = 2 / (30 + 1) # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    # Calculate KAMA
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Calculate weekly Donchian channels (20-period)
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
     
-    # KAMA slope (direction)
-    kama_slope = np.diff(kama, prepend=kama[0])
+    donchian_high = np.full_like(high_weekly, np.nan)
+    donchian_low = np.full_like(low_weekly, np.nan)
     
-    # Get 12h EMA34 for trend filter
-    close_12h = df_12h['close'].values
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    for i in range(20, len(high_weekly)):
+        donchian_high[i] = np.max(high_weekly[i-20:i])
+        donchian_low[i] = np.min(low_weekly[i-20:i])
     
-    # Get 12h close price aligned
-    close_12h_aligned = align_htf_to_ltf(prices, df_12h, close_12h)
+    # Align Donchian levels to 12h timeframe (with 1-bar delay for completed weekly bar)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_weekly, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_weekly, donchian_low)
+    donchian_mid = (donchian_high_aligned + donchian_low_aligned) / 2.0
     
-    # Volume confirmation: 20-period average on 4h
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.divide(volume, vol_ma20, out=np.zeros_like(volume), where=vol_ma20!=0)
+    # Get daily data for trend filter (EMA50)
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 50:
+        return np.zeros(n)
+    
+    close_daily = df_daily['close'].values
+    ema_50_daily = pd.Series(close_daily).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_daily_aligned = align_htf_to_ltf(prices, df_daily, ema_50_daily)
+    close_daily_aligned = align_htf_to_ltf(prices, df_daily, close_daily)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, period)  # Warmup for 12h EMA34 and KAMA
+    start_idx = max(50, 20)  # Warmup for daily EMA50 and weekly Donchian
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(kama_slope[i]) or np.isnan(ema_34_12h_aligned[i]) or 
-            np.isnan(close_12h_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(donchian_mid[i]) or np.isnan(ema_50_daily_aligned[i]) or 
+            np.isnan(close_daily_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # 12h trend determination
-        trend_12h_up = close_12h_aligned[i] > ema_34_12h_aligned[i]
-        trend_12h_down = close_12h_aligned[i] < ema_34_12h_aligned[i]
-        
         if position == 0:
-            # Long: KAMA slope turns positive in 12h uptrend with volume confirmation
-            if (kama_slope[i] > 0 and kama_slope[i-1] <= 0 and  # slope just turned positive
-                trend_12h_up and 
-                vol_ratio[i] > 1.5):
+            # Long: price breaks above weekly Donchian high AND daily close > daily EMA50
+            if close[i] > donchian_high_aligned[i] and close_daily_aligned[i] > ema_50_daily_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA slope turns negative in 12h downtrend with volume confirmation
-            elif (kama_slope[i] < 0 and kama_slope[i-1] >= 0 and  # slope just turned negative
-                  trend_12h_down and 
-                  vol_ratio[i] > 1.5):
+            # Short: price breaks below weekly Donchian low AND daily close < daily EMA50
+            elif close[i] < donchian_low_aligned[i] and close_daily_aligned[i] < ema_50_daily_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: KAMA slope turns negative
-            if kama_slope[i] < 0 and kama_slope[i-1] >= 0:
+            # Exit long: price crosses below weekly Donchian midpoint
+            if close[i] < donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: KAMA slope turns positive
-            if kama_slope[i] > 0 and kama_slope[i-1] <= 0:
+            # Exit short: price crosses above weekly Donchian midpoint
+            if close[i] > donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
