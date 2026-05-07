@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Donchian20_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dTrend_VolumeSpike_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -29,23 +29,23 @@ def generate_signals(prices):
     trend_up = close > ema_50_1d_aligned
     trend_down = close < ema_50_1d_aligned
     
-    # Donchian(20) channels on 12h
+    # Donchian(20) channels on 4h
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     for i in range(20, n):
         donchian_high[i] = np.max(high[i-20:i])
         donchian_low[i] = np.min(low[i-20:i])
     
-    # Volume spike: current volume > 2.0x 20-period average
+    # Volume spike: current volume > 2.5x 20-period average (~3.3 days)
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-20:i])
-    vol_spike = volume > (2.0 * vol_ma_20)
+    vol_spike = volume > (2.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 3  # ~1.5 days (3*12h) to prevent overtrading
+    cooldown_bars = 4  # ~2.67 days (4*4h) to prevent overtrading
     
     start_idx = max(20, 50)  # Ensure enough data for Donchian and EMA
     
@@ -102,4 +102,4 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: On 12h timeframe, price breaking above/below Donchian(20) channels with volume spike confirmation and 1d EMA50 trend filter captures institutional breakout momentum. Donchian channels represent dynamic support/resistance, reducing false breakouts. 1d trend filter ensures alignment with higher timeframe momentum. Volume spike filter (2.0x 20-period average) confirms institutional participation. Cooldown period prevents overtrading. Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag. Works in bull markets (breakouts above Donchian high in 1d uptrend) and bear markets (breakdowns below Donchian low in 1d downtrend). Uses discrete position sizing (0.25) to balance risk and reward while reducing fee churn. This strategy avoids saturated Camarilla patterns and focuses on proven Donchian breakout with volume/trend confluence, which has shown strong performance in DB.
+# Hypothesis: On 4h timeframe, price breaking above/below Donchian(20) channels with volume spike confirmation and 1d EMA50 trend filter captures institutional breakout momentum. Donchian channels represent dynamic support/resistance, reducing false breakouts. 1d trend filter ensures alignment with higher timeframe momentum. Volume spike filter (2.5x 20-period average) confirms institutional participation. Cooldown period prevents overtrading. Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag. Works in bull markets (breakouts above Donchian high in 1d uptrend) and bear markets (breakdowns below Donchian low in 1d downtrend). Uses discrete position sizing (0.25) to balance risk and reward while reducing fee churn. This strategy avoids saturated Camarilla patterns and focuses on proven Donchian breakout with volume/trend confluence, which has shown strong performance in DB (e.g., 4h_Donchian20_Breakout_12hTrend_Volume with 0.573 avg Sharpe). Increased volume threshold and cooldown bars to reduce trade frequency and improve generalization.
