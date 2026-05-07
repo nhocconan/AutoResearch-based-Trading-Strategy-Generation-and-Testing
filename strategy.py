@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_1d_KAMA_RSI_Chop_Filter"
-timeframe = "4h"
+name = "12h_1d_Camarilla_S1R1_Breakout_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,83 +22,69 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Daily KAMA: Kaufman Adaptive Moving Average
-    close_1d = df_1d['close'].values
-    direction_1d = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility_1d = np.abs(np.diff(close_1d))
-    er_1d = np.where(volatility_1d > 0, direction_1d / volatility_1d, 0)
-    sc_1d = (er_1d * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    kama_1d = np.zeros_like(close_1d)
-    kama_1d[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama_1d[i] = kama_1d[i-1] + sc_1d[i] * (close_1d[i] - kama_1d[i-1])
-    kama_1d = np.where(np.arange(len(close_1d)) < 30, np.nan, kama_1d)
-    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
+    # Calculate daily Camarilla pivot levels from previous day
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Daily RSI(14)
-    delta_1d = np.diff(close_1d, prepend=close_1d[0])
-    gain_1d = np.where(delta_1d > 0, delta_1d, 0)
-    loss_1d = np.where(delta_1d < 0, -delta_1d, 0)
-    avg_gain_1d = pd.Series(gain_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss_1d = pd.Series(loss_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs_1d = np.where(avg_loss_1d != 0, avg_gain_1d / avg_loss_1d, 0)
-    rsi_1d = 100 - (100 / (1 + rs_1d))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Handle NaN from shift
+    pivot = np.where(np.isnan(prev_high) | np.isnan(prev_low) | np.isnan(prev_close), 
+                     np.nan, (prev_high + prev_low + prev_close) / 3)
+    range_hl = np.where(np.isnan(prev_high) | np.isnan(prev_low), 
+                        np.nan, prev_high - prev_low)
     
-    # Weekly Chop Index (14) for regime filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
-        return np.zeros(n)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    atr_1w = np.zeros(len(high_1w))
-    for i in range(1, len(high_1w)):
-        tr = max(high_1w[i] - low_1w[i], 
-                 abs(high_1w[i] - high_1w[i-1]), 
-                 abs(low_1w[i] - low_1w[i-1]))
-        atr_1w[i] = tr if i == 1 else (atr_1w[i-1] * 13 + tr) / 14
-    highest_1w = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-    lowest_1w = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
-    chop_1w = 100 * np.log10((highest_1w - lowest_1w) / np.sum(np.abs(np.diff(high_1w, prepend=high_1w[0])) + 1e-10, axis=0)) / np.log10(14)
-    chop_1w = np.where(np.arange(len(high_1w)) < 14, np.nan, chop_1w)
-    chop_1w_aligned = align_htf_to_ltf(prices, df_1w, chop_1w, additional_delay_bars=2)
+    # Camarilla levels
+    s1 = np.where(np.isnan(range_hl) | np.isnan(prev_close), 
+                  np.nan, prev_close - (range_hl * 1.08 / 2))
+    r1 = np.where(np.isnan(range_hl) | np.isnan(prev_close), 
+                  np.nan, prev_close + (range_hl * 1.08 / 2))
     
-    # Volume spike detection: 6-period average (1.5 days of 4h bars)
-    vol_ma_6 = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
+    # Align daily levels to 12h timeframe
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    
+    # Daily trend filter: EMA(34) on daily close
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume spike detection: 4-period average (2 days of 12h bars)
+    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 6)  # Wait for KAMA and volume MA
+    start_idx = max(34, 4)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(kama_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(chop_1w_aligned[i]) or np.isnan(vol_ma_6[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(vol_ma_4[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above KAMA, RSI > 50, chop > 61.8 (range) -> mean reversion long
-            vol_condition = volume[i] > vol_ma_6[i] * 1.8
-            if close[i] > kama_1d_aligned[i] and rsi_1d_aligned[i] > 50 and chop_1w_aligned[i] > 61.8 and vol_condition:
+            # Long: price above S1 with volume and daily uptrend
+            vol_condition = volume[i] > vol_ma_4[i] * 2.0
+            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
+            
+            if close[i] > s1_aligned[i] and vol_condition and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA, RSI < 50, chop > 61.8 (range) -> mean reversion short
-            elif close[i] < kama_1d_aligned[i] and rsi_1d_aligned[i] < 50 and chop_1w_aligned[i] > 61.8 and vol_condition:
+            # Short: price below R1 with volume and daily downtrend
+            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below KAMA or RSI < 40 or chop < 38.2 (trend)
-            if close[i] < kama_1d_aligned[i] or rsi_1d_aligned[i] < 40 or chop_1w_aligned[i] < 38.2:
+            # Exit: price back below S1 or volume drops
+            if close[i] < s1_aligned[i] or volume[i] < vol_ma_4[i] * 1.1:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above KAMA or RSI > 60 or chop < 38.2 (trend)
-            if close[i] > kama_1d_aligned[i] or rsi_1d_aligned[i] > 60 or chop_1w_aligned[i] < 38.2:
+            # Exit: price back above R1 or volume drops
+            if close[i] > r1_aligned[i] or volume[i] < vol_ma_4[i] * 1.1:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,13 +92,13 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 4h mean reversion using daily KAMA trend + RSI + weekly chop filter
-# - Daily KAMA acts as adaptive trend: price > KAMA = bullish bias, < KAMA = bearish
-# - Daily RSI > 50 for longs, < 50 for shorts ensures momentum alignment
-# - Weekly Chop > 61.8 indicates ranging market ideal for mean reversion
-# - Volume spike (1.8x average) confirms institutional participation at extremes
-# - Works in both bull and bear markets by adapting to weekly regime
-# - Exit when price returns to KAMA, RSI reverses, or market trends (chop < 38.2)
-# - Position size 0.25 targets ~30-50 trades/year, avoiding fee drag
-# - Uses actual daily/weekly data via mtf_data to prevent look-ahead
-# - Designed to work in ranging markets (chop > 61.8) which occur in all regimes
+# Hypothesis: 12h Camarilla S1/R1 breakout with daily trend and volume confirmation
+# - Daily Camarilla S1/R1 act as strong support/resistance levels
+# - Breakout above S1 with volume in daily uptrend = long opportunity
+# - Breakdown below R1 with volume in daily downtrend = short opportunity
+# - Volume spike (2.0x average) confirms institutional participation
+# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
+# - Exit when price returns to S1/R1 or volume weakens
+# - Position size 0.25 targets ~15-30 trades/year, avoiding fee drag
+# - Uses 12h timeframe to reduce trade frequency vs 4h versions
+# - Designed to work in BOTH bull and bear markets via trend filter
