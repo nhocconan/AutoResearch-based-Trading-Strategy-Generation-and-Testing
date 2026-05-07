@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d EMA trend filter and volume confirmation.
-# Long when: price breaks above Donchian(20) high AND price > 1d EMA(34) AND volume > 1.5x 20-period MA
-# Short when: price breaks below Donchian(20) low AND price < 1d EMA(34) AND volume > 1.5x 20-period MA
-# Exit when price crosses back through Donchian midpoint (mean of high/low over 20 periods).
-# Designed for 4h timeframe with low trade frequency (target: 20-50/year) to avoid fee drag.
-# Uses 1d EMA for trend direction and volume confirmation to avoid false breakouts.
-# Works in bull markets via breakouts in uptrend, in bear markets via breakdowns in downtrend.
-# Volume filter ensures breakouts have conviction.
-name = "4h_Donchian20_1dEMA34_VolumeConfirm"
-timeframe = "4h"
+# Hypothesis: Daily timeframe strategy using weekly pivot points (Camarilla) with volume confirmation.
+# Long when price breaks above weekly R4 with volume > 1.5x average volume.
+# Short when price breaks below weekly S4 with volume > 1.5x average volume.
+# Exit when price returns to weekly pivot (PP) level.
+# Uses weekly timeframe for structural levels and daily for execution to reduce whipsaw.
+# Designed for low trade frequency (target: 10-25 trades/year) to minimize fee drag.
+# Works in bull markets via upside breakouts, in bear markets via downside breakdowns.
+# Volume filter ensures only significant breaks are traded, avoiding false signals.
+name = "1d_Camarilla_Weekly_Pivot_Volume_Breakout"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,61 +25,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian(20) channels
-    lookback = 20
-    donchian_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    donchian_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
-    
-    # Volume confirmation: volume > 1.5x 20-period MA
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma)
-    
-    # 1d EMA(34) for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get weekly data once before loop
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 1:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate weekly Camarilla pivot levels
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
+    close_weekly = df_weekly['close'].values
+    
+    # Weekly pivot point (PP)
+    pp_weekly = (high_weekly + low_weekly + close_weekly) / 3
+    range_weekly = high_weekly - low_weekly
+    
+    # Camarilla levels: R4 = PP + 1.5 * range, S4 = PP - 1.5 * range
+    r4_weekly = pp_weekly + 1.5 * range_weekly
+    s4_weekly = pp_weekly - 1.5 * range_weekly
+    
+    # Align weekly levels to daily timeframe (wait for weekly close)
+    pp_aligned = align_htf_to_ltf(prices, df_weekly, pp_weekly)
+    r4_aligned = align_htf_to_ltf(prices, df_weekly, r4_weekly)
+    s4_aligned = align_htf_to_ltf(prices, df_weekly, s4_weekly)
+    
+    # Calculate average volume (20-period) for volume confirmation
+    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = lookback  # Sufficient warmup for Donchian
+    start_idx = 20  # Wait for volume average
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(donchian_mid[i]) or np.isnan(volume_filter[i]) or 
-            np.isnan(ema_34_1d_aligned[i])):
+        # Skip if any required data is not available
+        if (np.isnan(pp_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(avg_volume[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: breakout above Donchian high + price > 1d EMA34 + volume confirmation
-            long_condition = (close[i] > donchian_high[i]) and (close[i] > ema_34_1d_aligned[i]) and volume_filter[i]
-            # Short: breakdown below Donchian low + price < 1d EMA34 + volume confirmation
-            short_condition = (close[i] < donchian_low[i]) and (close[i] < ema_34_1d_aligned[i]) and volume_filter[i]
+            # Long condition: price breaks above weekly R4 with volume confirmation
+            long_breakout = close[i] > r4_aligned[i]
+            volume_confirm = volume[i] > 1.5 * avg_volume[i]
             
-            if long_condition:
+            # Short condition: price breaks below weekly S4 with volume confirmation
+            short_breakdown = close[i] < s4_aligned[i]
+            volume_confirm_short = volume[i] > 1.5 * avg_volume[i]
+            
+            if long_breakout and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            elif short_condition:
+            elif short_breakdown and volume_confirm_short:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price crosses below Donchian midpoint
-            if close[i] < donchian_mid[i]:
+            # Long exit: price returns to or below weekly pivot
+            if close[i] <= pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price crosses above Donchian midpoint
-            if close[i] > donchian_mid[i]:
+            # Short exit: price returns to or above weekly pivot
+            if close[i] >= pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
