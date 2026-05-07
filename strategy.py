@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 4H_Camarilla_R3_S3_1DTrend_VolumeSpike_v4
+# 4H_Camarilla_R3_S3_1DTrend_VolumeSpike_v5
 # Hypothesis: 4-hour Camarilla R3/S3 breakout with daily trend filter (price > daily EMA34) and volume spike confirmation.
 # Uses daily trend to avoid counter-trend trades in both bull and bear markets.
-# Volume spike ensures momentum confirmation. Targets 20-40 trades/year to minimize fee drag.
-# Uses discrete position sizing (0.25).
-# Updated: Added 2-bar close confirmation for daily EMA34 trend to reduce look-ahead risk.
+# Volume spike ensures momentum confirmation. Targets 20-30 trades/year to minimize fee drag.
+# Uses discrete position sizing (0.25). Added hysteresis to reduce whipsaw.
 
-name = "4H_Camarilla_R3_S3_1DTrend_VolumeSpike_v4"
+name = "4H_Camarilla_R3_S3_1DTrend_VolumeSpike_v5"
 timeframe = "4h"
 leverage = 1.0
 
@@ -26,7 +25,7 @@ def generate_signals(prices):
     
     # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:  # Need enough data for EMA34
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     # Calculate daily EMA34 for trend filter
@@ -35,7 +34,6 @@ def generate_signals(prices):
     
     # Calculate Camarilla pivot levels from previous day
     # Camarilla: R3 = close + 1.1*(high-low)*1.1/2, S3 = close - 1.1*(high-low)*1.1/2
-    # We need previous day's high, low, close
     prev_high = df_1d['high'].values
     prev_low = df_1d['low'].values
     prev_close = df_1d['close'].values
