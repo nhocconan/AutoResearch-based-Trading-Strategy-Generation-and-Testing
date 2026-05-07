@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-name = "6h_WeeklyPivot_Breakout_TrendFilter"
+name = "6h_1wPivot_R2S2_Breakout_1dTrend"
 timeframe = "6h"
 leverage = 1.0
 
@@ -18,7 +18,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation
+    # Get weekly data for pivot calculation (used for R2/S2 breakouts)
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 5:
         return np.zeros(n)
@@ -37,13 +37,8 @@ def generate_signals(prices):
     s3 = low_1w - 2 * (high_1w - pivot)
     
     # Align weekly pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
     r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
     s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
     
     # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -70,13 +65,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(pivot_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(r2_aligned[i]) or 
+        if (np.isnan(r2_aligned[i]) or 
             np.isnan(s2_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or 
             np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
@@ -95,31 +85,31 @@ def generate_signals(prices):
         trend_1d_down = close_1d_aligned[i] < ema_50_1d_aligned[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: Break above weekly R1 with daily uptrend and volume
-            if (close[i] > r1_aligned[i] and 
+            # Long: Break above weekly R2 with daily uptrend and volume
+            if (close[i] > r2_aligned[i] and 
                 trend_1d_up and 
                 vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: Break below weekly S1 with daily downtrend and volume
-            elif (close[i] < s1_aligned[i] and 
+            # Short: Break below weekly S2 with daily downtrend and volume
+            elif (close[i] < s2_aligned[i] and 
                   trend_1d_down and 
                   vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit: Break below weekly S1 or trend change
-            if (close[i] < s1_aligned[i]) or not trend_1d_up:
+            # Exit: Break below weekly S2 or trend change
+            if (close[i] < s2_aligned[i]) or not trend_1d_up:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Break above weekly R1 or trend change
-            if (close[i] > r1_aligned[i]) or not trend_1d_down:
+            # Exit: Break above weekly R2 or trend change
+            if (close[i] > r2_aligned[i]) or not trend_1d_down:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
@@ -128,10 +118,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Weekly pivot points (R1/S1) act as significant support/resistance levels. 
-# Breaking above R1 in a daily uptrend with volume confirmation indicates bullish momentum, 
-# while breaking below S1 in a daily downtrend indicates bearish momentum. 
-# The 6h timeframe balances responsiveness with reasonable trade frequency (~15-25 trades/year). 
-# Works in bull markets by buying R1 breakouts in uptrends and in bear markets by selling S1 breakdowns in downtrends. 
-# Weekly pivots provide institutional-grade levels, daily EMA50 filters for trend alignment, 
+# Hypothesis: Weekly pivot R2/S2 levels act as stronger support/resistance than R1/S1.
+# Breaking above R2 in a daily uptrend with volume indicates strong bullish momentum,
+# while breaking below S2 in a daily downtrend indicates strong bearish momentum.
+# Using R2/S2 reduces false breakouts compared to R1/S1, leading to higher quality trades.
+# The 6h timeframe balances responsiveness with reasonable trade frequency (~10-20 trades/year).
+# Works in bull markets by buying R2 breakouts in uptrends and in bear markets by selling S2 breakdowns in downtrends.
+# Weekly pivots provide institutional-grade levels, daily EMA50 filters for trend alignment,
 # and volume ensures genuine participation. Cooldown prevents overtrading.
