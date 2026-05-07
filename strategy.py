@@ -1,13 +1,11 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3S3_Breakout_1dTrend_Volume_v3
-Hypothesis: Trade breakouts at Camarilla R3/S3 levels on 12h chart with daily EMA34 trend filter and volume confirmation.
-Breakouts capture strong directional moves while aligning with higher timeframe trend to avoid counter-trend trades.
-Volume spike (>2x 20-period average) confirms institutional participation. Designed for low trade frequency (12-37/year) to minimize fee drift.
-Works in both bull and bear markets by trading only in direction of daily trend.
+12h_Vortex_VolumeSpike_TrendFilter_v1
+Hypothesis: Use Vortex indicator (VI+ and VI-) to identify trend direction on 12h, enter on Vortex crossover with volume confirmation (>2x 20-bar average). Exit when Vortex reverses or volume dries up. Trend filter: only trade in direction of daily EMA34 to avoid counter-trend trades. Designed for low trade frequency (12-37/year) to minimize fee drag. Works in both bull and bear markets by aligning with higher timeframe trend.
 """
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume_v3"
+name = "12h_Vortex_VolumeSpike_TrendFilter_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -39,16 +37,31 @@ def generate_signals(prices):
     ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate Camarilla levels for 12h: based on previous bar's range
-    # Camarilla: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
-    # Using previous bar's OHLC to avoid look-ahead
-    prev_high = np.concatenate([[np.nan], high[:-1]])
-    prev_low = np.concatenate([[np.nan], low[:-1]])
-    prev_close = np.concatenate([[np.nan], close[:-1]])
+    # Calculate Vortex Indicator (VI) on 12h
+    # VM+ = |high - low_prev|, VM- = |low - high_prev|
+    # Sum over n periods (typically 14)
+    n_vortex = 14
+    vm_plus = np.abs(high - np.roll(low, 1))
+    vm_minus = np.abs(low - np.roll(high, 1))
+    # First value is invalid due to roll, set to 0
+    vm_plus[0] = 0
+    vm_minus[0] = 0
     
-    camarilla_width = 1.1 * (prev_high - prev_low) / 2
-    r3_level = prev_close + camarilla_width
-    s3_level = prev_close - camarilla_width
+    # True Range for VI denominator
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first TR is just high-low
+    
+    # Sum over n_vortex periods
+    vm_plus_sum = pd.Series(vm_plus).rolling(window=n_vortex, min_periods=n_vortex).sum().values
+    vm_minus_sum = pd.Series(vm_minus).rolling(window=n_vortex, min_periods=n_vortex).sum().values
+    tr_sum = pd.Series(tr).rolling(window=n_vortex, min_periods=n_vortex).sum().values
+    
+    # VI+ and VI-
+    vi_plus = np.divide(vm_plus_sum, tr_sum, out=np.zeros_like(vm_plus_sum), where=tr_sum!=0)
+    vi_minus = np.divide(vm_minus_sum, tr_sum, out=np.zeros_like(vm_minus_sum), where=tr_sum!=0)
     
     # Volume confirmation: 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -57,11 +70,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Warmup for volume MA and Camarilla levels
+    start_idx = max(20, n_vortex)  # Warmup for volume MA and Vortex
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r3_level[i]) or np.isnan(s3_level[i]) or 
+        if (np.isnan(vi_plus[i]) or np.isnan(vi_minus[i]) or 
             np.isnan(vol_ratio[i]) or np.isnan(ema_34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -89,30 +102,30 @@ def generate_signals(prices):
                 weekly_trend_down = weekly_close_aligned[i] < ema_34_1w_aligned[i]
         
         if position == 0:
-            # Long: price breaks above R3, volume spike, daily trend up, weekly trend up
-            if (close[i] > r3_level[i] and 
+            # Long: VI+ crosses above VI-, volume spike, daily trend up, weekly trend up
+            if (vi_plus[i] > vi_minus[i] and vi_plus[i-1] <= vi_minus[i-1] and
                 vol_ratio[i] > 2.0 and 
                 daily_trend_up and 
                 weekly_trend_up):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3, volume spike, daily trend down, weekly trend down
-            elif (close[i] < s3_level[i] and 
+            # Short: VI- crosses above VI+, volume spike, daily trend down, weekly trend down
+            elif (vi_minus[i] > vi_plus[i] and vi_minus[i-1] <= vi_plus[i-1] and
                   vol_ratio[i] > 2.0 and 
                   daily_trend_down and 
                   weekly_trend_down):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price falls below S3 or trend changes
-            if close[i] < s3_level[i] or not (daily_trend_up and weekly_trend_up):
+            # Exit long: VI- crosses above VI+ or trend changes
+            if (vi_minus[i] > vi_plus[i] and vi_minus[i-1] <= vi_plus[i-1]) or not (daily_trend_up and weekly_trend_up):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price rises above R3 or trend changes
-            if close[i] > r3_level[i] or not (daily_trend_down and weekly_trend_down):
+            # Exit short: VI+ crosses above VI- or trend changes
+            if (vi_plus[i] > vi_minus[i] and vi_plus[i-1] <= vi_minus[i-1]) or not (daily_trend_down and weekly_trend_down):
                 signals[i] = 0.0
                 position = 0
             else:
