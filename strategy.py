@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """
-1D_KAMA_Trend_1W_Trend_Filter
-Hypothesis: Use daily KAMA to capture trend direction and weekly trend filter to avoid counter-trend trades.
-KAMA adapts to market noise, reducing false signals in ranging markets. Weekly trend ensures alignment with higher timeframe momentum.
-Works in bull markets (trend following) and bear markets (avoids longs in downtrends, takes shorts in downtrends).
-Targets 7-25 trades/year to minimize fee drag on daily timeframe.
+1D_Camarilla_R1S1_Breakout_1W_Trend_Volume
+Hypothesis: Daily Camarilla R1/S1 breakouts with weekly trend filter and volume confirmation.
+Long: Price breaks above R1 in weekly uptrend with volume spike.
+Short: Price breaks below S1 in weekly downtrend with volume spike.
+Exit on opposite Camarilla level (S1 for longs, R1 for shorts).
+Camarilla levels provide institutional support/resistance. Weekly trend avoids counter-trend trades.
+Volume surge confirms institutional participation. Targets 10-25 trades/year for low fee drag.
+Works in bull markets (trend-following longs) and bear (shorts in downtrends).
 """
-name = "1D_KAMA_Trend_1W_Trend_Filter"
+name = "1D_Camarilla_R1S1_Breakout_1W_Trend_Volume"
 timeframe = "1d"
 leverage = 1.0
 
@@ -24,9 +27,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1D data for KAMA calculation
+    # Get 1D data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     # Get 1W data for trend filter
@@ -34,73 +37,69 @@ def generate_signals(prices):
     if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate KAMA (adaptive moving average) on 1D close
-    close_1d = df_1d['close'].values
-    # Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close_1d, n=10))  # |close[t] - close[t-10]|
-    volatility = np.sum(np.abs(np.diff(close_1d, n=1)), axis=0)  # sum of |close[t] - close[t-1]| over 10 periods
-    # Fix array lengths
-    change = np.concatenate([np.full(10, np.nan), change])
-    volatility = np.concatenate([np.full(10, np.nan), volatility])
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
-    # Calculate KAMA
-    kama = np.full_like(close_1d, np.nan)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    # Calculate previous day's Camarilla levels
+    # R1 = C + (H-L) * 1.1/12
+    # S1 = C - (H-L) * 1.1/12
+    # Where C, H, L are from previous day
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Calculate 1W EMA20 for trend filter
+    # Calculate Camarilla levels for each day
+    camarilla_range = prev_high - prev_low
+    r1 = prev_close + camarilla_range * 1.1 / 12
+    s1 = prev_close - camarilla_range * 1.1 / 12
+    
+    # Align to lower timeframe (1D bars)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Weekly trend filter: EMA20 on weekly close
     close_1w = df_1w['close'].values
     ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
     ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Volume filter: current 1D volume > 1.5 x 20-day average volume
+    # Volume filter: current volume > 2.0 x 20-day average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_avg * 1.5)
+    volume_filter = volume > (vol_avg * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # Ensure sufficient warmup
+    start_idx = max(20, 20)  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any data is not ready
-        if (np.isnan(kama_aligned[i]) or np.isnan(ema_20_1w_aligned[i]) or 
-            np.isnan(vol_avg[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above KAMA, weekly uptrend, and volume confirmation
-            if (close[i] > kama_aligned[i] and 
+            # Long: price breaks above R1, weekly uptrend, volume confirmation
+            if (close[i] > r1_aligned[i] and 
                 close[i] > ema_20_1w_aligned[i] and 
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA, weekly downtrend, and volume confirmation
-            elif (close[i] < kama_aligned[i] and 
+            # Short: price breaks below S1, weekly downtrend, volume confirmation
+            elif (close[i] < s1_aligned[i] and 
                   close[i] < ema_20_1w_aligned[i] and 
                   volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below KAMA
-            if close[i] < kama_aligned[i]:
+            # Exit long: price breaks below S1 (opposite level)
+            if close[i] < s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above KAMA
-            if close[i] > kama_aligned[i]:
+            # Exit short: price breaks above R1 (opposite level)
+            if close[i] > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
