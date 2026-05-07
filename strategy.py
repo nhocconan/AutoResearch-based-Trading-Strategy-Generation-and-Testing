@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_Weekly_Engulfing_Trend_Strategy"
-timeframe = "1d"
+name = "6h_Keltner_Channel_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,34 +9,58 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
-    open_ = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load daily data ONCE for Keltner channel and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Weekly EMA20 for trend filter
-    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1d = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Keltner Channel parameters (from daily)
+    c_high = df_1d['high'].values
+    c_low = df_1d['low'].values
+    c_close = df_1d['close'].values
     
-    # Daily volume spike detection (1.5x 20-period average)
+    # Calculate ATR(10) on daily
+    tr1 = c_high[1:] - c_low[1:]
+    tr2 = np.abs(c_high[1:] - c_close[:-1])
+    tr3 = np.abs(c_low[1:] - c_close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    
+    # EMA(20) as middle line
+    ema_20 = pd.Series(c_close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Keltner upper/lower bands (multiplier = 1.5)
+    kc_upper = ema_20 + (atr_10 * 1.5)
+    kc_lower = ema_20 - (atr_10 * 1.5)
+    
+    # Align Keltner channels to 6h timeframe
+    kc_upper_6h = align_htf_to_ltf(prices, df_1d, kc_upper)
+    kc_lower_6h = align_htf_to_ltf(prices, df_1d, kc_lower)
+    ema_20_6h = align_htf_to_ltf(prices, df_1d, ema_20)
+    
+    # Daily EMA50 for trend filter
+    ema_50_1d = pd.Series(c_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_6h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume spike detection (1.5x 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_20_1d[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(kc_upper_6h[i]) or np.isnan(kc_lower_6h[i]) or 
+            np.isnan(ema_50_6h[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -44,30 +68,25 @@ def generate_signals(prices):
         
         vol_condition = volume[i] > vol_ma_20[i] * 1.5
         
-        # Bullish engulfing: current green candle fully engulfs previous red candle
-        bullish_engulf = (close[i] > open_[i]) and (open_[i] < close[i-1]) and (close[i] > open_[i-1]) and (open_[i-1] > close[i-1])
-        # Bearish engulfing: current red candle fully engulfs previous green candle
-        bearish_engulf = (close[i] < open_[i]) and (open_[i] > close[i-1]) and (close[i] < open_[i-1]) and (open_[i-1] < close[i-1])
-        
         if position == 0:
-            # Long: bullish engulfing in weekly uptrend with volume
-            if bullish_engulf and ema_20_1d[i] > ema_20_1d[i-1] and vol_condition:
+            # Long: break above upper Keltner in daily uptrend with volume
+            if close[i] > kc_upper_6h[i] and ema_50_6h[i] > ema_50_6h[i-1] and vol_condition:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish engulfing in weekly downtrend with volume
-            elif bearish_engulf and ema_20_1d[i] < ema_20_1d[i-1] and vol_condition:
+            # Short: break below lower Keltner in daily downtrend with volume
+            elif close[i] < kc_lower_6h[i] and ema_50_6h[i] < ema_50_6h[i-1] and vol_condition:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: bearish engulfing or trend reversal
-            if bearish_engulf or ema_20_1d[i] < ema_20_1d[i-1]:
+            # Exit: price returns to EMA20 or trend reverses
+            if close[i] < ema_20_6h[i] or ema_50_6h[i] < ema_50_6h[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: bullish engulfing or trend reversal
-            if bullish_engulf or ema_20_1d[i] > ema_20_1d[i-1]:
+            # Exit: price returns to EMA20 or trend reverses
+            if close[i] > ema_20_6h[i] or ema_50_6h[i] > ema_50_6h[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -75,12 +94,14 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Daily engulfing patterns with weekly trend filter and volume confirmation
-# - Engulfing candles signal strong momentum shifts at daily timeframe
-# - Weekly EMA20 trend filter ensures we trade with the higher timeframe trend
-# - Volume confirmation (1.5x average) reduces false signals
-# - Works in both bull (engulfing in uptrend) and bear (engulfing in downtrend)
-# - Target: ~15-25 trades/year to minimize fee drag
-# - Uses 1d timeframe for signal generation and 1w for trend context
-# - Engulfing patterns are reliable reversal/continuation signals in crypto markets
-# - Simple 2-3 condition logic prevents overtrading and improves robustness
+# Hypothesis: Keltner Channel breakouts with daily trend filter and volume confirmation
+# - Keltner Channel (EMA20 ± 1.5*ATR10) adapts to volatility, providing dynamic support/resistance
+# - Breakout above upper band in daily uptrend (EMA50 rising) signals bullish continuation
+# - Breakdown below lower band in daily downtrend (EMA50 falling) signals bearish continuation
+# - Volume confirmation (1.5x average) reduces false breakouts
+# - Exit when price returns to EMA20 (middle line) or daily trend reverses
+# - Position size 0.25 targets ~20-40 trades/year to avoid fee drag
+# - Works in both bull (breakouts in uptrend) and bear (breakdowns in downtrend)
+# - Uses 1d timeframe for structure and trend, 6h for execution timing
+# - Novelty: Adaptive channels + trend filter + volume combo not recently tried on 6h
+# - Expected to perform well in ranging markets (channel bounds) and trending markets (breakouts)
