@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3_S3_Breakout_12hTrend_VolumeSpike"
-timeframe = "4h"
+name = "1h_4h1d_Confluence_RSI_Vol"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -17,91 +17,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    # 12h EMA50 for trend filter
-    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    
-    # 12h volume spike: > 1.8x 24-period average (12 days)
-    vol_ma_12h = pd.Series(df_12h['volume']).rolling(window=24, min_periods=24).mean().values
-    vol_spike_12h = df_12h['volume'].values > 1.8 * vol_ma_12h
-    vol_spike_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_spike_12h)
-    
-    # 4h Camarilla levels (R3, S3) from previous day
-    # Calculate from daily data
+    # Load 4h and 1d data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_4h) < 20 or len(df_1d) < 20:
         return np.zeros(n)
     
-    # Previous day's high, low, close
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # 4h RSI(14) for trend filter
+    delta_4h = pd.Series(df_4h['close']).diff()
+    gain_4h = (delta_4h.where(delta_4h > 0, 0)).rolling(window=14, min_periods=14).mean()
+    loss_4h = (-delta_4h.where(delta_4h < 0, 0)).rolling(window=14, min_periods=14).mean()
+    rs_4h = gain_4h / loss_4h
+    rsi_4h = 100 - (100 / (1 + rs_4h))
+    rsi_4h = rsi_4h.fillna(50).values
+    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
     
-    # Camarilla R3 and S3
-    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
-    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    # 1d EMA(50) for trend direction
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # 1h volume spike: > 1.8x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > 1.8 * vol_ma
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 24)  # Wait for EMA50 and volume MA
+    start_idx = max(20, 50)  # Wait for vol MA and EMA50
     
     for i in range(start_idx, n):
-        if (np.isnan(ema50_12h_aligned[i]) or 
-            np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(vol_spike_12h_aligned[i])):
+        if np.isnan(rsi_4h_aligned[i]) or np.isnan(ema50_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
+        
         if position == 0:
-            # Long: Close above R3, 12h trend up, volume spike
-            if (close[i] > camarilla_r3_aligned[i] and 
-                close[i] > ema50_12h_aligned[i] and 
-                vol_spike_12h_aligned[i]):
-                signals[i] = 0.25
+            # Long: 4h RSI > 55 (bullish), price > 1d EMA50, volume spike, in session
+            if (rsi_4h_aligned[i] > 55 and 
+                close[i] > ema50_1d_aligned[i] and 
+                vol_spike[i] and 
+                in_session):
+                signals[i] = 0.20
                 position = 1
-            # Short: Close below S3, 12h trend down, volume spike
-            elif (close[i] < camarilla_s3_aligned[i] and 
-                  close[i] < ema50_12h_aligned[i] and 
-                  vol_spike_12h_aligned[i]):
-                signals[i] = -0.25
+            # Short: 4h RSI < 45 (bearish), price < 1d EMA50, volume spike, in session
+            elif (rsi_4h_aligned[i] < 45 and 
+                  close[i] < ema50_1d_aligned[i] and 
+                  vol_spike[i] and 
+                  in_session):
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit: Close below S3 or trend turns down
-            if (close[i] < camarilla_s3_aligned[i] or 
-                close[i] < ema50_12h_aligned[i]):
+            # Exit: 4h RSI < 40 or price < 1d EMA50
+            if (rsi_4h_aligned[i] < 40 or 
+                close[i] < ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit: Close above R3 or trend turns up
-            if (close[i] > camarilla_r3_aligned[i] or 
-                close[i] > ema50_12h_aligned[i]):
+            # Exit: 4h RSI > 60 or price > 1d EMA50
+            if (rsi_4h_aligned[i] > 60 or 
+                close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-# Hypothesis: Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume spike confirmation.
-# Long when price breaks above R3 (strong resistance), 12h trend is up (price > EMA50), 
-# and 12h volume spike confirms institutional participation.
-# Short when price breaks below S3 (strong support), 12h trend is down, and volume spike present.
-# Uses 12h timeframe for trend/volume to filter 4h noise, 4h for entry timing.
-# Camarilla levels provide mathematically derived support/resistance with institutional relevance.
-# Volume spike (>1.8x average) ensures conviction, reducing false breakouts.
-# Discrete 0.25 position size limits risk. Target: 25-40 trades/year to minimize fee drag.
-# Works in bull markets (breakouts with trend) and bear markets (breakdowns with trend).
+# Hypothesis: 1h strategy using 4h RSI for momentum and 1d EMA50 for trend filter.
+# Enters only during high-liquidity session (08-20 UTC) on volume spikes.
+# Long when 4h RSI > 55 (bullish momentum) and price above 1d EMA50 (uptrend).
+# Short when 4h RSI < 45 (bearish momentum) and price below 1d EMA50 (downtrend).
+# Volume spike (>1.8x 20-bar avg) ensures conviction. Session filter reduces noise.
+# Discrete 0.20 position size limits risk. Works in bull/bear via dual RSI/EMA logic.
+# Target: 15-30 trades/year (~60-120 total over 4 years) to minimize fee drag.
