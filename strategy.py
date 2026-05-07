@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_4h1d_Donchian20_Trend_Volume"
-timeframe = "1h"
+name = "6h_Weekly_Pivot_Donchian_Breakout_With_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,78 +17,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h and 1d data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
+    # Load 6h and weekly data ONCE before loop
+    df_6h = get_htf_data(prices, '6h')
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_4h) < 10 or len(df_1d) < 20:
+    if len(df_6h) < 20 or len(df_1w) < 10:
         return np.zeros(n)
     
-    # 4h Donchian channels (20-period)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    donchian_high_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Weekly pivot from previous week (H, L, C)
+    prev_high_1w = df_1w['high'].shift(1).values
+    prev_low_1w = df_1w['low'].shift(1).values
+    prev_close_1w = df_1w['close'].shift(1).values
+    pivot_1w = (prev_high_1w + prev_low_1w + prev_close_1w) / 3.0
+    r1_1w = 2 * pivot_1w - prev_low_1w
+    s1_1w = 2 * pivot_1w - prev_high_1w
     
-    # Align 4h Donchian levels to 1h timeframe
-    donchian_high_4h_aligned = align_htf_to_ltf(prices, df_4h, donchian_high_4h)
-    donchian_low_4h_aligned = align_htf_to_ltf(prices, df_4h, donchian_low_4h)
+    # Align weekly pivot levels to 6h timeframe
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
     
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # 6h Donchian channel (20-period)
+    def donchian_channels(high, low, window):
+        upper = np.full_like(high, np.nan)
+        lower = np.full_like(high, np.nan)
+        for i in range(window-1, len(high)):
+            upper[i] = np.max(high[i-window+1:i+1])
+            lower[i] = np.min(low[i-window+1:i+1])
+        return upper, lower
     
-    # 1h volume spike: > 2.0x 20-period average
-    vol_ma_1h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1h = volume > 2.0 * vol_ma_1h
+    upper_6h, lower_6h = donchian_channels(high, low, 20)
     
-    # Session filter: 08-20 UTC (already datetime64[ms])
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # 6h volume filter: > 1.5x 20-period average
+    vol_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > 1.5 * vol_ma_6h
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 34)  # Wait for indicators
+    start_idx = max(20, 30)  # Wait for Donchian and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_high_4h_aligned[i]) or np.isnan(donchian_low_4h_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        if not in_session[i]:
+        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or 
+            np.isnan(s1_1w_aligned[i]) or np.isnan(upper_6h[i]) or 
+            np.isnan(lower_6h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Break above 4h Donchian high + volume spike + above 1d EMA34
-            if (close[i] > donchian_high_4h_aligned[i] and vol_spike_1h[i] and 
-                close[i] > ema34_1d_aligned[i]):
-                signals[i] = 0.20
+            # Long: Break above weekly R1 with volume confirmation and price above Donchian upper
+            if (close[i] > r1_1w_aligned[i] and vol_filter[i] and 
+                close[i] > upper_6h[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: Break below 4h Donchian low + volume spike + below 1d EMA34
-            elif (close[i] < donchian_low_4h_aligned[i] and vol_spike_1h[i] and 
-                  close[i] < ema34_1d_aligned[i]):
-                signals[i] = -0.20
+            # Short: Break below weekly S1 with volume confirmation and price below Donchian lower
+            elif (close[i] < s1_1w_aligned[i] and vol_filter[i] and 
+                  close[i] < lower_6h[i]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Break below 4h Donchian low or below 1d EMA34
-            if close[i] < donchian_low_4h_aligned[i] or close[i] < ema34_1d_aligned[i]:
+            # Exit: Price below weekly pivot or Donchian lower
+            if close[i] < pivot_1w_aligned[i] or close[i] < lower_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: Break above 4h Donchian high or above 1d EMA34
-            if close[i] > donchian_high_4h_aligned[i] or close[i] > ema34_1d_aligned[i]:
+            # Exit: Price above weekly pivot or Donchian upper
+            if close[i] > pivot_1w_aligned[i] or close[i] > upper_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
+
+# Hypothesis: Weekly pivot levels (R1/S1) act as strong support/resistance on 6s timeframe.
+# Breakouts above R1 or below S1 with volume confirmation and Donchian breakout
+# provide high-probability trend continuation trades.
+# Weekly timeframe avoids noise, Donchian confirms breakout, volume filters false signals.
+# Designed for 15-30 trades/year to minimize fee drag while capturing major moves.
