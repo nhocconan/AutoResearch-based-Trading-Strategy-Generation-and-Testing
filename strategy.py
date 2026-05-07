@@ -1,15 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3S3_Breakout_1dTrend_Volume
-Hypothesis: Camarilla pivot levels (R3/S3) from 1d combined with 1d EMA34 trend filter and volume confirmation.
-Long when price breaks above R3 in uptrend with volume spike; short when breaks below S3 in downtrend with volume spike.
-Exit when price returns to 1d EMA34 (mean reversion to trend). 
-Camarilla levels provide institutional support/resistance, EMA34 filters trend direction, volume confirms breakout strength.
-Designed for 4h timeframe to capture multi-day moves with controlled frequency (target: 20-50 trades/year).
-Works in bull markets (breakouts with trend) and bear markets (breakdowns with trend).
+1h_Camarilla_R1S1_Breakout_4hTrend_1dVolume
+Hypothesis: Combines Camarilla pivot points (R1/S1) on 1h for entry timing with 4h trend filter (EMA50) and 1d volume confirmation to capture breakouts with institutional interest. The Camarilla levels provide precise entry points near intraday support/resistance, while higher timeframe filters ensure alignment with dominant trend and reduce false breakouts. Designed for low frequency (15-35 trades/year) to minimize fee drag in 1h timeframe.
 """
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "1h_Camarilla_R1S1_Breakout_4hTrend_1dVolume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -26,68 +21,73 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and trend filter
+    # Calculate Camarilla pivot points for 1h
+    # Using previous period's high, low, close
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
+    
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_val = prev_high - prev_low
+    
+    # Camarilla levels: R1 = close + (high-low)*1.1/12, S1 = close - (high-low)*1.1/12
+    r1 = prev_close + range_val * 1.1 / 12
+    s1 = prev_close - range_val * 1.1 / 12
+    
+    # 4h EMA50 for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    
+    # 1d volume filter: current volume > 1.3 * 20-period average
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
-        return np.zeros(n)
+    vol_avg_1d = pd.Series(df_1d['volume']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    volume_filter = volume > (vol_avg_1d_aligned * 1.3)
     
-    # Calculate Camarilla levels from previous 1d bar
-    # R4 = C + (H-L)*1.1/2, R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4, S4 = C - (H-L)*1.1/2
-    # where C = (H+L+Close)/3 (typical price)
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    rang = df_1d['high'] - df_1d['low']
-    
-    r3 = typical_price + rang * 1.1 / 4
-    s3 = typical_price - rang * 1.1 / 4
-    
-    # Align Camarilla levels to 4h (available after 1d bar closes)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3.values)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3.values)
-    
-    # 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume filter: current volume > 2.0 * 20-period average
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_avg * 2.0)
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Need enough data for EMA34
+    start_idx = 20  # Need enough data for calculations
     
     for i in range(start_idx, n):
-        # Skip if any data is not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_avg[i])):
+        # Skip if any data is not ready or outside session
+        if (np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(ema_50_4h_aligned[i]) or 
+            np.isnan(vol_avg_1d_aligned[i]) or not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R3 + uptrend + volume spike
-            if close[i] > r3_aligned[i] and close[i] > ema_34_aligned[i] and volume_filter[i]:
-                signals[i] = 0.25
+            # Long: price breaks above R1 + 4h uptrend + volume confirmation
+            if close[i] > r1[i] and close[i] > ema_50_4h_aligned[i] and volume_filter[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below S3 + downtrend + volume spike
-            elif close[i] < s3_aligned[i] and close[i] < ema_34_aligned[i] and volume_filter[i]:
-                signals[i] = -0.25
+            # Short: price breaks below S1 + 4h downtrend + volume confirmation
+            elif close[i] < s1[i] and close[i] < ema_50_4h_aligned[i] and volume_filter[i]:
+                signals[i] = -0.20
                 position = -1
         elif position != 0:
-            # Exit: price returns to 1d EMA34 (mean reversion to trend)
+            # Exit: price returns to opposite Camarilla level (S1 for long, R1 for short)
             if position == 1:
-                if close[i] <= ema_34_aligned[i]:
+                if close[i] <= s1[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
             else:  # position == -1
-                if close[i] >= ema_34_aligned[i]:
+                if close[i] >= r1[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
