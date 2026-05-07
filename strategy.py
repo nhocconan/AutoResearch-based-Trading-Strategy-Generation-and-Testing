@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Camarilla_R3S3_Breakout_1dTrend_Volume_Spike"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume_Spike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -58,11 +58,11 @@ def generate_signals(prices):
         if position == 0:
             # Long: Close breaks above R3 with volume spike and 1d uptrend
             if close[i] > R3_aligned[i] and vol_spike[i] and trend_up[i]:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             # Short: Close breaks below S3 with volume spike and 1d downtrend
             elif close[i] < S3_aligned[i] and vol_spike[i] and trend_down[i]:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
             # Exit: Close below S3 or trend turns down
@@ -70,14 +70,14 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
             # Exit: Close above R3 or trend turns up
             if close[i] > R3_aligned[i] or not trend_down[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
@@ -86,5 +86,5 @@ def generate_signals(prices):
 # Short when price breaks below S3 (strong support) with volume confirmation in 1d downtrend.
 # R3/S3 are stronger levels than R1/S1, leading to fewer but higher-quality trades.
 # Volume spike (>2x average) ensures conviction behind the breakout.
-# Designed for 6h timeframe to target 12-37 trades/year, avoiding overtrading.
+# Designed for 12h timeframe to target 12-37 trades/year, avoiding overtrading.
 # Works in bull markets (breaks above R3 in uptrend) and bear markets (breaks below S3 in downtrend).
