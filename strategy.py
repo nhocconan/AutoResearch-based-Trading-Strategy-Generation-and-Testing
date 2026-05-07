@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 4h_PriceAction_VolumeBreakout_1dTrend
-# Hypothesis: Price action breakouts with volume confirmation and daily trend filter.
-# Uses 4h price action (high/low breaks) with volume spike (>1.5x) and 1d EMA50 trend.
-# Works in bull markets via long breakouts and bear via short breakdowns.
-# Volume filter reduces false breakouts, trend filter avoids counter-trend trades.
-# Target: 20-50 trades per year (~80-200 over 4 years) with position size 0.25.
+# 1D_Weekly_HTF_Pullback_LongOnly_v2
+# Hypothesis: In multi-year cycles, strong weekly uptrends create reliable daily pullback buying opportunities.
+# Uses 1-week EMA21 as trend filter and enters long when price pulls back to daily EMA50 during weekly uptrend.
+# Exits when price breaks below daily EMA50 or weekly trend turns down. Designed for low frequency (~10-25 trades/year)
+# with position sizing 0.25 to manage drawdown in bear markets like 2022. Works in bull via trend continuation,
+# avoids bear markets by staying flat when weekly trend turns down.
 
-name = "4h_PriceAction_VolumeBreakout_1dTrend"
-timeframe = "4h"
+name = "1D_Weekly_HTF_Pullback_LongOnly_v2"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -20,73 +20,45 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Load 1d data ONCE for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load weekly data ONCE for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 21:
         return np.zeros(n)
     
-    # 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Weekly EMA21 for trend filter
+    ema_21_1w = pd.Series(df_1w['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
-    # Price action: use recent swing points
-    # Look for breaks of recent 10-period high/low
-    high_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values
-    low_10 = pd.Series(low).rolling(window=10, min_periods=10).min().values
-    
-    # Volume ratio: current volume / 10-period average volume
-    vol_ma = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
-    vol_ratio = np.where(vol_ma > 0, volume / vol_ma, 1.0)
+    # Daily EMA50 for entry/exit
+    ema_50_d = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0  # 0: flat, 1: long
     
-    start_idx = 10  # Need 10 periods for calculations
+    start_idx = 50  # Need 50 periods for daily EMA50
     
     for i in range(start_idx, n):
-        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ratio[i]):
+        if np.isnan(ema_21_1w_aligned[i]) or np.isnan(ema_50_d[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Breakout conditions: price breaks above 10-period high or below 10-period low
-        breakout_up = close[i] > high_10[i-1]  # Use previous bar's high to avoid look-ahead
-        breakout_down = close[i] < low_10[i-1]  # Use previous bar's low
-        
-        # Volume confirmation: volume > 1.5x average
-        volume_confirm = vol_ratio[i] > 1.5
-        
-        # Trend filter from 1d EMA50
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Weekly uptrend filter
+        weekly_uptrend = close[i] > ema_21_1w_aligned[i]
         
         if position == 0:
-            # Long: upward breakout + volume + uptrend
-            if breakout_up and volume_confirm and uptrend:
+            # Enter long when: weekly uptrend AND price crosses above daily EMA50
+            if weekly_uptrend and close[i] > ema_50_d[i] and close[i-1] <= ema_50_d[i-1]:
                 signals[i] = 0.25
                 position = 1
-            # Short: downward breakout + volume + downtrend
-            elif breakout_down and volume_confirm and downtrend:
-                signals[i] = -0.25
-                position = -1
         elif position == 1:
-            # Exit: price breaks back below 10-period low or trend reversal
-            if close[i] < low_10[i] or not uptrend:
+            # Exit when: price breaks below daily EMA50 OR weekly trend turns down
+            if close[i] < ema_50_d[i] or not weekly_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        elif position == -1:
-            # Exit: price breaks back above 10-period high or trend reversal
-            if close[i] > high_10[i] or not downtrend:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
     
     return signals
