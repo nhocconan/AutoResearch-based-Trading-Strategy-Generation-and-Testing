@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_1wPivot_1dEMA34_VolumeSpike_v3"
-timeframe = "4h"
+name = "1d_1wPivot_KellyTrend_Edge"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,48 +17,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # Weekly pivot points from daily data (use last completed week)
-    # Calculate weekly high/low/close from daily data
-    # We'll compute weekly pivot using the last 5 trading days (approximate week)
-    weekly_high = pd.Series(high).rolling(window=5*24//4, min_periods=5*24//4).max().values  # 5 days of 4h bars
-    weekly_low = pd.Series(low).rolling(window=5*24//4, min_periods=5*24//4).min().values
-    weekly_close = pd.Series(close).rolling(window=5*24//4, min_periods=5*24//4).mean().values
+    # Weekly pivot points
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Pivot levels
     pp = (weekly_high + weekly_low + weekly_close) / 3
     r1 = 2 * pp - weekly_low
     s1 = 2 * pp - weekly_high
     r2 = pp + (weekly_high - weekly_low)
     s2 = pp - (weekly_high - weekly_low)
-    r3 = weekly_high + 2 * (pp - weekly_low)
-    s3 = weekly_low - 2 * (weekly_high - pp)
     
-    # Align weekly pivot levels to 4h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp.values)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
+    # Align weekly pivot levels to daily timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
     
     # Daily trend filter: EMA(34) on daily close
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_34 = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Volume spike detection: 6-period average (1.5 days of 4h bars)
-    vol_ma_6 = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
+    # Volume spike detection: 20-period average (20 days)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 6, 5*24//4)  # Wait for all indicators
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(pp_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(r1_aligned[i]) or
-            np.isnan(vol_ma_6[i])):
+        if (np.isnan(ema_34[i]) or np.isnan(pp_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,40 +62,40 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: price above S1 with volume and daily uptrend
-            vol_condition = volume[i] > vol_ma_6[i] * 2.0
-            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
+            vol_condition = volume[i] > vol_ma[i] * 2.0
+            uptrend = ema_34[i] > ema_34[i-1]
             
             if close[i] > s1_aligned[i] and vol_condition and uptrend:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             # Short: price below R1 with volume and daily downtrend
             elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
             # Exit: price back below pivot or volume drops
-            if close[i] < pp_aligned[i] or volume[i] < vol_ma_6[i] * 1.5:
+            if close[i] < pp_aligned[i] or volume[i] < vol_ma[i] * 1.3:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
             # Exit: price back above pivot or volume drops
-            if close[i] > pp_aligned[i] or volume[i] < vol_ma_6[i] * 1.5:
+            if close[i] > pp_aligned[i] or volume[i] < vol_ma[i] * 1.3:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-# Hypothesis: 4h weekly pivot breakout with daily trend and volume confirmation
-# - Weekly pivot points (S1/R1) act as dynamic support/resistance levels
-# - Breakout above S1 with volume in daily uptrend = long opportunity
-# - Breakdown below R1 with volume in daily downtrend = short opportunity
+# Hypothesis: Daily weekly pivot breakout with trend and volume confirmation
+# - Weekly pivot points (S1/R1) act as strong support/resistance levels
+# - Breakout above S1 with volume spike in daily uptrend = long opportunity
+# - Breakdown below R1 with volume spike in daily downtrend = short opportunity
 # - Volume spike (2x average) confirms institutional participation
 # - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
 # - Exit when price returns to weekly pivot (PP) or volume weakens
-# - Position size 0.25 targets 20-40 trades/year, avoiding fee drag
+# - Position size 0.30 targets 15-25 trades/year, avoiding fee drag
 # - Weekly pivot provides structure that works across market regimes
-# - Focus on BTC/ETH with sufficient trade frequency and trend filtering
+# - Kelly-inspired sizing (0.30) balances risk and return in volatile crypto markets
