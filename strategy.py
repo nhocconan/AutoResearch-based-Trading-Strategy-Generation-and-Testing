@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_KAMA_RSI_ChopFilter_WeeklyTrend"
-timeframe = "1d"
+name = "6h_Stealth_CCI_Range"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,80 +17,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Load daily data once for trend filter and CCI
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    # KAMA calculation
-    close_s = pd.Series(close)
-    change = close_s.diff(10).abs()
-    volatility = close_s.diff().abs().rolling(window=10, min_periods=10).sum()
-    er = change / volatility.replace(0, 1e-10)
-    sc = (er * (0.66 - 0.06) + 0.06) ** 2
-    kama = [close[0]]
-    for i in range(1, len(close)):
-        kama.append(kama[-1] + sc[i] * (close[i] - kama[-1]))
-    kama = np.array(kama)
+    # Daily CCI (20-period)
+    tp_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3.0
+    sma_tp = pd.Series(tp_1d).rolling(window=20, min_periods=20).mean().values
+    mad = pd.Series(tp_1d).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
+    cci_1d = (tp_1d - sma_tp) / (0.015 * mad)
+    cci_1d[np.isnan(mad) | (mad == 0)] = 0
     
-    # RSI calculation
-    delta = close_s.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # Align daily CCI to 6h (needs 0 delay - CCI is complete when daily bar closes)
+    cci_1d_aligned = align_htf_to_ltf(prices, df_1d, cci_1d)
     
-    # Weekly EMA34 for trend filter
-    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Daily EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Bollinger Bands for chop regime (width percentile)
-    sma_20 = close_s.rolling(window=20, min_periods=20).mean().values
-    std_20 = close_s.rolling(window=20, min_periods=20).std().values
-    bb_width = (std_20 * 2) / sma_20
-    bb_width_pct = pd.Series(bb_width).rolling(window=50, min_periods=20).rank(pct=True).values * 100
+    # 6h ATR(14) for volatility filter
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0
     
-    start_idx = max(50, 34)
+    start_idx = max(100, 50, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(bb_width_pct[i])):
+        if (np.isnan(cci_1d_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(atr_14[i]) or np.isnan(close[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        kama_up = kama[i] > kama[i-1]
-        kama_down = kama[i] < kama[i-1]
-        rsi_oversold = rsi[i] < 30
-        rsi_overbought = rsi[i] > 70
-        chop_condition = bb_width_pct[i] > 50  # Choppy market when width > median
+        # Stealth zone: CCI between -80 and 80 (not extreme)
+        in_stealth = (-80 <= cci_1d_aligned[i] <= 80)
+        
+        # Trend filter: price above/below EMA50
+        above_ema50 = close[i] > ema_50_1d_aligned[i]
+        below_ema50 = close[i] < ema_50_1d_aligned[i]
+        
+        # Volatility filter: avoid choppy markets (ATR < 0.02 * price)
+        vol_filter = atr_14[i] > 0.02 * close[i]
         
         if position == 0:
-            # Long: KAMA up in weekly uptrend, RSI oversold, choppy market (mean reversion)
-            if kama_up and ema_34_1w_aligned[i] > ema_34_1w_aligned[i-1] and rsi_oversold and chop_condition:
+            # Long: CCI pulling up from stealth zone in uptrend
+            if (cci_1d_aligned[i] > cci_1d_aligned[i-1] and 
+                cci_1d_aligned[i-1] < -20 and  # was in deep stealth/oversold
+                above_ema50 and vol_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA down in weekly downtrend, RSI overbought, choppy market
-            elif kama_down and ema_34_1w_aligned[i] < ema_34_1w_aligned[i-1] and rsi_overbought and chop_condition:
+            # Short: CCI pulling down from stealth zone in downtrend
+            elif (cci_1d_aligned[i] < cci_1d_aligned[i-1] and 
+                  cci_1d_aligned[i-1] > 20 and  # was in deep stealth/overbought
+                  below_ema50 and vol_filter):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: KAMA down or RSI overbought
-            if not kama_up or rsi[i] > 60:
+            # Exit: CCI enters overbought or trend breaks
+            if cci_1d_aligned[i] > 80 or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: KAMA up or RSI oversold
-            if not kama_down or rsi[i] < 40:
+            # Exit: CCI enters oversold or trend breaks
+            if cci_1d_aligned[i] < -80 or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -98,15 +94,15 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 1d KAMA trend + RSI mean reversion + chop regime filter with weekly trend
-# - KAMA adapts to market noise, providing reliable trend direction
-# - RSI extremes (oversold/overbought) provide mean reversion entries in choppy markets
-# - Bollinger width percentile > 50 identifies choppy/range regimes suitable for mean reversion
-# - Weekly EMA34 trend filter ensures alignment with higher timeframe trend
-# - Works in bull markets: KAMA up + weekly uptrend + RSI oversold dips
-# - Works in bear markets: KAMA down + weekly downtrend + RSI overbought bounces
-# - Chop regime filter avoids trending markets where mean reversion fails
-# - Position size 0.25 targets ~20-60 trades/year to avoid fee drag
-# - Combines trend following (KAMA) with mean reversion (RSI) in appropriate regimes
-# - Weekly trend filter reduces whipsaws vs same-timeframe signals
-# - Proven components: KAMA (from 1.31 Sharpe), RSI, chop regime, weekly trend filter
+# Hypothesis: 6h Stealth CCI Range - Fade extremes in ranging markets
+# - Uses daily CCI (20) to identify overbought/oversold conditions
+# - Enters when CCI reverses from extreme levels (>80 or <-80) back into "stealth zone" (-80 to 80)
+# - Only trades in direction of daily EMA50 trend (avoids counter-trend whipsaws)
+# - Volatility filter (ATR > 2% of price) prevents trading in choppy/low-volatility conditions
+# - Works in bull markets: buy dips in uptrend when CCI recovers from oversold
+# - Works in bear markets: sell rallies in downtrend when CCI declines from overbought
+# - Stealth zone avoids whipsaws from extreme CCI readings that often reverse
+# - Position size 0.25 limits risk; targets ~50-120 trades over 4 years (12-30/year)
+# - Daily timeframe for CCI reduces noise vs lower timeframes
+# - Novel: CCI reversal from extremes + trend filter + vol filter not recently tried on 6h
+# - Avoids saturated CCI overbought/oversold strategies by requiring reversal FROM extremes
