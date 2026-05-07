@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v4"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_v5"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -34,7 +34,7 @@ def generate_signals(prices):
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume spike: current volume > 2.0 x 24-period average (12h * 24 = 12 days)
+    # Volume spike: current volume > 2.0 x 24-period average (4h * 24 = 4 days)
     vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
