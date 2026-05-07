@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h trend filter (EMA21) and 1d momentum filter (ROC25) for direction,
-# with entry on 1h pullbacks to the 21 EMA during strong trends. Designed to work in both bull
-# and bear markets by following the higher timeframe trend. Uses volume confirmation to avoid
-# false breakouts. Target: 15-35 trades/year per symbol to minimize fee drag.
-name = "1h_EMA21_Pullback_4hTrend_1dROC"
-timeframe = "1h"
+# Hypothesis: 4h Williams %R with 1d trend filter and volume confirmation.
+# Uses Williams %R(14) for momentum reversal signals, confirmed by 1d EMA trend direction and volume spikes.
+# Designed to work in both bull and bear markets by only taking trades in the direction of the 1d trend.
+# Target: 20-50 trades/year per symbol to avoid excessive fee drag.
+name = "4h_WilliamsR_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,78 +21,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h data for trend filter (EMA21)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 21:
-        return np.zeros(n)
-    
-    # Load 1d data for momentum filter (ROC25)
+    # Load 1d data ONCE for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 25:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # 4h EMA21 for trend direction
-    ema_21_4h = pd.Series(df_4h['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
+    # 1d trend filter: 34-period EMA on close
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 1d ROC25 for momentum strength
-    roc_25_1d = (pd.Series(df_1d['close']).pct_change(25) * 100).values
-    roc_25_1d_aligned = align_htf_to_ltf(prices, df_1d, roc_25_1d)
+    # Williams %R (14-period) on 4h data
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # 1h EMA21 for entry timing (pullback to EMA)
-    ema_21_1h = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    
-    # Volume confirmation: volume above 20-period EMA
-    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_above_ema = volume > vol_ema_20
+    # 4h volume average for spike detection
+    vol_ema_4h = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_spike = np.where(vol_ema_4h > 0, volume / vol_ema_4h, 1.0) > 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Sufficient warmup for all indicators
+    start_idx = 100  # Sufficient warmup for Williams %R and EMA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_21_4h_aligned[i]) or np.isnan(roc_25_1d_aligned[i]) or 
-            np.isnan(ema_21_1h[i]) or np.isnan(vol_above_ema[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend and momentum filters
-        uptrend = ema_21_4h_aligned[i] > ema_21_4h_aligned[i-1]  # 4h EMA rising
-        strong_uptrend = uptrend and (roc_25_1d_aligned[i] > 0)  # 4h EMA up + 1d ROC positive
-        downtrend = ema_21_4h_aligned[i] < ema_21_4h_aligned[i-1]  # 4h EMA falling
-        strong_downtrend = downtrend and (roc_25_1d_aligned[i] < 0)  # 4h EMA down + 1d ROC negative
+        # Trend filter: price above/below 1d EMA34
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Long entry: pullback to EMA in strong uptrend with volume
-            near_ema = low[i] <= ema_21_1h[i] * 1.005  # within 0.5% of EMA (low touches or slightly above)
-            long_condition = strong_uptrend and near_ema and vol_above_ema[i]
-            
-            # Short entry: pullback to EMA in strong downtrend with volume
-            near_ema_short = high[i] >= ema_21_1h[i] * 0.995  # within 0.5% of EMA (high touches or slightly below)
-            short_condition = strong_downtrend and near_ema_short and vol_above_ema[i]
+            # Long signal: Williams %R oversold (< -80) with volume spike in uptrend
+            long_condition = (williams_r[i] < -80) and vol_spike[i] and uptrend
+            # Short signal: Williams %R overbought (> -20) with volume spike in downtrend
+            short_condition = (williams_r[i] > -20) and vol_spike[i] and downtrend
             
             if long_condition:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
             elif short_condition:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: trend breaks or price moves significantly above EMA
-            if not strong_uptrend or high[i] > ema_21_1h[i] * 1.02:  # 2% above EMA
+            # Exit: Williams %R returns above -50 or trend turns down
+            if (williams_r[i] > -50) or (not uptrend):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend breaks or price moves significantly below EMA
-            if not strong_downtrend or low[i] < ema_21_1h[i] * 0.98:  # 2% below EMA
+            # Exit: Williams %R returns below -50 or trend turns up
+            if (williams_r[i] < -50) or (not downtrend):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
