@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R3_S3_Breakout_12hTrend_Volume
-# Hypothesis: Uses Camarilla R3/S3 levels from 1d as breakout levels, filtered by 12h EMA50 trend and volume spikes.
-# Camarilla levels provide high-probability reversal/breakout points. Trading breaks of R3 (bullish) or S3 (bearish)
-# with 12h trend filter ensures alignment with higher timeframe momentum. Volume spikes confirm breakout strength.
-# Designed for 4h timeframe to balance trade frequency and signal quality. Works in bull/bear via trend filter.
+# 1h_Camarilla_R3S3_Breakout_4hTrend_Volume
+# Hypothesis: Uses 1d Camarilla R3/S3 as breakout levels, filtered by 4h EMA50 trend and volume spikes on 1h.
+# The 4h EMA50 provides trend direction, while 1d Camarilla levels offer high-probability breakout zones.
+# Volume spikes confirm breakout strength. Trades only during 08-20 UTC session to reduce noise.
+# Designed for 1h timeframe with strict entry conditions to limit trades (target: 15-37/year).
+# Works in bull/bear markets via trend filter and breakout logic.
 
-name = "4h_Camarilla_R3_S3_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "1h_Camarilla_R3S3_Breakout_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -23,7 +24,11 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation
+    # Pre-compute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # Get 1d data for Camarilla calculation (once before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -33,8 +38,6 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla R3 = close + (high - low) * 1.1/4
-    # Camarilla S3 = close - (high - low) * 1.1/4
     camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
     camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
     
@@ -44,21 +47,21 @@ def generate_signals(prices):
     camarilla_r3[0] = np.nan
     camarilla_s3[0] = np.nan
     
-    # Align Camarilla levels to 4h timeframe
-    camarilla_r3_4h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_4h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Align Camarilla levels to 1h timeframe
+    camarilla_r3_1h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_1h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get 4h data for trend filter (once before loop)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_4h = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 4h EMA50 for trend filter
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_1h = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Calculate volume spike on 4h timeframe (20-period average)
+    # Calculate volume spike on 1h timeframe (20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma_20)
     
@@ -66,36 +69,37 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
-        # Skip if any critical value is NaN
-        if (np.isnan(camarilla_r3_4h[i]) or np.isnan(camarilla_s3_4h[i]) or 
-            np.isnan(ema_50_12h_4h[i]) or np.isnan(volume_spike[i])):
+        # Skip if any critical value is NaN or outside session
+        if (np.isnan(camarilla_r3_1h[i]) or np.isnan(camarilla_s3_1h[i]) or 
+            np.isnan(ema_50_4h_1h[i]) or np.isnan(volume_spike[i]) or
+            not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above Camarilla R3 + above 12h EMA50 + volume spike
-            if close[i] > camarilla_r3_4h[i] and close[i] > ema_50_12h_4h[i] and volume_spike[i]:
-                signals[i] = 0.25
+            # Long: Price breaks above Camarilla R3 + above 4h EMA50 + volume spike
+            if close[i] > camarilla_r3_1h[i] and close[i] > ema_50_4h_1h[i] and volume_spike[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short: Price breaks below Camarilla S3 + below 12h EMA50 + volume spike
-            elif close[i] < camarilla_s3_4h[i] and close[i] < ema_50_12h_4h[i] and volume_spike[i]:
-                signals[i] = -0.25
+            # Short: Price breaks below Camarilla S3 + below 4h EMA50 + volume spike
+            elif close[i] < camarilla_s3_1h[i] and close[i] < ema_50_4h_1h[i] and volume_spike[i]:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit: Price closes below Camarilla S3 or below 12h EMA50
-            if close[i] < camarilla_s3_4h[i] or close[i] < ema_50_12h_4h[i]:
+            # Exit: Price closes below Camarilla S3 or below 4h EMA50
+            if close[i] < camarilla_s3_1h[i] or close[i] < ema_50_4h_1h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit: Price closes above Camarilla R3 or above 12h EMA50
-            if close[i] > camarilla_r3_4h[i] or close[i] > ema_50_12h_4h[i]:
+            # Exit: Price closes above Camarilla R3 or above 4h EMA50
+            if close[i] > camarilla_r3_1h[i] or close[i] > ema_50_4h_1h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
