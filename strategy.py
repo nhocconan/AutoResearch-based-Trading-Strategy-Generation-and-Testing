@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Volume"
-timeframe = "1h"
+name = "6h_WeeklyPivot_Breakout_TrendFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,51 +18,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Camarilla levels and trend
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get weekly data for pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
         return np.zeros(n)
     
-    # Calculate Camarilla R1 and S1 on 4h
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Calculate weekly pivot points (standard method)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    pivot_4h = (high_4h + low_4h + close_4h) / 3
-    range_4h = high_4h - low_4h
-    r1_4h = close_4h + 1.1 * range_4h / 12
-    s1_4h = close_4h - 1.1 * range_4h / 12
+    pivot = (high_1w + low_1w + close_1w) / 3
+    r1 = 2 * pivot - low_1w
+    s1 = 2 * pivot - high_1w
+    r2 = pivot + (high_1w - low_1w)
+    s2 = pivot - (high_1w - low_1w)
+    r3 = high_1w + 2 * (pivot - low_1w)
+    s3 = low_1w - 2 * (high_1w - pivot)
     
-    # Align Camarilla levels to 1h
-    r1_4h_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
-    s1_4h_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
+    # Align weekly pivot levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
     
-    # Calculate 4h EMA50 for trend filter
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Volume filter: current volume > 1.5x 20-period average (1h)
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume filter: current volume > 1.5x 20-period average (6h)
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-20:i])
     vol_filter = volume > (1.5 * vol_ma_20)
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    session_filter = (hours >= 8) & (hours <= 20)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 3  # ~3 hours cooldown
+    cooldown_bars = 3  # ~1.5 days for 6h to reduce trades
     
-    start_idx = max(100, 20)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r1_4h_aligned[i]) or 
-            np.isnan(s1_4h_aligned[i]) or 
-            np.isnan(ema_50_4h_aligned[i]) or 
+        if (np.isnan(pivot_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
+            np.isnan(r2_aligned[i]) or 
+            np.isnan(s2_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -74,39 +89,49 @@ def generate_signals(prices):
         
         bars_since_last_trade += 1
         
-        # Determine 4h trend direction
-        trend_4h_up = close[i] > ema_50_4h_aligned[i]
-        trend_4h_down = close[i] < ema_50_4h_aligned[i]
+        # Determine daily trend direction
+        close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
+        trend_1d_up = close_1d_aligned[i] > ema_50_1d_aligned[i]
+        trend_1d_down = close_1d_aligned[i] < ema_50_1d_aligned[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            if session_filter[i] and vol_filter[i]:
-                # Long: Break above R1 in 4h uptrend
-                if close[i] > r1_4h_aligned[i] and trend_4h_up:
-                    signals[i] = 0.20
-                    position = 1
-                    bars_since_last_trade = 0
-                # Short: Break below S1 in 4h downtrend
-                elif close[i] < s1_4h_aligned[i] and trend_4h_down:
-                    signals[i] = -0.20
-                    position = -1
-                    bars_since_last_trade = 0
+            # Long: Break above weekly R1 with daily uptrend and volume
+            if (close[i] > r1_aligned[i] and 
+                trend_1d_up and 
+                vol_filter[i]):
+                signals[i] = 0.25
+                position = 1
+                bars_since_last_trade = 0
+            # Short: Break below weekly S1 with daily downtrend and volume
+            elif (close[i] < s1_aligned[i] and 
+                  trend_1d_down and 
+                  vol_filter[i]):
+                signals[i] = -0.25
+                position = -1
+                bars_since_last_trade = 0
         elif position == 1:
-            # Exit: Break below S1 or trend change
-            if close[i] < s1_4h_aligned[i] or not trend_4h_up:
+            # Exit: Break below weekly S1 or trend change
+            if (close[i] < s1_aligned[i]) or not trend_1d_up:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: Break above R1 or trend change
-            if close[i] > r1_4h_aligned[i] or not trend_4h_down:
+            # Exit: Break above weekly R1 or trend change
+            if (close[i] > r1_aligned[i]) or not trend_1d_down:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-# Hypothesis: Camarilla R1/S1 breakout on 1h with 4h EMA50 trend filter and volume confirmation captures institutional breakouts in both bull and bear markets. The 4h trend filter ensures we trade with the higher-timeframe momentum, while volume confirms participation. Session filter (08-20 UTC) reduces noise during low-liquidity hours. Target: 15-35 trades/year. Works in bull markets by buying R1 breaks in uptrends and in bear markets by selling S1 breaks in downtrends. Camarilla levels provide precise intraday support/resistance, EMA50 establishes trend, and volume avoids false breakouts. This avoids overtrading by requiring multiple confirmations and cooldown periods.
+# Hypothesis: Weekly pivot points (R1/S1) act as significant support/resistance levels. 
+# Breaking above R1 in a daily uptrend with volume confirmation indicates bullish momentum, 
+# while breaking below S1 in a daily downtrend indicates bearish momentum. 
+# The 6h timeframe balances responsiveness with reasonable trade frequency (~15-25 trades/year). 
+# Works in bull markets by buying R1 breakouts in uptrends and in bear markets by selling S1 breakdowns in downtrends. 
+# Weekly pivots provide institutional-grade levels, daily EMA50 filters for trend alignment, 
+# and volume ensures genuine participation. Cooldown prevents overtrading.
