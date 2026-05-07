@@ -1,14 +1,12 @@
-#!/usr/bin/env python3
-"""
-6h_Camarilla_R3_S3_Breakout_1DTrend_Volume
-Hypothesis: Uses Camarilla R3/S3 levels from daily timeframe with a 1-day EMA34 trend filter and volume spike confirmation.
-Only enters long on breakout above R3 in uptrend (close > EMA34) or short on breakdown below S3 in downtrend (close < EMA34).
-Exits when price returns inside the pivot range (S3 to R3) to avoid overtrading.
-Designed for low trade frequency (<50/year) and works in both bull and bear markets by following the higher timeframe trend.
-"""
+# 4H_Camarilla_R3_S3_Breakout_12HTF_Trend_Volume
+# Hypothesis: Uses Camarilla R3/S3 levels from daily timeframe with 12-hour EMA trend filter and volume spike confirmation.
+# The 12-hour EMA provides stronger trend filtering than daily EMA, reducing false signals during choppy periods.
+# Only enters long on breakout above R3 when 12h EMA is rising (trend up) or short on breakdown below S3 when 12h EMA is falling (trend down).
+# Exits when price returns inside the pivot range (S3 to R3) to capture mean reversion and avoid overtrading.
+# Designed for low trade frequency (target 25-40 trades/year) and works in both bull and bear markets by following higher timeframe trend.
 
-name = "6h_Camarilla_R3_S3_Breakout_1DTrend_Volume"
-timeframe = "6h"
+name = "4H_Camarilla_R3_S3_Breakout_12HTF_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -40,13 +38,19 @@ def generate_signals(prices):
     camarilla_r3 = close_1d + rng * 1.1 / 4
     camarilla_s3 = close_1d - rng * 1.1 / 4
     
-    # 1-day EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
+        return np.zeros(n)
     
-    # Align Camarilla levels and EMA to 6h timeframe
+    # 12-hour EMA34 for trend filter (more responsive than daily)
+    close_12h = df_12h['close'].values
+    ema34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align all indicators to 4h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema34_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
     
     # Volume filter: current volume > 2.0x average volume (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -69,15 +73,15 @@ def generate_signals(prices):
         volume_filter = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long: Price breaks above R3 + Uptrend (price > EMA34) + volume spike
+            # Long: Price breaks above R3 + Uptrend (12h EMA rising) + volume spike
             if (close[i] > r3_aligned[i] and 
-                close[i] > ema34_aligned[i] and
+                ema34_aligned[i] > ema34_aligned[i-1] and  # 12h EMA rising
                 volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S3 + Downtrend (price < EMA34) + volume spike
+            # Short: Price breaks below S3 + Downtrend (12h EMA falling) + volume spike
             elif (close[i] < s3_aligned[i] and 
-                  close[i] < ema34_aligned[i] and
+                  ema34_aligned[i] < ema34_aligned[i-1] and  # 12h EMA falling
                   volume_filter):
                 signals[i] = -0.25
                 position = -1
