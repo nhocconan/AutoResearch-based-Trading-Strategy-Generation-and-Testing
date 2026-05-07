@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Ichimoku_Cloud_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,82 +17,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for Ichimoku components
+    # Load daily data ONCE before loop for Camarilla levels and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Ichimoku components (9, 26, 52 periods)
-    high_9 = pd.Series(df_1d['high']).rolling(window=9, min_periods=9).max().values
-    low_9 = pd.Series(df_1d['low']).rolling(window=9, min_periods=9).min().values
-    high_26 = pd.Series(df_1d['high']).rolling(window=26, min_periods=26).max().values
-    low_26 = pd.Series(df_1d['low']).rolling(window=26, min_periods=26).min().values
-    high_52 = pd.Series(df_1d['high']).rolling(window=52, min_periods=52).max().values
-    low_52 = pd.Series(df_1d['low']).rolling(window=52, min_periods=52).min().values
+    # Calculate Camarilla levels from previous day
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    tenkan = (high_9 + low_9) / 2
-    kijun = (high_26 + low_26) / 2
-    senkou_a = (tenkan + kijun) / 2
-    senkou_b = (high_52 + low_52) / 2
+    # Camarilla R1 and S1 levels
+    range_hl = prev_high - prev_low
+    s1 = prev_close - (range_hl * 1.1 / 12)
+    r1 = prev_close + (range_hl * 1.1 / 12)
     
-    # Align Ichimoku components to 6h timeframe
-    tenkan_a = align_htf_to_ltf(prices, df_1d, tenkan)
-    kijun_a = align_htf_to_ltf(prices, df_1d, kijun)
-    senkou_a_a = align_htf_to_ltf(prices, df_1d, senkou_a)
-    senkou_b_a = align_htf_to_ltf(prices, df_1d, senkou_b)
+    # Align daily levels to 4h timeframe
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     
-    # 12h trend filter (EMA 50)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
+    # Daily EMA(34) for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_a = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # Volume spike detection: 4-period average (1 day of 6h bars)
-    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    # Volume spike detection: 6-period average (1 day of 4h bars)
+    vol_ma_6 = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(52, 50, 4)  # Wait for Ichimoku, EMA, and volume MA
+    start_idx = max(34, 6)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(tenkan_a[i]) or np.isnan(kijun_a[i]) or 
-            np.isnan(senkou_a_a[i]) or np.isnan(senkou_b_a[i]) or 
-            np.isnan(ema_50_12h_a[i]) or np.isnan(vol_ma_4[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(vol_ma_6[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Cloud top and bottom
-        cloud_top = max(senkou_a_a[i], senkou_b_a[i])
-        cloud_bottom = min(senkou_a_a[i], senkou_b_a[i])
-        
         if position == 0:
-            # Long: price above cloud, Tenkan > Kijun, volume, and 12h uptrend
-            vol_condition = volume[i] > vol_ma_4[i] * 1.8
-            bullish_cross = tenkan_a[i] > kijun_a[i]
-            uptrend = ema_50_12h_a[i] > ema_50_12h_a[i-1]
+            # Long: price above S1 with volume and daily uptrend
+            vol_condition = volume[i] > vol_ma_6[i] * 2.0
+            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
             
-            if close[i] > cloud_top and bullish_cross and vol_condition and uptrend:
+            if close[i] > s1_aligned[i] and vol_condition and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below cloud, Tenkan < Kijun, volume, and 12h downtrend
-            elif close[i] < cloud_bottom and not bullish_cross and vol_condition and not uptrend:
+            # Short: price below R1 with volume and daily downtrend
+            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below cloud or volume drops
-            if close[i] < cloud_top or volume[i] < vol_ma_4[i] * 1.2:
+            # Exit: price back below S1 or volume drops
+            if close[i] < s1_aligned[i] or volume[i] < vol_ma_6[i] * 1.3:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above cloud or volume drops
-            if close[i] > cloud_bottom or volume[i] < vol_ma_4[i] * 1.2:
+            # Exit: price back above R1 or volume drops
+            if close[i] > r1_aligned[i] or volume[i] < vol_ma_6[i] * 1.3:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -100,24 +85,16 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 6h Ichimoku cloud breakout with 12h trend filter and volume confirmation
-# - Ichimoku cloud acts as dynamic support/resistance with forward-looking Kumo
-# - Breakout above cloud with Tenkan/Kijun bullish cross in 12h uptrend = long
-# - Breakdown below cloud with bearish cross in 12h downtrend = short
-# - Volume spike (1.8x average) confirms institutional participation
-# - Works in both bull (buy cloud breaks in uptrend) and bear (sell cloud breaks in downtrend)
-# - Exit when price returns to cloud or volume weakens
-# - Position size 0.25 targets ~20-50 trades/year, avoiding fee drag
-# - Uses actual daily Ichimoku (not 6h) for better stability and reduced noise
-# - 12h trend filter reduces whipsaws vs using same timeframe
-# - Novel combination: Ichimoku cloud (1d) + trend (12h) + volume (6h) not recently tried
-# - Aims for 50-150 total trades over 4 years (12-37/year) to stay within limits
-# - Ichimoku's forward-looking cloud provides better anticipation than static pivots
-# - Tenkan/Kijun cross adds momentum confirmation to breakout direction
-# - Volume confirmation reduces false breakouts in choppy markets
-# - Designed to work in BOTH bull and bear markets via 12h trend filter
-# - Cloud breakouts are proven effective in trending markets with volume confirmation
-# - Targets BTC and ETH primarily, with potential applicability to SOL
-# - Avoids overtrading by requiring multiple confluence factors for entry
-# - Exit conditions are simple: price re-enters cloud or volume drops below threshold
-# - Minimal parameters: Ichimoku (9,26,52), EMA 50, volume multiplier 1.8/1.2
+# Hypothesis: 4h Camarilla R1/S1 breakout with 1d trend and volume confirmation
+# - Camarilla R1/S1 from previous day act as intraday support/resistance
+# - Breakout above S1 with volume spike in daily uptrend = long opportunity
+# - Breakdown below R1 with volume spike in daily downtrend = short opportunity
+# - Volume spike (2.0x average) filters weak breakouts
+# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
+# - Exit when price returns to S1/R1 or volume weakens
+# - Position size 0.25 targets ~25-50 trades/year, avoiding fee drag
+# - Uses actual daily Camarilla levels for intraday precision
+# - Daily trend filter reduces whipsaws vs using same timeframe
+# - Designed to work in BOTH bull and bear markets via trend filter
+# - Volume confirmation reduces false breakouts
+# - Proven pattern from top performers (Camarilla + trend + volume)
