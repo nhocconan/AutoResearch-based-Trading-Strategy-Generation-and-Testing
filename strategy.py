@@ -1,24 +1,22 @@
-#!/usr/bin/env python3
-"""
-4h_Keltner_Channel_Breakout_12hTrend_Volume
-Hypothesis: Keltner Channel breakout with 12-hour trend filter and volume confirmation.
-In bull markets (price > 12h EMA50), long on upper band breakout with volume.
-In bear markets (price < 12h EMA50), short on lower band breakout with volume.
-Uses ATR-based bands for volatility adaptation, reducing false breakouts in low volatility.
-Target: 25-40 trades per year (~100-160 over 4 years) with position size 0.25.
-"""
+# 12h_Camarilla_R3_S3_Breakout_1wTrend_1dVolume
+# Hypothesis: Use weekly trend filter (price above/below weekly EMA200) and daily volume confirmation
+# to trade Camarilla R3/S3 breakouts on 12h timeframe. Weekly trend ensures we trade with
+# higher timeframe momentum, daily volume filter avoids low-liquidity breakouts. Targets 15-25
+# trades per year (~60-100 over 4 years) with position size 0.25.
+# Weekly trend filter reduces whipsaw in sideways markets, volume confirmation ensures
+# institutional participation in breakouts.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Keltner_Channel_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1wTrend_1dVolume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,59 +24,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12-hour data ONCE for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Load weekly data ONCE for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 12-hour EMA50 for trend filter
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Weekly EMA200 for trend filter
+    ema_200_1w = pd.Series(df_1w['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
-    # Keltner Channel: 20-period EMA ± (2 * ATR(10))
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Load daily data ONCE for volume filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
     
-    # True Range calculation
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0  # First period has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Daily volume 20-period average
+    vol_20_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
+    vol_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_20_1d)
     
-    upper_band = ema_20 + (2 * atr)
-    lower_band = ema_20 - (2 * atr)
+    # Previous period's high, low, close for Camarilla calculation
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
     
-    # Volume ratio: current volume / 20-period average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.where(vol_ma > 0, volume / vol_ma, 1.0)
+    # Calculate Camarilla levels
+    # R3 = Close + (High - Low) * 1.1/4
+    # S3 = Close - (High - Low) * 1.1/4
+    rang = prev_high - prev_low
+    r3 = prev_close + rang * 1.1 / 4
+    s3 = prev_close - rang * 1.1 / 4
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need 50 periods for EMA50 and sufficient warmup
+    start_idx = 50  # Need sufficient warmup for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(ema_50_12h_aligned[i]) or np.isnan(ema_20[i]) or np.isnan(atr[i]) or np.isnan(vol_ratio[i]):
+        if np.isnan(ema_200_1w_aligned[i]) or np.isnan(vol_20_1d_aligned[i]) or np.isnan(r3[i]) or np.isnan(s3[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine market regime from 12-hour EMA50
-        uptrend_regime = close[i] > ema_50_12h_aligned[i]
-        downtrend_regime = close[i] < ema_50_12h_aligned[i]
+        # Weekly trend filter
+        uptrend = close[i] > ema_200_1w_aligned[i]
+        downtrend = close[i] < ema_200_1w_aligned[i]
         
-        # Volume confirmation: volume > 1.5x average
-        volume_confirm = vol_ratio[i] > 1.5
+        # Daily volume confirmation: volume > 1.5x 20-day average
+        volume_confirm = volume[i] > vol_20_1d_aligned[i] * 1.5
         
         if position == 0:
-            # Long: close breaks above upper Keltner band in uptrend regime + volume
-            long_entry = (close[i] > upper_band[i]) and uptrend_regime and volume_confirm
-            # Short: close breaks below lower Keltner band in downtrend regime + volume
-            short_entry = (close[i] < lower_band[i]) and downtrend_regime and volume_confirm
+            # Long: price breaks above R3 in uptrend with volume confirmation
+            long_entry = (close[i] > r3[i]) and uptrend and volume_confirm
+            # Short: price breaks below S3 in downtrend with volume confirmation
+            short_entry = (close[i] < s3[i]) and downtrend and volume_confirm
             
             if long_entry:
                 signals[i] = 0.25
@@ -87,15 +89,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: close crosses below EMA20 (middle band) or regime changes to downtrend
-            if (close[i] < ema_20[i]) or (not uptrend_regime):
+            # Exit: price crosses below S3 or trend changes to downtrend
+            if (close[i] < s3[i]) or (not uptrend):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: close crosses above EMA20 (middle band) or regime changes to uptrend
-            if (close[i] > ema_20[i]) or (not downtrend_regime):
+            # Exit: price crosses above R3 or trend changes to uptrend
+            if (close[i] > r3[i]) or (not downtrend):
                 signals[i] = 0.0
                 position = 0
             else:
