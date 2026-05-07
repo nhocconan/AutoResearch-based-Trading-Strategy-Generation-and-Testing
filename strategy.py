@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_DonchianBreakout_VolumeTrend_v1
-Hypothesis: Combines Donchian channel breakout (20-period) with volume confirmation and 12h EMA trend filter.
-Captures breakouts in both bull and bear markets while filtering false signals with volume and trend.
-Target: 20-30 trades/year to minimize fee drag. Works in bull via breakouts, bear via short breakdowns.
+1h_TrendFollowing_With_4H1D_Filter_v1
+Hypothesis: Combines 4h trend direction (EMA crossover) with 1d trend filter and volume confirmation on 1h timeframe.
+Trades only during active session (08-20 UTC) to reduce noise. Uses EMA(13/34) on 4h for trend direction,
+EMA(50) on 1d for long-term bias, and volume spike (>1.5x average) for entry confirmation on 1h.
+Designed for 15-25 trades/year to minimize fee drift while capturing medium-term trends.
 """
 
-name = "4h_DonchianBreakout_VolumeTrend_v1"
-timeframe = "4h"
+name = "1h_TrendFollowing_With_4H1D_Filter_v1"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -24,57 +25,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Pre-compute hour filter for session (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
-    # Volume confirmation: current volume > 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # 12h trend filter: EMA of 12h close
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # 4h EMA crossover for trend direction (fast=13, slow=34)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 34:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    close_4h = df_4h['close'].values
+    ema_4h_fast = pd.Series(close_4h).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema_4h_slow = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_4h_fast_aligned = align_htf_to_ltf(prices, df_4h, ema_4h_fast)
+    ema_4h_slow_aligned = align_htf_to_ltf(prices, df_4h, ema_4h_slow)
+    
+    # 1d EMA for long-term trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(34, n):  # Start after 4h slow EMA warmup
         # Skip if any critical value is NaN
-        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(ema_12h_aligned[i]) or 
-            vol_ma[i] == 0):
+        if (np.isnan(ema_4h_fast_aligned[i]) or np.isnan(ema_4h_slow_aligned[i]) or 
+            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Session filter: only trade between 08:00-20:00 UTC
+        hour = hours[i]
+        in_session = 8 <= hour <= 20
+        
         if position == 0:
-            # Long: breakout above upper Donchian with volume and trend confirmation
-            if close[i] > high_roll[i] and volume[i] > vol_ma[i] and close[i] > ema_12h_aligned[i]:
-                signals[i] = 0.25
+            # Long conditions: 4h fast EMA above slow EMA, price above 1d EMA, volume spike, in session
+            if (ema_4h_fast_aligned[i] > ema_4h_slow_aligned[i] and 
+                close[i] > ema_1d_aligned[i] and 
+                volume[i] > 1.5 * vol_ma[i] and 
+                in_session):
+                signals[i] = 0.20
                 position = 1
-            # Short: breakdown below lower Donchian with volume and trend confirmation
-            elif close[i] < low_roll[i] and volume[i] > vol_ma[i] and close[i] < ema_12h_aligned[i]:
-                signals[i] = -0.25
+            # Short conditions: 4h fast EMA below slow EMA, price below 1d EMA, volume spike, in session
+            elif (ema_4h_fast_aligned[i] < ema_4h_slow_aligned[i] and 
+                  close[i] < ema_1d_aligned[i] and 
+                  volume[i] > 1.5 * vol_ma[i] and 
+                  in_session):
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit: price closes below lower Donchian
-            if close[i] < low_roll[i]:
+            # Exit long: 4h EMA crossover reverses OR price crosses below 1d EMA
+            if (ema_4h_fast_aligned[i] < ema_4h_slow_aligned[i] or 
+                close[i] < ema_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit: price closes above upper Donchian
-            if close[i] > high_roll[i]:
+            # Exit short: 4h EMA crossover reverses OR price crosses above 1d EMA
+            if (ema_4h_fast_aligned[i] > ema_4h_slow_aligned[i] or 
+                close[i] > ema_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
