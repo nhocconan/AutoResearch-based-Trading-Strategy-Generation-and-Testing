@@ -1,6 +1,16 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-name = "4H_Camarilla_R3S3_1DTrend_VolumeSpike_v15"
-timeframe = "4h"
+
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d trend filter and volume spike
+# Uses 12h timeframe to capture medium-term moves, reducing trade frequency
+# Long: Price breaks above R3 + above 1d EMA34 + volume > 2x 20-period average
+# Short: Price breaks below S3 + below 1d EMA34 + volume > 2x 20-period average
+# Exit: Price returns to middle of prior 12h range (H4/L4)
+# Position size: 0.25 (25% of capital) to balance risk and return
+# Works in bull/bear: trend filter adapts to market direction, volume ensures conviction
+
+name = "12H_Camarilla_R3S3_1DTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,9 +27,9 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for structure (R3/S3 levels)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # Get 12h data for structure (R3/S3 levels)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
     # Get 1d data for trend filter
@@ -31,17 +41,17 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate previous 4h bar's high, low, close for Camarilla levels
-    prev_high = df_4h['high'].values
-    prev_low = df_4h['low'].values
-    prev_close = df_4h['close'].values
+    # Calculate previous 12h bar's high, low, close for Camarilla levels
+    prev_high = df_12h['high'].values
+    prev_low = df_12h['low'].values
+    prev_close = df_12h['close'].values
     
     # Calculate Camarilla levels: R3 and S3 (correct formula)
     r3 = prev_close + 1.1 * (prev_high - prev_low) * 1.1 / 2
     s3 = prev_close - 1.1 * (prev_high - prev_low) * 1.1 / 2
     
-    r3_aligned = align_htf_to_ltf(prices, df_4h, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_4h, s3)
+    r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
     
     # Volume filter: current volume > 2.0x average volume (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -91,12 +101,12 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: Price returns to the middle of the prior 4h range (H4/L4)
+            # Exit: Price returns to the middle of the prior 12h range (H4/L4)
             # H4 = close + 1.1*(high-low)*1.1/6, L4 = close - 1.1*(high-low)*1.1/6
             h4 = prev_close + 1.1 * (prev_high - prev_low) * 1.1 / 6
             l4 = prev_close - 1.1 * (prev_high - prev_low) * 1.1 / 6
-            h4_aligned = align_htf_to_ltf(prices, df_4h, h4)
-            l4_aligned = align_htf_to_ltf(prices, df_4h, l4)
+            h4_aligned = align_htf_to_ltf(prices, df_12h, h4)
+            l4_aligned = align_htf_to_ltf(prices, df_12h, l4)
             
             camarilla_mid = (h4_aligned[i] + l4_aligned[i]) / 2
             at_mid = abs(close[i] - camarilla_mid) < (h4_aligned[i] - l4_aligned[i]) * 0.25  # Within 25% of range
@@ -109,3 +119,5 @@ def generate_signals(prices):
                 signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
+
+# -*- coding: utf-8 -*-
