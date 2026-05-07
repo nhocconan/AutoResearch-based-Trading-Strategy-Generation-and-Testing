@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-1h_R3S3_Breakout_4hTrend_1dVolume
+1h_4hTrend_1dVolume_R3S3_Breakout
 Hypothesis: 1h timeframe with 4h trend filter (EMA20) and 1d volume confirmation.
 Uses 4h OHLC to calculate daily-style Camarilla R3/S3 levels (based on prior 4h bar).
 Breakouts occur when price penetrates R3/S3 with volume spike (1d volume > 1.5x 20-period average)
@@ -8,7 +8,7 @@ and 4h trend alignment. Designed for 15-30 trades/year to avoid fee drag in 1h.
 Works in bull/bear via trend filter and volume confirmation.
 """
 
-name = "1h_R3S3_Breakout_4hTrend_1dVolume"
+name = "1h_4hTrend_1dVolume_R3S3_Breakout"
 timeframe = "1h"
 leverage = 1.0
 
