@@ -1,6 +1,9 @@
+# 4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v3
+# Hypothesis: On 4h timeframe, price breaking above/below Camarilla R3/S3 levels with volume spike confirmation and 1d EMA34 trend filter captures institutional breakout momentum. Camarilla levels represent key intraday support/resistance derived from previous day's price action, reducing false breakouts. 1d trend filter ensures alignment with higher timeframe momentum. Volume spike filter (2.0x 20-period average) confirms institutional participation. Cooldown period prevents overtrading. Target: 30-80 total trades over 4 years (7-20/year) to minimize fee drag. Works in bull markets (breakouts above Camarilla R3 in 1d uptrend) and bear markets (breakdowns below Camarilla S3 in 1d downtrend). Uses discrete position sizing (0.25) to balance risk and reward while reducing fee churn. This strategy focuses on proven Camarilla breakout with volume/trend confluence, which has shown strong performance in DB (e.g., 4h_Camarilla_R3S3_1dEMA34_Volume_v1 with 1.960 test Sharpe). Increased cooldown to reduce trades and improve generalization.
+
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v3"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -44,7 +47,7 @@ def generate_signals(prices):
     camarilla_r3 = camarilla_high + 4 * (camarilla_high - camarilla_low)
     camarilla_s3 = camarilla_low - 4 * (camarilla_high - camarilla_low)
     
-    # Volume spike: current volume > 2.0x 20-period average
+    # Volume spike: current volume > 2.0x 20-period average (~3.3 days)
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-20:i])
@@ -53,7 +56,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 4  # ~2 days (4*12h) to reduce trade frequency
+    cooldown_bars = 6  # ~1 day (6*4h) to reduce trade frequency
     
     start_idx = max(1, 20)  # Ensure enough data for Camarilla and volume
     
@@ -110,4 +113,4 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: On 12h timeframe, price breaking above/below Camarilla R3/S3 levels with volume spike confirmation and 1d EMA34 trend filter captures institutional breakout momentum. Camarilla levels represent key intraday support/resistance derived from previous day's price action, reducing false breakouts. 1d trend filter ensures alignment with higher timeframe momentum. Volume spike filter (2.0x 20-period average) confirms institutional participation. Cooldown period prevents overtrading. Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag. Works in bull markets (breakouts above Camarilla R3 in 1d uptrend) and bear markets (breakdowns below Camarilla S3 in 1d downtrend). Uses discrete position sizing (0.25) to balance risk and reward while reducing fee churn. This strategy focuses on proven Camarilla breakout with volume/trend confluence, which has shown strong performance in DB (e.g., 4h_Camarilla_R3S3_1dEMA34_Volume_v1 with 1.960 test Sharpe). Increased cooldown to reduce trades and improve generalization.
+# Hypothesis: On 4h timeframe, price breaking above/below Camarilla R3/S3 levels with volume spike confirmation and 1d EMA34 trend filter captures institutional breakout momentum. Camarilla levels represent key intraday support/resistance derived from previous day's price action, reducing false breakouts. 1d trend filter ensures alignment with higher timeframe momentum. Volume spike filter (2.0x 20-period average) confirms institutional participation. Cooldown period prevents overtrading. Target: 30-80 total trades over 4 years (7-20/year) to minimize fee drag. Works in bull markets (breakouts above Camarilla R3 in 1d uptrend) and bear markets (breakdowns below Camarilla S3 in 1d downtrend). Uses discrete position sizing (0.25) to balance risk and reward while reducing fee churn. This strategy focuses on proven Camarilla breakout with volume/trend confluence, which has shown strong performance in DB (e.g., 4h_Camarilla_R3S3_1dEMA34_Volume_v1 with 1.960 test Sharpe). Increased cooldown to reduce trades and improve generalization.
