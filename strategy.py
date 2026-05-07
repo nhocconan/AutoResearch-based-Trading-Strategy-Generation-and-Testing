@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h RSI(14) with volume-weighted price change and 12h trend filter.
-# Uses RSI for mean reversion in ranging markets and trend following in trending markets,
-# filtered by 12h EMA to avoid counter-trend trades. Volume-weighted price change
-# confirms momentum strength. Designed for low trade frequency (<30/year) to minimize
-# fee drag while capturing both bull and bear market moves.
-name = "4h_RSI_VolMom_12hTrend"
-timeframe = "4h"
+# Hypothesis: 1h strategy using 4h trend filter (EMA21) and 1d momentum filter (ROC25) for direction,
+# with entry on 1h pullbacks to the 21 EMA during strong trends. Designed to work in both bull
+# and bear markets by following the higher timeframe trend. Uses volume confirmation to avoid
+# false breakouts. Target: 15-35 trades/year per symbol to minimize fee drag.
+name = "1h_EMA21_Pullback_4hTrend_1dROC"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,92 +21,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load 4h data for trend filter (EMA21)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 21:
         return np.zeros(n)
     
-    # 12h trend filter: 50-period EMA on close
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Load 1d data for momentum filter (ROC25)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 25:
+        return np.zeros(n)
     
-    # RSI(14) calculation
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # 4h EMA21 for trend direction
+    ema_21_4h = pd.Series(df_4h['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
     
-    # Use Wilder's smoothing (alpha = 1/period)
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
+    # 1d ROC25 for momentum strength
+    roc_25_1d = (pd.Series(df_1d['close']).pct_change(25) * 100).values
+    roc_25_1d_aligned = align_htf_to_ltf(prices, df_1d, roc_25_1d)
     
-    for i in range(14, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # 1h EMA21 for entry timing (pullback to EMA)
+    ema_21_1h = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Volume-weighted price change momentum
-    price_change = (close - np.roll(close, 1)) / np.roll(close, 1)
-    price_change[0] = 0
-    vol_price_change = price_change * volume
-    
-    # Smooth volume-weighted price change
-    vol_price_change_smooth = pd.Series(vol_price_change).ewm(span=10, adjust=False, min_periods=10).mean().values
-    
-    # Momentum threshold (adaptive to volatility)
-    vol_price_change_std = pd.Series(vol_price_change_smooth).rolling(50, min_periods=50).std().values
-    vol_price_change_mean = pd.Series(vol_price_change_smooth).rolling(50, min_periods=50).mean().values
-    mom_threshold = 0.5 * vol_price_change_std  # Half standard deviation
+    # Volume confirmation: volume above 20-period EMA
+    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_above_ema = volume > vol_ema_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Sufficient warmup for RSI and moving averages
+    start_idx = 100  # Sufficient warmup for all indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(vol_price_change_smooth[i]) or np.isnan(vol_price_change_std[i])):
+        if (np.isnan(ema_21_4h_aligned[i]) or np.isnan(roc_25_1d_aligned[i]) or 
+            np.isnan(ema_21_1h[i]) or np.isnan(vol_above_ema[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: price above/below 12h EMA50
-        uptrend = close[i] > ema_50_12h_aligned[i]
-        downtrend = close[i] < ema_50_12h_aligned[i]
-        
-        # Momentum condition
-        mom_long = vol_price_change_smooth[i] > mom_threshold[i]
-        mom_short = vol_price_change_smooth[i] < -mom_threshold[i]
+        # Trend and momentum filters
+        uptrend = ema_21_4h_aligned[i] > ema_21_4h_aligned[i-1]  # 4h EMA rising
+        strong_uptrend = uptrend and (roc_25_1d_aligned[i] > 0)  # 4h EMA up + 1d ROC positive
+        downtrend = ema_21_4h_aligned[i] < ema_21_4h_aligned[i-1]  # 4h EMA falling
+        strong_downtrend = downtrend and (roc_25_1d_aligned[i] < 0)  # 4h EMA down + 1d ROC negative
         
         if position == 0:
-            # Long: RSI oversold with bullish momentum in uptrend
-            long_condition = (rsi[i] < 30) and mom_long and uptrend
-            # Short: RSI overbought with bearish momentum in downtrend
-            short_condition = (rsi[i] > 70) and mom_short and downtrend
+            # Long entry: pullback to EMA in strong uptrend with volume
+            near_ema = low[i] <= ema_21_1h[i] * 1.005  # within 0.5% of EMA (low touches or slightly above)
+            long_condition = strong_uptrend and near_ema and vol_above_ema[i]
+            
+            # Short entry: pullback to EMA in strong downtrend with volume
+            near_ema_short = high[i] >= ema_21_1h[i] * 0.995  # within 0.5% of EMA (high touches or slightly below)
+            short_condition = strong_downtrend and near_ema_short and vol_above_ema[i]
             
             if long_condition:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             elif short_condition:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit: RSI overbought or momentum turns bearish or trend fails
-            if (rsi[i] > 70) or (not mom_long) or (not uptrend):
+            # Long exit: trend breaks or price moves significantly above EMA
+            if not strong_uptrend or high[i] > ema_21_1h[i] * 1.02:  # 2% above EMA
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit: RSI oversold or momentum turns bullish or trend fails
-            if (rsi[i] < 30) or (not mom_short) or (not downtrend):
+            # Short exit: trend breaks or price moves significantly below EMA
+            if not strong_downtrend or low[i] < ema_21_1h[i] * 0.98:  # 2% below EMA
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
