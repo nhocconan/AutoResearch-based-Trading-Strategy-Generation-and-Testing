@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4H_Camarilla_R3S3_1DTrend_VolumeSpike_v19"
+name = "4H_Camarilla_R3S3_1DTrend_VolumeSpike_v20"
 timeframe = "4h"
 leverage = 1.0
 
@@ -84,13 +84,13 @@ def generate_signals(prices):
             if (close[i] > r3_aligned[i] and 
                 close[i] > ema_34_1d_aligned[i] and   # Daily uptrend filter
                 volume_filter):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             # Short: Price breaks below S3 + daily downtrend + volume spike
             elif (close[i] < s3_aligned[i] and 
                   close[i] < ema_34_1d_aligned[i] and   # Daily downtrend filter
                   volume_filter):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         elif position != 0:
             # Exit: Price returns to the middle of the prior 4h range (H4/L4)
@@ -110,6 +110,6 @@ def generate_signals(prices):
                 position = 0
             else:
                 # Maintain position
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.20 if position == 1 else -0.20
     
     return signals
