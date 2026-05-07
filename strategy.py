@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_1dTrend_VolumeSqueeze_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,61 +22,53 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Previous day's high, low, close for Camarilla levels
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
-    
-    # Camarilla R1 and S1 levels
-    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
-    
-    # Align Camarilla levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
     # Daily trend filter: EMA(34) on daily close
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume spike detection: 2-period average (1 day of 12h bars)
-    vol_ma_2 = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
+    # Donchian channel (20 periods) on 4h data
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume squeeze: current volume < 50% of 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_squeeze = volume < (vol_ma_20 * 0.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 2)  # Wait for EMA and volume MA
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(vol_ma_2[i])):
+        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(vol_ma_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above S1 with volume and daily uptrend
-            vol_condition = volume[i] > vol_ma_2[i] * 2.0
-            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
-            
-            if close[i] > s1_aligned[i] and vol_condition and uptrend:
+            # Long: Donchian breakout + daily uptrend + volume squeeze (pre-breakout consolidation)
+            if (close[i] > donchian_high[i-1] and 
+                ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and 
+                volume_squeeze[i-1]):  # squeeze confirmed on previous bar
                 signals[i] = 0.25
                 position = 1
-            # Short: price below R1 with volume and daily downtrend
-            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
+            # Short: Donchian breakdown + daily downtrend + volume squeeze
+            elif (close[i] < donchian_low[i-1] and 
+                  ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and 
+                  volume_squeeze[i-1]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below S1 or volume drops
-            if close[i] < s1_aligned[i] or volume[i] < vol_ma_2[i] * 1.5:
+            # Exit: Donchian reversal or trend change
+            if close[i] < donchian_low[i] or ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above R1 or volume drops
-            if close[i] > r1_aligned[i] or volume[i] < vol_ma_2[i] * 1.5:
+            # Exit: Donchian reversal or trend change
+            if close[i] > donchian_high[i] or ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -84,13 +76,12 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 12h Camarilla R1/S1 breakout with daily trend and volume confirmation
-# - Camarilla R1/S1 levels act as intraday support/resistance derived from prior day's range
-# - Breakout above S1 with volume in daily uptrend = long opportunity
-# - Breakdown below R1 with volume in daily downtrend = short opportunity
-# - Volume spike (2x average) confirms institutional participation
-# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
-# - Exit when price returns to Camarilla S1/R1 or volume weakens
-# - Position size 0.25 targets 20-40 trades/year, avoiding fee drag
-# - Daily EMA(34) filter ensures trades align with higher timeframe trend
-# - Uses 12h timeframe to reduce trade frequency and fee drag while capturing multi-day moves
+# Hypothesis: Donchian(20) breakout with daily trend filter and volume squeeze precondition
+# - Volume squeeze (low volatility) precedes breakouts, increasing success rate
+# - Breakout above/below Donchian(20) with daily EMA(34) trend alignment
+# - Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend)
+# - Volume squeeze filter reduces false breakouts by requiring pre-breakout consolidation
+# - Exits on Donchian reversal or trend change to capture full moves
+# - Position size 0.25 targets 20-40 trades/year to minimize fee drag
+# - Daily EMA(34) ensures alignment with higher timeframe trend
+# - Effective in both trending and ranging markets due to volatility-based entry filter
