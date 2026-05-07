@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """
-1h_4hTrend_1dVolume_CamPullback
-Hypothesis: 1h timeframe with 4h trend filter (EMA20) and 1d volume confirmation.
-Enters on pullback to 4h EMA20 during 4h trend (pullback in opposite direction of trend).
-Uses 1d volume spike (>1.5x 20-day average) for confirmation.
-Designed for 15-30 trades/year to avoid fee drag in 1h.
-Works in bull/bear via trend filter and volume confirmation.
+6h_MultiTimeframe_1wTrend_1dSupport_Resistance
+Hypothesis: 6h timeframe with weekly trend filter and daily support/resistance levels.
+Uses weekly EMA20 for trend direction (bullish when price > EMA20, bearish when price < EMA20).
+Looks for mean reversion entries at daily support/resistance levels:
+- Long when price touches or crosses below daily S1 (Camarilla) in weekly uptrend
+- Short when price touches or crosses above daily R1 (Camarilla) in weekly downtrend
+Uses volume confirmation to avoid false breaks (6h volume > 1.5x 20-period average).
+Designed for 15-35 trades/year to avoid fee drag in 6h timeframe.
+Works in bull/bear via trend filter and mean reversion at key levels.
 """
 
-name = "1h_4hTrend_1dVolume_CamPullback"
-timeframe = "1h"
+name = "6h_MultiTimeframe_1wTrend_1dSupport_Resistance"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -18,7 +21,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,94 +29,100 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend and pullback logic
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # 4h EMA20 for trend
-    close_4h = df_4h['close'].values
-    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    # Calculate weekly EMA20 for trend
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Get 1d data for volume confirmation
+    # Get daily data for support/resistance levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 1d volume average
-    vol_1d = df_1d['volume'].values
-    vol_ma20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_1d = np.divide(vol_1d, vol_ma20_1d, out=np.zeros_like(vol_1d), where=vol_ma20_1d!=0)
-    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
+    # Calculate daily OHLC for Camarilla levels (using prior daily bar)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
+    # Range and Camarilla levels from prior daily bar
+    range_1d = high_1d - low_1d
+    r1_1d = close_1d + 1.1 * (range_1d / 12)  # R1 = C + 1.1*(H-L)/12
+    s1_1d = close_1d - 1.1 * (range_1d / 12)  # S1 = C - 1.1*(H-L)/12
+    
+    # Align Camarilla levels to 6h
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    
+    # Get 6h volume for confirmation
+    vol_6h = volume
+    vol_ma20_6h = pd.Series(vol_6h).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_6h = np.divide(vol_6h, vol_ma20_6h, out=np.zeros_like(vol_6h), where=vol_ma20_6h!=0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Warmup
+    start_idx = 50  # Warmup
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_20_4h_aligned[i]) or 
-            np.isnan(vol_ratio_1d_aligned[i])):
+        if (np.isnan(ema_20_1w_aligned[i]) or 
+            np.isnan(r1_1d_aligned[i]) or 
+            np.isnan(s1_1d_aligned[i]) or
+            np.isnan(vol_ratio_6h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Session filter
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        if not in_session:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Determine 4h trend
-        close_4h_aligned = align_htf_to_ltf(prices, df_4h, close_4h)
-        if np.isnan(close_4h_aligned[i]):
+        # Determine weekly trend
+        # Get weekly close aligned to 6h for trend comparison
+        close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
+        if np.isnan(close_1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
-        trend_up = close_4h_aligned[i] > ema_20_4h_aligned[i]
-        trend_down = close_4h_aligned[i] < ema_20_4h_aligned[i]
+        trend_up = close_1w_aligned[i] > ema_20_1w_aligned[i]
+        trend_down = close_1w_aligned[i] < ema_20_1w_aligned[i]
         
         if position == 0:
-            # Long: pullback to EMA20 during uptrend with volume confirmation
-            if (low[i] <= ema_20_4h_aligned[i] and 
-                close[i] > ema_20_4h_aligned[i] and  # closed back above EMA
-                vol_ratio_1d_aligned[i] > 1.5 and 
+            # Long: price touches/crosses below S1 in weekly uptrend with volume
+            if (low[i] <= s1_1d_aligned[i] and 
+                close[i] > s1_1d_aligned[i] and  # reversal confirmation
+                vol_ratio_6h[i] > 1.5 and 
                 trend_up):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # Short: pullback to EMA20 during downtrend with volume confirmation
-            elif (high[i] >= ema_20_4h_aligned[i] and 
-                  close[i] < ema_20_4h_aligned[i] and  # closed back below EMA
-                  vol_ratio_1d_aligned[i] > 1.5 and 
+            # Short: price touches/crosses above R1 in weekly downtrend with volume
+            elif (high[i] >= r1_1d_aligned[i] and 
+                  close[i] < r1_1d_aligned[i] and  # reversal confirmation
+                  vol_ratio_6h[i] > 1.5 and 
                   trend_down):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below EMA20 or trend turns down
-            if (close[i] < ema_20_4h_aligned[i] or 
-                not trend_up):
+            # Exit long: price touches/crosses above R1 or trend turns down
+            if (high[i] >= r1_1d_aligned[i] and 
+                close[i] < r1_1d_aligned[i]) or \
+               not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above EMA20 or trend turns up
-            if (close[i] > ema_20_4h_aligned[i] or 
-                not trend_down):
+            # Exit short: price touches/crosses below S1 or trend turns up
+            if (low[i] <= s1_1d_aligned[i] and 
+                close[i] > s1_1d_aligned[i]) or \
+               not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
