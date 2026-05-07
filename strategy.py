@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Bands
-# Hypothesis: 4h chart strategy using Camarilla R1/S1 breakouts with 1d EMA34 trend filter, volume confirmation, and Bollinger Band width filter to avoid low-volatility chop.
-# Designed to reduce false breakouts in sideways markets by requiring expanding volatility (BB width > 20th percentile).
-# Target: 20-40 trades/year per symbol to minimize fee drag while maintaining edge in both bull and bear markets.
+# 6h_Camarilla_R3_S3_Breakout_12hTrend_Volume
+# Hypothesis: 6h chart strategy using Camarilla R3/S3 breakouts with 12h EMA50 trend filter and volume confirmation.
+# R3/S3 levels represent stronger support/resistance than R1/S1, reducing false breakouts.
+# Trend filter ensures trading with higher timeframe momentum. Volume confirms breakout strength.
+# Designed to work in both bull and bear markets by capturing strong directional moves with proper filtering.
+# Target: 15-30 trades/year per symbol to minimize fee drag while maintaining edge.
 
-timeframe = "4h"
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Bands"
+timeframe = "6h"
+name = "6h_Camarilla_R3_S3_Breakout_12hTrend_Volume"
 leverage = 1.0
 
 import numpy as np
@@ -22,90 +24,70 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA trend filter and Bollinger Bands
+    # Get 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) == 0:
+        return np.zeros(n)
+    
+    # Calculate EMA50 on 12h closes for trend filter
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # Get daily data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) == 0:
         return np.zeros(n)
     
-    # Calculate EMA34 on 1d closes for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Calculate Bollinger Bands (20, 2) on 1d closes
-    sma_20_1d = pd.Series(df_1d['close'].values).rolling(window=20, min_periods=20).mean().values
-    std_20_1d = pd.Series(df_1d['close'].values).rolling(window=20, min_periods=20).std().values
-    upper_bb_1d = sma_20_1d + 2 * std_20_1d
-    lower_bb_1d = sma_20_1d - 2 * std_20_1d
-    bb_width_1d = (upper_bb_1d - lower_bb_1d) / sma_20_1d  # Normalized width
-    
-    # Align Bollinger Band width to 4h timeframe
-    bb_width_1d_aligned = align_htf_to_ltf(prices, df_1d, bb_width_1d)
-    
-    # Calculate 20th percentile of BB width for regime filter (using expanding window to avoid look-ahead)
-    bb_width_percentile = np.zeros_like(bb_width_1d_aligned)
-    for i in range(len(bb_width_1d_aligned)):
-        if i < 20:
-            bb_width_percentile[i] = np.nan
-        else:
-            bb_width_percentile[i] = np.percentile(bb_width_1d_aligned[:i+1], 20)
-    
-    # Get daily data for Camarilla levels
     d_high = df_1d['high'].values
     d_low = df_1d['low'].values
     d_close = df_1d['close'].values
     
-    camarilla_r1 = d_close + 1.1 * (d_high - d_low) / 12
-    camarilla_s1 = d_close - 1.1 * (d_high - d_low) / 12
+    camarilla_r3 = d_close + 1.1 * (d_high - d_low) * 2 / 4  # R3 = C + 1.1*(H-L)*2/4
+    camarilla_s3 = d_close - 1.1 * (d_high - d_low) * 2 / 4  # S3 = C - 1.1*(H-L)*2/4
     
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Volume spike detection: 1.5x average volume (6-period = 1 day on 4h chart)
-    vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
+    # Volume spike detection: 2.0x average volume (4-period = 1 day on 6h chart)
+    vol_ma = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20, 6)  # Ensure we have EMA, BB, and volume MA data
+    start_idx = max(50, 4)  # Ensure we have EMA and volume MA data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0 or
-            np.isnan(bb_width_1d_aligned[i]) or np.isnan(bb_width_percentile[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Regime filter: only trade when volatility is expanding (BB width > 20th percentile)
-        volatility_expanding = bb_width_1d_aligned[i] > bb_width_percentile[i]
-        
         if position == 0:
-            # Long: close > R1 with volume spike, price above 1d EMA34, and expanding volatility
-            if (close[i] > camarilla_r1_aligned[i] and 
-                volume[i] > 1.5 * vol_ma[i] and 
-                close[i] > ema_34_1d_aligned[i] and 
-                volatility_expanding):
+            # Long: close > R3 with volume spike and price above 12h EMA50
+            if (close[i] > camarilla_r3_aligned[i] and 
+                volume[i] > 2.0 * vol_ma[i] and 
+                close[i] > ema_50_12h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: close < S1 with volume spike, price below 1d EMA34, and expanding volatility
-            elif (close[i] < camarilla_s1_aligned[i] and 
-                  volume[i] > 1.5 * vol_ma[i] and 
-                  close[i] < ema_34_1d_aligned[i] and 
-                  volatility_expanding):
+            # Short: close < S3 with volume spike and price below 12h EMA50
+            elif (close[i] < camarilla_s3_aligned[i] and 
+                  volume[i] > 2.0 * vol_ma[i] and 
+                  close[i] < ema_50_12h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: touch S1 (opposite level) or trend failure (price below 1d EMA34)
-            if close[i] < camarilla_s1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            # Exit: touch S3 (opposite level) or trend failure (price below 12h EMA50)
+            if close[i] < camarilla_s3_aligned[i] or close[i] < ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: touch R1 (opposite level) or trend failure (price above 1d EMA34)
-            if close[i] > camarilla_r1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            # Exit: touch R3 (opposite level) or trend failure (price above 12h EMA50)
+            if close[i] > camarilla_r3_aligned[i] or close[i] > ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
