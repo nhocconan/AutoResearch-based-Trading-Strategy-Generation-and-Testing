@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_WeeklyPivot_Breakout_TrendVolume"
-timeframe = "1d"
+name = "12h_TRIX_Volume_Spike_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,92 +17,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop for Pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
-    
-    # Load daily data ONCE before loop for trend filter
+    # Load daily data ONCE for TRIX and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 18:
         return np.zeros(n)
     
-    # Calculate weekly Pivot (standard) from previous week
-    prev_high = df_1w['high'].shift(1).values
-    prev_low = df_1w['low'].shift(1).values
-    prev_close = df_1w['close'].shift(1).values
-    
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
-    
-    # Weekly Pivot support/resistance levels
-    s1 = pivot - range_hl
-    r1 = pivot + range_hl
-    
-    # Align weekly levels to 1d timeframe
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    # TRIX(12) = EMA(EMA(EMA(close,12),12),12) - 1 period rate of change
+    close_series = pd.Series(df_1d['close'])
+    ema1 = close_series.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
+    trix = (ema3 / ema3.shift(1) - 1) * 100  # Percentage change
+    trix_values = trix.values
     
     # Daily EMA(34) for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d = close_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align TRIX and EMA to 12h timeframe
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix_values)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume spike detection: 20-day average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume spike detection: 2-period average (1 day of 12h bars)
+    vol_ma_2 = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Wait for EMA and volume MA
+    start_idx = max(34, 2)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(trix_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(vol_ma_2[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above S1 with volume and daily uptrend
-            vol_condition = volume[i] > vol_ma_20[i] * 2.0
+            # Long: TRIX crosses above zero with volume and daily uptrend
+            trix_cross_up = trix_aligned[i] > 0 and trix_aligned[i-1] <= 0
+            vol_condition = volume[i] > vol_ma_2[i] * 2.0
             uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
             
-            if close[i] > s1_aligned[i] and vol_condition and uptrend:
-                signals[i] = 0.30
+            if trix_cross_up and vol_condition and uptrend:
+                signals[i] = 0.25
                 position = 1
-            # Short: price below R1 with volume and daily downtrend
-            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
-                signals[i] = -0.30
+            # Short: TRIX crosses below zero with volume and daily downtrend
+            elif trix_aligned[i] < 0 and trix_aligned[i-1] >= 0 and vol_condition and not uptrend:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below S1 or volume drops
-            if close[i] < s1_aligned[i] or volume[i] < vol_ma_20[i] * 1.5:
+            # Exit: TRIX crosses below zero or volume drops
+            if trix_aligned[i] < 0 or volume[i] < vol_ma_2[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above R1 or volume drops
-            if close[i] > r1_aligned[i] or volume[i] < vol_ma_20[i] * 1.5:
+            # Exit: TRIX crosses above zero or volume drops
+            if trix_aligned[i] > 0 or volume[i] < vol_ma_2[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-# Hypothesis: 1d Weekly Pivot S1/R1 breakout with trend and volume confirmation
-# - Weekly Pivot S1/R1 act as key support/resistance levels from prior week
-# - Breakout above S1 with volume in daily uptrend = long opportunity
-# - Breakdown below R1 with volume in daily downtrend = short opportunity
-# - Volume spike (2.0x 20-day average) confirms institutional participation
-# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
-# - Exit when price returns to S1/R1 or volume weakens
-# - Position size 0.30 targets ~10-25 trades/year, avoiding fee drag
-# - Uses actual weekly Pivot levels (not daily) for better stability
-# - Daily trend filter reduces whipsaws vs using same timeframe
-# - Designed to work in BOTH bull and bear markets via trend filter
-# - Volume confirmation reduces false breakouts
-# - Novel combination: Weekly Pivot (1w) + trend (1d) + volume (1d) for daily timeframe
-# - Aims for 40-100 total trades over 4 years (10-25/year) to stay within limits
+# Hypothesis: TRIX(12) zero-cross with volume spike and daily trend filter
+# - TRIX shows momentum changes; zero-cross signals trend shifts
+# - Volume spike (2x 2-period average) confirms institutional participation
+# - Daily EMA(34) trend filter ensures trades align with higher timeframe trend
+# - Works in bull (TRIX up-cross in uptrend) and bear (TRIX down-cross in downtrend)
+# - Exit on TRIX reverse cross or volume weakening
+# - Position size 0.25 targets ~20-40 trades/year, avoiding fee drag
+# - Novel application: TRIX momentum with volume confirmation on 12h timeframe
+# - Avoids overtrading by requiring multiple confluence factors
+# - Uses daily TRIX and trend for stability, 12h for execution timing
+# - Volume confirmation reduces false signals in choppy markets
