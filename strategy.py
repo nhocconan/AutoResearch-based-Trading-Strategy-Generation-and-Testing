@@ -1,12 +1,15 @@
-# 4H_TRIX_Volume_Spike_Regime_v1
-# Hypothesis: TRIX momentum combined with volume spike and chop regime filter (4h/1d).
-# Long when TRIX crosses above zero with volume spike in chop regime.
-# Short when TRIX crosses below zero with volume spike in chop regime.
-# Exit when TRIX reverses or volume condition fails.
-# Designed for low trade frequency (<50/year) with high win rate in trending markets.
-# Works in both bull and bear markets via regime filter.
-name = "4H_TRIX_Volume_Spike_Regime_v1"
-timeframe = "4h"
+#!/usr/bin/env python3
+"""
+1D_KAMA_Trend_1W_Camarilla_R1_S1_Breakout_v1
+Hypothesis: Use 1d KAMA (ER=10) for trend direction and 1w Camarilla R1/S1 levels for entry.
+Long when price crosses above 1d KAMA and touches 1w R1 level; 
+Short when price crosses below 1d KAMA and touches 1w S1 level.
+Volume confirmation: current volume > 1.5x 20-period average volume.
+This combines adaptive trend-following with weekly pivot point precision to reduce false signals and work in both bull and bear markets.
+Fewer trades expected due to daily timeframe and strict entry conditions.
+"""
+name = "1D_KAMA_Trend_1W_Camarilla_R1_S1_Breakout_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +18,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,91 +26,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for chop regime filter
+    # Get 1d data for KAMA trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # Calculate 1d Chop Index (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1d KAMA (ER=10)
+    close_1d = pd.Series(df_1d['close'])
+    change = abs(close_1d.diff(10))
+    volatility = close_1d.diff().abs().rolling(window=10).sum()
+    er = change / volatility.replace(0, 1e-10)
+    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
+    kama = [close_1d.iloc[0]]
+    for i in range(1, len(close_1d)):
+        kama.append(kama[-1] + sc.iloc[i] * (close_1d.iloc[i] - kama[-1]))
+    kama = np.array(kama)
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr = np.concatenate([[np.nan], tr])  # align with index
-    
-    # ATR
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Chop Index: (sum(TR) / (max(high) - min(low))) * 100
-    max_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    range_max_min = max_high - min_low
-    sum_tr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    chop = (sum_tr / np.maximum(range_max_min, 1e-10)) * 100
-    chop[range_max_min == 0] = 100  # avoid division by zero
-    
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # Get 4h data for TRIX
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 18:
+    # Get 1w data for Camarilla levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    # Calculate TRIX (12-period EMA of EMA of EMA)
-    close_4h = pd.Series(df_4h['close'])
-    ema1 = close_4h.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
-    trix = (ema3.pct_change() * 100).values  # percentage change
+    # Calculate 1w Camarilla levels (R1, S1)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    pivot = (high_1w + low_1w + close_1w) / 3
+    range_1w = high_1w - low_1w
+    r1 = pivot + (range_1w * 1.1 / 12)
+    s1 = pivot - (range_1w * 1.1 / 12)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
     
-    trix_aligned = align_htf_to_ltf(prices, df_4h, trix)
-    
-    # Volume spike: current volume > 2.0 * 20-period average volume
+    # Volume filter: current volume > 1.5 * 20-period average volume
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_avg * 2.0)
+    volume_filter = volume > (vol_avg * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    bars_since_exit = 0  # bars since last exit to prevent overtrading
     
-    start_idx = max(30, 20)  # Ensure sufficient warmup
+    start_idx = max(10, 20)  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
+        bars_since_exit += 1
+        
         # Skip if any data is not ready
-        if (np.isnan(trix_aligned[i]) or np.isnan(chop_aligned[i]) or 
+        if (np.isnan(kama_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
             np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                bars_since_exit = 0
             continue
         
-        # Chop regime: chop > 50 indicates ranging market (good for mean reversion)
-        # But we use it as volatility filter: chop > 30 and chop < 70 for active market
-        chop_ok = (chop_aligned[i] > 30) and (chop_aligned[i] < 70)
-        
         if position == 0:
-            # Long: TRIX crosses above zero with volume spike in active chop regime
-            if (trix_aligned[i] > 0 and trix_aligned[i-1] <= 0 and 
-                volume_spike[i] and chop_ok):
+            # Minimum 5 days between trades to reduce frequency
+            if bars_since_exit < 5:
+                continue
+                
+            # Long: price crosses above KAMA and touches R1 level
+            if (close[i] > kama_aligned[i] and close[i-1] <= kama_aligned[i-1] and 
+                low[i] <= r1_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX crosses below zero with volume spike in active chop regime
-            elif (trix_aligned[i] < 0 and trix_aligned[i-1] >= 0 and 
-                  volume_spike[i] and chop_ok):
+                bars_since_exit = 0
+            # Short: price crosses below KAMA and touches S1 level
+            elif (close[i] < kama_aligned[i] and close[i-1] >= kama_aligned[i-1] and 
+                  high[i] >= s1_aligned[i]):
                 signals[i] = -0.25
                 position = -1
+                bars_since_exit = 0
         elif position != 0:
-            # Exit: TRIX reverses or volume condition fails
-            if position == 1 and (trix_aligned[i] < 0 or not volume_spike[i]):
+            # Exit: price returns to opposite KAMA side
+            if position == 1 and close[i] < kama_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and (trix_aligned[i] > 0 or not volume_spike[i]):
+                bars_since_exit = 0
+            elif position == -1 and close[i] > kama_aligned[i]:
                 signals[i] = 0.0
                 position = 0
+                bars_since_exit = 0
             else:
                 # Hold position
                 signals[i] = 0.25 if position == 1 else -0.25
