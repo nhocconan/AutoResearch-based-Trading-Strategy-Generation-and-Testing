@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_4h_1d_Camarilla_R1S1_Breakout_Trend_Volume"
-timeframe = "1h"
+name = "6h_1d_RSI21_SMA100_Rebound"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,102 +17,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h and 1d data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_4h) < 30 or len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 4h-based 1d equivalent for Camarilla pivot levels
-    # Using 4h high/low/close to compute daily pivot levels
-    # For each 4h bar, we compute Camarilla levels based on previous 4h bar's high/low/close
-    prev_4h_high = df_4h['high'].shift(1).values
-    prev_4h_low = df_4h['low'].shift(1).values
-    prev_4h_close = df_4h['close'].shift(1).values
+    # Daily SMA(100) for trend filter
+    sma_100_1d = pd.Series(df_1d['close']).rolling(window=100, min_periods=100).mean().values
+    sma_100_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_100_1d)
     
-    pivot = (prev_4h_high + prev_4h_low + prev_4h_close) / 3
-    range_hl = prev_4h_high - prev_4h_low
+    # 6h RSI(21) for entry
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/21, min_periods=21, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/21, min_periods=21, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
     
-    # Camarilla levels from 4h data (S1 and R1)
-    s1_4h = prev_4h_close - (range_hl * 1.08 / 2)
-    r1_4h = prev_4h_close + (range_hl * 1.08 / 2)
-    
-    # Align 4h Camarilla levels to 1h timeframe
-    s1_4h_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
-    r1_4h_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
-    
-    # Daily trend filter: EMA(34) on daily close from 1h data
-    # We'll use 1h data to compute EMA(34) on daily equivalent
-    # But we need to use actual daily data for trend
-    daily_close = df_1d['close'].values
-    ema_34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume spike detection: 12-period average (6 hours of 1h bars) for 1h volume
+    # 6h volume spike filter (2x 12-bar average = 3 days)
     vol_ma_12 = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 12)  # Wait for EMA and volume MA
+    start_idx = max(100, 21, 12)  # Wait for SMA, RSI, and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(s1_4h_aligned[i]) or 
-            np.isnan(r1_4h_aligned[i]) or np.isnan(vol_ma_12[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
-        if not in_session:
+        if (np.isnan(sma_100_1d_aligned[i]) or np.isnan(rsi[i]) or 
+            np.isnan(vol_ma_12[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above S1 with volume and daily uptrend
-            vol_condition = volume[i] > vol_ma_12[i] * 2.0
-            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
+            # Long: price near SMA(100) support with RSI oversold bounce and volume
+            near_sma = abs(close[i] - sma_100_1d_aligned[i]) / sma_100_1d_aligned[i] < 0.02
+            rsi_oversold = rsi[i] < 30
+            rsi_rising = rsi[i] > rsi[i-1]
+            vol_spike = volume[i] > vol_ma_12[i] * 2.0
             
-            if close[i] > s1_4h_aligned[i] and vol_condition and uptrend:
-                signals[i] = 0.20
+            if near_sma and rsi_oversold and rsi_rising and vol_spike:
+                signals[i] = 0.25
                 position = 1
-            # Short: price below R1 with volume and daily downtrend
-            elif close[i] < r1_4h_aligned[i] and vol_condition and not uptrend:
-                signals[i] = -0.20
+            
+            # Short: price near SMA(100) resistance with RSI overbought rejection and volume
+            elif near_sma and rsi[i] > 70 and rsi[i] < rsi[i-1] and vol_spike:
+                signals[i] = -0.25
                 position = -1
+        
         elif position == 1:
-            # Exit: price back below S1 or volume drops
-            if close[i] < s1_4h_aligned[i] or volume[i] < vol_ma_12[i] * 1.5:
+            # Exit: RSI overbought or price moves far from SMA
+            if rsi[i] > 70 or abs(close[i] - sma_100_1d_aligned[i]) / sma_100_1d_aligned[i] > 0.05:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
+        
         elif position == -1:
-            # Exit: price back above R1 or volume drops
-            if close[i] > r1_4h_aligned[i] or volume[i] < vol_ma_12[i] * 1.5:
+            # Exit: RSI oversold or price moves far from SMA
+            if rsi[i] < 30 or abs(close[i] - sma_100_1d_aligned[i]) / sma_100_1d_aligned[i] > 0.05:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-# Hypothesis: 1h Camarilla S1/R1 breakout with 4h/1d trend and volume confirmation
-# - 4h Camarilla S1/R1 act as support/resistance levels
-# - Breakout above S1 with volume in daily uptrend = long opportunity
-# - Breakdown below R1 with volume in daily downtrend = short opportunity
-# - Volume spike (2.0x average) confirms institutional participation
-# - Session filter (08-20 UTC) reduces noise trades
-# - Position size 0.20 targets ~20-40 trades/year, avoiding fee drag
-# - Uses 4h data for Camarilla levels and 1d for trend filter
-# - Designed to work in BOTH bull and bear markets via trend filter
-# - Higher volume threshold (2.0) to reduce false signals
-# - Exit volume threshold (1.5) to allow trends to continue
+# Hypothesis: 6h RSI(21) rebound from daily SMA(100) with volume confirmation
+# - Daily SMA(100) acts as major support/resistance in both bull and bear markets
+# - In uptrends, price pulls back to SMA(100) and bounces (long opportunity)
+# - In downtrends, price rallies to SMA(100) and gets rejected (short opportunity)
+# - RSI(21) < 30 with rising momentum identifies oversold bounces
+# - RSI(21) > 70 with falling momentum identifies overbought rejections
+# - Volume spike (2x average) confirms institutional participation at key levels
+# - Works in ranging markets too as price oscillates around SMA(100)
+# - Position size 0.25 limits drawdown while capturing meaningful moves
+# - Target: 15-30 trades/year to avoid fee drag on 6h timeframe
