@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_4h1d_Confluence_RSI_Vol"
-timeframe = "1h"
+name = "6h_Weekly_Pivot_Donchian_Breakout_VolumeTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,85 +17,86 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h and 1d data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_4h) < 20 or len(df_1d) < 20:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # 4h RSI(14) for trend filter
-    delta_4h = pd.Series(df_4h['close']).diff()
-    gain_4h = (delta_4h.where(delta_4h > 0, 0)).rolling(window=14, min_periods=14).mean()
-    loss_4h = (-delta_4h.where(delta_4h < 0, 0)).rolling(window=14, min_periods=14).mean()
-    rs_4h = gain_4h / loss_4h
-    rsi_4h = 100 - (100 / (1 + rs_4h))
-    rsi_4h = rsi_4h.fillna(50).values
-    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
+    # Calculate weekly pivot points (using previous week's data)
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    weekly_s1 = 2 * weekly_pivot - weekly_high
+    weekly_r2 = weekly_pivot + (weekly_high - weekly_low)
+    weekly_s2 = weekly_pivot - (weekly_high - weekly_low)
     
-    # 1d EMA(50) for trend direction
+    # Align weekly pivot levels to 6h timeframe
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
+    weekly_r2_aligned = align_htf_to_ltf(prices, df_1w, weekly_r2)
+    weekly_s2_aligned = align_htf_to_ltf(prices, df_1w, weekly_s2)
+    
+    # Daily trend filter (1d EMA50)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
     ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # 1h volume spike: > 1.8x 20-period average
+    # 6h volume confirmation: > 1.8x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > 1.8 * vol_ma
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    # 6h Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 50)  # Wait for vol MA and EMA50
+    start_idx = max(20, 50)  # Wait for Donchian and EMA50
     
     for i in range(start_idx, n):
-        if np.isnan(rsi_4h_aligned[i]) or np.isnan(ema50_1d_aligned[i]):
+        if np.isnan(weekly_pivot_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
         if position == 0:
-            # Long: 4h RSI > 55 (bullish), price > 1d EMA50, volume spike, in session
-            if (rsi_4h_aligned[i] > 55 and 
-                close[i] > ema50_1d_aligned[i] and 
-                vol_spike[i] and 
-                in_session):
-                signals[i] = 0.20
+            # Long: Price breaks above weekly R2 with volume and daily uptrend
+            if high[i] > weekly_r2_aligned[i] and close[i] > ema50_1d_aligned[i] and vol_spike[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: 4h RSI < 45 (bearish), price < 1d EMA50, volume spike, in session
-            elif (rsi_4h_aligned[i] < 45 and 
-                  close[i] < ema50_1d_aligned[i] and 
-                  vol_spike[i] and 
-                  in_session):
-                signals[i] = -0.20
+            # Short: Price breaks below weekly S2 with volume and daily downtrend
+            elif low[i] < weekly_s2_aligned[i] and close[i] < ema50_1d_aligned[i] and vol_spike[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: 4h RSI < 40 or price < 1d EMA50
-            if (rsi_4h_aligned[i] < 40 or 
-                close[i] < ema50_1d_aligned[i]):
+            # Exit: Price breaks below weekly pivot or loses daily uptrend
+            if close[i] < weekly_pivot_aligned[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: 4h RSI > 60 or price > 1d EMA50
-            if (rsi_4h_aligned[i] > 60 or 
-                close[i] > ema50_1d_aligned[i]):
+            # Exit: Price breaks above weekly pivot or gains daily uptrend
+            if close[i] > weekly_pivot_aligned[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-# Hypothesis: 1h strategy using 4h RSI for momentum and 1d EMA50 for trend filter.
-# Enters only during high-liquidity session (08-20 UTC) on volume spikes.
-# Long when 4h RSI > 55 (bullish momentum) and price above 1d EMA50 (uptrend).
-# Short when 4h RSI < 45 (bearish momentum) and price below 1d EMA50 (downtrend).
-# Volume spike (>1.8x 20-bar avg) ensures conviction. Session filter reduces noise.
-# Discrete 0.20 position size limits risk. Works in bull/bear via dual RSI/EMA logic.
-# Target: 15-30 trades/year (~60-120 total over 4 years) to minimize fee drag.
+# Hypothesis: Weekly pivot levels provide strong institutional support/resistance.
+# Donchian breakout at R2/S2 levels with volume confirmation captures institutional breakouts.
+# Daily EMA50 filter ensures we only trade in the direction of the higher timeframe trend.
+# Weekly timeframe reduces noise, 6s provides timely entry/exit.
+# Works in bull markets (breakouts above R2) and bear markets (breakdowns below S2).
+# Volume spike requirement ensures conviction and reduces false breakouts.
+# Target: 15-30 trades/year to minimize fee decay while capturing significant moves.
