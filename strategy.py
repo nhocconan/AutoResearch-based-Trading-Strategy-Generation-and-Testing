@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3S3_Breakout_1dTrend_Volume_Sparse_v1
-Hypothesis: Use 12h timeframe with 1d Camarilla R3/S3 breakouts filtered by 1d EMA50 trend and volume > 1.5x average. Designed to work in both bull (breakouts with trend) and bear (fades from extremes with trend) markets. Target 15-25 trades/year by requiring strong trend alignment and volume confirmation.
+4h_Camarilla_R3S3_Breakout_1dTrend_Volume_Tight_v2
+Hypothesis: Tighten entry criteria from v1 by requiring volume > 2x average (vs 1.5x) and adding a 4-hour trend filter using EMA20 to avoid whipsaws. Target 15-25 trades/year by requiring stronger confluence. Uses 1d Camarilla R3/S3 for breakout levels, 1d EMA50 for trend filter, and volume spike for confirmation. Works in bull markets (breakouts with trend) and bear markets (fades from extremes with trend).
 """
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume_Sparse_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_Tight_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -37,7 +37,7 @@ def generate_signals(prices):
     r3_1d = close_1d + (range_1d * 1.1 / 2)
     s3_1d = close_1d - (range_1d * 1.1 / 2)
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
@@ -45,9 +45,12 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume filter: current volume > 1.5 * 100-period average
+    # 4-hour EMA20 for additional trend filter
+    ema_20_4h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Volume filter: current volume > 2.0 * 100-period average (stricter than v1)
     vol_avg = pd.Series(volume).rolling(window=100, min_periods=100).mean().values
-    volume_filter = volume > (vol_avg * 1.5)
+    volume_filter = volume > (vol_avg * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -57,23 +60,25 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any data is not ready
         if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg[i]) or 
-            np.isnan(volume_filter[i])):
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_20_4h[i]) or 
+            np.isnan(vol_avg[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R3 + 1d uptrend + volume filter
+            # Long: price breaks above R3 + 1d uptrend + 4h uptrend + volume filter
             if (close[i] > r3_1d_aligned[i] and 
                 close[i] > ema_50_1d_aligned[i] and 
+                close[i] > ema_20_4h[i] and 
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 + 1d downtrend + volume filter
+            # Short: price breaks below S3 + 1d downtrend + 4h downtrend + volume filter
             elif (close[i] < s3_1d_aligned[i] and 
                   close[i] < ema_50_1d_aligned[i] and 
+                  close[i] < ema_20_4h[i] and 
                   volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
