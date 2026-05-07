@@ -1,10 +1,5 @@
-# 1h_Camarilla_R3S3_1dTrend_VolumeSpike_v1
-# Hypothesis: Use 1d trend (EMA34) to filter direction, 4h Camarilla R3/S3 for breakout levels, and volume spike for entry confirmation on 1h timeframe. 1d trend filter ensures alignment with higher timeframe momentum, reducing false breakouts in choppy markets. Volume spike confirms institutional interest. Designed to work in both bull and bear markets by following the 1d trend.
-# Target: 15-35 trades/year via strict 1d trend + 4h breakout + volume confluence.
-# Timeframe: 1h, Leverage: 1.0
-
 #!/usr/bin/env python3
-name = "1h_Camarilla_R3S3_1dTrend_VolumeSpike_v1"
+name = "1h_Camarilla_R3S3_1dTrend_VolumeSpike_v2"
 timeframe = "1h"
 leverage = 1.0
 
