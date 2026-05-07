@@ -1,9 +1,5 @@
-# 4h_Camarilla_R3_S3_Pullback_1dTrend_Volume
-# Hypothesis: Pullback to Camarilla R3/S3 levels in 1d trend with volume confirmation.
-# Camarilla levels (R3, S3) act as strong support/resistance in trending markets.
-# Entry on pullback to these levels with 1d EMA34 trend filter and volume spike.
-# Works in bull/bear by only taking pullbacks aligned with higher timeframe trend.
-# Target: 20-40 trades/year per symbol (80-160 total over 4 years) to minimize fee drag.
+#3
+#!/usr/bin/env python3
 
 name = "4h_Camarilla_R3_S3_Pullback_1dTrend_Volume"
 timeframe = "4h"
@@ -34,8 +30,6 @@ def generate_signals(prices):
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate Camarilla levels from previous 1d bar
-    # R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
-    # where C, H, L are close, high, low of previous day
     prev_close = df_1d['close'].shift(1).values
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
@@ -43,7 +37,7 @@ def generate_signals(prices):
     R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
     S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     
-    # Align Camarilla levels to 4h timeframe (available after 1d bar closes)
+    # Align Camarilla levels to 4h timeframe
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
