@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_Breakout_12hEMA50_Trend_VolumeS"
-timeframe = "4h"
+name = "1h_Keltner_Reversal_4hTrend"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -17,43 +17,25 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # 4h trend filter: 21 EMA
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 21:
         return np.zeros(n)
+    ema_21_4h = pd.Series(df_4h['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
     
-    # Calculate 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # Get 1d data for Camarilla pivot
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    # Calculate Camarilla pivot levels from previous 1d bar
-    prev_high = df_1d['high'].values
-    prev_low = df_1d['low'].values
-    prev_close = df_1d['close'].values
-    
-    pivot = (prev_high + prev_low + prev_close) / 3
-    r3 = prev_close + 1.1 * (prev_high - prev_low) / 2
-    s3 = prev_close - 1.1 * (prev_high - prev_low) / 2
-    
-    # Align pivot levels
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # Volume filter: 20-period average for spike detection
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Volatility filter: ATR > 0.3% of price
+    # 1h Keltner Channel (20, 2.0)
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    vol_filter = atr > 0.003 * close
+    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    kc_upper = ema_20 + 2.0 * atr
+    kc_lower = ema_20 - 2.0 * atr
+    
+    # Volume filter: 20-period average for spike detection
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Session filter: 08:00 - 20:00 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -62,45 +44,44 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 50)  # Ensure volume MA and EMA data
+    start_idx = max(20, 20)  # Ensure Keltner and volume data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN or invalid
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+        if (np.isnan(ema_21_4h_aligned[i]) or np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or
             np.isnan(vol_ma[i]) or vol_ma[i] == 0 or
-            np.isnan(vol_filter[i]) or not vol_filter[i] or not session_filter[i]):
+            np.isnan(atr[i]) or not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume spike: current volume > 1.8 x 20-period average
-        volume_spike = volume[i] > 1.8 * vol_ma[i]
+        # Volume spike: current volume > 1.5 x 20-period average
+        volume_spike = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long: Price breaks above R3, above 12h EMA50 (uptrend), with volume spike
-            buffer = 0.0005 * close[i]  # 0.05% buffer to avoid whipsaws
-            if (close[i] > r3_aligned[i] + buffer and 
-                close[i] > ema_50_12h_aligned[i] + buffer and   # 12h uptrend
+            # Long: Price closes below lower Keltner (oversold) in 4h uptrend, with volume spike
+            if (close[i] < kc_lower[i] and 
+                close[i] > ema_21_4h_aligned[i] and   # 4h uptrend filter
                 volume_spike):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
-            # Short: Price breaks below S3, below 12h EMA50 (downtrend), with volume spike
-            elif (close[i] < s3_aligned[i] - buffer and 
-                  close[i] < ema_50_12h_aligned[i] - buffer and   # 12h downtrend
+            # Short: Price closes above upper Keltner (overbought) in 4h downtrend, with volume spike
+            elif (close[i] > kc_upper[i] and 
+                  close[i] < ema_21_4h_aligned[i] and   # 4h downtrend filter
                   volume_spike):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         elif position != 0:
-            # Exit: Price returns to pivot level (approximated as midpoint)
-            pivot_approx = (r3_aligned[i] + s3_aligned[i]) / 2
-            at_pivot = abs(close[i] - pivot_approx) < 0.001 * close[i]  # Within 0.1% of pivot
-            
-            if at_pivot:
+            # Exit: Price returns to middle of Keltner Channel (EMA20)
+            if position == 1 and close[i] > ema_20[i]:
+                signals[i] = 0.0
+                position = 0
+            elif position == -1 and close[i] < ema_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 # Maintain position
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.20 if position == 1 else -0.20
     
     return signals
