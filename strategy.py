@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3S3_1wTrend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dTrend_VolumeSpike_v17"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,20 +17,16 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
+    # Get 1d data for trend filter and Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1w EMA21 for trend filter
-    ema_21_1w = pd.Series(df_1w['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Get 1d data for Camarilla levels (previous day's high, low, close)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
-        return np.zeros(n)
-    
     prev_high = df_1d['high'].values
     prev_low = df_1d['low'].values
     prev_close = df_1d['close'].values
@@ -46,13 +42,13 @@ def generate_signals(prices):
     # Volume filter: 20-period average volume for spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Volatility filter: avoid low volatility (ATR > 0.5% of price)
+    # Volatility filter: avoid low volatility (ATR > 0.4% of price)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    vol_filter = atr > 0.005 * close  # ATR > 0.5% of price
+    vol_filter = atr > 0.004 * close  # ATR > 0.4% of price
     
     # Session filter: 08:00 - 20:00 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -61,11 +57,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 21)  # Ensure volume MA and EMA data
+    start_idx = max(20, 34)  # Ensure volume MA and EMA data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN or invalid
-        if (np.isnan(ema_21_1w_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
             np.isnan(vol_ma[i]) or vol_ma[i] == 0 or
             np.isnan(vol_filter[i]) or not vol_filter[i] or
             not session_filter[i]):
@@ -78,16 +74,16 @@ def generate_signals(prices):
         volume_spike = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long: Price breaks above R3, above 1w EMA21 (uptrend), with volume spike
+            # Long: Price breaks above R3, above 1d EMA34 (uptrend), with volume spike
             buffer = 0.001 * close[i]  # 0.1% buffer to avoid whipsaws
             if (close[i] > r3_aligned[i] + buffer and 
-                close[i] > ema_21_1w_aligned[i] + buffer and   # 1w uptrend
+                close[i] > ema_34_1d_aligned[i] + buffer and   # 1d uptrend
                 volume_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S3, below 1w EMA21 (downtrend), with volume spike
+            # Short: Price breaks below S3, below 1d EMA34 (downtrend), with volume spike
             elif (close[i] < s3_aligned[i] - buffer and 
-                  close[i] < ema_21_1w_aligned[i] - buffer and   # 1w downtrend
+                  close[i] < ema_34_1d_aligned[i] - buffer and   # 1d downtrend
                   volume_spike):
                 signals[i] = -0.25
                 position = -1
