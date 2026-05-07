@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v2"
-timeframe = "4h"
+name = "1d_R3S3_Breakout_1wTrend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,14 +17,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Camarilla levels
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # Calculate 1w EMA34 trend filter
+    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Calculate 1d data for daily levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
-    
-    # Calculate 1d EMA34 trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate Camarilla R3 and S3 levels from previous day
     high_prev = df_1d['high'].shift(1).values
@@ -34,7 +39,7 @@ def generate_signals(prices):
     r3 = close_prev + 1.1 * (high_prev - low_prev) / 4
     s3 = close_prev - 1.1 * (high_prev - low_prev) / 4
     
-    # Align daily levels to 4h timeframe (with 1-day delay for completed bar)
+    # Align daily levels to 1d timeframe (1-day delay for completed bar)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
@@ -47,15 +52,15 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 6  # ~24 hours for 4h to reduce trades
+    cooldown_bars = 5  # ~5 days to reduce trades
     
-    start_idx = max(200, 20, 50)
+    start_idx = max(100, 20, 50)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(r3_aligned[i]) or 
             np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(ema_34_1w_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -67,9 +72,9 @@ def generate_signals(prices):
         
         bars_since_last_trade += 1
         
-        # Determine 1d trend direction
-        trend_up = close > ema_34_1d_aligned[i]
-        trend_down = close < ema_34_1d_aligned[i]
+        # Determine 1w trend direction
+        trend_up = close > ema_34_1w_aligned[i]
+        trend_down = close < ema_34_1w_aligned[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
             # Long: Break above R3 in uptrend with strong volume
@@ -105,9 +110,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Using 4h timeframe with Camarilla R3/S3 breakouts, 1d EMA34 trend filter, and 2.0x volume spike
-# will yield 19-50 trades per year (75-200 total over 4 years), minimizing fee drag. The strategy trades
+# Hypothesis: Using 1d timeframe with Camarilla R3/S3 breakouts, 1w EMA34 trend filter, and 2.0x volume spike
+# will yield 7-25 trades per year (30-100 total over 4 years), minimizing fee drag. The strategy trades
 # with the higher timeframe trend, capturing institutional breakouts in both bull and bear markets.
-# Position size of 0.25 manages drawdown, and increased cooldown of 6 bars prevents overtrading. Focus on BTC/ETH
+# Position size of 0.25 manages drawdown, and cooldown of 5 days prevents overtrading. Focus on BTC/ETH
 # as primary targets, avoiding SOL-only bias. This combines proven elements from top performers:
 # Camarilla levels + higher timeframe trend + volume confirmation.
