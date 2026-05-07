@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_4h1d_HybridTrendBreakout_v1"
-timeframe = "1h"
+name = "6h_WeeklyPivot_Trend_Direction_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,84 +17,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get weekly data for pivot points
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # 4h EMA20 trend filter
-    ema_20_4h = pd.Series(df_4h['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    # Calculate weekly pivot points from previous week
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Get 1d data for volatility filter
+    # Pivot point calculation
+    pivot = (weekly_high + weekly_low + weekly_close) / 3
+    r1 = 2 * pivot - weekly_low
+    s1 = 2 * pivot - weekly_high
+    r2 = pivot + (weekly_high - weekly_low)
+    s2 = pivot - (weekly_high - weekly_low)
+    
+    # Align weekly pivot levels to 6h timeframe (with 1-bar delay for completed week)
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 1d ATR14 for volatility
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # Daily EMA34 trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 1h session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_ok = (hours >= 8) & (hours <= 20)
-    
-    # 1h range breakout (previous 20-bar range)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    # Volume filter: current volume > 1.5 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ok = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 14)  # Need 20 for range, 14 for ATR
+    start_idx = max(20, 1)  # Need 20 for volume MA, 1 for weekly data
     
     for i in range(start_idx, n):
-        if np.isnan(ema_20_4h_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or np.isnan(high_20[i]) or np.isnan(low_20[i]):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Skip outside session
-        if not session_ok[i]:
+        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(pivot_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above 20-bar high, above 4h EMA20, and volatility filter
-            if close[i] > high_20[i] and close[i] > ema_20_4h_aligned[i] and volume[i] > 0:
-                atr = atr_14_1d_aligned[i]
-                if atr > 0 and volume[i] > np.median(volume[max(0, i-20):i+1]) * 1.5:
-                    signals[i] = 0.20
-                    position = 1
-            # Short: break below 20-bar low, below 4h EMA20, and volatility filter
-            elif close[i] < low_20[i] and close[i] < ema_20_4h_aligned[i] and volume[i] > 0:
-                atr = atr_14_1d_aligned[i]
-                if atr > 0 and volume[i] > np.median(volume[max(0, i-20):i+1]) * 1.5:
-                    signals[i] = -0.20
-                    position = -1
+            # Long: price above S1 and above daily EMA34 + volume
+            if close[i] > s1_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_ok[i]:
+                signals[i] = 0.25
+                position = 1
+            # Short: price below R1 and below daily EMA34 + volume
+            elif close[i] < r1_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_ok[i]:
+                signals[i] = -0.25
+                position = -1
         elif position != 0:
-            # Exit: price returns to 20-bar range or breaks in opposite direction
+            # Exit: price returns to pivot level or breaks in opposite direction
             if position == 1:
-                if close[i] < low_20[i] or close[i] < ema_20_4h_aligned[i]:
+                if close[i] < pivot_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
             else:  # position == -1
-                if close[i] > high_20[i] or close[i] > ema_20_4h_aligned[i]:
+                if close[i] > pivot_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
