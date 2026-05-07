@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_KAMA_Trend_Filter_v2
-Hypothesis: KAMA on daily timeframe for trend direction, with 12h price action and volume confirmation.
-Improved from v1: Added ADX filter to avoid choppy markets and reduce false signals.
-KAMA adapts to market noise, reducing whipsaws in ranging markets while capturing trends.
-Target: 20-30 trades/year to minimize fee drag. Works in both bull and bear by adapting smoothing constant.
+1d_Williams_Alligator_Range_MeanReversion_v1
+Hypothesis: Uses Williams Alligator (3 SMAs: Jaw, Teeth, Lips) on weekly timeframe to identify trend vs range.
+In ranging markets (Jaw > Teeth > Lips or Lips > Teeth > Jaw), mean reversion at Bollinger Bands (20,2) on daily timeframe.
+In trending markets, follow Alligator direction. Volume confirmation reduces false signals.
+Designed for low turnover (<20 trades/year) to minimize fee drag in both bull and bear markets.
 """
 
-name = "12h_KAMA_Trend_Filter_v2"
-timeframe = "12h"
+name = "1d_Williams_Alligator_Range_MeanReversion_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -25,135 +25,124 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for KAMA calculation
+    # Get weekly data for Alligator
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 13:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    
+    # Calculate Williams Alligator SMAs
+    # Jaw: 13-period SMMA, Teeth: 8-period SMMA, Lips: 5-period SMMA
+    def smma(arr, period):
+        result = np.full_like(arr, np.nan, dtype=np.float64)
+        if len(arr) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: SMMA = (prev * (period-1) + current) / period
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
+    
+    jaw = smma(close_1w, 13)
+    teeth = smma(close_1w, 8)
+    lips = smma(close_1w, 5)
+    
+    # Align Alligator lines to daily timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1w, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1w, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1w, lips)
+    
+    # Get daily data for Bollinger Bands
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     
-    # Calculate Kaufman Adaptive Moving Average (KAMA)
-    er_period = 10
-    fast_sc = 2 / (2 + 1)  # 0.6667
-    slow_sc = 2 / (30 + 1)  # 0.0645
+    # Calculate Bollinger Bands (20, 2)
+    bb_middle = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    bb_std = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2 * bb_std
+    bb_lower = bb_middle - 2 * bb_std
     
-    # Calculate Efficiency Ratio (ER)
-    change = np.abs(np.diff(close_1d))
+    # Align Bollinger Bands to daily timeframe (same as prices since 1d is our base)
+    bb_middle_aligned = bb_middle  # already aligned
+    bb_upper_aligned = bb_upper
+    bb_lower_aligned = bb_lower
     
-    # Calculate volatility over er_period window
-    volatility_sum = np.zeros_like(close_1d)
-    for i in range(er_period, len(close_1d)):
-        volatility_sum[i] = np.sum(np.abs(np.diff(close_1d[i-er_period:i+1])))
-    
-    er = np.zeros_like(close_1d)
-    for i in range(er_period, len(close_1d)):
-        if volatility_sum[i] > 0:
-            er[i] = np.abs(close_1d[i] - close_1d[i-er_period]) / volatility_sum[i]
-        else:
-            er[i] = 0
-    
-    # Calculate smoothing constant (SC)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Calculate KAMA
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    
-    # Align KAMA to 12h timeframe
-    kama_12h = align_htf_to_ltf(prices, df_1d, kama)
-    
-    # Calculate ADX for trend strength (14-period)
-    # +DM, -DM, TR
-    up_move = high[1:] - high[:-1]
-    down_move = low[:-1] - low[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    tr = np.maximum(high[1:] - low[1:], np.absolute(np.diff(close)))
-    
-    # Smooth using Wilder's smoothing (alpha = 1/period)
-    period = 14
-    alpha = 1.0 / period
-    
-    tr_sum = np.zeros_like(close)
-    plus_dm_sum = np.zeros_like(close)
-    minus_dm_sum = np.zeros_like(close)
-    
-    # Initial values
-    if len(tr) >= period:
-        tr_sum[period] = np.sum(tr[:period])
-        plus_dm_sum[period] = np.sum(plus_dm[:period])
-        minus_dm_sum[period] = np.sum(minus_dm[:period])
-        
-        # Wilder's smoothing
-        for i in range(period + 1, len(close)):
-            tr_sum[i] = tr_sum[i-1] - (tr_sum[i-1] / period) + tr[i-1]
-            plus_dm_sum[i] = plus_dm_sum[i-1] - (plus_dm_sum[i-1] / period) + plus_dm[i-1]
-            minus_dm_sum[i] = minus_dm_sum[i-1] - (minus_dm_sum[i-1] / period) + minus_dm[i-1]
-    
-    # Avoid division by zero
-    plus_di = np.zeros_like(close)
-    minus_di = np.zeros_like(close)
-    dx = np.zeros_like(close)
-    
-    for i in range(period, len(close)):
-        if tr_sum[i] > 0:
-            plus_di[i] = 100 * plus_dm_sum[i] / tr_sum[i]
-            minus_di[i] = 100 * minus_dm_sum[i] / tr_sum[i]
-            if plus_di[i] + minus_di[i] > 0:
-                dx[i] = 100 * np.abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
-    
-    # ADX: smoothed DX
-    adx = np.zeros_like(close)
-    if len(close) >= 2 * period:
-        adx[2*period] = np.sum(dx[period:2*period]) / period
-        for i in range(2*period + 1, len(close)):
-            adx[i] = (adx[i-1] * (period - 1) + dx[i]) / period
-    
-    # Align ADX to 12h timeframe
-    adx_12h = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume confirmation: volume > 24-period average (24 * 12h = 12 days)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume confirmation: volume > 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(20, n):
         # Skip if any critical value is NaN
-        if (np.isnan(kama_12h[i]) or np.isnan(adx_12h[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
+            np.isnan(bb_middle_aligned[i]) or np.isnan(bb_upper_aligned[i]) or np.isnan(bb_lower_aligned[i]) or
+            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Only trade when ADX > 25 (trending market)
-        if adx_12h[i] <= 25:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
+        # Determine market regime using Alligator
+        # Trending up: Lips > Teeth > Jaw
+        # Trending down: Jaw > Teeth > Lips
+        # Ranging: otherwise (intertwined)
+        lips_val = lips_aligned[i]
+        teeth_val = teeth_aligned[i]
+        jaw_val = jaw_aligned[i]
+        
+        is_trending_up = lips_val > teeth_val and teeth_val > jaw_val
+        is_trending_down = jaw_val > teeth_val and teeth_val > lips_val
+        is_ranging = not (is_trending_up or is_trending_down)
         
         if position == 0:
-            # Long: price above KAMA with volume confirmation
-            if close[i] > kama_12h[i] and volume[i] > vol_ma[i]:
-                signals[i] = 0.25
-                position = 1
-            # Short: price below KAMA with volume confirmation
-            elif close[i] < kama_12h[i] and volume[i] > vol_ma[i]:
-                signals[i] = -0.25
-                position = -1
+            if is_ranging and volume[i] > vol_ma[i]:
+                # In ranging market, mean revert at Bollinger Bands
+                if close[i] <= bb_lower_aligned[i]:
+                    signals[i] = 0.25
+                    position = 1
+                elif close[i] >= bb_upper_aligned[i]:
+                    signals[i] = -0.25
+                    position = -1
+            elif is_trending_up and volume[i] > vol_ma[i]:
+                # In uptrend, go long on pullback to Teeth
+                if close[i] <= teeth_aligned[i] and close[i] > bb_lower_aligned[i]:
+                    signals[i] = 0.25
+                    position = 1
+            elif is_trending_down and volume[i] > vol_ma[i]:
+                # In downtrend, go short on rally to Teeth
+                if close[i] >= teeth_aligned[i] and close[i] < bb_upper_aligned[i]:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Exit: price crosses below KAMA
-            if close[i] < kama_12h[i]:
+            # Exit long conditions
+            if is_trending_up and close[i] >= lips_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            elif is_ranging and close[i] >= bb_middle_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            elif close[i] <= bb_lower_aligned[i]:  # stop loss
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price crosses above KAMA
-            if close[i] > kama_12h[i]:
+            # Exit short conditions
+            if is_trending_down and close[i] <= lips_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            elif is_ranging and close[i] <= bb_middle_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            elif close[i] >= bb_upper_aligned[i]:  # stop loss
                 signals[i] = 0.0
                 position = 0
             else:
