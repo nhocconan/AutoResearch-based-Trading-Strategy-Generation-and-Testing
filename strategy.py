@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_Spike_v5"
-timeframe = "4h"
+name = "1d_KAMA_RSI_Chop_Filter_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,46 +17,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla R3 and S3 levels from previous day
-    high_prev = df_1d['high'].shift(1).values
-    low_prev = df_1d['low'].shift(1).values
-    close_prev = df_1d['close'].shift(1).values
+    # KAMA calculation (daily)
+    close_s = pd.Series(close)
+    change = abs(close_s.diff(1))
+    volatility = change.rolling(window=10, min_periods=10).sum()
+    er = change / volatility.replace(0, np.nan)
+    er = er.fillna(0)
+    sc = (er * (2 / (2 + 1) - 2 / (30 + 1)) + 2 / (30 + 1)) ** 2
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    r3 = close_prev + 1.1 * (high_prev - low_prev) / 4
-    s3 = close_prev - 1.1 * (high_prev - low_prev) / 4
+    # Weekly trend filter: EMA50
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Align daily levels to 4h timeframe (with 1-day delay for completed bar)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
+    for i in range(14, n):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # 1d EMA34 trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Chop index (14)
+    atr = np.zeros(n)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[high[0] - low[0]], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_sum = np.zeros(n)
+    for i in range(14, n):
+        atr_sum[i] = np.sum(tr[i-13:i+1])
+    atr[13:] = atr_sum[13:] / 14
+    highest_high = np.zeros(n)
+    lowest_low = np.zeros(n)
+    for i in range(14, n):
+        highest_high[i] = np.max(high[i-13:i+1])
+        lowest_low[i] = np.min(low[i-13:i+1])
+    chop = np.zeros(n)
+    for i in range(14, n):
+        if highest_high[i] != lowest_low[i]:
+            chop[i] = 100 * np.log10(atr_sum[i] / (highest_high[i] - lowest_low[i])) / np.log10(14)
+        else:
+            chop[i] = 50
     
-    # Volume filter: current volume > 2.0x 20-period average
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma_20[i] = np.mean(volume[i-20:i])
-    vol_filter = volume > (2.0 * vol_ma_20)
+    # Align weekly EMA50 to daily
+    trend_up = close > ema_50_1w_aligned
+    trend_down = close < ema_50_1w_aligned
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 6  # ~1 day for 4h to reduce trades
+    cooldown_bars = 5  # ~1 week for daily to reduce trades
     
-    start_idx = max(200, 20, 50)
+    start_idx = max(30, 50, 14)  # Ensure all indicators ready
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or np.isnan(ema_50_1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,36 +98,34 @@ def generate_signals(prices):
         
         bars_since_last_trade += 1
         
-        # Determine 1d trend direction
-        trend_up = close > ema_34_1d_aligned[i]
-        trend_down = close < ema_34_1d_aligned[i]
-        
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: Break above R3 in uptrend with volume spike
-            if (close[i] > r3_aligned[i] and 
-                trend_up[i] and 
-                vol_filter[i]):
+            # Long: Price above KAMA, RSI > 50, chop > 61.8 (trending)
+            if (close[i] > kama[i] and 
+                rsi[i] > 50 and 
+                chop[i] > 61.8 and 
+                trend_up[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: Break below S3 in downtrend with volume spike
-            elif (close[i] < s3_aligned[i] and 
-                  trend_down[i] and 
-                  vol_filter[i]):
+            # Short: Price below KAMA, RSI < 50, chop > 61.8 (trending)
+            elif (close[i] < kama[i] and 
+                  rsi[i] < 50 and 
+                  chop[i] > 61.8 and 
+                  trend_down[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit: Price re-enters Camarilla body (between R3 and S3) or trend change
-            if (close[i] < r3_aligned[i] and close[i] > s3_aligned[i]) or not trend_up[i]:
+            # Exit: Price crosses below KAMA or chop < 38.2 (ranging)
+            if close[i] < kama[i] or chop[i] < 38.2:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price re-enters Camarilla body or trend change
-            if (close[i] < r3_aligned[i] and close[i] > s3_aligned[i]) or not trend_down[i]:
+            # Exit: Price crosses above KAMA or chop < 38.2 (ranging)
+            if close[i] > kama[i] or chop[i] < 38.2:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
@@ -105,11 +134,8 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Using 4h timeframe with Camarilla R3/S3 breakouts, 1d EMA34 trend filter,
-# and volume confirmation (2.0x 20-period average) will yield 20-50 trades per year
-# (80-200 total over 4 years). The strategy trades with the higher timeframe trend,
-# capturing institutional breakouts in both bull and bear markets. Volume filter ensures
-# breakouts have institutional participation. Position size of 0.25 manages drawdown,
-# and cooldown of 6 bars prevents overtrading. This version reduces volume threshold
-# from 2.5x to 2.0x to increase signal frequency slightly while maintaining quality,
-# and increases cooldown from 2 to 6 bars to further reduce trade frequency.
+# Hypothesis: Using daily KAMA as trend filter with RSI momentum and Chop index regime filter.
+# Long when price > KAMA, RSI > 50, chop > 61.8 (trending up), short when price < KAMA, RSI < 50, chop > 61.8 (trending down).
+# Weekly EMA50 ensures alignment with higher timeframe trend. Chop index filters out ranging markets (chop < 38.2).
+# This strategy should work in both bull and bear markets by following the weekly trend while using daily momentum.
+# Position size 0.25 manages drawdown, cooldown of 5 days prevents overtrading (~70 trades/year max).
