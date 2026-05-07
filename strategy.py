@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_RSI_MeanReversion_Volume_Confirmation
-Hypothesis: Uses RSI mean-reversion on 4h timeframe with volume spike confirmation and Bollinger Band squeeze filter. 
-Enters long when RSI < 30 and price below lower Bollinger Band with volume > 1.5x average. 
-Enters short when RSI > 70 and price above upper Bollinger Band with volume > 1.5x average. 
-Uses 1d trend filter to align with higher timeframe direction. 
-Designed for low trade frequency (15-30/year) with clear mean-reversion logic, works in ranging markets and avoids strong trends.
+4h_TRIX_VolumeSpike_TrendFilter_v1
+Hypothesis: Uses TRIX (15-period) for momentum with volume spike confirmation and EMA50 trend filter. 
+Enters long when TRIX crosses above zero with volume > 2x average and price above EMA50. 
+Enters short when TRIX crosses below zero with volume > 2x average and price below EMA50. 
+Designed for low trade frequency (20-40/year) with clear momentum logic, works in trending markets and avoids range-bound conditions.
 """
 
-name = "4h_RSI_MeanReversion_Volume_Confirmation"
+name = "4h_TRIX_VolumeSpike_TrendFilter_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -35,20 +34,12 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # RSI calculation (14-period)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Bollinger Bands (20-period, 2 std dev)
-    ma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_bb = ma20 + (2 * std20)
-    lower_bb = ma20 - (2 * std20)
+    # TRIX calculation (15-period EMA of EMA of EMA)
+    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
+    trix = 100 * (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1)
+    trix[0] = 0  # First value undefined
     
     # Volume confirmation: 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -61,8 +52,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(rsi[i]) or np.isnan(ma20[i]) or np.isnan(std20[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(trix[i]) or np.isnan(vol_ratio[i]) or 
+            np.isnan(ema_50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -80,30 +71,28 @@ def generate_signals(prices):
         daily_trend_down = daily_close_aligned[i] < ema_50_1d_aligned[i]
         
         if position == 0:
-            # Long: RSI oversold, price below lower BB, volume spike, daily trend up (for mean reversion in uptrend)
-            if (rsi[i] < 30 and 
-                close[i] < lower_bb[i] and 
-                vol_ratio[i] > 1.5 and 
-                daily_trend_up):
+            # Long: TRIX crosses above zero, volume spike, price above EMA50
+            if (trix[i] > 0 and trix[i-1] <= 0 and 
+                vol_ratio[i] > 2.0 and 
+                close[i] > ema_50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI overbought, price above upper BB, volume spike, daily trend down (for mean reversion in downtrend)
-            elif (rsi[i] > 70 and 
-                  close[i] > upper_bb[i] and 
-                  vol_ratio[i] > 1.5 and 
-                  daily_trend_down):
+            # Short: TRIX crosses below zero, volume spike, price below EMA50
+            elif (trix[i] < 0 and trix[i-1] >= 0 and 
+                  vol_ratio[i] > 2.0 and 
+                  close[i] < ema_50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: RSI returns to neutral or price reaches middle band
-            if rsi[i] > 50 or close[i] > ma20[i]:
+            # Exit long: TRIX crosses below zero or price falls below EMA50
+            if trix[i] < 0 or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: RSI returns to neutral or price reaches middle band
-            if rsi[i] < 50 or close[i] < ma20[i]:
+            # Exit short: TRIX crosses above zero or price rises above EMA50
+            if trix[i] > 0 or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
