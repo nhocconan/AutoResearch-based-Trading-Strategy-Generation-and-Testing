@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_Vortex_Trend_Filter_v2
-Hypothesis: Uses Vortex Indicator on 4h timeframe for trend direction, confirmed by 12h trend filter and volume spike.
-Vortex identifies trend strength by comparing positive and negative vortex movements.
-Works in both bull and bear markets by capturing established trends with volume confirmation.
-Targets 25-35 trades/year to minimize fee drag.
+1h_4h_Donchian_1d_Trend_Breakout_v1
+Hypothesis: Combines 4h Donchian breakout with 1-day trend filter for direction,
+using 1h only for precise entry timing and volume confirmation. Targets 15-37 trades/year
+by requiring multiple confluence factors to minimize overtrading. Works in bull/bear via
+trend filter and volatility-based breakout levels.
 """
 
-name = "4h_Vortex_Trend_Filter_v2"
-timeframe = "4h"
+name = "1h_4h_Donchian_1d_Trend_Breakout_v1"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -20,81 +20,69 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Vortex Indicator (14-period)
-    # VM+ = |current high - previous low|
-    # VM- = |current low - previous high|
-    vm_plus = np.abs(high - np.roll(low, 1))
-    vm_minus = np.abs(low - np.roll(high, 1))
-    vm_plus[0] = 0  # first value has no previous
-    vm_minus[0] = 0
-    
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first TR is just high-low
-    
-    # Sum over 14 periods
-    vm_plus_sum = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values
-    vm_minus_sum = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    
-    # VI+ and VI-
-    vi_plus = np.divide(vm_plus_sum, tr_sum, out=np.zeros_like(vm_plus_sum), where=tr_sum!=0)
-    vi_minus = np.divide(vm_minus_sum, tr_sum, out=np.zeros_like(vm_minus_sum), where=tr_sum!=0)
-    
-    # 12h trend filter: EMA of 12h close
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # 4h Donchian channels (20-period high/low)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
     
-    # Volume confirmation: current volume > 1.5 * 20-period average
+    # 1-day trend filter (EMA 50)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # Volume confirmation (volume > 1.5x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(14, n):
+    for i in range(50, n):
         # Skip if any critical value is NaN
-        if (np.isnan(vi_plus[i]) or np.isnan(vi_minus[i]) or 
-            np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: VI+ > VI- AND price above 12h EMA with volume spike
-            if vi_plus[i] > vi_minus[i] and close[i] > ema_12h_aligned[i] and volume[i] > 1.5 * vol_ma[i]:
-                signals[i] = 0.25
+            # Long: price breaks above 4h Donchian high AND above 1-day EMA with volume confirmation
+            if close[i] > donchian_high_aligned[i] and close[i] > ema_1d_aligned[i] and volume[i] > 1.5 * vol_ma[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short: VI- > VI+ AND price below 12h EMA with volume spike
-            elif vi_minus[i] > vi_plus[i] and close[i] < ema_12h_aligned[i] and volume[i] > 1.5 * vol_ma[i]:
-                signals[i] = -0.25
+            # Short: price breaks below 4h Donchian low AND below 1-day EMA with volume confirmation
+            elif close[i] < donchian_low_aligned[i] and close[i] < ema_1d_aligned[i] and volume[i] > 1.5 * vol_ma[i]:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit: VI- crosses above VI+ (trend weakening) OR price below 12h EMA
-            if vi_minus[i] > vi_plus[i] or close[i] < ema_12h_aligned[i]:
+            # Exit: price breaks below 4h Donchian low OR below 1-day EMA
+            if close[i] < donchian_low_aligned[i] or close[i] < ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit: VI+ crosses above VI- (trend weakening) OR price above 12h EMA
-            if vi_plus[i] > vi_minus[i] or close[i] > ema_12h_aligned[i]:
+            # Exit: price breaks above 4h Donchian high OR above 1-day EMA
+            if close[i] > donchian_high_aligned[i] or close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
