@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA trend filter and volume confirmation.
-# Long when: price breaks above Donchian(20) high AND 1w EMA(50) rising AND volume > 20-day average volume
-# Short when: price breaks below Donchian(20) low AND 1w EMA(50) falling AND volume > 20-day average volume
-# Exit when price crosses back through the Donchian(20) midline (mean of high and low).
-# Designed for 1d timeframe with low trade frequency (target: 15-25/year) to avoid fee drag.
-# Uses 1w for trend direction and volume confirmation to avoid false breakouts.
-# Works in bull markets via breakouts in uptrend, in bear markets via breakdowns in downtrend.
-# Volume filter avoids low-conviction breakouts that often fail.
-name = "1d_Donchian20_1wEMA50_VolumeConfirm"
-timeframe = "1d"
+# Hypothesis: 4h Donchian breakout with volume confirmation and 1d volatility regime filter.
+# Long when price breaks above 20-period Donchian high AND volume > 1.5x 20-period average volume AND 1d ATR(14) < 1d ATR(50) (low volatility regime).
+# Short when price breaks below 20-period Donchian low AND volume > 1.5x 20-period average volume AND 1d ATR(14) < 1d ATR(50) (low volatility regime).
+# Exit when price crosses back below 20-period Donchian low (long) or above 20-period Donchian high (short).
+# Designed for 4h timeframe with tight entry conditions (target: 20-50 trades/year) to avoid fee drag.
+# Uses 4h for price breakout and volume confirmation, and 1d for volatility regime to avoid choppy markets.
+# Works in bull markets via upward breakouts in uptrend, in bear markets via downward breakouts in downtrend.
+# Volatility filter (ATR14 < ATR50) avoids high-noise periods and whipsaws.
+name = "4h_DonchianBreakout_Volume_VolatilityRegime"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,29 +25,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian(20) channels
+    # 4h Donchian(20) channels
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # 1w EMA(50) for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # 4h Volume confirmation: volume > 1.5x 20-period average volume
+    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirmed = volume > (1.5 * avg_volume)
+    
+    # 1d ATR(14) and ATR(50) for volatility regime
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_rising = np.zeros_like(ema_50_1w, dtype=bool)
-    ema_50_falling = np.zeros_like(ema_50_1w, dtype=bool)
-    ema_50_rising[1:] = ema_50_1w[1:] > ema_50_1w[:-1]
-    ema_50_falling[1:] = ema_50_1w[1:] < ema_50_1w[:-1]
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    ema_50_rising_aligned = align_htf_to_ltf(prices, df_1w, ema_50_rising)
-    ema_50_falling_aligned = align_htf_to_ltf(prices, df_1w, ema_50_falling)
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = 0  # first value has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Volume confirmation: current volume > 20-day average volume
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > vol_ma_20
+    atr_14 = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    atr_50 = pd.Series(tr).ewm(alpha=1/50, adjust=False, min_periods=50).mean().values
+    low_vol_regime = atr_14 < atr_50  # low volatility regime
+    
+    low_vol_aligned = align_htf_to_ltf(prices, df_1d, low_vol_regime)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -55,19 +63,17 @@ def generate_signals(prices):
     start_idx = 50  # Sufficient warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_50_rising_aligned[i]) or np.isnan(ema_50_falling_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(volume_confirmed[i]) or np.isnan(low_vol_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above Donchian high AND 1w EMA50 rising AND volume confirmed
-            long_condition = (close[i] > donchian_high[i]) and ema_50_rising_aligned[i] and volume_confirmed[i]
-            # Short: break below Donchian low AND 1w EMA50 falling AND volume confirmed
-            short_condition = (close[i] < donchian_low[i]) and ema_50_falling_aligned[i] and volume_confirmed[i]
+            # Long: price breaks above Donchian high AND volume confirmed AND low vol regime
+            long_condition = (close[i] > donchian_high[i]) and volume_confirmed[i] and low_vol_aligned[i]
+            # Short: price breaks below Donchian low AND volume confirmed AND low vol regime
+            short_condition = (close[i] < donchian_low[i]) and volume_confirmed[i] and low_vol_aligned[i]
             
             if long_condition:
                 signals[i] = 0.25
@@ -76,15 +82,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price crosses below Donchian mid
-            if close[i] < donchian_mid[i]:
+            # Exit: price crosses back below Donchian low
+            if close[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price crosses above Donchian mid
-            if close[i] > donchian_mid[i]:
+            # Exit: price crosses back above Donchian high
+            if close[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
