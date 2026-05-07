@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Choppiness Index regime filter with 12h Donchian breakout and volume confirmation.
-# Use 12h Choppiness Index to detect regimes: >61.8 = range (mean revert), <38.2 = trending (trend follow).
-# In trending regime (CHOP < 38.2): enter long on breakout above 12h Donchian(20) upper band, short on breakdown below lower band.
-# In ranging regime (CHOP > 61.8): enter long at Donchian lower band (mean reversion), short at upper band.
-# Volume confirmation: current volume > 1.5x 20-period average to avoid low-conviction breakouts.
-# Exit when regime changes or volatility drops (ATR ratio < 0.8).
-# Designed for 6h timeframe with moderate trade frequency (target: 15-30/year) to avoid fee drag.
-# Works in both bull and bear markets by adapting to regime.
-name = "6h_Chop_Donchian_Breakout_12hVol"
-timeframe = "6h"
+# Hypothesis: 4h Choppiness Index regime filter combined with 1d Donchian breakout and volume confirmation.
+# In high volatility regimes (CHOP < 38.2), trade breakouts of 1d Donchian channels (20-period).
+# In low volatility regimes (CHOP > 61.8), avoid trading to prevent whipsaws.
+# Volume confirmation ensures breakout legitimacy.
+# Designed for 4h timeframe with controlled trade frequency (target: 20-50/year) to avoid fee drag.
+# Works in both bull and bear markets by adapting to volatility regimes.
+
+name = "4h_Chop_DonchianBreakout_1dVolume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,47 +24,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h data for Choppiness Index and Donchian channels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 14:
+    # Choppiness Index (14-period) for regime detection
+    atr14 = pd.Series(np.maximum(np.maximum(high - low, np.abs(high - np.roll(close, 1))), np.abs(low - np.roll(close, 1)))).rolling(window=14, min_periods=14).mean().values
+    atr14[0] = np.mean(np.maximum(np.maximum(high[:1] - low[:1], np.abs(high[:1] - np.roll(close[:1], 1))), np.abs(low[:1] - np.roll(close[:1], 1)))) if n > 0 else 0
+    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr14 * 14 / (max_high - min_low)) / np.log10(14)
+    chop = np.where((max_high - min_low) != 0, chop, 50)  # Avoid division by zero
+    
+    # 1d Donchian channels (20-period) for breakout signals
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # True Range for ATR calculation
-    tr1 = high_12h[1:] - low_12h[1:]
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with indices
-    
-    # ATR(14)
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Sum of True Range over 14 periods for Choppiness denominator
-    sum_tr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    
-    # Highest high and lowest low over 14 periods
-    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
-    
-    # Choppiness Index: 100 * log10(sum_tr / (highest_high - lowest_low)) / log10(14)
-    # Avoid division by zero
-    range_hl = highest_high - lowest_low
-    chop = np.full_like(close_12h, np.nan)
-    mask = (range_hl > 0) & (~np.isnan(sum_tr))
-    chop[mask] = 100 * np.log10(sum_tr[mask] / range_hl[mask]) / np.log10(14)
-    
-    # Donchian channels (20-period)
-    donch_h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donch_l = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    
-    # Align HTF indicators to 6s timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_12h, chop)
-    donch_h_aligned = align_htf_to_ltf(prices, df_12h, donch_h)
-    donch_l_aligned = align_htf_to_ltf(prices, df_12h, donch_l)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -74,33 +51,21 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Sufficient warmup for indicators
+    start_idx = 34  # Sufficient warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(chop_aligned[i]) or np.isnan(donch_h_aligned[i]) or np.isnan(donch_l_aligned[i]) or 
+        if (np.isnan(chop[i]) or np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
             np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        chop_val = chop_aligned[i]
-        donch_h_val = donch_h_aligned[i]
-        donch_l_val = donch_l_aligned[i]
-        
         if position == 0:
-            # Determine regime and enter accordingly
-            if chop_val < 38.2:  # Trending regime
-                # Breakout entry
-                long_cond = (close[i] > donch_h_val) and volume_filter[i]
-                short_cond = (close[i] < donch_l_val) and volume_filter[i]
-            elif chop_val > 61.8:  # Ranging regime
-                # Mean reversion entry
-                long_cond = (close[i] < donch_l_val) and volume_filter[i]
-                short_cond = (close[i] > donch_h_val) and volume_filter[i]
-            else:  # Transition zone - no trade
-                long_cond = False
-                short_cond = False
+            # Long conditions: Low volatility regime (CHOP > 61.8), price breaks above 1d Donchian high, volume confirmation
+            long_cond = (chop[i] > 61.8) and (close[i] > donchian_high_aligned[i]) and volume_filter[i]
+            # Short conditions: Low volatility regime (CHOP > 61.8), price breaks below 1d Donchian low, volume confirmation
+            short_cond = (chop[i] > 61.8) and (close[i] < donchian_low_aligned[i]) and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -109,15 +74,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: regime change to ranging or volatility drop
-            if chop_val > 61.8:  # Exit trending for ranging
+            # Long exit: High volatility regime (CHOP < 38.2) OR price breaks below Donchian low
+            if (chop[i] < 38.2) or (close[i] < donchian_low_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: regime change to ranging or volatility drop
-            if chop_val > 61.8:  # Exit trending for ranging
+            # Short exit: High volatility regime (CHOP < 38.2) OR price breaks above Donchian high
+            if (chop[i] < 38.2) or (close[i] > donchian_high_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
