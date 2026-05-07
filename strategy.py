@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """
-6h_Trix_VolumeSpike_ChopRegime
-Hypothesis: Use TRIX (1-period ROC of EMA smoothed) for momentum, volume spikes for confirmation,
-and Choppiness Index to filter between trending (TRIX momentum) and ranging (mean reversion) regimes.
-In trending markets (CHOP < 38.2): go long when TRIX crosses above zero with volume spike,
-short when TRIX crosses below zero with volume spike.
-In ranging markets (CHOP > 61.8): fade extreme TRIX values (long when TRIX < -0.1, short when TRIX > 0.1)
-with volume spike confirmation. Weekly trend filter (price > weekly EMA50) avoids counter-trend trades.
-Designed for 15-30 trades/year to avoid fee drag in 6h timeframe.
+4h_Keltner_Breakout_Pullback
+Hypothesis: 4h timeframe with Keltner Channel breakout and EMA pullback entry.
+Goes long when price breaks above upper Keltner Channel (EMA20 + 2*ATR) and pulls back to EMA20 in uptrend.
+Goes short when price breaks below lower Keltner Channel (EMA20 - 2*ATR) and pulls back to EMA20 in downtrend.
+Uses 1-day ADX for trend strength filter (ADX > 25) to avoid ranging markets.
+Designed for 20-40 trades/year to avoid fee drag in 4h timeframe.
+Works in bull/bear via trend filter and pullback entries at dynamic support/resistance.
 """
 
-name = "6h_Trix_VolumeSpike_ChopRegime"
-timeframe = "6h"
+name = "4h_Keltner_Breakout_Pullback"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -20,7 +19,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -28,124 +27,119 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Calculate weekly EMA50 for trend
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
-    
-    # Get daily data for Choppiness Index
+    # Get 1-day data for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range and ATR(14) for Chop
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first bar
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate ADX(14) on daily timeframe
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
+        
+        for i in range(1, len(high)):
+            plus_dm[i] = max(high[i] - high[i-1], 0)
+            minus_dm[i] = max(low[i-1] - low[i], 0)
+            if plus_dm[i] < minus_dm[i]:
+                plus_dm[i] = 0
+            if minus_dm[i] < plus_dm[i]:
+                minus_dm[i] = 0
+            if plus_dm[i] == minus_dm[i]:
+                plus_dm[i] = 0
+                minus_dm[i] = 0
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        atr = np.zeros_like(high)
+        atr[period] = np.mean(tr[1:period+1])
+        for i in range(period+1, len(high)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        
+        plus_di = 100 * (pd.Series(plus_dm).ewm(alpha=1/period, adjust=False).mean().values / atr)
+        minus_di = 100 * (pd.Series(minus_dm).ewm(alpha=1/period, adjust=False).mean().values / atr)
+        dx = np.zeros_like(high)
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+        adx = pd.Series(dx).ewm(alpha=1/period, adjust=False).mean().values
+        
+        # Set first 'period' values to NaN
+        adx[:period] = np.nan
+        return adx
     
-    # Sum of TRUE RANGE over 14 periods
-    sum_tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Highest high and lowest low over 14 periods
-    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    # Calculate Keltner Channel on 4h timeframe
+    def calculate_atr(high, low, close, period=10):
+        tr = np.zeros_like(high)
+        for i in range(1, len(high)):
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        atr = np.zeros_like(high)
+        atr[period] = np.mean(tr[1:period+1])
+        for i in range(period+1, len(high)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        
+        # Set first 'period' values to NaN
+        atr[:period] = np.nan
+        return atr
     
-    # Chop = 100 * log10(sum_tr_14 / (hh_14 - ll_14)) / log10(14)
-    chop = 100 * np.log10(sum_tr_14 / (hh_14 - ll_14)) / np.log10(14)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    atr_4h = calculate_atr(high, low, close, 10)
+    ema_20_4h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # TRIX: 1-period ROC of triple-smoothed EMA (12-period)
-    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean()
-    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
-    trix = 100 * (ema3 - ema3.shift(1)) / ema3.shift(1)
-    trix = trix.fillna(0).values
-    
-    # Volume confirmation: volume > 2x 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.divide(volume, vol_ma20, out=np.zeros_like(volume), where=vol_ma20!=0)
+    upper_keltner = ema_20_4h + 2 * atr_4h
+    lower_keltner = ema_20_4h - 2 * atr_4h
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Warmup
+    start_idx = 50  # Warmup
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(close_1w_aligned[i]) or
-            np.isnan(chop_aligned[i]) or
-            np.isnan(trix[i]) or
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(ema_20_4h[i]) or 
+            np.isnan(upper_keltner[i]) or 
+            np.isnan(lower_keltner[i]) or
+            np.isnan(adx_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine weekly trend (only trade with trend)
-        trend_up = close_1w_aligned[i] > ema_50_1w_aligned[i]
-        trend_down = close_1w_aligned[i] < ema_50_1w_aligned[i]
+        # Trend filter: only trade when ADX > 25 (trending market)
+        strong_trend = adx_1d_aligned[i] > 25
         
         if position == 0:
-            # Determine regime
-            if chop_aligned[i] < 38.2:  # Trending regime
-                # Long: TRIX crosses above zero with volume spike
-                if trix[i] > 0 and trix[i-1] <= 0 and vol_ratio[i] > 2.0 and trend_up:
-                    signals[i] = 0.25
-                    position = 1
-                # Short: TRIX crosses below zero with volume spike
-                elif trix[i] < 0 and trix[i-1] >= 0 and vol_ratio[i] > 2.0 and trend_down:
-                    signals[i] = -0.25
-                    position = -1
-            elif chop_aligned[i] > 61.8:  # Ranging regime
-                # Long: TRIX deeply oversold with volume spike
-                if trix[i] < -0.1 and vol_ratio[i] > 2.0:
-                    signals[i] = 0.25
-                    position = 1
-                # Short: TRIX deeply overbought with volume spike
-                elif trix[i] > 0.1 and vol_ratio[i] > 2.0:
-                    signals[i] = -0.25
-                    position = -1
+            # Long: price breaks above upper Keltner and pulls back to EMA20 in uptrend
+            if (high[i] > upper_keltner[i] and 
+                low[i] <= ema_20_4h[i] and 
+                close[i] > ema_20_4h[i] and
+                strong_trend):
+                signals[i] = 0.25
+                position = 1
+            # Short: price breaks below lower Keltner and pulls back to EMA20 in downtrend
+            elif (low[i] < lower_keltner[i] and 
+                  high[i] >= ema_20_4h[i] and 
+                  close[i] < ema_20_4h[i] and
+                  strong_trend):
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Exit conditions
-            if chop_aligned[i] < 38.2:  # Trending: exit on TRIX cross below zero
-                if trix[i] < 0 and trix[i-1] >= 0:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-            else:  # Ranging: exit when TRIX returns to neutral
-                if -0.05 <= trix[i] <= 0.05:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+            # Exit long: price breaks below lower Keltner or trend weakens
+            if low[i] < lower_keltner[i] or not strong_trend:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
         elif position == -1:
-            # Exit conditions
-            if chop_aligned[i] < 38.2:  # Trending: exit on TRIX cross above zero
-                if trix[i] > 0 and trix[i-1] <= 0:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
-            else:  # Ranging: exit when TRIX returns to neutral
-                if -0.05 <= trix[i] <= 0.05:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            # Exit short: price breaks above upper Keltner or trend weakens
+            if high[i] > upper_keltner[i] or not strong_trend:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
