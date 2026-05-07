@@ -1,17 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_Ichimoku_CloudBreakout_1wTrend
-Hypothesis: Daily Ichimoku cloud breakouts with weekly trend filter capture major momentum moves.
-In bull markets: price breaks above cloud with weekly uptrend = long. 
-In bear markets: price breaks below cloud with weekly downtrend = short.
-The cloud acts as dynamic support/resistance, reducing false breakouts.
-Weekly trend filter ensures we only trade in the direction of higher timeframe momentum.
-Low frequency via daily timeframe and strict entry criteria (cloud breakout + weekly trend + volume).
-Target: 30-100 total trades over 4 years.
+6h_LinearRegressionBreakout_12hTrend
+Hypothesis: Price crossing above/below the 60-period linear regression channel with 12h trend filter and volume confirmation captures momentum moves while reducing false signals. Linear regression adapts to trend direction, and the channel acts as dynamic support/resistance. 12h trend filter ensures alignment with higher timeframe momentum. Volume confirmation adds conviction. Low frequency via 6h timeframe and strict entry criteria.
+Target: 50-150 total trades over 4 years.
 """
-
-name = "1d_Ichimoku_CloudBreakout_1wTrend"
-timeframe = "1d"
+name = "6h_LinearRegressionBreakout_12hTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -28,33 +22,47 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Ichimoku components (9, 26, 52 periods)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan = (high_9 + low_9) / 2
+    # Linear Regression Channel (60-period)
+    period = 60
+    # Calculate linear regression slope and intercept using least squares
+    # For each point, we need sum of x, y, x^2, xy over the window
+    # Since x is just 0,1,2,...,period-1, we can precompute sums
+    sum_x = period * (period - 1) / 2
+    sum_x2 = (period - 1) * period * (2 * period - 1) / 6
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun = (high_26 + low_26) / 2
+    # Initialize arrays
+    slope = np.full(n, np.nan)
+    intercept = np.full(n, np.nan)
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2)
+    # Calculate using rolling window
+    for i in range(period - 1, n):
+        y_window = close[i - period + 1:i + 1]
+        sum_y = np.sum(y_window)
+        sum_xy = np.sum(y_window * np.arange(period))
+        
+        # Calculate slope and intercept
+        slope[i] = (period * sum_xy - sum_x * sum_y) / (period * sum_x2 - sum_x * sum_x)
+        intercept[i] = (sum_y - slope[i] * sum_x) / period
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    high_52 = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    low_52 = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = ((high_52 + low_52) / 2)
+    # Calculate LR value at current point (end of window)
+    lr_value = intercept + slope * (period - 1)
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Calculate standard deviation of residuals for channel width
+    residuals = close - lr_value
+    std_dev = pd.Series(residuals).rolling(window=period, min_periods=period).std().values
+    
+    # Upper and lower channel (1 standard deviation)
+    upper_channel = lr_value + std_dev
+    lower_channel = lr_value - std_dev
+    
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # 1w EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     # Volume filter: current volume > 1.5 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -63,40 +71,36 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 52 + 26)  # Need enough data for Ichimoku
+    start_idx = max(100, period - 1)  # Need enough data for LR
     
     for i in range(start_idx, n):
         # Skip if any data is not ready
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or np.isnan(senkou_a[i]) or 
-            np.isnan(senkou_b[i]) or np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(lr_value[i]) or np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine cloud boundaries (Senkou Span A and B)
-        upper_cloud = np.maximum(senkou_a[i], senkou_b[i])
-        lower_cloud = np.minimum(senkou_a[i], senkou_b[i])
-        
         if position == 0:
-            # Long: price breaks above cloud + weekly uptrend + volume
-            if close[i] > upper_cloud and close[i] > ema_50_1w_aligned[i] and volume_filter[i]:
+            # Long: price crosses above upper channel + 12h uptrend + volume
+            if close[i] > upper_channel[i] and close[i] > ema_50_12h_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below cloud + weekly downtrend + volume
-            elif close[i] < lower_cloud and close[i] < ema_50_1w_aligned[i] and volume_filter[i]:
+            # Short: price crosses below lower channel + 12h downtrend + volume
+            elif close[i] < lower_channel[i] and close[i] < ema_50_12h_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: price returns to Kijun-sen (mean reversion to baseline)
+            # Exit: price returns to linear regression value (mean reversion to trend)
             if position == 1:
-                if close[i] <= kijun[i]:
+                if close[i] <= lr_value[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] >= kijun[i]:
+                if close[i] >= lr_value[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
