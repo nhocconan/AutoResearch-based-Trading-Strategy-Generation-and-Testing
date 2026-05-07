@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1wTrend_Volume_v2
-Hypothesis: 12h Camarilla R3/S3 breakouts with 1-week trend filter and volume confirmation.
-This strategy targets major trend reversals and continuations on higher timeframes.
-R3/S3 levels represent stronger breakout points than R1/S1, reducing false signals.
-The 1-week trend filter ensures alignment with the major trend, improving performance in both bull and bear markets.
-Volume confirmation ensures institutional participation.
-Target: 15-30 trades per year (~60-120 over 4 years) with position size 0.25.
+1d_1w_Camarilla_R3_S3_Breakout_Trend_Volume
+Hypothesis: Daily Camarilla R3/S3 breakouts with 1-week trend filter and volume confirmation.
+The 1-week trend filter ensures alignment with the major trend, reducing false signals in both bull and bear markets.
+Volume confirmation ensures institutional participation. Target: 20-50 trades per year (~80-200 over 4 years) with position size 0.25.
 """
 
-name = "12h_Camarilla_R3_S3_Breakout_1wTrend_Volume_v2"
-timeframe = "12h"
+name = "1d_1w_Camarilla_R3_S3_Breakout_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -36,27 +33,26 @@ def generate_signals(prices):
     ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
     ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Load 1-day data ONCE for Camarilla calculation
+    # Calculate Camarilla levels from previous day (using 1d data)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day (using 1d data)
-    prev_high = df_1d['high'].values
-    prev_low = df_1d['low'].values
-    prev_close = df_1d['close'].values
+    prev_high_1d = df_1d['high'].values
+    prev_low_1d = df_1d['low'].values
+    prev_close_1d = df_1d['close'].values
     
     # Roll to get previous day values
-    prev_high_1 = np.roll(prev_high, 1)
-    prev_low_1 = np.roll(prev_low, 1)
-    prev_close_1 = np.roll(prev_close, 1)
+    prev_high = np.roll(prev_high_1d, 1)
+    prev_low = np.roll(prev_low_1d, 1)
+    prev_close = np.roll(prev_close_1d, 1)
     # Fill first values
-    prev_high_1[0] = prev_high[0]
-    prev_low_1[0] = prev_low[0]
-    prev_close_1[0] = prev_close[0]
+    prev_high[0] = prev_high_1d[0]
+    prev_low[0] = prev_low_1d[0]
+    prev_close[0] = prev_close_1d[0]
     
-    pivot = (prev_high_1 + prev_low_1 + prev_close_1) / 3
-    range_val = prev_high_1 - prev_low_1
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_val = prev_high - prev_low
     
     # Camarilla R3 and S3 levels
     R3 = close + (range_val * 1.1 / 4)
