@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Refined"
-timeframe = "4h"
+name = "6h_Ichimoku_CloudBreakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,48 +17,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily OHLC for Camarilla calculation
+    # Daily OHLC for Ichimoku calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    if len(df_1d) < 52:  # Need at least 52 days for Senkou Span B
         return np.zeros(n)
     
     daily_high = df_1d['high'].values
     daily_low = df_1d['low'].values
     daily_close = df_1d['close'].values
     
-    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    camarilla_r1 = daily_close + (daily_high - daily_low) * 1.1 / 12
-    camarilla_s1 = daily_close - (daily_high - daily_low) * 1.1 / 12
+    # Ichimoku components
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(daily_high).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(daily_low).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (period9_high + period9_low) / 2
     
-    # Align Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(daily_high).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(daily_low).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (period26_high + period26_low) / 2
     
-    # Daily trend: price above/below EMA34
-    ema_34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
     
-    daily_trend_up = close > ema_34_aligned
-    daily_trend_down = close < ema_34_aligned
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period52_high = pd.Series(daily_high).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(daily_low).rolling(window=52, min_periods=52).min().values
+    senkou_span_b = (period52_high + period52_low) / 2
     
-    # Volume filter: current volume > 1.5x 24-period average (less restrictive)
+    # Align Ichimoku components to 6h timeframe
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
+    
+    # Daily trend: price above/below Kumo (cloud)
+    # Cloud top = max(Senkou Span A, Senkou Span B)
+    # Cloud bottom = min(Senkou Span A, Senkou Span B)
+    cloud_top = np.maximum(senkou_span_a_aligned, senkou_span_b_aligned)
+    cloud_bottom = np.minimum(senkou_span_a_aligned, senkou_span_b_aligned)
+    
+    daily_trend_up = close > cloud_top
+    daily_trend_down = close < cloud_bottom
+    
+    # Volume filter: current volume > 2.0x 24-period average
     vol_ma_24 = np.full(n, np.nan)
     for i in range(24, n):
         vol_ma_24[i] = np.mean(volume[i-24:i])
-    vol_filter = volume > (1.5 * vol_ma_24)
+    vol_filter = volume > (2.0 * vol_ma_24)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 12  # ~2 days (12*4h) to prevent overtrading
+    cooldown_bars = 4  # ~1 day (4*6h) to prevent overtrading
     
     start_idx = 24  # Volume MA needs 24 bars
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or 
+        if (np.isnan(tenkan_sen_aligned[i]) or 
+            np.isnan(kijun_sen_aligned[i]) or 
+            np.isnan(senkou_span_a_aligned[i]) or 
+            np.isnan(senkou_span_b_aligned[i]) or 
             np.isnan(vol_ma_24[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -75,31 +95,39 @@ def generate_signals(prices):
         trend_down = daily_trend_down[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: Price breaks above Camarilla R1 with volume in daily uptrend
-            if (close[i] > r1_aligned[i] and 
-                trend_up and 
+            # Long: Tenkan-sen crosses above Kijun-sen with price above cloud in daily uptrend
+            if (tenkan_sen_aligned[i] > kijun_sen_aligned[i] and
+                tenkan_sen_aligned[i-1] <= kijun_sen_aligned[i-1] and  # Cross just happened
+                close[i] > cloud_top[i] and
+                trend_up and
                 vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: Price breaks below Camarilla S1 with volume in daily downtrend
-            elif (close[i] < s1_aligned[i] and 
-                  trend_down and 
+            # Short: Tenkan-sen crosses below Kijun-sen with price below cloud in daily downtrend
+            elif (tenkan_sen_aligned[i] < kijun_sen_aligned[i] and
+                  tenkan_sen_aligned[i-1] >= kijun_sen_aligned[i-1] and  # Cross just happened
+                  close[i] < cloud_bottom[i] and
+                  trend_down and
                   vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit: Price falls back below Camarilla S1 or daily trend changes to down
-            if close[i] < s1_aligned[i] or not trend_up:
+            # Exit: Tenkan-sen crosses below Kijun-sen or price falls below cloud
+            if (tenkan_sen_aligned[i] < kijun_sen_aligned[i] and
+                tenkan_sen_aligned[i-1] >= kijun_sen_aligned[i-1]) or \
+               close[i] < cloud_bottom[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price rises back above Camarilla R1 or daily trend changes to up
-            if close[i] > r1_aligned[i] or not trend_down:
+            # Exit: Tenkan-sen crosses above Kijun-sen or price rises above cloud
+            if (tenkan_sen_aligned[i] > kijun_sen_aligned[i] and
+                tenkan_sen_aligned[i-1] <= kijun_sen_aligned[i-1]) or \
+               close[i] > cloud_top[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
@@ -108,4 +136,4 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: On 4h timeframe, price breaking above/below Camarilla R1/S1 levels with volume confirmation and daily EMA34 trend filter captures institutional breakout momentum. Camarilla levels provide mathematically derived support/resistance with institutional relevance. Works in bull markets (breakouts above R1 in daily uptrend) and bear markets (breakdowns below S1 in daily downtrend). Target: 75-200 trades over 4 years (19-50/year) to minimize fee drag while capturing significant moves. Daily trend filter ensures alignment with higher timeframe momentum. Reduced volume threshold (1.5x) and increased cooldown (12 bars) to balance trade frequency and avoid overtrading.
+# Hypothesis: On 6h timeframe, Ichimoku Tenkan/Kijun cross with price position relative to Kumo (cloud) provides high-probability trend signals. Combined with daily trend filter (price above/below cloud) and volume confirmation, this captures institutional momentum. Works in bull markets (TK cross up in uptrend above cloud) and bear markets (TK cross down in downtrend below cloud). The cloud acts as dynamic support/resistance. Target: 50-150 trades over 4 years (12-37/year) to minimize fee drag while capturing significant moves. Ichimoku is a complete trading system that works across market regimes.
