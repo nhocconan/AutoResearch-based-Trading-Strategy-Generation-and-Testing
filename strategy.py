@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Keltner_Breakout_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,32 +17,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter (EMA34) and Camarilla pivot calculation
+    # Get 1d data for ATR and EMA20 (midline)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
+    # Calculate 1d EMA20 (midline)
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
-    # Calculate 1d Camarilla pivot levels (R3, S3) from previous day
+    # Calculate 1d ATR(20)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d_prev = df_1d['close'].values
+    close_1d_arr = df_1d['close'].values
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d_arr, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d_arr, 1))
+    tr2[0] = np.nan
+    tr3[0] = np.nan
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_20_1d = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    atr_20_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_20_1d)
     
-    pivot = (high_1d + low_1d + close_1d_prev) / 3.0
-    r3 = pivot + (high_1d - low_1d) * 1.1 / 2.0
-    s3 = pivot - (high_1d - low_1d) * 1.1 / 2.0
+    # Calculate Keltner Channels (upper/lower)
+    upper_keltner = ema_20_1d_aligned + (2.0 * atr_20_1d_aligned)
+    lower_keltner = ema_20_1d_aligned - (2.0 * atr_20_1d_aligned)
     
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # Calculate 1d volume average for volume spike filter
+    # Get 1d volume for volume spike filter
     vol_1d = df_1d['volume'].values
-    vol_avg_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
+    vol_ma20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
+    
+    # Calculate 4h volume ratio (current volume vs 20-period average)
+    vol_ma20_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / vol_ma20_4h
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -51,38 +60,37 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data is not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or 
-            np.isnan(vol_avg_20_aligned[i])):
+        if (np.isnan(ema_20_1d_aligned[i]) or 
+            np.isnan(upper_keltner[i]) or 
+            np.isnan(lower_keltner[i]) or 
+            np.isnan(vol_ma20_1d_aligned[i]) or 
+            np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R3 (resistance) in uptrend with volume spike
-            if (high[i] > r3_aligned[i] and 
-                close[i] > ema_34_1d_aligned[i] and 
-                volume[i] > vol_avg_20_aligned[i] * 1.5):
+            # Long: price breaks above upper Keltner + volume spike
+            if (close[i] > upper_keltner[i] and 
+                vol_ratio[i] > 1.8):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 (support) in downtrend with volume spike
-            elif (low[i] < s3_aligned[i] and 
-                  close[i] < ema_34_1d_aligned[i] and 
-                  volume[i] > vol_avg_20_aligned[i] * 1.5):
+            # Short: price breaks below lower Keltner + volume spike
+            elif (close[i] < lower_keltner[i] and 
+                  vol_ratio[i] > 1.8):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below EMA34 (trend change) or breaks below S3 (reversal)
-            if close[i] < ema_34_1d_aligned[i] or low[i] < s3_aligned[i]:
+            # Exit long: price crosses below midline (EMA20)
+            if close[i] < ema_20_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above EMA34 (trend change) or breaks above R3 (reversal)
-            if close[i] > ema_34_1d_aligned[i] or high[i] > r3_aligned[i]:
+            # Exit short: price crosses above midline (EMA20)
+            if close[i] > ema_20_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
