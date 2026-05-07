@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_ElderRay_1dTrend_VolumeSpike"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 20:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -29,10 +29,17 @@ def generate_signals(prices):
     trend_up = close > ema_34_1d_aligned
     trend_down = close < ema_34_1d_aligned
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13 (6h)
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Previous 12h close for Camarilla calculation
+    prev_close = np.roll(close, 1)
+    prev_close[0] = np.nan
+    
+    # Calculate Camarilla levels based on previous period
+    R4 = prev_close + 1.5 * (high - low)
+    R3 = prev_close + 1.0 * (high - low)
+    R2 = prev_close + 0.5 * (high - low)
+    S2 = prev_close - 0.5 * (high - low)
+    S3 = prev_close - 1.0 * (high - low)
+    S4 = prev_close - 1.5 * (high - low)
     
     # Volume spike: current volume > 2.0x 20-period average
     vol_ma_20 = np.full(n, np.nan)
@@ -43,15 +50,16 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 4  # ~1 day (4*6h) to reduce trade frequency
+    cooldown_bars = 4  # ~2 days (4*12h) to reduce trade frequency
     
-    start_idx = max(20, 13)  # Ensure enough data for volume and EMA13
+    start_idx = max(20, 1)  # Ensure enough data for volume MA
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(ema13[i]) or 
-            np.isnan(vol_ma_20[i])):
+            np.isnan(vol_ma_20[i]) or 
+            np.isnan(R3[i]) or 
+            np.isnan(S3[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,31 +75,31 @@ def generate_signals(prices):
         trending_down = trend_down[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: Bull Power > 0 with volume spike in 1d uptrend
-            if (bull_power[i] > 0 and 
+            # Long: price breaks above R3 with volume spike in 1d uptrend
+            if (close[i] > R3[i] and 
                 trending_up and 
                 vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: Bear Power < 0 with volume spike in 1d downtrend
-            elif (bear_power[i] < 0 and 
+            # Short: price breaks below S3 with volume spike in 1d downtrend
+            elif (close[i] < S3[i] and 
                   trending_down and 
                   vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit: Bull Power <= 0 or 1d trend changes to down
-            if bull_power[i] <= 0 or not trending_up:
+            # Exit: price breaks below S3 or 1d trend changes to down
+            if close[i] < S3[i] or not trending_up:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Bear Power >= 0 or 1d trend changes to up
-            if bear_power[i] >= 0 or not trending_down:
+            # Exit: price breaks above R3 or 1d trend changes to up
+            if close[i] > R3[i] or not trending_down:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
@@ -100,11 +108,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Elder Ray (Bull/Bear Power) measures trend strength via price relative to EMA13.
-# Long when Bull Power > 0 (strong buying pressure) with volume spike and 1d uptrend.
-# Short when Bear Power < 0 (strong selling pressure) with volume spike and 1d downtrend.
-# Works in bull markets (sustained Bull Power > 0) and bear markets (sustained Bear Power < 0).
-# Volume spike confirms institutional participation. 6h timeframe balances noise and responsiveness.
-# Elder Ray acts as both trend and momentum filter, reducing false breakouts.
+# Hypothesis: Camarilla R3/S3 breakout captures institutional breakout moves in both bull and bear markets.
+# Long when price breaks above Camarilla R3 with volume spike and 1d uptrend.
+# Short when price breaks below Camarilla S3 with volume spike and 1d downtrend.
+# Works in bull markets (sustained uptrend with breakouts) and bear markets (sustained downtrend with breakdowns).
+# Volume spike confirms institutional participation. 12h timeframe reduces noise vs lower TFs.
 # Discrete position sizing (0.25) balances risk and minimizes fee churn.
 # Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
