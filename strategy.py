@@ -1,14 +1,6 @@
-# 4h_Bollinger_Band_Momentum_1dTrend_Confirmation_v1
-# This strategy identifies high-probability momentum entries by combining Bollinger Band breakouts
-# with 1-day trend confirmation and volume surge filters. It focuses on capturing strong
-# directional moves during trending markets while filtering out choppy conditions. Designed
-# for the 4-hour timeframe with 1-day higher timeframe trend filter to ensure alignment with
-# institutional momentum. The strategy uses discrete position sizing to minimize transaction
-# costs and is structured to perform in both bull and bear markets by only taking trades
-# in the direction of the higher timeframe trend.
-
-name = "4h_Bollinger_Band_Momentum_1dTrend_Confirmation_v1"
-timeframe = "4h"
+#!/usr/bin/env python3
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSurge"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,40 +17,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-day data for trend filter (call ONCE before loop)
+    # 1d trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    # 1-day EMA50 for trend filter
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    trend_up = close > ema_50_1d_aligned
-    trend_down = close < ema_50_1d_aligned
     
-    # Bollinger Bands (20, 2) on 4h timeframe
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean()
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std()
-    upper_band = (sma_20 + 2 * std_20).values
-    lower_band = (sma_20 - 2 * std_20).values
+    # 1d EMA34 trend
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    trend_up = close > ema_34_1d_aligned
+    trend_down = close < ema_34_1d_aligned
     
-    # Volume surge: current volume > 2.0x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_surge = volume > (2.0 * vol_ma_20)
+    # Daily OHLC for Camarilla R3/S3 levels
+    daily_close = df_1d['close'].values
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    
+    camarilla_r3 = daily_close + (daily_high - daily_low) * 1.1 / 4
+    camarilla_s3 = daily_close - (daily_high - daily_low) * 1.1 / 4
+    
+    # Align Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Volume surge filter: current volume > 2.0x 12-period average (1-day equivalent in 12h)
+    vol_ma_12 = np.full(n, np.nan)
+    for i in range(12, n):
+        vol_ma_12[i] = np.mean(volume[i-12:i])
+    vol_surge = volume > (2.0 * vol_ma_12)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 3  # ~0.5 days (3*4h) to prevent overtrading
+    cooldown_bars = 2  # ~1 day (2*12h) to prevent overtrading
     
-    start_idx = 20  # Ensure enough data for Bollinger Bands and volume MA
+    start_idx = max(12, 34)  # Ensure enough data for volume MA and EMA
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(upper_band[i]) or 
-            np.isnan(lower_band[i]) or 
-            np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,46 +75,37 @@ def generate_signals(prices):
         trending_down = trend_down[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: Price breaks above upper Bollinger Band with volume surge in 1d uptrend
-            if (close[i] > upper_band[i] and 
+            # Long: Price breaks above Camarilla R3 with volume surge in 1d uptrend
+            if (close[i] > r3_aligned[i] and 
                 trending_up and 
                 vol_surge[i]):
-                signals[i] = 0.25
+                signals[i] = 0.28
                 position = 1
                 bars_since_last_trade = 0
-            # Short: Price breaks below lower Bollinger Band with volume surge in 1d downtrend
-            elif (close[i] < lower_band[i] and 
+            # Short: Price breaks below Camarilla S3 with volume surge in 1d downtrend
+            elif (close[i] < s3_aligned[i] and 
                   trending_down and 
                   vol_surge[i]):
-                signals[i] = -0.25
+                signals[i] = -0.28
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit: Price falls back below middle Bollinger Band (SMA20) or 1d trend changes to down
-            if close[i] < sma_20.iloc[i] or not trending_up:
+            # Exit: Price falls back below Camarilla S3 or 1d trend changes to down
+            if close[i] < s3_aligned[i] or not trending_up:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.28
         elif position == -1:
-            # Exit: Price rises back above middle Bollinger Band (SMA20) or 1d trend changes to up
-            if close[i] > sma_20.iloc[i] or not trending_down:
+            # Exit: Price rises back above Camarilla R3 or 1d trend changes to up
+            if close[i] > r3_aligned[i] or not trending_down:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.28
     
     return signals
 
-# Hypothesis: Bollinger Band breakouts combined with 1-day trend confirmation and volume surge filters
-# capture institutional momentum moves while avoiding false signals in choppy markets. The strategy
-# only takes long positions in 1-day uptrends and short positions in 1-day downtrends, ensuring
-# alignment with higher timeframe momentum. Bollinger Bands (20,2) provide dynamic support/resistance
-# levels that adapt to volatility, while the volume surge filter (2.0x 20-period average) confirms
-# institutional participation. The middle Bollinger Band (SMA20) serves as an objective exit point.
-# Discrete position sizing (0.25) and cooldown periods minimize transaction costs. Designed for
-# the 4-hour timeframe to balance signal frequency with reliability, targeting 50-150 total trades
-# over 4 years (12-37/year) to overcome fee drag. Works in both bull markets (longs in uptrends)
-# and bear markets (shorts in downtrends) by following the 1-day trend filter.
+# Hypothesis: On 12h timeframe, price breaking above/below Camarilla R3/S3 levels with volume surge confirmation and 1d EMA34 trend filter captures institutional breakout momentum. Camarilla R3/S3 represent stronger support/resistance, reducing false breakouts. 1d trend filter ensures alignment with higher timeframe momentum. Volume surge filter (2.0x 12-period average) confirms institutional participation. Cooldown period prevents overtrading. Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag. Works in bull markets (breakouts above R3 in 1d uptrend) and bear markets (breakdowns below S3 in 1d downtrend). Uses discrete position sizing (0.28) to balance risk and reward while reducing fee churn.
