@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_Donchian20_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,23 +17,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get daily data for Camarilla levels and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Weekly trend filter: EMA34
-    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate Camarilla levels from previous day
+    high_prev = df_1d['high'].shift(1).values
+    low_prev = df_1d['low'].shift(1).values
+    close_prev = df_1d['close'].shift(1).values
     
-    # Daily Donchian(20) breakout channels
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
+    # Camarilla R3 and S3 levels
+    r3 = close_prev + 1.1 * (high_prev - low_prev) / 6
+    s3 = close_prev - 1.1 * (high_prev - low_prev) / 6
     
-    # Volume filter: current volume > 1.5x 20-day average
+    # Align daily levels to 4h timeframe (with 1-day delay for completed bar)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Daily trend filter: EMA34
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume filter: current volume > 1.5x 20-period average (4h)
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-20:i])
@@ -42,15 +48,15 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 5  # 5 days cooldown to reduce trades
+    cooldown_bars = 3  # ~6 hours for 4h to reduce trades
     
     start_idx = max(100, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or 
+        if (np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -62,36 +68,36 @@ def generate_signals(prices):
         
         bars_since_last_trade += 1
         
-        # Determine weekly trend direction
-        trend_up = close > ema_34_1w_aligned[i]
-        trend_down = close < ema_34_1w_aligned[i]
+        # Determine daily trend direction
+        trend_up = close > ema_34_1d_aligned[i]
+        trend_down = close < ema_34_1d_aligned[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: Break above Donchian high in uptrend with volume
-            if (close[i] > donchian_high[i] and 
+            # Long: Break above R3 in uptrend with volume
+            if (close[i] > r3_aligned[i] and 
                 trend_up[i] and 
                 vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: Break below Donchian low in downtrend with volume
-            elif (close[i] < donchian_low[i] and 
+            # Short: Break below S3 in downtrend with volume
+            elif (close[i] < s3_aligned[i] and 
                   trend_down[i] and 
                   vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit: Price re-enters Donchian channel or trend change
-            if (close[i] < donchian_high[i] and close[i] > donchian_low[i]) or not trend_up[i]:
+            # Exit: Price re-enters Camarilla body (between R3 and S3) or trend change
+            if (close[i] < r3_aligned[i] and close[i] > s3_aligned[i]) or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price re-enters Donchian channel or trend change
-            if (close[i] < donchian_high[i] and close[i] > donchian_low[i]) or not trend_down[i]:
+            # Exit: Price re-enters Camarilla body or trend change
+            if (close[i] < r3_aligned[i] and close[i] > s3_aligned[i]) or not trend_down[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
@@ -100,8 +106,8 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Daily Donchian(20) breakouts with weekly trend alignment capture
-# multi-day momentum in both bull and bear markets. Weekly trend filter ensures
-# we trade with the dominant trend, reducing whipsaw. Volume confirmation ensures
-# genuine participation. 5-day cooldown and 0.25 sizing limit trades to ~15-25/year
-# to minimize fee drag. Target: 20-30 trades/year for robust performance.
+# Hypothesis: Camarilla R3/S3 breakouts with daily trend alignment capture institutional
+# breakouts in both bull and bear markets. The 4h timeframe provides sufficient
+# noise filtering while capturing multi-day moves. Volume confirmation ensures
+# genuine institutional participation. Conservative sizing (0.25) limits drawdown
+# during false breaks. Target: 20-40 trades/year to minimize fee drag.
