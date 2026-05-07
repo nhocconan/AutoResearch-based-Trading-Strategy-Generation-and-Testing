@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3S3_1dTrend_VolumeSpike_v2"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dTrend_VolumeSpike_v18"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
