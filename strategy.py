@@ -1,6 +1,5 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
+name = "4h_4hTrend_1dEngulfingVolume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -20,69 +19,65 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from daily OHLC (previous day's values)
-    # Camarilla formula: based on previous day's high, low, close
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # 4h trend: 4h EMA(21)
+    ema_21_4h = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Calculate Camarilla levels for each day
-    R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
-    S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
-    R4 = prev_close + (prev_high - prev_low) * 1.1 / 2
-    S4 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    # Daily bullish engulfing pattern: current candle engulfs previous bearish candle
+    # Engulfing condition: today's close > yesterday's open AND today's open < yesterday's close
+    daily_open = df_1d['open'].values
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
     
-    # Align Camarilla levels to 4h timeframe (using previous day's values)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
+    bullish_engulf = (daily_close[1:] > daily_open[:-1]) & (daily_open[1:] < daily_close[:-1])
+    bearish_engulf = (daily_close[1:] < daily_open[:-1]) & (daily_open[1:] > daily_close[:-1])
     
-    # Daily trend filter: EMA(34) on daily close
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align to 4h timeframe - daily patterns available after daily close
+    bullish_engulf_aligned = align_htf_to_ltf(prices, df_1d, np.concatenate([[False], bullish_engulf]))
+    bearish_engulf_aligned = align_htf_to_ltf(prices, df_1d, np.concatenate([[False], bearish_engulf]))
     
-    # Volume spike detection: 20-period average (approx 10 hours for 4h)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume spike: 4h volume > 2x 24-period average (24*4h = 4 days)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Wait for EMA and volume MA
+    start_idx = max(21, 24)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(R3_aligned[i]) or 
-            np.isnan(S3_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_21_4h[i]) or np.isnan(bullish_engulf_aligned[i]) or 
+            np.isnan(bearish_engulf_aligned[i]) or np.isnan(vol_ma_24[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above S3 with volume and daily uptrend
-            vol_condition = volume[i] > vol_ma_20[i] * 2.0
-            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
-            
-            if close[i] > S3_aligned[i] and vol_condition and uptrend:
+            # Long: bullish engulfing on daily + price above 4h EMA + volume spike
+            if (bullish_engulf_aligned[i] and 
+                close[i] > ema_21_4h[i] and 
+                volume[i] > vol_ma_24[i] * 2.0):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below R3 with volume and daily downtrend
-            elif close[i] < R3_aligned[i] and vol_condition and not uptrend:
+            # Short: bearish engulfing on daily + price below 4h EMA + volume spike
+            elif (bearish_engulf_aligned[i] and 
+                  close[i] < ema_21_4h[i] and 
+                  volume[i] > vol_ma_24[i] * 2.0):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price returns to S3 or volume drops significantly
-            if close[i] < S3_aligned[i] or volume[i] < vol_ma_20[i] * 1.5:
+            # Exit: price back below 4h EMA or volume drops
+            if close[i] < ema_21_4h[i] or volume[i] < vol_ma_24[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price returns to R3 or volume drops significantly
-            if close[i] > R3_aligned[i] or volume[i] < vol_ma_20[i] * 1.5:
+            # Exit: price back above 4h EMA or volume drops
+            if close[i] > ema_21_4h[i] or volume[i] < vol_ma_24[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -90,13 +85,13 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with daily trend and volume confirmation
-# - Camarilla R3 and S3 act as key support/resistance levels derived from daily price action
-# - Breakout above S3 with volume expansion in daily uptrend = long opportunity
-# - Breakdown below R3 with volume expansion in daily downtrend = short opportunity
-# - Volume spike (2x average) confirms institutional participation and reduces false breakouts
-# - Daily EMA(34) trend filter ensures we trade with the higher timeframe momentum
-# - Works in both bull (buy S3 breaks in uptrend) and bear (sell R3 breaks in downtrend)
-# - Exit when price returns to the breakout level (S3/R3) or volume weakens
-# - Position size 0.25 targets 20-40 trades/year, avoiding excessive fee drag
-# - Uses actual Camarilla formula rather than pivot points for better precision in ranging markets
+# Hypothesis: 4h trend filtered by daily candlestick engulfing patterns with volume confirmation
+# - 4h EMA(21) establishes trend direction (price above = uptrend, below = downtrend)
+# - Daily bullish/bearish engulfing patterns signal potential reversals/continuations
+# - Volume spike (2x average) confirms institutional participation in the move
+# - Works in bull markets: buy on bullish engulfing dips in uptrend
+# - Works in bear markets: sell on bearish engulfing rallies in downtrend
+# - Exit when price crosses 4h EMA or volume weakens
+# - Position size 0.25 targets ~20-40 trades/year, avoiding excessive fee drag
+# - Daily engulfing provides clean reversal signals that work across market regimes
+# - Combines trend following with reversal confirmation for robustness
