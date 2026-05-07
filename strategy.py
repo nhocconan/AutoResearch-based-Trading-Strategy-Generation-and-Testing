@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Volume_Spike_v2"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Volume_Spike_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -38,16 +38,16 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume filter: current volume > 2.0x 20-period average (stricter to reduce trades)
+    # Volume filter: current volume > 2.5x 20-period average (stricter to reduce trades)
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-20:i])
-    vol_filter = volume > (2.0 * vol_ma_20)
+    vol_filter = volume > (2.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 6  # ~12 hours for 4h to reduce trades
+    cooldown_bars = 8  # ~16 hours for 4h to reduce trades
     
     start_idx = max(100, 20, 34)
     
@@ -76,14 +76,14 @@ def generate_signals(prices):
             if (close[i] > r3_aligned[i] and 
                 trend_up[i] and 
                 vol_filter[i]):
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
             # Short: Break below S3 in downtrend with strong volume
             elif (close[i] < s3_aligned[i] and 
                   trend_down[i] and 
                   vol_filter[i]):
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
@@ -93,7 +93,7 @@ def generate_signals(prices):
                 position = 0
                 bars_since_last_trade = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
             # Exit: Price re-enters Camarilla body or trend change
             if (close[i] < r3_aligned[i] and close[i] > s3_aligned[i]) or not trend_down[i]:
@@ -101,12 +101,13 @@ def generate_signals(prices):
                 position = 0
                 bars_since_last_trade = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-# Hypothesis: Camarilla R3/S3 breakouts require stronger price movement, reducing false signals.
-# Combined with 1d EMA34 trend filter and strict volume spike (>2x average), this captures
-# institutional breakouts with follow-through. Increased cooldown (6 bars) and stricter
-# volume filter target 20-35 trades/year. Works in both bull (breakouts above R3) and
-# bear (breakdowns below S3) markets by trading with the higher timeframe trend.
+# Hypothesis: Further increasing the volume threshold to 2.5x average and extending cooldown to 8 bars (16 hours)
+# will reduce trade frequency to target 15-25 trades per year, minimizing fee drag while maintaining
+# the edge of Camarilla R3/S3 breakouts with 1d EMA34 trend confirmation. This should improve
+# generalization to the test period (2025-2026) by focusing only on the strongest institutional breakouts.
+# Position size reduced to 0.25 to manage drawdown during volatile periods. Works in both bull (breakouts above R3)
+# and bear (breakdowns below S3) markets by trading with the higher timeframe trend.
