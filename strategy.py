@@ -3,20 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 1-week trend filter and volume confirmation.
-# Long when price breaks above Donchian high(20) AND weekly EMA50 is rising AND volume > 2x 20-period average.
-# Short when price breaks below Donchian low(20) AND weekly EMA50 is falling AND volume > 2x 20-period average.
-# Exit when price crosses back below/above Donchian median (midpoint) or volume drops below average.
-# Designed for 6h timeframe with moderate trade frequency (target: 15-30/year) to avoid fee drag.
-# Uses weekly EMA50 for trend filter to avoid counter-trend trades in strong trends.
-# Volume filter ensures participation and avoids low-conviction moves.
-name = "6h_Donchian_20_1wEMA50_VolumeFilter"
-timeframe = "6h"
+# Hypothesis: 12-hour Donchian(20) breakout with 1-day volume confirmation and
+#   chop regime filter. Long when price breaks above 20-period high with volume
+#   spike and chop > 61.8 (range); short when breaks below 20-period low with
+#   volume spike and chop > 61.8. This structure captures volatility expansion
+#   in ranging markets, works in both bull and bear regimes by filtering for
+#   high-probability mean-reversion bursts. Target: 20-50 trades/year.
+name = "12h_Donchian20_VolumeChop"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,48 +24,54 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Donchian channels (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (high_roll + low_roll) / 2.0
+    high_max20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Weekly EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Chop index (14-period) for regime filter
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first bar
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    highest_high20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    chop = 100 * np.log10(atr14.sum() / (highest_high20 - lowest_low20)) / np.log10(14)
+    # Fix: correct chop calculation using rolling sum
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    hh_ll_diff = highest_high20 - lowest_low20
+    chop = np.where(hh_ll_diff != 0, 100 * np.log10(atr_sum / hh_ll_diff) / np.log10(14), 50)
+    
+    # 1-day volume average for spike detection
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    
-    # Weekly EMA50 direction (rising/falling)
-    ema50_1w_rising = np.zeros_like(ema50_1w_aligned, dtype=bool)
-    ema50_1w_falling = np.zeros_like(ema50_1w_aligned, dtype=bool)
-    ema50_1w_rising[1:] = ema50_1w_aligned[1:] > ema50_1w_aligned[:-1]
-    ema50_1w_falling[1:] = ema50_1w_aligned[1:] < ema50_1w_aligned[:-1]
-    
-    # Volume filter: current volume > 2x 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (2.0 * vol_ma20)
+    vol_1d = df_1d['volume'].values
+    vol_avg20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Sufficient warmup for indicators
+    start_idx = 40  # sufficient warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or np.isnan(donchian_mid[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(ema50_1w_rising[i]) or np.isnan(ema50_1w_falling[i]) or 
-            np.isnan(volume_filter[i])):
+        if (np.isnan(high_max20[i]) or np.isnan(low_min20[i]) or 
+            np.isnan(chop[i]) or np.isnan(vol_avg20_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Volume spike: current 12h volume > 2x daily average volume (approximation)
+        vol_spike = volume[i] > (2.0 * vol_avg20_1d_aligned[i])
+        
         if position == 0:
-            # Long conditions: break above Donchian high, weekly EMA50 rising, volume filter
-            long_cond = (close[i] > high_roll[i]) and ema50_1w_rising[i] and volume_filter[i]
-            # Short conditions: break below Donchian low, weekly EMA50 falling, volume filter
-            short_cond = (close[i] < low_roll[i]) and ema50_1w_falling[i] and volume_filter[i]
+            # Long: breakout above 20-period high, volume spike, chop > 61.8 (range)
+            long_cond = (close[i] > high_max20[i]) and vol_spike and (chop[i] > 61.8)
+            # Short: breakdown below 20-period low, volume spike, chop > 61.8
+            short_cond = (close[i] < low_min20[i]) and vol_spike and (chop[i] > 61.8)
             
             if long_cond:
                 signals[i] = 0.25
@@ -75,15 +80,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below Donchian mid OR volume filter fails
-            if close[i] < donchian_mid[i] or not volume_filter[i]:
+            # Long exit: price returns to 20-period low or chop drops (trend emerging)
+            if close[i] < low_min20[i] or chop[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above Donchian mid OR volume filter fails
-            if close[i] > donchian_mid[i] or not volume_filter[i]:
+            # Short exit: price returns to 20-period high or chop drops
+            if close[i] > high_max20[i] or chop[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
