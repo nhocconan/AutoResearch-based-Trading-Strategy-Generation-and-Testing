@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_Wedges_Breakout_WeeklyTrend"
-timeframe = "1d"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,21 +17,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load daily data ONCE for Camarilla pivots and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Daily EMAs for wedge detection
-    ema_9 = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Daily close for Camarilla calculation
+    daily_close = df_1d['close'].values
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
     
-    # Weekly EMA for trend filter
-    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Calculate Camarilla levels (R3, S3) from previous day
+    # R3 = close + (high - low) * 1.1/2
+    # S3 = close - (high - low) * 1.1/2
+    camarilla_range = daily_high - daily_low
+    r3 = daily_close + camarilla_range * 1.1 / 2
+    s3 = daily_close - camarilla_range * 1.1 / 2
     
-    # Volume spike detection
+    # Align Camarilla levels to 12h timeframe (wait for daily close)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume spike detection on 12h chart
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -40,39 +51,35 @@ def generate_signals(prices):
     start_idx = max(50, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(ema_9[i]) or 
-            np.isnan(ema_20[i]) or np.isnan(ema_50[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Rising wedge (bearish): higher lows + lower highs
-        rising_wedge = (ema_9[i] > ema_9[i-1]) and (ema_20[i] < ema_20[i-1])
-        # Falling wedge (bullish): lower lows + higher highs
-        falling_wedge = (ema_9[i] < ema_9[i-1]) and (ema_20[i] > ema_20[i-1])
-        
+        # Volume condition: 2x average volume
         vol_condition = volume[i] > vol_ma_20[i] * 2.0
         
         if position == 0:
-            # Long: falling wedge breakout above EMA20 in weekly uptrend
-            if falling_wedge and close[i] > ema_20[i] and vol_condition and ema_20_1w_aligned[i] > ema_20_1w_aligned[i-1]:
+            # Long: price breaks above R3 with volume in daily uptrend
+            if close[i] > r3_aligned[i] and vol_condition and ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]:
                 signals[i] = 0.25
                 position = 1
-            # Short: rising wedge breakdown below EMA20 in weekly downtrend
-            elif rising_wedge and close[i] < ema_20[i] and vol_condition and ema_20_1w_aligned[i] < ema_20_1w_aligned[i-1]:
+            # Short: price breaks below S3 with volume in daily downtrend
+            elif close[i] < s3_aligned[i] and vol_condition and ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below EMA9 or wedge invalid
-            if close[i] < ema_9[i] or not falling_wedge:
+            # Exit: price returns below S3 (mean reversion) or trend breaks
+            if close[i] < s3_aligned[i] or ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above EMA9 or wedge invalid
-            if close[i] > ema_9[i] or not rising_wedge:
+            # Exit: price returns above R3 (mean reversion) or trend breaks
+            if close[i] > r3_aligned[i] or ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -80,16 +87,13 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 1d Wedge breakouts with weekly trend filter and volume confirmation
-# - Rising wedge (higher lows + lower highs) = bearish continuation pattern
-# - Falling wedge (lower lows + higher highs) = bullish continuation pattern
-# - Breakout occurs when price breaks EMA20 in wedge direction with volume spike
-# - Weekly EMA20 trend filter ensures alignment with higher timeframe trend
-# - Works in both bull (falling wedge breakouts in uptrend) and bear (rising wedge breakdowns in downtrend)
-# - Volume confirmation (2x average) reduces false breakouts
-# - Exit when price returns to EMA9 or wedge pattern invalidates
-# - Position size 0.25 targets ~30-80 trades/year to avoid fee drag
-# - Wedges provide clear structure with defined support/resistance levels
-# - Weekly trend filter reduces whipsaws vs same-timeframe signals
-# - Novel combination: Wedge patterns (9/20 EMA) + weekly trend + volume spike not recently tried
-# - Aims for 60-120 total trades over 4 years (15-30/year) to stay within limits
+# Hypothesis: 12h Camarilla R3/S3 breakout with daily trend filter and volume confirmation
+# - Camarilla R3/S3 levels act as natural support/resistance derived from prior day's range
+# - Breakout above R3 (bullish) or below S3 (bearish) with volume continuation signals
+# - Daily EMA34 trend filter ensures alignment with higher timeframe direction
+# - Volume confirmation (2x average) reduces false breakouts in choppy markets
+# - Mean reversion exit when price returns to opposite S3/R3 level or trend breaks
+# - Works in both bull and breakout markets (breakouts) and bear markets (mean reversion)
+# - Position size 0.25 targets ~50-150 trades over 4 years (12-37/year) to avoid fee drag
+# - Proven pattern: Camarilla breakouts + volume + trend filter showed strong performance in DB
+# - 12h timeframe reduces noise vs lower timeframes while capturing significant moves
