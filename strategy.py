@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_1w_Camarilla_R1_S1_Breakout_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "12h_Camarilla_R1_S1_Breakout_1dEMA34_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,20 +17,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 35:
         return np.zeros(n)
     
-    # Weekly EMA(21) for trend filter
-    ema_1w = pd.Series(df_1w['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # 1d EMA(34) for trend filter
+    ema_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate Pivot Points from previous 1d
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
     prev_close = df_1d['close'].shift(1).values
@@ -39,46 +35,46 @@ def generate_signals(prices):
     r1 = 2 * pivot - prev_low
     s1 = 2 * pivot - prev_high
     
-    # Align Pivot levels to 1d
+    # Align Pivot levels to 12h
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume filter: > 2.5x 30-period average (tightened for daily)
+    # Volume filter: > 2.0x 30-period average
     vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    vol_filter = volume > 2.5 * vol_ma
+    vol_filter = volume > 2.0 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Wait for volume MA
+    start_idx = 35  # Wait for EMA and Pivots
     
     for i in range(start_idx, n):
-        if np.isnan(ema_1w_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Break above R1 with weekly uptrend and volume
-            if (close[i] > r1_aligned[i] and close[i] > ema_1w_aligned[i] and vol_filter[i]):
+            # Long: Break above R1 with daily uptrend and volume
+            if (close[i] > r1_aligned[i] and close[i] > ema_1d_aligned[i] and vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S1 with weekly downtrend and volume
-            elif (close[i] < s1_aligned[i] and close[i] < ema_1w_aligned[i] and vol_filter[i]):
+            # Short: Break below S1 with daily downtrend and volume
+            elif (close[i] < s1_aligned[i] and close[i] < ema_1d_aligned[i] and vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Exit: Close below S1 or trend change
-            if close[i] < s1_aligned[i] or close[i] < ema_1w_aligned[i]:
+            if close[i] < s1_aligned[i] or close[i] < ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Exit: Close above R1 or trend change
-            if close[i] > r1_aligned[i] or close[i] > ema_1w_aligned[i]:
+            if close[i] > r1_aligned[i] or close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -86,8 +82,7 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Daily Camarilla R1/S1 breakout with weekly EMA(21) trend filter and volume confirmation.
-# Weekly trend filter ensures alignment with higher timeframe direction, reducing false signals.
+# Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA(34) trend filter and volume confirmation.
 # Pivot levels from prior day provide key support/resistance. Breaking R1/S1 indicates momentum.
-# Volume filter (>2.5x 30-day average) confirms institutional participation.
-# Position size 0.25 limits drawdown. Target: 10-20 trades/year to minimize fee drag on 1d timeframe.
+# Daily EMA filter ensures alignment with higher timeframe trend. Volume confirms institutional participation.
+# Target: 12-30 trades/year to minimize fee drift. Position size 0.25 limits drawdown in volatile markets.
