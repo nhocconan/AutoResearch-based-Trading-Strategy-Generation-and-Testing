@@ -3,13 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "6h"
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d trend filter and volume spike
+# Uses 12h timeframe for lower trade frequency (~15-30/year), 1d trend for bias,
+# and volume confirmation to avoid false breakouts. Designed to work in both bull
+# and bear markets by only trading with the higher timeframe trend, reducing
+# whipsaw during reversals. Low trade count minimizes fee drag, improving
+# generalization to unseen data.
+
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,7 +24,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for trend and Camarilla levels
+    # Load 1d data ONCE for trend, volume average, and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -26,7 +33,7 @@ def generate_signals(prices):
     ema_20_1d = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
     ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
-    # 1d volume average for spike detection
+    # 1d volume average for spike detection (20-period EMA)
     vol_avg_1d = pd.Series(df_1d['volume']).ewm(span=20, adjust=False, min_periods=20).mean().values
     vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
@@ -36,25 +43,25 @@ def generate_signals(prices):
     prev_close = df_1d['close'].shift(1).values
     prev_range = prev_high - prev_low
     
-    # Camarilla levels for current day (based on previous day)
-    # R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
+    # Camarilla levels: R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
     camarilla_r3 = prev_close + prev_range * 1.1 / 4
     camarilla_s3 = prev_close - prev_range * 1.1 / 4
     
-    # Align Camarilla levels to 6h timeframe
+    # Align Camarilla levels to 12h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # 6h volume spike: current volume > 1.5x 20-period EMA
-    vol_ema_6h = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike = np.where(vol_ema_6h > 0, volume / vol_ema_6h, 1.0) > 1.5
+    # 12h volume spike: current volume > 1.5x 20-period EMA of 12h volume
+    vol_ema_12h = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_spike = np.where(vol_ema_12h > 0, volume / vol_ema_12h, 1.0) > 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Sufficient warmup
+    start_idx = 50  # Sufficient warmup for indicators
     
     for i in range(start_idx, n):
+        # Skip if any required data is NaN
         if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
             np.isnan(ema_20_1d_aligned[i]) or np.isnan(vol_spike[i])):
             if position != 0:
