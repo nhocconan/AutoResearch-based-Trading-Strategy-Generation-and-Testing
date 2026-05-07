@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R2_S2_Breakout_1dEMA34_Volume"
+name = "4h_KAMA_RSI_TrendFollow"
 timeframe = "4h"
 leverage = 1.0
 
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,63 +17,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for EMA and pivot points
+    # Load 1d data ONCE before loop for KAMA and RSI
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 1d EMA(34) for trend filter
-    ema_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # 1d KAMA: Efficiency Ratio (ER) period 10, Fast SC 2, Slow SC 30
+    close_1d = df_1d['close']
+    change = abs(close_1d.diff(10))
+    volatility = close_1d.diff().abs().rolling(10).sum()
+    er = change / volatility.replace(0, np.nan)
+    sc = (er * (2/10 - 1/30) + 1/30) ** 2
+    kama = [np.nan] * len(close_1d)
+    kama[0] = close_1d.iloc[0]
+    for i in range(1, len(close_1d)):
+        if np.isnan(sc.iloc[i]) or np.isnan(kama[i-1]):
+            kama[i] = np.nan
+        else:
+            kama[i] = kama[i-1] + sc.iloc[i] * (close_1d.iloc[i] - kama[i-1])
+    kama = np.array(kama)
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
     
-    # Calculate Pivot Points from previous 1d for R2/S2
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # 1d RSI(14)
+    delta = close_1d.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
-    pivot = (prev_high + prev_low + prev_close) / 3
-    r2 = pivot + (prev_high - prev_low)  # R2 = P + (H - L)
-    s2 = pivot - (prev_high - prev_low)  # S2 = P - (H - L)
-    
-    # Align Pivot levels to 4h
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    
-    # Volume filter: > 1.6x 20-period average
+    # Volume filter: > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > 1.6 * vol_ma
+    vol_filter = volume > 1.5 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Wait for EMA
+    start_idx = 30  # Wait for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Break above R2 with 1d uptrend and volume
-            if (close[i] > r2_aligned[i] and close[i] > ema_1d_aligned[i] and vol_filter[i]):
+            # Long: Price above KAMA and RSI > 50 with volume
+            if (close[i] > kama_aligned[i] and rsi_aligned[i] > 50 and vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S2 with 1d downtrend and volume
-            elif (close[i] < s2_aligned[i] and close[i] < ema_1d_aligned[i] and vol_filter[i]):
+            # Short: Price below KAMA and RSI < 50 with volume
+            elif (close[i] < kama_aligned[i] and rsi_aligned[i] < 50 and vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Close below S2 or trend change
-            if close[i] < s2_aligned[i] or close[i] < ema_1d_aligned[i]:
+            # Exit: Price below KAMA or RSI < 50
+            if close[i] < kama_aligned[i] or rsi_aligned[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Close above R2 or trend change
-            if close[i] > r2_aligned[i] or close[i] > ema_1d_aligned[i]:
+            # Exit: Price above KAMA or RSI > 50
+            if close[i] > kama_aligned[i] or rsi_aligned[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -81,8 +91,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 4h Camarilla R2/S2 breakout with 1d EMA(34) trend filter and volume confirmation.
-# R2/S2 are stronger support/resistance levels than R1/S1, offering cleaner breakouts.
-# 1d EMA(34) ensures alignment with daily trend, reducing whipsaw in choppy markets.
-# Volume confirms institutional participation. Position size 0.25 limits drawdown.
-# Target: ~20-30 trades/year to avoid fee drag while capturing significant moves.
+# Hypothesis: 4h KAMA with RSI(14) trend filter and volume confirmation.
+# KAMA adapts to market noise, reducing whipsaw in choppy markets while
+# following trends in strong moves. RSI confirms momentum direction.
+# Volume ensures institutional participation. Position size 0.25 limits drawdown.
+# Works in both bull (trend following) and bear (adaptive filtering reduces false signals).
+# Target: ~20-30 trades/year to avoid fee drag.
