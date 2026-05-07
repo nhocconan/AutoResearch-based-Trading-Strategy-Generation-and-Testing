@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_v1"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_v2"
 timeframe = "12h"
 leverage = 1.0
 
@@ -78,14 +78,14 @@ def generate_signals(prices):
             if (close[i] > r3_aligned[i] and 
                 trend_1d_up and 
                 vol_filter[i]):
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
                 bars_since_last_trade = 0
             # Short: price breaks below S3 in daily downtrend with volume spike
             elif (close[i] < s3_aligned[i] and 
                   trend_1d_down and 
                   vol_filter[i]):
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
@@ -95,7 +95,7 @@ def generate_signals(prices):
                 position = 0
                 bars_since_last_trade = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
             # Exit: price closes above S3 OR trend change
             if (close[i] > s3_aligned[i]) or not trend_1d_down:
@@ -103,7 +103,7 @@ def generate_signals(prices):
                 position = 0
                 bars_since_last_trade = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
