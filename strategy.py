@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-6H_TurtleSoup_Reversal_v1
-Hypothesis: Use 1w pivot points for institutional bias and 6h Turtle Soup pattern (false breakout reversal) for entries.
-Long when price breaks below prior day's low then reverses above it with bullish weekly bias;
-Short when price breaks above prior day's high then reverses below it with bearish weekly bias.
-Volume confirmation: current volume > 1.5x 20-period average volume.
-Works in both bull/bear markets by fading institutional stop hunts at key levels.
+12H_Donchian_Breakout_1D_Trend_Volume
+Hypothesis: Use 1d ADX for trend strength and 12h Donchian channel breakout for entry.
+Long when price breaks above 12h upper Donchian(20) and 1d ADX > 25;
+Short when price breaks below 12h lower Donchian(20) and 1d ADX > 25.
+Volume confirmation: current volume > 1.3x 20-period average volume.
+This captures strong trend moves with volatility-based breakouts, filtering out weak/choppy markets.
+Designed for 12h timeframe to keep trade frequency low (target: 12-37 trades/year).
+Works in both bull (breakouts up) and bear (breakouts down) markets via symmetric logic.
 """
-name = "6H_TurtleSoup_Reversal_v1"
-timeframe = "6h"
+name = "12H_Donchian_Breakout_1D_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,51 +27,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for weekly pivot bias (institutional sentiment)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
-        return np.zeros(n)
-    
-    # Calculate weekly pivot points
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    pivot_1w = (high_1w + low_1w + close_1w) / 3
-    range_1w = high_1w - low_1w
-    # Weekly bias: above pivot = bullish, below = bearish
-    weekly_bullish = close_1w > pivot_1w
-    weekly_bearish = close_1w < pivot_1w
-    bias_bullish = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
-    bias_bearish = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
-    
-    # Get 1d data for prior day's high/low (Turtle Soup setup)
+    # Get 1d data for ADX trend strength
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Prior day's high and low
-    prior_high = df_1d['high'].shift(1).values  # Shift to get prior day only
-    prior_low = df_1d['low'].shift(1).values
-    prior_high_aligned = align_htf_to_ltf(prices, df_1d, prior_high)
-    prior_low_aligned = align_htf_to_ltf(prices, df_1d, prior_low)
+    # Calculate 1d ADX (14-period)
+    high_1d = df_1d['high']
+    low_1d = df_1d['low']
+    close_1d = df_1d['close']
     
-    # Volume filter: current volume > 1.5 * 20-period average volume
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = (high_1d - close_1d.shift(1)).abs()
+    tr3 = (low_1d - close_1d.shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=14, min_periods=14).mean()
+    
+    # Directional Movement
+    up = high_1d.diff()
+    down = -low_1d.diff()
+    plus_dm = np.where((up > down) & (up > 0), up, 0)
+    minus_dm = np.where((down > up) & (down > 0), down, 0)
+    
+    # Smoothed DM
+    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean()
+    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean()
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / atr.replace(0, 1e-10)
+    minus_di = 100 * minus_dm_smooth / atr.replace(0, 1e-10)
+    
+    # DX and ADX
+    dx = (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-10)) * 100
+    adx = dx.rolling(window=14, min_periods=14).mean()
+    adx_values = adx.values
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_values)
+    
+    # Get 12h data for Donchian channels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
+    
+    high_12h = df_12h['high']
+    low_12h = df_12h['low']
+    
+    # Donchian channels (20-period)
+    upper = high_12h.rolling(window=20, min_periods=20).max()
+    lower = low_12h.rolling(window=20, min_periods=20).min()
+    upper_values = upper.values
+    lower_values = lower.values
+    upper_12h_aligned = align_htf_to_ltf(prices, df_12h, upper_values)
+    lower_12h_aligned = align_htf_to_ltf(prices, df_12h, lower_values)
+    
+    # Volume filter: current volume > 1.3x 20-period average volume
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_avg * 1.5)
+    volume_filter = volume > (vol_avg * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_exit = 0
+    bars_since_exit = 0  # bars since last exit to prevent overtrading
     
-    start_idx = max(20, 30)  # Ensure sufficient warmup for all indicators
+    start_idx = max(30, 20)  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
         bars_since_exit += 1
         
         # Skip if any data is not ready
-        if (np.isnan(bias_bullish[i]) or np.isnan(bias_bearish[i]) or 
-            np.isnan(prior_high_aligned[i]) or np.isnan(prior_low_aligned[i]) or
-            np.isnan(vol_avg[i])):
+        if (np.isnan(adx_1d_aligned[i]) or np.isnan(upper_12h_aligned[i]) or 
+            np.isnan(lower_12h_aligned[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,34 +103,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Minimum 6 bars between trades (~1.5 days on 6h TF) to reduce frequency
-            if bars_since_exit < 6:
+            # Minimum 24 bars between trades (2 days on 12h TF) to reduce frequency
+            if bars_since_exit < 24:
                 continue
                 
-            # Turtle Soup Long: false breakdown below prior low then reversal
-            # Condition: price breaks below prior low, then closes back above it
-            if (low[i] < prior_low_aligned[i] and  # broke below prior low
-                close[i] > prior_low_aligned[i] and  # closed back above (reversal)
-                bias_bullish[i] > 0.5 and          # weekly bullish bias
-                volume_filter[i]):                 # volume confirmation
+            # Long: price breaks above upper Donchian and strong trend (ADX > 25)
+            if (high[i] > upper_12h_aligned[i] and adx_1d_aligned[i] > 25):
                 signals[i] = 0.25
                 position = 1
                 bars_since_exit = 0
-            # Turtle Soup Short: false breakout above prior high then reversal
-            elif (high[i] > prior_high_aligned[i] and  # broke above prior high
-                  close[i] < prior_high_aligned[i] and  # closed back below (reversal)
-                  bias_bearish[i] > 0.5 and             # weekly bearish bias
-                  volume_filter[i]):                    # volume confirmation
+            # Short: price breaks below lower Donchian and strong trend (ADX > 25)
+            elif (low[i] < lower_12h_aligned[i] and adx_1d_aligned[i] > 25):
                 signals[i] = -0.25
                 position = -1
                 bars_since_exit = 0
         elif position != 0:
-            # Exit: price returns to opposite prior day level
-            if position == 1 and close[i] < prior_low_aligned[i]:
+            # Exit: price returns to opposite Donchian level (mean reversion within channel)
+            if position == 1 and low[i] < lower_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_exit = 0
-            elif position == -1 and close[i] > prior_high_aligned[i]:
+            elif position == -1 and high[i] > upper_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_exit = 0
