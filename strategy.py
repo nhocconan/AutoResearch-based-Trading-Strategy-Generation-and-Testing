@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-# 1d_Trix_WeeklyTrend_VolumeBreakout
-# Hypothesis: Daily TRIX crossover for momentum with weekly EMA trend filter and volume surge confirmation. 
-# Works in bull markets via trend-following crossovers and in bear markets via mean-reversion during low-volume pullbacks.
-# Volume filter reduces false signals, weekly trend filter ensures alignment with higher timeframe momentum.
-# Target: 15-25 trades/year per symbol to minimize fee drag while capturing sustained moves.
+# 6h_Donchian_20_WeeklyPivotDir_Volume
+# Hypothesis: 6h chart strategy using Donchian(20) breakouts filtered by weekly pivot direction from 1w timeframe.
+# Long when price breaks above Donchian upper band and weekly pivot is bullish (price > weekly pivot).
+# Short when price breaks below Donchian lower band and weekly pivot is bearish (price < weekly pivot).
+# Volume confirmation (1.5x average) reduces false breakouts. Weekly pivot provides structural bias
+# that works in both bull and bear markets by aligning with higher timeframe trend.
+# Target: 15-35 trades/year per symbol to minimize fee drag while maintaining edge.
 
-timeframe = "1d"
-name = "1d_Trix_WeeklyTrend_VolumeBreakout"
+timeframe = "6h"
+name = "6h_Donchian_20_WeeklyPivotDir_Volume"
 leverage = 1.0
 
 import numpy as np
@@ -18,74 +20,64 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) == 0:
+    # Get weekly data for pivot direction (higher timeframe than 1d)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) == 0:
         return np.zeros(n)
     
-    # Calculate weekly EMA40 for trend filter
-    ema_40_weekly = pd.Series(df_weekly['close'].values).ewm(span=40, adjust=False, min_periods=40).mean().values
-    ema_40_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_40_weekly)
+    # Calculate weekly pivot point: (H + L + C) / 3
+    weekly_pivot = (df_1w['high'].values + df_1w['low'].values + df_1w['close'].values) / 3.0
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
     
-    # Calculate TRIX (15-period) on daily close
-    # TRIX = EMA(EMA(EMA(close, 15), 15), 15) - 1
-    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean()
-    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
-    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
-    trix = (ema3 / ema3.shift(1) - 1) * 100
-    trix = trix.fillna(0).values
+    # Calculate Donchian channels (20-period) on 6h data
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate TRIX signal line (9-period EMA of TRIX)
-    trix_signal = pd.Series(trix).ewm(span=9, adjust=False, min_periods=9).mean().values
-    
-    # Volume spike: 2x average volume (20-day average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume spike detection: 1.5x average volume (4-period = 1 day on 6h chart)
+    vol_ma = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(45, 20)  # Ensure TRIX and volume MA are valid
+    start_idx = max(20, 4)  # Ensure we have Donchian and volume MA data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(ema_40_weekly_aligned[i]) or 
-            np.isnan(trix[i]) or np.isnan(trix_signal[i]) or 
-            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(weekly_pivot_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: TRIX crosses above signal line with volume surge and price above weekly EMA40
-            if (trix[i] > trix_signal[i] and trix[i-1] <= trix_signal[i-1] and
-                volume[i] > 2.0 * vol_ma[i] and
-                close[i] > ema_40_weekly_aligned[i]):
+            # Long: price breaks above Donchian high with volume, and weekly pivot is bullish (price > pivot)
+            if (high[i] > donchian_high[i] and 
+                volume[i] > 1.5 * vol_ma[i] and 
+                close[i] > weekly_pivot_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX crosses below signal line with volume surge and price below weekly EMA40
-            elif (trix[i] < trix_signal[i] and trix[i-1] >= trix_signal[i-1] and
-                  volume[i] > 2.0 * vol_ma[i] and
-                  close[i] < ema_40_weekly_aligned[i]):
+            # Short: price breaks below Donchian low with volume, and weekly pivot is bearish (price < pivot)
+            elif (low[i] < donchian_low[i] and 
+                  volume[i] > 1.5 * vol_ma[i] and 
+                  close[i] < weekly_pivot_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: TRIX crosses below signal line or trend failure (price below weekly EMA40)
-            if (trix[i] < trix_signal[i] and trix[i-1] >= trix_signal[i-1]) or \
-               close[i] < ema_40_weekly_aligned[i]:
+            # Exit: price breaks below Donchian low (reversal signal)
+            if low[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: TRIX crosses above signal line or trend failure (price above weekly EMA40)
-            if (trix[i] > trix_signal[i] and trix[i-1] <= trix_signal[i-1]) or \
-               close[i] > ema_40_weekly_aligned[i]:
+            # Exit: price breaks above Donchian high (reversal signal)
+            if high[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
