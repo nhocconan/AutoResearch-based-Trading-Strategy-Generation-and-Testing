@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-6h_KAMA_Trend_1D_Camarilla_R3_S3_Breakout_With_Volume_Filter
-Hypothesis: Use 6h KAMA (ER=10) for trend direction and 1d Camarilla R3/S3 levels for breakout entries.
-Long when price crosses above 6h KAMA and breaks above 1d R3; short when price crosses below 6h KAMA and breaks below 1d S3.
-Volume confirmation: current volume > 2.0x 20-period average volume to filter weak breakouts.
-KAMA adapts to market noise, reducing false signals in chop, while Camarilla R3/S3 provide strong intraday support/resistance.
-Volume filter ensures only significant breakouts trigger entries, reducing whipsaws in both bull and bear markets.
-Designed for 6h timeframe to target 12-37 trades/year (50-150 total over 4 years).
+12H_Camarilla_R1_S1_Breakout_1D_Trend_Volume_v1
+Hypothesis: Use 12h timeframe with 1d trend filter (EMA34) and volume confirmation.
+Long when price crosses above 12h EMA and touches 12h R1 level in uptrend.
+Short when price crosses below 12h EMA and touches 12h S1 level in downtrend.
+Volume filter: current volume > 1.5x 20-period average volume.
+Designed for fewer trades (12-37/year) to avoid fee drag while capturing trend continuation.
+Works in bull markets via trend continuation and in bear markets via short signals.
 """
-name = "6h_KAMA_Trend_1D_Camarilla_R3_S3_Breakout_With_Volume_Filter"
-timeframe = "6h"
+name = "12H_Camarilla_R1_S1_Breakout_1D_Trend_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -26,54 +26,53 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 6h data for KAMA trend
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 10:
-        return np.zeros(n)
-    
-    # Calculate 6h KAMA (ER=10)
-    close_6h = pd.Series(df_6h['close'])
-    change = abs(close_6h.diff(10))
-    volatility = close_6h.diff().abs().rolling(window=10).sum()
-    er = change / volatility.replace(0, 1e-10)
-    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
-    kama = [close_6h.iloc[0]]
-    for i in range(1, len(close_6h)):
-        kama.append(kama[-1] + sc.iloc[i] * (close_6h.iloc[i] - kama[-1]))
-    kama = np.array(kama)
-    kama_aligned = align_htf_to_ltf(prices, df_6h, kama)
-    
-    # Get 1d data for Camarilla levels (R3, S3)
+    # Get 1d data for trend filter (EMA34)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla levels (R3, S3)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r3 = pivot + (range_1d * 1.1 / 4)  # R3 = pivot + 1.1*(H-L)/4
-    s3 = pivot - (range_1d * 1.1 / 4)  # S3 = pivot - 1.1*(H-L)/4
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Calculate 1d EMA34
+    close_1d = pd.Series(df_1d['close'])
+    ema_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Volume filter: current volume > 2.0 * 20-period average volume
+    # Get 12h data for EMA and Camarilla levels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
+    
+    # Calculate 12h EMA20 for trend
+    close_12h = pd.Series(df_12h['close'])
+    ema_12h = close_12h.ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    
+    # Calculate 12h Camarilla levels (R1, S1)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    pivot = (high_12h + low_12h + close_12h) / 3
+    range_12h = high_12h - low_12h
+    r1 = pivot + (range_12h * 1.1 / 12)
+    s1 = pivot - (range_12h * 1.1 / 12)
+    r1_aligned = align_htf_to_ltf(prices, df_12h, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_12h, s1)
+    
+    # Volume filter: current volume > 1.5 * 20-period average volume
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_avg * 2.0)
+    volume_filter = volume > (vol_avg * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_exit = 0  # bars since last exit to prevent overtrading
     
-    start_idx = max(10, 20)  # Ensure sufficient warmup
+    start_idx = max(34, 20)  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
         bars_since_exit += 1
         
         # Skip if any data is not ready
-        if (np.isnan(kama_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(ema_12h_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
             np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -82,29 +81,29 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Minimum 24 bars between trades (4 days on 6h TF) to reduce frequency
+            # Minimum 24 bars between trades (12 days on 12h TF) to reduce frequency
             if bars_since_exit < 24:
                 continue
                 
-            # Long: price crosses above KAMA and breaks above R3
-            if (close[i] > kama_aligned[i] and close[i-1] <= kama_aligned[i-1] and 
-                close[i] > r3_aligned[i]):
+            # Long: price crosses above 12h EMA and touches R1 level in uptrend (1d EMA up)
+            if (close[i] > ema_12h_aligned[i] and close[i-1] <= ema_12h_aligned[i-1] and 
+                low[i] <= r1_aligned[i] and ema_1d_aligned[i] > ema_1d_aligned[i-1]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_exit = 0
-            # Short: price crosses below KAMA and breaks below S3
-            elif (close[i] < kama_aligned[i] and close[i-1] >= kama_aligned[i-1] and 
-                  close[i] < s3_aligned[i]):
+            # Short: price crosses below 12h EMA and touches S1 level in downtrend (1d EMA down)
+            elif (close[i] < ema_12h_aligned[i] and close[i-1] >= ema_12h_aligned[i-1] and 
+                  high[i] >= s1_aligned[i] and ema_1d_aligned[i] < ema_1d_aligned[i-1]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_exit = 0
         elif position != 0:
-            # Exit: price returns to opposite KAMA side
-            if position == 1 and close[i] < kama_aligned[i]:
+            # Exit: price returns to opposite 12h EMA side
+            if position == 1 and close[i] < ema_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_exit = 0
-            elif position == -1 and close[i] > kama_aligned[i]:
+            elif position == -1 and close[i] > ema_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_exit = 0
