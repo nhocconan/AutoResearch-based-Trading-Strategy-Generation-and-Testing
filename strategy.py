@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_12h_Camarilla_Pivot_Reversal"
-timeframe = "6h"
+name = "4h_Donchian20_VolumeTrend_1dEMA34"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,82 +17,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 5:
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 12h Camarilla pivot levels using previous 12h bar
-    # H, L, C from previous 12h bar
-    h_prev = df_12h['high'].shift(1).values
-    l_prev = df_12h['low'].shift(1).values
-    c_prev = df_12h['close'].shift(1).values
+    # Donchian channel (20-period) on 4h data
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate pivot and levels
-    pp = (h_prev + l_prev + c_prev) / 3
-    range_hl = h_prev - l_prev
-    r3 = c_prev + range_hl * 1.1 / 2
-    s3 = c_prev - range_hl * 1.1 / 2
-    r4 = c_prev + range_hl * 1.1
-    s4 = c_prev - range_hl * 1.1
+    # Daily EMA(34) trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Align to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_12h, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_12h, s4)
-    
-    # Volume confirmation: 12-period average (3 days of 6h bars)
-    vol_ma_12 = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
+    # Volume spike detection: 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 12  # Wait for volume MA
+    start_idx = max(20, 34, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(vol_ma_12[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price crosses above S3 with volume, targeting S4 as stop
-            vol_condition = volume[i] > vol_ma_12[i] * 1.8
+            # Long: break above Donchian high with volume and daily uptrend
+            vol_condition = volume[i] > vol_ma_20[i] * 1.5
+            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
             
-            if close[i] > s3_aligned[i] and vol_condition:
-                signals[i] = 0.25
+            if close[i] > donchian_high[i] and vol_condition and uptrend:
+                signals[i] = 0.30
                 position = 1
-            # Short: price crosses below R3 with volume, targeting R4 as stop
-            elif close[i] < r3_aligned[i] and vol_condition:
-                signals[i] = -0.25
+            # Short: break below Donchian low with volume and daily downtrend
+            elif close[i] < donchian_low[i] and vol_condition and not uptrend:
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit: price reaches S4 (target) or closes back below S3 (failed breakout)
-            if close[i] >= s4_aligned[i] or close[i] < s3_aligned[i]:
+            # Exit: price back below Donchian low or trend reversal
+            if close[i] < donchian_low[i] or ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit: price reaches R4 (target) or closes back above R3 (failed breakdown)
-            if close[i] <= r4_aligned[i] or close[i] > r3_aligned[i]:
+            # Exit: price back above Donchian high or trend reversal
+            if close[i] > donchian_high[i] or ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-# Hypothesis: 6s Camarilla pivot reversal with 12h structure
-# - Camarilla R3/S3 act as intraday support/resistance levels where reversals often occur
-# - Break of R3/S3 with volume indicates potential continuation to R4/S4 targets
-# - Fade at R3/S3 in ranging markets, breakout continuation in trending markets
-# - Volume confirmation (1.8x average) filters false breakouts
-# - Works in both bull (buy S3 breaks in uptrends) and bear (sell R3 breaks in downtrends)
-# - Target R4/S4 levels provide clear profit targets
-# - Position size 0.25 targets 50-150 trades over 4 years, avoiding fee drag
-# - Uses 12h timeframe for structure, 6h for execution timing
+# Hypothesis: Donchian(20) breakout with volume confirmation and daily EMA(34) trend filter
+# - Donchian breakout captures momentum in both bull and bear markets
+# - Volume confirmation (1.5x average) filters false breakouts
+# - Daily EMA(34) ensures alignment with higher timeframe trend
+# - Exit on opposite Donchian break or trend reversal
+# - Position size 0.30 balances risk and return
+# - Designed for 4h timeframe to target 20-50 trades/year, avoiding excessive fees
+# - Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend)
