@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d trend filter
+    # 1d trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -28,35 +28,50 @@ def generate_signals(prices):
     trend_up = close > ema34_1d_aligned
     trend_down = close < ema34_1d_aligned
     
-    # Volume spike filter (volume > 1.5x 20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 1.5)
+    # Camarilla pivot levels from previous day
+    def calculate_camarilla(h, l, c):
+        R4 = c + ((h - l) * 1.1 / 2)
+        R3 = c + ((h - l) * 1.1 / 4)
+        R2 = c + ((h - l) * 1.1 / 6)
+        R1 = c + ((h - l) * 1.1 / 12)
+        S1 = c - ((h - l) * 1.1 / 12)
+        S2 = c - ((h - l) * 1.1 / 6)
+        S3 = c - ((h - l) * 1.1 / 4)
+        S4 = c - ((h - l) * 1.1 / 2)
+        return R1, R2, R3, R4, S1, S2, S3, S4
     
-    # Camarilla pivot levels from 1d OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Use previous day's OHLC for Camarilla levels
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
     
-    # Calculate Camarilla levels for each 1d bar
-    camarilla_high = high_1d + (high_1d - low_1d) * 1.1 / 12  # R3 level
-    camarilla_low = low_1d - (high_1d - low_1d) * 1.1 / 12   # S3 level
+    R1, R2, R3, R4, S1, S2, S3, S4 = calculate_camarilla(prev_high, prev_low, prev_close)
     
-    camarilla_high_aligned = align_htf_to_ltf(prices, df_1d, camarilla_high)
-    camarilla_low_aligned = align_htf_to_ltf(prices, df_1d, camarilla_low)
+    # Volume filter: current volume > 1.5 * 20-period average
+    vol_ma20 = np.zeros(n)
+    vol_sum = 0
+    for i in range(n):
+        vol_sum += volume[i]
+        if i >= 20:
+            vol_sum -= volume[i - 20]
+        if i < 19:
+            vol_ma20[i] = np.nan
+        else:
+            vol_ma20[i] = vol_sum / 20
+    volume_filter = volume > (1.5 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
     cooldown_bars = 3  # ~12 hours
     
-    start_idx = 20  # Ensure volume MA is valid
+    start_idx = 19  # Ensure volume MA is valid
     
     for i in range(start_idx, n):
-        # Skip if any data not ready
-        if (np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(camarilla_high_aligned[i]) or 
-            np.isnan(camarilla_low_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,39 +83,38 @@ def generate_signals(prices):
         bars_since_last_trade += 1
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: Price breaks above R3 level AND 1d uptrend AND volume spike
-            if close[i] > camarilla_high_aligned[i] and trend_up[i] and vol_spike[i]:
-                signals[i] = 0.30
+            # Long: price breaks above R3 AND 1d uptrend AND volume filter
+            if close[i] > R3[i] and trend_up[i] and volume_filter[i]:
+                signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: Price breaks below S3 level AND 1d downtrend AND volume spike
-            elif close[i] < camarilla_low_aligned[i] and trend_down[i] and vol_spike[i]:
-                signals[i] = -0.30
+            # Short: price breaks below S3 AND 1d downtrend AND volume filter
+            elif close[i] < S3[i] and trend_down[i] and volume_filter[i]:
+                signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit: Price closes below camarilla low OR trend turns down
-            if close[i] < camarilla_low_aligned[i] or not trend_up[i]:
+            # Exit: price breaks below R1 OR trend turns down
+            if close[i] < R1[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: Price closes above camarilla high OR trend turns up
-            if close[i] > camarilla_high_aligned[i] or not trend_down[i]:
+            # Exit: price breaks above S1 OR trend turns up
+            if close[i] > S1[i] or not trend_down[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-# Hypothesis: Camarilla R3/S3 breakout with 1d trend filter and volume spike captures
-# institutional breakouts in both bull and bear markets. The Camarilla levels
-# (R3/S3) act as magnet levels where price often accelerates after breaking through.
-# Volume spike confirms institutional participation. 1d trend filter ensures we
-# trade in the direction of the higher timeframe trend. Cooldown prevents overtrading.
-# Position size 0.30 balances risk and return. Works in bull markets (breaks above R3
-# in uptrend) and bear markets (breaks below S3 in downtrend). Target: 20-50 trades/year.
+# Hypothesis: Camarilla R3/S3 breakout with 1d trend filter and volume confirmation
+# Captures institutional breakout patterns in both bull and bear markets.
+# Long when price breaks above R3 in 1d uptrend with volume surge,
+# short when breaks below S3 in 1d downtrend with volume surge.
+# Uses tight entry conditions to limit trades and reduce fee drag.
+# Position size 0.25 manages risk, cooldown of 3 bars limits frequency.
