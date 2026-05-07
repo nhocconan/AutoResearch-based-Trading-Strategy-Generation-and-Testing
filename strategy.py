@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """
-4H_Elder_Ray_Bull_Bear_2_1D_EMA34_Power
-Hypothesis: Elder Ray Power (2-period EMA - 34-period EMA) on 1d determines bull/bear regime.
-In bull regime (Power > 0), go long when 4h high touches 1d high and volume > 1.5x average.
-In bear regime (Power < 0), go short when 4h low touches 1d low and volume > 1.5x average.
-Volume confirmation reduces false breaks. Works in both bull (buy strength) and bear (sell weakness).
+1D_Weekly_TRIX_Volume_Spike_Regime_v1
+Hypothesis: Use weekly TRIX for trend direction and daily TRIX for entry timing.
+Long when weekly TRIX > 0, daily TRIX crosses above -0.05, and volume > 1.5x 20-day average.
+Short when weekly TRIX < 0, daily TRIX crosses below 0.05, and volume > 1.5x 20-day average.
+Exit when daily TRIX crosses back toward zero or volume dries up.
+Weekly TRIX filters for primary trend, daily TRIX provides timely entries, volume confirms momentum.
+Designed to work in both bull (follow weekly uptrend) and bear (follow weekly downtrend) markets.
 """
-name = "4H_Elder_Ray_Bull_Bear_2_1D_EMA34_Power"
-timeframe = "4h"
+name = "1D_Weekly_TRIX_Volume_Spike_Regime_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -24,25 +26,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Elder Ray Power
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get weekly data for trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA2 and EMA34
-    close_1d = pd.Series(df_1d['close'])
-    ema2 = close_1d.ewm(span=2, adjust=False).mean().values
-    ema34 = close_1d.ewm(span=34, adjust=False).mean().values
-    power = ema2 - ema34  # Elder Ray Power: bullish when >0, bearish when <0
-    power_aligned = align_htf_to_ltf(prices, df_1d, power)
+    # Calculate weekly TRIX (15-period EMA of EMA of EMA of close)
+    close_weekly = pd.Series(df_weekly['close'])
+    ema1 = close_weekly.ewm(span=15, adjust=False).mean()
+    ema2 = ema1.ewm(span=15, adjust=False).mean()
+    ema3 = ema2.ewm(span=15, adjust=False).mean()
+    trix_weekly = (ema3.diff() / ema3.shift(1)) * 100
+    trix_weekly = trix_weekly.fillna(0).values
+    trix_weekly_aligned = align_htf_to_ltf(prices, df_weekly, trix_weekly)
     
-    # Get 1d high and low for reference levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
-    low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
+    # Calculate daily TRIX for entry signals
+    close_daily = pd.Series(close)
+    ema1_d = close_daily.ewm(span=15, adjust=False).mean()
+    ema2_d = ema1_d.ewm(span=15, adjust=False).mean()
+    ema3_d = ema2_d.ewm(span=15, adjust=False).mean()
+    trix_daily = (ema3_d.diff() / ema3_d.shift(1)) * 100
+    trix_daily = trix_daily.fillna(0).values
     
-    # Volume filter: current volume > 1.5 * 20-period average volume
+    # Volume filter: current volume > 1.5 * 20-day average volume
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_avg * 1.5)
     
@@ -50,14 +56,14 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_exit = 0  # bars since last exit to prevent overtrading
     
-    start_idx = 34  # Ensure EMA34 is valid
+    start_idx = max(30, 20)  # Ensure sufficient warmup for TRIX
     
     for i in range(start_idx, n):
         bars_since_exit += 1
         
         # Skip if any data is not ready
-        if (np.isnan(power_aligned[i]) or np.isnan(high_1d_aligned[i]) or 
-            np.isnan(low_1d_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(trix_weekly_aligned[i]) or np.isnan(trix_daily[i]) or 
+            np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,36 +71,41 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Minimum 12 bars between trades (2 days on 4h TF) to reduce frequency
-            if bars_since_exit < 12:
+            # Minimum 3 days between trades to reduce frequency
+            if bars_since_exit < 3:
                 continue
                 
-            # Bull regime: Power > 0, look for long
-            if power_aligned[i] > 0:
-                # Long: 4h high touches 1d high with volume confirmation
-                if high[i] >= high_1d_aligned[i] and volume_filter[i]:
-                    signals[i] = 0.25
-                    position = 1
-                    bars_since_exit = 0
-            # Bear regime: Power < 0, look for short
-            elif power_aligned[i] < 0:
-                # Short: 4h low touches 1d low with volume confirmation
-                if low[i] <= low_1d_aligned[i] and volume_filter[i]:
-                    signals[i] = -0.25
-                    position = -1
-                    bars_since_exit = 0
+            # Long: weekly trend up, daily TRIX crosses above -0.05, volume spike
+            if (trix_weekly_aligned[i] > 0 and 
+                trix_daily[i] > -0.05 and trix_daily[i-1] <= -0.05 and
+                volume_filter[i]):
+                signals[i] = 0.25
+                position = 1
+                bars_since_exit = 0
+            # Short: weekly trend down, daily TRIX crosses below 0.05, volume spike
+            elif (trix_weekly_aligned[i] < 0 and 
+                  trix_daily[i] < 0.05 and trix_daily[i-1] >= 0.05 and
+                  volume_filter[i]):
+                signals[i] = -0.25
+                position = -1
+                bars_since_exit = 0
         elif position != 0:
-            # Exit: price returns to opposite 1d level or power flips
+            # Exit conditions
+            exit_signal = False
+            
             if position == 1:
-                if low[i] <= low_1d_aligned[i] or power_aligned[i] < 0:
-                    signals[i] = 0.0
-                    position = 0
-                    bars_since_exit = 0
+                # Exit long: TRIX crosses back below 0 or volume dries up
+                if trix_daily[i] < 0 or not volume_filter[i]:
+                    exit_signal = True
             elif position == -1:
-                if high[i] >= high_1d_aligned[i] or power_aligned[i] > 0:
-                    signals[i] = 0.0
-                    position = 0
-                    bars_since_exit = 0
+                # Exit short: TRIX crosses back above 0 or volume dries up
+                if trix_daily[i] > 0 or not volume_filter[i]:
+                    exit_signal = True
+            
+            if exit_signal:
+                signals[i] = 0.0
+                position = 0
+                bars_since_exit = 0
             else:
                 # Hold position
                 signals[i] = 0.25 if position == 1 else -0.25
