@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_Choppiness_Trend_Breakout"
-timeframe = "1d"
+name = "6h_Donchian20_Breakout_WeeklyPivotDirection_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,57 +17,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for choppiness and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # 1w trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 1d EMA34 trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    trend_up = close > ema_34_1d_aligned
-    trend_down = close < ema_34_1d_aligned
+    close_1w = df_1w['close'].values
+    # 1w EMA50 trend
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    trend_up = close > ema_50_1w_aligned
+    trend_down = close < ema_50_1w_aligned
     
-    # 1d ATR(14) for volatility
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    tr = np.maximum(high_1d[1:] - low_1d[1:], 
-                    np.maximum(np.abs(high_1d[1:] - close_1d[:-1]),
-                               np.abs(low_1d[1:] - close_1d[:-1])))
-    tr = np.concatenate([np.array([high_1d[0] - low_1d[0]]), tr])
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    # 6h Donchian(20) channels
+    donchian_len = 20
+    highest_high = pd.Series(high).rolling(window=donchian_len, min_periods=donchian_len).max().values
+    lowest_low = pd.Series(low).rolling(window=donchian_len, min_periods=donchian_len).min().values
     
-    # 1d Choppiness Index (14)
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    hh = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr_sum / (hh - ll)) / np.log10(14)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # Choppiness regime: > 61.8 = range, < 38.2 = trend
-    chop_range = chop_aligned > 61.8
-    chop_trend = chop_aligned < 38.2
-    
-    # Volume surge: current volume > 2.0x 20-period average
+    # Volume confirmation: current volume > 1.8x 20-period average
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-20:i])
-    vol_surge = volume > (2.0 * vol_ma_20)
+    vol_surge = volume > (1.8 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 1  # Minimum 1 day between trades
+    cooldown_bars = 4  # ~1 day (4*6h) to reduce trade frequency
     
-    start_idx = max(20, 14)
+    start_idx = max(donchian_len, 20)  # Ensure enough data for Donchian and volume
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(atr_14_aligned[i]) or 
-            np.isnan(chop_aligned[i]) or 
+        if (np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -84,27 +68,31 @@ def generate_signals(prices):
         trending_down = trend_down[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: chop regime (range) + trend up + volume surge
-            if chop_range[i] and trending_up and vol_surge[i]:
+            # Long: price breaks above Donchian high with volume surge in 1w uptrend
+            if (close[i] > highest_high[i] and 
+                trending_up and 
+                vol_surge[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: chop regime (range) + trend down + volume surge
-            elif chop_range[i] and trending_down and vol_surge[i]:
+            # Short: price breaks below Donchian low with volume surge in 1w downtrend
+            elif (close[i] < lowest_low[i] and 
+                  trending_down and 
+                  vol_surge[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit: chop shifts to trend or trend changes
-            if chop_trend[i] or not trending_up:
+            # Exit: price breaks below Donchian low or 1w trend changes to down
+            if close[i] < lowest_low[i] or not trending_up:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: chop shifts to trend or trend changes
-            if chop_trend[i] or not trending_down:
+            # Exit: price breaks above Donchian high or 1w trend changes to up
+            if close[i] > highest_high[i] or not trending_down:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
@@ -113,7 +101,8 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: In ranging markets (chop > 61.8), breakouts with volume surge and aligned 1d trend
-# capture the start of new trends. Works in bull/bear by following 1d EMA34 direction.
-# Chop regime filter reduces false breakouts. Volume surge confirms conviction.
-# Cooldown prevents overtrading. Target: 20-60 trades/year. Size: 0.25.
+# Hypothesis: Donchian(20) breakout with weekly EMA50 trend filter and volume surge works in both bull and bear markets.
+# In bull markets: 1w trend up, breakouts above Donchian high capture continuation.
+# In bear markets: 1w trend down, breakdowns below Donchian low capture continuation.
+# Volume surge confirms institutional participation. Using 6h timeframe reduces trade frequency vs lower TFs.
+# Cooldown of 4 bars (~1 day) and position size 0.25 target 50-150 trades over 4 years.
