@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Donchian20_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,61 +17,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for trend filter and Donchian
+    # Load daily data ONCE for Camarilla pivot and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Donchian channel (20-day) - breakout levels
-    donchian_high = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
+    # Calculate daily Camarilla pivot levels (based on previous day)
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
+    
+    # Camarilla levels (S1, S2, S3, R1, R2, R3)
+    s1 = prev_close - (range_hl * 1.0833)  # Support 1
+    r1 = prev_close + (range_hl * 1.0833)  # Resistance 1
+    
+    # Align daily levels to 4h timeframe
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     
     # Daily EMA(34) for trend filter
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align daily indicators to 12h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume spike detection: 2-period average (1 day of 12h bars)
-    vol_ma_2 = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
+    # Volume spike detection: 6-period average (1 day of 4h bars)
+    vol_ma_6 = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20, 2)  # Wait for EMA, Donchian, and volume MA
+    start_idx = max(34, 6)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_2[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(vol_ma_6[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian high with volume and daily uptrend
-            vol_condition = volume[i] > vol_ma_2[i] * 1.8
+            # Long: price above S1 with volume and daily uptrend
+            vol_condition = volume[i] > vol_ma_6[i] * 1.8
             uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
             
-            if close[i] > donchian_high_aligned[i] and vol_condition and uptrend:
+            if close[i] > s1_aligned[i] and vol_condition and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low with volume and daily downtrend
-            elif close[i] < donchian_low_aligned[i] and vol_condition and not uptrend:
+            # Short: price below R1 with volume and daily downtrend
+            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price returns to Donchian low or volume drops
-            if close[i] < donchian_low_aligned[i] or volume[i] < vol_ma_2[i] * 1.2:
+            # Exit: price back below S1 or volume drops
+            if close[i] < s1_aligned[i] or volume[i] < vol_ma_6[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price returns to Donchian high or volume drops
-            if close[i] > donchian_high_aligned[i] or volume[i] < vol_ma_2[i] * 1.2:
+            # Exit: price back above R1 or volume drops
+            if close[i] > r1_aligned[i] or volume[i] < vol_ma_6[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -79,16 +87,16 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 12h Donchian(20) breakout with 1d trend and volume confirmation
-# - Donchian(20) breakouts capture major trend moves on higher timeframe
-# - Daily EMA(34) filter ensures alignment with daily trend direction
+# Hypothesis: 4h Camarilla R1/S1 breakout with 1d trend and volume confirmation
+# - Daily Camarilla R1/S1 act as key support/resistance levels from prior day
+# - Breakout above S1 with volume in daily uptrend = long opportunity
+# - Breakdown below R1 with volume in daily downtrend = short opportunity
 # - Volume spike (1.8x average) confirms institutional participation
-# - Exit when price returns to opposite Donchian band or volume weakens
-# - Position size 0.25 targets ~15-30 trades/year, avoiding fee drag
-# - Works in both bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend)
-# - Uses actual daily Donchian levels (not intraday) for better stability
-# - Daily trend filter reduces whipsaws vs using same timeframe breakout
+# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
+# - Exit when price returns to S1/R1 or volume weakens
+# - Position size 0.25 targets ~20-50 trades/year, avoiding fee drag
+# - Uses actual daily Camarilla levels (proven edge from top performers)
+# - Daily trend filter reduces whipsaws vs using same timeframe
 # - Designed to work in BOTH bull and bear markets via trend filter
 # - Volume confirmation reduces false breakouts
-# - Simple 3-condition strategy: breakout + volume + trend
-# - Aims for 60-120 total trades over 4 years (15-30/year) to stay within limits
+# - Targets 75-200 total trades over 4 years (19-50/year) as per experiment guidelines
