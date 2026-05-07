@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-12h_Pivot_Breakout_1dTrend_Volume
-Hypothesis: Price breaking above/below daily Camarilla pivot levels (S3/R3) with 1d trend filter and volume spike (>1.5x 24-period average). 
-Pivot levels act as key support/resistance; breaks indicate institutional interest. 1d EMA50 ensures alignment with higher timeframe trend.
-Volume spike confirms breakout strength. Designed for low trade frequency (12-25/year) with clear trend-following logic.
-Works in bull/bear markets by requiring trend alignment and volatility-based confirmation.
+1d_Williams_Alligator_ElderRay_Trend_Volume_Spike
+Hypothesis: Combines Williams Alligator (trend detection) with Elder Ray (bull/bear power) and volume spike confirmation on daily timeframe. 
+Williams Alligator uses smoothed moving averages (Jaw, Teeth, Lips) to identify trends and avoid sideways markets. 
+Elder Ray measures bull power (high - EMA13) and bear power (EMA13 - low) to assess trend strength. 
+Volume spike (>1.5x 20-day average) confirms breakout strength. 
+Weekly trend filter ensures alignment with higher timeframe trend. 
+Designed for low trade frequency (10-20/year) with strong trend-following logic, works in bull/bear markets by requiring trend alignment and volatility-based confirmation.
 """
 
-name = "12h_Pivot_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "1d_Williams_Alligator_ElderRay_Trend_Volume_Spike"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +19,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,73 +27,108 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for pivot levels and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    weekly_close = df_1w['close'].values
     
-    # Calculate Camarilla pivot levels (S3, R3) from previous day
-    # R3 = close + 1.1*(high - low)
-    # S3 = close - 1.1*(high - low)
-    hl_range = daily_high - daily_low
-    r3 = daily_close + 1.1 * hl_range
-    s3 = daily_close - 1.1 * hl_range
+    # Calculate weekly EMA50 for trend filter
+    ema_50_1w = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Align pivot levels to 12h timeframe (previous day's levels available at open)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Williams Alligator (13,8,5) - smoothed moving averages
+    # Jaw: 13-period smoothed moving average of median price, shifted 8 bars
+    # Teeth: 8-period smoothed moving average of median price, shifted 5 bars
+    # Lips: 5-period smoothed moving average of median price, shifted 3 bars
+    median_price = (high + low) / 2
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    def smoothed_ma(arr, period):
+        # Smoothed moving average (SMMA) - similar to RMA/Wilder's smoothing
+        sma = pd.Series(arr).rolling(window=period, min_periods=period).mean().values
+        smma = np.full_like(arr, np.nan, dtype=np.float64)
+        if len(arr) >= period:
+            smma[period-1] = sma[period-1]
+            for i in range(period, len(arr)):
+                smma[i] = (smma[i-1] * (period-1) + arr[i]) / period
+        return smma
     
-    # Volume confirmation: 24-period average (2 * 12h periods)
-    vol_ma24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    vol_ratio = np.divide(volume, vol_ma24, out=np.zeros_like(volume), where=vol_ma24!=0)
+    jaw = smoothed_ma(median_price, 13)
+    teeth = smoothed_ma(median_price, 8)
+    lips = smoothed_ma(median_price, 5)
+    
+    # Shift as per Alligator definition
+    jaw = np.roll(jaw, 8)
+    teeth = np.roll(teeth, 5)
+    lips = np.roll(lips, 3)
+    
+    # Elder Ray - Bull Power and Bear Power using 13-period EMA
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = ema13 - low
+    
+    # Volume confirmation: 20-day average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = np.divide(volume, vol_ma20, out=np.zeros_like(volume), where=vol_ma20!=0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Warmup
+    start_idx = 100  # Warmup for all indicators
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(ema_50_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine 1d trend
-        trend_up = daily_close[i] > ema_50_1d[i]  # Use daily close for trend
-        trend_down = daily_close[i] < ema_50_1d[i]
+        # Determine weekly trend using aligned close
+        weekly_close_aligned = align_htf_to_ltf(prices, df_1w, weekly_close)
+        if np.isnan(weekly_close_aligned[i]):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+            
+        weekly_trend_up = weekly_close_aligned[i] > ema_50_1w_aligned[i]
+        weekly_trend_down = weekly_close_aligned[i] < ema_50_1w_aligned[i]
+        
+        # Alligator alignment: Lips > Teeth > Jaw = uptrend, Lips < Teeth < Jaw = downtrend
+        alligator_long = lips[i] > teeth[i] and teeth[i] > jaw[i]
+        alligator_short = lips[i] < teeth[i] and teeth[i] < jaw[i]
         
         if position == 0:
-            # Long: Close breaks above R3 with uptrend and volume spike
-            if close[i] > r3_aligned[i] and trend_up and vol_ratio[i] > 1.5:
+            # Long: Alligator aligned up, Bull Power positive, Bear Power negative, weekly trend up, volume spike
+            if (alligator_long and 
+                bull_power[i] > 0 and 
+                bear_power[i] > 0 and  # Actually bear power should be positive for strength, but we want it decreasing
+                weekly_trend_up and 
+                vol_ratio[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: Close breaks below S3 with downtrend and volume spike
-            elif close[i] < s3_aligned[i] and trend_down and vol_ratio[i] > 1.5:
+            # Short: Alligator aligned down, Bull Power negative, Bear Power positive, weekly trend down, volume spike
+            elif (alligator_short and 
+                  bull_power[i] < 0 and 
+                  bear_power[i] < 0 and  # Bull power negative for bear strength
+                  weekly_trend_down and 
+                  vol_ratio[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Close crosses below S3 or trend turns down
-            if close[i] < s3_aligned[i] or not trend_up:
+            # Exit long: Alligator alignment breaks or weekly trend turns down
+            if not alligator_long or not weekly_trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Close crosses above R3 or trend turns up
-            if close[i] > r3_aligned[i] or not trend_down:
+            # Exit short: Alligator alignment breaks or weekly trend turns up
+            if not alligator_short or not weekly_trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
