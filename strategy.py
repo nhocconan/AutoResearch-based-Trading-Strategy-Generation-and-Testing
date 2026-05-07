@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
-Hypothesis: Uses Camarilla pivot levels from 1d for S3/R3 breakout with volume spike confirmation and 1d EMA trend filter.
-Enters long when price breaks above R3 with volume > 2x average and price above 1d EMA50.
-Enters short when price breaks below S3 with volume > 2x average and price below 1d EMA50.
-Designed for low trade frequency (20-40/year) with clear breakout logic, works in trending markets and avoids range-bound conditions.
+12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
+Hypothesis: Uses daily (1d) Camarilla pivot levels S3/R3 for breakout signals on 12h timeframe, with volume spike (>2x average) and daily EMA50 trend filter. Designed for low trade frequency (12-37/year) to avoid fee drag, works in trending markets by aligning with daily trend, and avoids range-bound conditions through volume confirmation. Uses discrete position sizing (0.25) to minimize churn.
 """
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -35,14 +32,10 @@ def generate_signals(prices):
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Calculate Camarilla pivot levels for each day
-    # R4 = C + ((H-L)*1.1/2)
-    # R3 = C + ((H-L)*1.1/4)
-    # S3 = C - ((H-L)*1.1/4)
-    # S4 = C - ((H-L)*1.1/2)
     camarilla_r3 = df_1d['close'] + (df_1d['high'] - df_1d['low']) * 1.1 / 4
     camarilla_s3 = df_1d['close'] - (df_1d['high'] - df_1d['low']) * 1.1 / 4
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3.values)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3.values)
     
