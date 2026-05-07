@@ -1,7 +1,10 @@
+# 4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike
+# Hypothesis: Breakouts from Camarilla R3/S3 levels on 4h with daily trend filter and volume spikes capture strong momentum moves. Works in bull (breakouts up in uptrend) and bear (breakouts down in downtrend). Volume surge confirms institutional participation. Low trade frequency avoids fee drag.
+
 #!/usr/bin/env python3
 
-name = "1d_RSI_MeanReversion_With_TrendFilter"
-timeframe = "1d"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -10,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,44 +21,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get daily data for Camarilla levels and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate weekly EMA20 for trend filter
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Calculate Camarilla levels from previous day's OHLC
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate daily RSI(14) for mean reversion
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Camarilla R3, S3 levels
+    # R3 = close + (high - low) * 1.1 / 2
+    # S3 = close - (high - low) * 1.1 / 2
+    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 2
+    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 2
     
-    # Wilder's smoothing (equivalent to EMA with alpha=1/14)
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
+    # Align Camarilla levels to 4h timeframe (use previous day's levels)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    for i in range(14, n):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, 50), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    # Volume filter: current volume > 2.0x 20-period average (on 4h data)
+    vol_ma_20 = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma_20[i] = np.mean(volume[i-20:i])
+    vol_filter = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 5  # Prevent overtrading (approx 5 days for 1d)
+    cooldown_bars = 3  # Prevent overtrading (approx 6 hours for 4h)
     
-    start_idx = 14  # Warmup for RSI
+    start_idx = max(20, 34)  # Warmup for volume MA and EMA
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if np.isnan(ema_20_1w_aligned[i]):
+        if (np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,33 +74,37 @@ def generate_signals(prices):
         
         bars_since_last_trade += 1
         
-        # Determine weekly trend direction
-        weekly_close_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
-        trend_up = weekly_close_aligned[i] > ema_20_1w_aligned[i]
-        trend_down = weekly_close_aligned[i] < ema_20_1w_aligned[i]
+        # Determine daily trend direction
+        close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
+        trend_1d_up = close_1d_aligned[i] > ema_34_1d_aligned[i]
+        trend_1d_down = close_1d_aligned[i] < ema_34_1d_aligned[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: RSI oversold in weekly uptrend
-            if rsi[i] < 30 and trend_up:
+            # Long: break above Camarilla R3 in daily uptrend with volume spike
+            if (close[i] > camarilla_r3_aligned[i] and 
+                trend_1d_up and 
+                vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: RSI overbought in weekly downtrend
-            elif rsi[i] > 70 and trend_down:
+            # Short: break below Camarilla S3 in daily downtrend with volume spike
+            elif (close[i] < camarilla_s3_aligned[i] and 
+                  trend_1d_down and 
+                  vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit: RSI returns to neutral or trend changes
-            if rsi[i] > 50 or not trend_up:
+            # Exit: price closes below Camarilla S3 OR trend change
+            if (close[i] < camarilla_s3_aligned[i] or not trend_1d_up):
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: RSI returns to neutral or trend changes
-            if rsi[i] < 50 or not trend_down:
+            # Exit: price closes above Camarilla R3 OR trend change
+            if (close[i] > camarilla_r3_aligned[i] or not trend_1d_down):
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
