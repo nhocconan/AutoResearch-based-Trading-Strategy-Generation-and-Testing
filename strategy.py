@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_1wPivot_1dEMA34_VolumeSpike_v2"
-timeframe = "4h"
+name = "12h_Donchian20_VolumeTrend_1d"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -22,69 +22,52 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Weekly high/low/close from daily data (5 trading days)
-    # Convert daily data to weekly approximation using last 5 days
-    daily_high_series = pd.Series(df_1d['high'])
-    daily_low_series = pd.Series(df_1d['low'])
-    daily_close_series = pd.Series(df_1d['close'])
-    
-    weekly_high = daily_high_series.rolling(window=5, min_periods=5).max().values
-    weekly_low = daily_low_series.rolling(window=5, min_periods=5).min().values
-    weekly_close = daily_close_series.rolling(window=5, min_periods=5).mean().values
-    
-    # Weekly pivot levels
-    pp = (weekly_high + weekly_low + weekly_close) / 3
-    r1 = 2 * pp - weekly_low
-    s1 = 2 * pp - weekly_high
-    
-    # Align weekly pivot levels to 4h timeframe (6 bars per day)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Donchian channel (20-period) on 12h data
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
     # Daily trend filter: EMA(34) on daily close
-    ema_34_1d = daily_close_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume spike: 6-period average (1.5 days of 4h bars)
-    vol_ma_6 = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
+    # Volume spike detection: 20-period average (10 days of 12h bars)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 6)  # Wait for EMA and volume MA
+    start_idx = max(34, 20)  # Wait for all indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(pp_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(vol_ma_6[i])):
+        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(vol_ma_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above S1 with volume and daily uptrend
-            vol_condition = volume[i] > vol_ma_6[i] * 2.0
+            # Long: breakout above upper band with volume and daily uptrend
+            vol_condition = volume[i] > vol_ma_20[i] * 2.0
             uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
             
-            if close[i] > s1_aligned[i] and vol_condition and uptrend:
+            if close[i] > highest_high[i-1] and vol_condition and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below R1 with volume and daily downtrend
-            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
+            # Short: breakdown below lower band with volume and daily downtrend
+            elif close[i] < lowest_low[i-1] and vol_condition and not uptrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below pivot or volume drops
-            if close[i] < pp_aligned[i] or volume[i] < vol_ma_6[i] * 1.5:
+            # Exit: price back below lower band or volume drops
+            if close[i] < lowest_low[i-1] or volume[i] < vol_ma_20[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above pivot or volume drops
-            if close[i] > pp_aligned[i] or volume[i] < vol_ma_6[i] * 1.5:
+            # Exit: price back above upper band or volume drops
+            if close[i] > highest_high[i-1] or volume[i] < vol_ma_20[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -92,10 +75,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Weekly pivot points (S1/R1) act as strong support/resistance levels
-# Breakout above S1 with volume spike in daily uptrend = long opportunity
-# Breakdown below R1 with volume spike in daily downtrend = short opportunity
-# Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
-# Exit when price returns to weekly pivot (PP) or volume weakens
-# Position size 0.25 targets ~25-35 trades/year, avoiding fee drag
-# Weekly pivot provides structure that works across market regimes (tested: 0.458 avg Sharpe)
+# Hypothesis: 12h Donchian breakout with daily trend and volume confirmation
+# - Donchian(20) breakout captures momentum in both bull and bear markets
+# - Daily EMA(34) ensures alignment with higher timeframe trend
+# - Volume spike (2x average) confirms institutional participation
+# - Exit when price returns to opposite band or volume weakens
+# - Position size 0.25 targets 15-30 trades/year, avoiding fee drag
+# - Works in bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend)
