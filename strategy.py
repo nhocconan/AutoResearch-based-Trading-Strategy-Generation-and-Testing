@@ -1,7 +1,6 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_v3"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -32,7 +31,7 @@ def generate_signals(prices):
     r3 = close_prev + 1.1 * (high_prev - low_prev) / 6
     s3 = close_prev - 1.1 * (high_prev - low_prev) / 6
     
-    # Align daily levels to 4h timeframe (with 1-day delay for completed bar)
+    # Align daily levels to 12h timeframe (with 1-day delay for completed bar)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
@@ -40,7 +39,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume filter: current volume > 1.5x 20-period average (4h)
+    # Volume filter: current volume > 1.5x 20-period average (12h)
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-20:i])
@@ -49,7 +48,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 3  # ~6 hours for 4h to reduce trades
+    cooldown_bars = 2  # ~1 day for 12h to reduce trades
     
     start_idx = max(100, 20)
     
@@ -108,7 +107,7 @@ def generate_signals(prices):
     return signals
 
 # Hypothesis: Camarilla R3/S3 breakouts with daily trend alignment capture institutional
-# breakouts in both bull and bear markets. The 4h timeframe provides sufficient
+# breakouts in both bull and bear markets. The 12h timeframe provides sufficient
 # noise filtering while capturing multi-day moves. Volume confirmation ensures
 # genuine institutional participation. Conservative sizing (0.25) limits drawdown
-# during false breaks. Target: 20-40 trades/year to minimize fee drift.
+# during false breaks. Target: 15-25 trades/year to minimize fee drag.
