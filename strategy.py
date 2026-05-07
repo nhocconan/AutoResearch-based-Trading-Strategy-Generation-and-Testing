@@ -1,15 +1,12 @@
-# -*- coding: utf-8 -*-
-# -*- mode: python; -*-
-
 #!/usr/bin/env python3
-# 6H_WeeklyPivot_CounterTrend_With1DTrendFilter
-# Hypothesis: 6-hour counter-trend strategy using weekly pivot levels with daily trend filter.
-# Fades from weekly R2/S2 when price is in daily uptrend/downtrend, targeting mean reversion within weekly range.
-# Works in bull markets (fades from weekly resistance in uptrend) and bear markets (fades from weekly support in downtrend).
-# Targets 15-30 trades/year to minimize fee drag. Uses weekly structure with daily trend filter.
+# 12h_Camarilla_R3_S3_1DTrend_VolumeBreakout_v4
+# Hypothesis: 12-hour timeframe strategy using daily Camarilla R3/S3 breakouts with 1-day EMA34 trend filter and volume spike confirmation.
+# Targets 12-37 trades/year to minimize fee drag. Uses price channel structure with trend and volume filters.
+# Works in bull markets (breakouts with trend) and bear markets (fades from extremes with trend filter).
+# Added volatility filter to avoid whipsaws and reduced position size to manage drawdown.
 
-name = "6H_WeeklyPivot_CounterTrend_With1DTrendFilter"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_1DTrend_VolumeBreakout_v4"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -26,66 +23,82 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 1:
+    # Get 1d data for Camarilla calculation and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:  # Need enough data for EMA34
         return np.zeros(n)
     
-    # Get daily data for trend filter
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 20:
-        return np.zeros(n)
+    # Calculate daily Camarilla levels (based on previous day's OHLC)
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Calculate weekly pivot points (based on previous week's OHLC)
-    prev_weekly_high = df_weekly['high'].shift(1).values
-    prev_weekly_low = df_weekly['low'].shift(1).values
-    prev_weekly_close = df_weekly['close'].shift(1).values
+    # Calculate Camarilla levels for each day
+    range_1d = prev_high - prev_low
+    r3 = prev_close + range_1d * 1.1 / 4
+    s3 = prev_close - range_1d * 1.1 / 4
+    pp = (prev_high + prev_low + prev_close) / 3  # Pivot point
     
-    # Calculate weekly pivot and support/resistance levels
-    weekly_range = prev_weekly_high - prev_weekly_low
-    pp_weekly = (prev_weekly_high + prev_weekly_low + prev_weekly_close) / 3
-    r2_weekly = pp_weekly + weekly_range * 0.25  # Weekly R2
-    s2_weekly = pp_weekly - weekly_range * 0.25  # Weekly S2
+    # Calculate 1-day EMA34 for trend filter
+    ema_34 = pd.Series(prev_close).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate daily EMA20 for trend filter
-    ema_20_daily = pd.Series(prev_weekly_close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Align Camarilla levels, EMA, and pivot to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Align weekly levels and daily EMA to 6h timeframe
-    r2_weekly_aligned = align_htf_to_ltf(prices, df_weekly, r2_weekly)
-    s2_weekly_aligned = align_htf_to_ltf(prices, df_weekly, s2_weekly)
-    pp_weekly_aligned = align_htf_to_ltf(prices, df_weekly, pp_weekly)
-    ema_20_daily_aligned = align_htf_to_ltf(prices, df_daily, ema_20_daily)
+    # Volume filter: current volume > 2.0x average volume (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Volatility filter: avoid low volatility periods (ATR < 0.5% of price)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    vol_filter = atr > 0.005 * close  # ATR > 0.5% of price
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure we have daily EMA data
+    start_idx = max(34, 20)  # Ensure we have EMA34 and volume MA data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(r2_weekly_aligned[i]) or np.isnan(s2_weekly_aligned[i]) or 
-            np.isnan(pp_weekly_aligned[i]) or np.isnan(ema_20_daily_aligned[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(pp_aligned[i]) or np.isnan(ema_34_aligned[i]) or
+            np.isnan(vol_ma[i]) or vol_ma[i] == 0 or np.isnan(vol_filter[i]) or not vol_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Volume filter: spike confirmation (2.0x average volume)
+        volume_filter = volume[i] > 2.0 * vol_ma[i]
+        
         if position == 0:
-            # Long: Price rejects S2 support + daily uptrend (price > EMA20)
-            if (close[i] <= s2_weekly_aligned[i] * 1.002 and  # Within 0.2% of S2
-                close[i] > ema_20_daily_aligned[i]):          # Daily uptrend
+            # Long: Price breaks above R3 + uptrend (price > EMA34) + volume spike
+            if (close[i] > r3_aligned[i] and 
+                close[i] > ema_34_aligned[i] and   # Uptrend filter
+                volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price rejects R2 resistance + daily downtrend (price < EMA20)
-            elif (close[i] >= r2_weekly_aligned[i] * 0.998 and  # Within 0.2% of R2
-                  close[i] < ema_20_daily_aligned[i]):         # Daily downtrend
+            # Short: Price breaks below S3 + downtrend (price < EMA34) + volume spike
+            elif (close[i] < s3_aligned[i] and 
+                  close[i] < ema_34_aligned[i] and   # Downtrend filter
+                  volume_filter):
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: Price returns to weekly pivot (mean reversion target)
-            at_pivot = abs(close[i] - pp_weekly_aligned[i]) < (r2_weekly_aligned[i] - pp_weekly_aligned[i]) * 0.3  # Within 30% of range to pivot
+            # Exit conditions:
+            # 1. Price returns to pivot point (mean reversion)
+            # 2. Opposite Camarilla level break (trend exhaustion)
+            at_pivot = abs(close[i] - pp_aligned[i]) < (r3_aligned[i] - pp_aligned[i]) * 0.1  # Within 10% of PP
+            opposite_break = (position == 1 and close[i] < s3_aligned[i]) or \
+                           (position == -1 and close[i] > r3_aligned[i])
             
-            if at_pivot:
+            if at_pivot or opposite_break:
                 signals[i] = 0.0
                 position = 0
             else:
