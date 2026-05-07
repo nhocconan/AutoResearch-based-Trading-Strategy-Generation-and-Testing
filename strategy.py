@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_12hTrend_Volume_S"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,63 +17,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # 12h EMA50 for trend filter
+    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Calculate 1d Camarilla pivot levels
+    # Load 1d data for Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Calculate Camarilla pivot levels from previous day
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    
+    pivot = (high_1d + low_1d + close_1d) / 3
     range_1d = high_1d - low_1d
+    r1 = close_1d + range_1d * 1.1 / 12
+    s1 = close_1d - range_1d * 1.1 / 12
+    r3 = close_1d + range_1d * 1.1 / 4
+    s3 = close_1d - range_1d * 1.1 / 4
     
-    # Camarilla levels: R3, S3
-    r3 = close_1d + (range_1d * 1.1 / 4)
-    s3 = close_1d - (range_1d * 1.1 / 4)
-    
+    # Align pivot levels to 4h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # 12h volume spike: > 1.3x 24-period average (12 days)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    vol_spike = volume > 1.3 * vol_ma
+    # 4h volume spike: > 1.8x 20-period average (10 hours)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > 1.8 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(24, 34)  # Wait for volume MA and EMA34
+    start_idx = max(20, 50)  # Wait for volume MA and EMA50
     
     for i in range(start_idx, n):
-        if np.isnan(ema34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
+        if np.isnan(ema50_12h_aligned[i]) or np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above R3, uptrend (price > EMA34), volume spike
-            if high[i] > r3_aligned[i] and close[i] > ema34_1d_aligned[i] and vol_spike[i]:
+            # Long: Price breaks above R1 with volume spike and 12h uptrend
+            if close[i] > r1_aligned[i] and ema50_12h_aligned[i] > pivot_aligned[i] and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S3, downtrend (price < EMA34), volume spike
-            elif low[i] < s3_aligned[i] and close[i] < ema34_1d_aligned[i] and vol_spike[i]:
+            # Short: Price breaks below S1 with volume spike and 12h downtrend
+            elif close[i] < s1_aligned[i] and ema50_12h_aligned[i] < pivot_aligned[i] and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Price falls back below R3 or trend turns down
-            if close[i] < r3_aligned[i] or close[i] < ema34_1d_aligned[i]:
+            # Exit: Price breaks below S1 or 12h trend turns down
+            if close[i] < s1_aligned[i] or ema50_12h_aligned[i] < pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price rises back above S3 or trend turns up
-            if close[i] > s3_aligned[i] or close[i] > ema34_1d_aligned[i]:
+            # Exit: Price breaks above R1 or 12h trend turns up
+            if close[i] > r1_aligned[i] or ema50_12h_aligned[i] > pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -81,11 +92,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
-# Long when price breaks above Camarilla R3 level during uptrend (price > 1d EMA34) with volume spike.
-# Short when price breaks below Camarilla S3 level during downtrend (price < 1d EMA34) with volume spike.
-# Uses 1d timeframe for trend and pivot calculation to avoid whipsaws, 12h for entry timing.
-# Volume spike (>1.3x average) ensures conviction. Discrete 0.25 position size limits risk.
-# Camarilla levels provide precise support/resistance; breakouts with trend filter capture sustained moves.
-# Works in bull markets (breakouts above R3 in uptrend) and bear markets (breakdowns below S3 in downtrend).
-# Target: 15-30 trades/year to minimize fee drag while capturing significant moves.
+# Hypothesis: Camarilla R1/S1 breakout with 12h EMA50 trend filter and volume confirmation.
+# Long when price breaks above R1 (Camarilla resistance level 1) with volume spike and 12h uptrend.
+# Short when price breaks below S1 (Camarilla support level 1) with volume spike and 12h downtrend.
+# Uses Camarilla levels from daily timeframe for structure, 12h for trend filter, 4h for execution.
+# Volume spike (>1.8x 20-period average) ensures conviction. Discrete 0.25 position size limits risk.
+# Works in bull markets (breakouts in uptrend) and bear markets (breakdowns in downtrend).
+# Target: 20-40 trades/year to minimize fee decay while capturing meaningful moves.
