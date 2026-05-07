@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Donchian20_Breakout_1dTrend_VolumeConfirm"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_12hTrend_VolumeConfirm"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,20 +17,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # 1d EMA(34) for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 12h EMA(34) for trend filter
+    ema_34_12h = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # 12h Donchian channel (20-period)
+    # 4h Donchian channel (20-period)
     high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 12h volume spike (20-period average)
+    # 4h volume spike (20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -39,21 +39,21 @@ def generate_signals(prices):
     start_idx = 34  # Wait for EMA and Donchian
     
     for i in range(start_idx, n):
-        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(ema_34_12h_aligned[i]) or np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(vol_ma_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above Donchian high with volume and 1d uptrend
+            # Long: break above Donchian high with volume and 12h uptrend
             vol_condition = volume[i] > vol_ma_20[i] * 1.8
-            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]  # Rising EMA
+            uptrend = ema_34_12h_aligned[i] > ema_34_12h_aligned[i-1]  # Rising EMA
             
             if close[i] > high_20[i] and vol_condition and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below Donchian low with volume and 1d downtrend
+            # Short: break below Donchian low with volume and 12h downtrend
             elif close[i] < low_20[i] and vol_condition and not uptrend:
                 signals[i] = -0.25
                 position = -1
@@ -76,11 +76,14 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 12h Donchian breakout with 1d EMA trend filter and volume confirmation
+# Hypothesis: 4h Donchian breakout with 12h EMA trend filter and volume confirmation
 # - Donchian(20) breakouts capture momentum after range periods
-# - 1d EMA(34) ensures alignment with higher timeframe trend
+# - 12h EMA(34) ensures alignment with higher timeframe trend
 # - Volume spike (1.8x average) confirms institutional participation
 # - Works in bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend)
-# - Position size 0.25 targets 15-25 trades/year, avoiding fee drag
+# - Position size 0.25 targets 20-40 trades/year, avoiding fee drag
 # - Exit at range midpoint provides logical profit target in ranging markets
-# - Using 12h timeframe targets 50-150 total trades over 4 years (12-37/year) as per requirements
+# - Targets 4h timeframe for optimal balance of signal quality and trade frequency
+# - 12h trend filter prevents counter-trend entries during choppy periods
+# - Volume confirmation reduces false breakouts
+# - Exit at midpoint provides clear risk-reward in ranging environments
