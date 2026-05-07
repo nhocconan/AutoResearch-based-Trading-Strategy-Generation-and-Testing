@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-1h_4h_1d_Structure_Filter_v1
-Hypothesis: Combines 4h Donchian breakout for trend direction with 1d volume confirmation
-and 1h momentum filter to avoid whipsaws. Uses timeframe hierarchy: 4h/1d for signal direction,
-1h only for entry timing. Targets 15-35 trades/year to minimize fee drag while capturing
-trend moves in both bull and bear markets through structured breakouts.
+1d_WeeklyDonchianBreakout_TrendVolume_v1
+Hypothesis: Weekly Donchian channel breakout on 1d timeframe with 1w trend filter and volume confirmation.
+Captures long-term trends while avoiding whipsaws. Targets 10-20 trades/year per symbol to minimize fee drag.
+Works in both bull and bear markets by using trend filter to align with higher timeframe direction.
 """
 
-name = "1h_4h_1d_Structure_Filter_v1"
-timeframe = "1h"
+name = "1d_WeeklyDonchianBreakout_TrendVolume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -25,89 +24,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h Donchian channels (20-period) for trend direction
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Weekly Donchian channel (20-week period)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # 1d volume confirmation: volume > 20-period average
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # Calculate 20-period highest high and lowest low
+    highest_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    volume_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Align to daily timeframe
+    donchian_high = align_htf_to_ltf(prices, df_1w, highest_high)
+    donchian_low = align_htf_to_ltf(prices, df_1w, lowest_low)
     
-    # 1h momentum filter: RSI(14) to avoid overextended entries
-    close_series = pd.Series(close)
-    delta = close_series.diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values
+    # 1-week trend filter: EMA of weekly close
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    # Volume confirmation: current volume > 20-day average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):
         # Skip if any critical value is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(rsi[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Session filter: only trade 08-20 UTC
-        hour = hours[i]
-        in_session = 8 <= hour <= 20
-        
-        if position == 0 and in_session:
-            # Long: price breaks above 4h Donchian high with volume confirmation and RSI not overbought
-            if (close[i] > donchian_high_aligned[i] and 
-                volume[i] > vol_ma_1d_aligned[i] and 
-                rsi[i] < 70):
-                signals[i] = 0.20
+        if position == 0:
+            # Long: price breaks above weekly Donchian high AND above weekly EMA with volume confirmation
+            if close[i] > donchian_high[i] and close[i] > ema_1w_aligned[i] and volume[i] > vol_ma[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 4h Donchian low with volume confirmation and RSI not oversold
-            elif (close[i] < donchian_low_aligned[i] and 
-                  volume[i] > vol_ma_1d_aligned[i] and 
-                  rsi[i] > 30):
-                signals[i] = -0.20
+            # Short: price breaks below weekly Donchian low AND below weekly EMA with volume confirmation
+            elif close[i] < donchian_low[i] and close[i] < ema_1w_aligned[i] and volume[i] > vol_ma[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price breaks below 4h Donchian low OR RSI becomes oversold
-            if close[i] < donchian_low_aligned[i] or rsi[i] < 30:
+            # Exit: price crosses below weekly Donchian low
+            if close[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: price breaks above 4h Donchian high OR RSI becomes overbought
-            if close[i] > donchian_high_aligned[i] or rsi[i] > 70:
+            # Exit: price crosses above weekly Donchian high
+            if close[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
-        else:
-            # Outside session: maintain position or stay flat
-            if position == 0:
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = -0.25
     
     return signals
