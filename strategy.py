@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-name = "4h_1d_Keltner_Channel_Squeeze_Breakout"
-timeframe = "4h"
+name = "12h_1d_Camarilla_S1R1_Breakout_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtools import atr
-from mtf_data import get_htf_data, align_ltf_to_htf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,81 +19,67 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Daily Keltner Channel (20 EMA + 2*ATR)
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate daily Camarilla pivot levels from previous day
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # EMA(20) on daily close
-    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
     
-    # ATR(10) on daily
-    atr_10_1d = atr(high_1d, low_1d, close_1d, 10)
+    # Camarilla levels
+    s1 = prev_close - (range_hl * 1.08 / 2)
+    r1 = prev_close + (range_hl * 1.08 / 2)
     
-    # Keltner bands
-    upper_1d = ema_20_1d + 2 * atr_10_1d
-    lower_1d = ema_20_1d - 2 * atr_10_1d
+    # Align daily levels to 12h timeframe
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     
-    # Align to 4h
-    ema_20_1d_aligned = align_ltf_to_htf(prices, df_1d, ema_20_1d)
-    upper_1d_aligned = align_ltf_to_htf(prices, df_1d, upper_1d)
-    lower_1d_aligned = align_ltf_to_htf(prices, df_1d, lower_1d)
+    # Daily trend filter: EMA(34) on daily close
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 4h Bollinger Band width (20, 2) for squeeze detection
-    close_series = pd.Series(close)
-    sma_20 = close_series.rolling(window=20, min_periods=20).mean().values
-    std_20 = close_series.rolling(window=20, min_periods=20).std().values
-    bb_upper = sma_20 + 2 * std_20
-    bb_lower = sma_20 - 2 * std_20
-    bb_width = (bb_upper - bb_lower) / sma_20
-    
-    # Bollinger Band width percentile (50 lookback) for squeeze
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=20).apply(
-        lambda x: np.percentile(x, 50) if len(x) == 50 else np.nan, raw=False
-    ).values
-    
-    # Squeeze condition: BB width below 50th percentile
-    squeeze = bb_width < bb_width_percentile
+    # Volume spike detection: 2-period average (1 day of 12h bars)
+    vol_ma_2 = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Wait for BB width percentile and Bollinger
+    start_idx = max(34, 2)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_20_1d_aligned[i]) or np.isnan(upper_1d_aligned[i]) or 
-            np.isnan(lower_1d_aligned[i]) or np.isnan(sma_20[i]) or np.isnan(std_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(vol_ma_2[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Look for breakout after squeeze
-            if squeeze[i-1]:  # Was in squeeze
-                # Breakout above upper Keltner with volume confirmation
-                vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-                if not np.isnan(vol_ma_20[i]) and volume[i] > vol_ma_20[i] * 1.5:
-                    if close[i] > upper_1d_aligned[i]:
-                        signals[i] = 0.25
-                        position = 1
-                    elif close[i] < lower_1d_aligned[i]:
-                        signals[i] = -0.25
-                        position = -1
+            # Long: price above S1 with volume and daily uptrend
+            vol_condition = volume[i] > vol_ma_2[i] * 2.0
+            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
+            
+            if close[i] > s1_aligned[i] and vol_condition and uptrend:
+                signals[i] = 0.25
+                position = 1
+            # Short: price below R1 with volume and daily downtrend
+            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Exit: return to middle (EMA) or opposite band
-            if close[i] < ema_20_1d_aligned[i] or close[i] > upper_1d_aligned[i]:
+            # Exit: price back below S1 or volume drops
+            if close[i] < s1_aligned[i] or volume[i] < vol_ma_2[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: return to middle (EMA) or opposite band
-            if close[i] > ema_20_1d_aligned[i] or close[i] < lower_1d_aligned[i]:
+            # Exit: price back above R1 or volume drops
+            if close[i] > r1_aligned[i] or volume[i] < vol_ma_2[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,10 +87,13 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 4h Bollinger Band squeeze + daily Keltner channel breakout
-# - Bollinger Band squeeze indicates low volatility, priming for breakout
-# - Breakout above/below daily Keltner channel (EMA20 ± 2*ATR) with volume
-# - Works in both bull and bear markets by capturing volatility expansion
-# - Daily timeframe provides stable volatility bands less prone to whipsaw
-# - Position size 0.25 targets ~25-40 trades/year, minimizing fee drag
-# - Exit when price returns to daily EMA (mean reversion) or breaks opposite band
+# Hypothesis: 12h Camarilla S1/R1 breakout with daily trend and volume confirmation
+# - Daily Camarilla S1/R1 act as strong support/resistance levels
+# - Breakout above S1 with volume in daily uptrend = long opportunity
+# - Breakdown below R1 with volume in daily downtrend = short opportunity
+# - Volume spike (2.0x average) confirms institutional participation
+# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
+# - Exit when price returns to S1/R1 or volume weakens
+# - Position size 0.25 targets ~15-35 trades/year, avoiding fee drag
+# - Uses actual daily Camarilla levels (not weekly) for better responsiveness
+# - Designed to work in BOTH bull and bear markets via trend filter
