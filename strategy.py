@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Vortex_Volume_Spike_1dTrend_v1
-Hypothesis: On 4h timeframe, use Vortex Indicator to identify trend direction and strength, 
-filtered by daily EMA trend and volume spikes to avoid false signals. 
-Long when VI+ > VI- and price above daily EMA with volume spike. 
-Short when VI- > VI+ and price below daily EMA with volume spike. 
-Vortex helps distinguish between trending and ranging markets, reducing whipsaws in chop.
-Works in both bull and bear markets by requiring alignment with daily trend.
+4h_Donchian_Breakout_Volume_Trend_v1
+Hypothesis: On 4h timeframe, breakouts above/below Donchian(20) channels with volume confirmation 
+and trend filter from 1d EMA34 work in both bull and bear markets. Volume filters reduce false 
+breakouts, EMA34 ensures alignment with daily trend. Donchian provides clear entry/exit levels.
 """
-name = "4h_Vortex_Volume_Spike_1dTrend_v1"
+name = "4h_Donchian_Breakout_Volume_Trend_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -31,41 +28,29 @@ def generate_signals(prices):
     if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate Vortex Indicator (period=14)
-    vm_plus = np.abs(high - np.roll(low, 1))
-    vm_minus = np.abs(low - np.roll(high, 1))
-    vm_plus[0] = 0
-    vm_minus[0] = 0
-    
-    tr = np.maximum(high - low, 
-                    np.maximum(np.abs(high - np.roll(close, 1)), 
-                               np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]
-    
-    vi_plus = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values / \
-              pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    vi_minus = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values / \
-               pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # Calculate Donchian Channel (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Daily EMA34 for trend filter
     ema_34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Volume filter: current volume > 2.0 * 20-period average volume
+    # Volume filter: current volume > 1.5 * 20-period average volume
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_avg * 2.0)
+    volume_filter = volume > (vol_avg * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_entry = 0
     
-    start_idx = max(34, 20, 14)  # Ensure sufficient warmup
+    start_idx = max(34, 20)  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
         bars_since_entry += 1
         
         # Skip if any data is not ready
-        if (np.isnan(vi_plus[i]) or np.isnan(vi_minus[i]) or 
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(ema_34_aligned[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -74,35 +59,35 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Minimum 8 bars between trades to reduce frequency (4h timeframe)
-            if bars_since_entry < 8:
+            # Minimum 6 bars between trades to reduce frequency (4h timeframe)
+            if bars_since_entry < 6:
                 continue
                 
-            # Long: VI+ > VI- (bullish vortex) + price above EMA34 + volume filter
-            if (vi_plus[i] > vi_minus[i] and 
+            # Long: breakout above Donchian high + price above EMA34 + volume filter
+            if (close[i] > donchian_high[i] and 
                 close[i] > ema_34_aligned[i] and 
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_entry = 0
-            # Short: VI- > VI+ (bearish vortex) + price below EMA34 + volume filter
-            elif (vi_minus[i] > vi_plus[i] and 
+            # Short: breakdown below Donchian low + price below EMA34 + volume filter
+            elif (close[i] < donchian_low[i] and 
                   close[i] < ema_34_aligned[i] and 
                   volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_entry = 0
         elif position != 0:
-            # Exit: Vortex crossover in opposite direction
+            # Exit: reverse Donchian breakout
             if position == 1:
-                if vi_minus[i] > vi_plus[i]:  # Bearish crossover
+                if close[i] < donchian_low[i]:  # Break below lower band
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if vi_plus[i] > vi_minus[i]:  # Bullish crossover
+                if close[i] > donchian_high[i]:  # Break above upper band
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
