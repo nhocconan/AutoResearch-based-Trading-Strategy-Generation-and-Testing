@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_Wedges_Breakout_WeeklyTrend_v2"
-timeframe = "1d"
+name = "12h_Camarilla_Pivot_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,79 +17,94 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load daily data ONCE for Camarilla pivots and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Daily EMAs for wedge detection
-    ema_9 = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Camarilla pivot levels from daily data
+    # Pivot = (H + L + C) / 3
+    # Range = H - L
+    # R1 = Pivot + (Range * 1.1 / 12)
+    # S1 = Pivot - (Range * 1.1 / 12)
+    # R3 = Pivot + (Range * 1.1 / 4)
+    # S3 = Pivot - (Range * 1.1 / 4)
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
     
-    # Weekly EMA for trend filter
-    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    pivot = (daily_high + daily_low + daily_close) / 3
+    daily_range = daily_high - daily_low
+    r1 = pivot + (daily_range * 1.1 / 12)
+    s1 = pivot - (daily_range * 1.1 / 12)
+    r3 = pivot + (daily_range * 1.1 / 4)
+    s3 = pivot - (daily_range * 1.1 / 4)
     
-    # Volume spike detection
+    # Align Camarilla levels to 12h timeframe (wait for daily close)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume spike detection (2x 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)
+    start_idx = max(50, 34)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(ema_9[i]) or 
-            np.isnan(ema_20[i]) or np.isnan(ema_50[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Rising wedge (bearish): higher lows + lower highs
-        rising_wedge = (ema_9[i] > ema_9[i-1]) and (ema_20[i] < ema_20[i-1])
-        # Falling wedge (bullish): lower lows + higher highs
-        falling_wedge = (ema_9[i] < ema_9[i-1]) and (ema_20[i] > ema_20[i-1])
-        
         vol_condition = volume[i] > vol_ma_20[i] * 2.0
         
         if position == 0:
-            # Long: falling wedge breakout above EMA20 in weekly uptrend
-            if falling_wedge and close[i] > ema_20[i] and vol_condition and ema_20_1w_aligned[i] > ema_20_1w_aligned[i-1]:
-                signals[i] = 0.25
+            # Long: Break above S1 with volume in daily uptrend
+            if close[i] > s1_aligned[i] and vol_condition and ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]:
+                signals[i] = 0.30
                 position = 1
-            # Short: rising wedge breakdown below EMA20 in weekly downtrend
-            elif rising_wedge and close[i] < ema_20[i] and vol_condition and ema_20_1w_aligned[i] < ema_20_1w_aligned[i-1]:
-                signals[i] = -0.25
+            # Short: Break below R1 with volume in daily downtrend
+            elif close[i] < r1_aligned[i] and vol_condition and ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]:
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit: price back below EMA9 or wedge invalid
-            if close[i] < ema_9[i] or not falling_wedge:
+            # Exit: Price returns to pivot or trend reverses
+            if close[i] < pivot[i] or ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit: price back above EMA9 or wedge invalid
-            if close[i] > ema_9[i] or not rising_wedge:
+            # Exit: Price returns to pivot or trend reverses
+            if close[i] > pivot[i] or ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-# Hypothesis: 1d Wedge breakouts with weekly trend filter and volume confirmation
-# - Rising wedge (higher lows + lower highs) = bearish continuation pattern
-# - Falling wedge (lower lows + higher highs) = bullish continuation pattern
-# - Breakout occurs when price breaks EMA20 in wedge direction with volume spike
-# - Weekly EMA20 trend filter ensures alignment with higher timeframe trend
-# - Works in both bull (falling wedge breakouts in uptrend) and bear (rising wedge breakdowns in downtrend)
+# Hypothesis: Camarilla pivot breakouts on 12h with daily trend filter and volume confirmation
+# - Uses Camarilla R1/S1 as entry levels (tighter than R3/S3 for higher probability)
+# - Daily EMA34 trend filter ensures alignment with higher timeframe trend
 # - Volume confirmation (2x average) reduces false breakouts
-# - Exit when price returns to EMA9 or wedge pattern invalidates
-# - Position size 0.25 targets ~30-80 trades/year to avoid fee drag
-# - Wedges provide clear structure with defined support/resistance levels
-# - Weekly trend filter reduces whipsaws vs same-timeframe signals
-# - Novel combination: Wedge patterns (9/20 EMA) + weekly trend + volume spike not recently tried
-# - Aims for 60-120 total trades over 4 years (15-30/year) to stay within limits
+# - Works in both bull (buy S1 breakouts in uptrend) and bear (sell R1 breakdowns in downtrend)
+# - Exit when price returns to daily pivot or trend reverses
+# - Position size 0.30 targets ~40-100 trades over 4 years (10-25/year) to avoid fee drag
+# - Camarilla levels provide mathematically derived support/resistance with statistical edge
+# - Daily timeframe for pivots/trend avoids noise while 12h provides timely execution
+# - Proven pattern: Similar to top performers (e.g., 4H_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_Dyn) but adapted to 12h timeframe
+# - Aims for 50-150 total trades over 4 years (12-37/year) as specified in experiment #135745
+# - Avoids overtrading by requiring volume spike and trend alignment for entry
+# - Simple 3-condition logic: pivot level break + volume + trend filter
