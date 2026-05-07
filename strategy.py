@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_1dTrend_VolumeSpike_v16"
-timeframe = "4h"
+name = "6h_200EMA_RSI_Reversal"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -17,38 +17,53 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Camarilla levels
+    # Get daily data for 200EMA and RSI (weekly for higher timeframe context)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 200 EMA on daily close
+    ema_200_1d = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Get 1d data for Camarilla levels (previous day's high, low, close)
-    prev_high = df_1d['high'].values
-    prev_low = df_1d['low'].values
-    prev_close = df_1d['close'].values
+    # Calculate 14-period RSI on daily close
+    delta = pd.Series(df_1d['close'].values).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rs = rs.replace([np.inf, -np.inf], 100)  # Handle division by zero
+    rsi_14_1d = 100 - (100 / (1 + rs))
+    rsi_14_1d = rsi_14_1d.fillna(50).values
+    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
     
-    # Calculate Camarilla R3 and S3 levels from previous 1d bar
-    range_hl = prev_high - prev_low
-    r3 = prev_close + range_hl * 0.55  # Standard Camarilla formula: close + (high-low)*1.1/2
-    s3 = prev_close - range_hl * 0.55  # Standard Camarilla formula: close - (high-low)*1.1/2
+    # Weekly trend filter: 50 EMA on weekly close
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Volume filter: 20-period average volume for spike detection
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 6h RSI for entry timing (14-period)
+    delta_6h = pd.Series(close).diff()
+    gain_6h = delta_6h.clip(lower=0)
+    loss_6h = -delta_6h.clip(upper=0)
+    avg_gain_6h = gain_6h.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss_6h = loss_6h.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs_6h = avg_gain_6h / avg_loss_6h
+    rs_6h = rs_6h.replace([np.inf, -np.inf], 100)
+    rsi_14_6h = 100 - (100 / (1 + rs_6h))
+    rsi_14_6h = rsi_14_6h.fillna(50).values
     
-    # Volatility filter: avoid low volatility (ATR > 0.4% of price)
+    # Volatility filter: ATR > 0.3% of price
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    vol_filter = atr > 0.004 * close  # ATR > 0.4% of price
+    vol_filter = atr > 0.003 * close
     
     # Session filter: 08:00 - 20:00 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -57,12 +72,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)  # Ensure volume MA and EMA data
+    start_idx = max(200, 14)  # Ensure 200EMA and RSI data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN or invalid
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(vol_ma[i]) or vol_ma[i] == 0 or
+        if (np.isnan(ema_200_1d_aligned[i]) or np.isnan(rsi_14_1d_aligned[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(rsi_14_6h[i]) or
             np.isnan(vol_filter[i]) or not vol_filter[i] or
             not session_filter[i]):
             if position != 0:
@@ -70,37 +85,26 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Volume spike: current volume > 2.0 x 20-period average
-        volume_spike = volume[i] > 2.0 * vol_ma[i]
-        
         if position == 0:
-            # Long: Price breaks above R3, above 1d EMA34 (uptrend), with volume spike
-            buffer = 0.001 * close[i]  # 0.1% buffer to avoid whipsaws
-            if (close[i] > r3_aligned[i] + buffer and 
-                close[i] > ema_34_1d_aligned[i] + buffer and   # 1d uptrend
-                volume_spike):
+            # Long: Price above daily 200EMA (bullish regime), 
+            # weekly 50EMA confirms uptrend, daily RSI oversold (<30), 6h RSI crosses above 30
+            if (close[i] > ema_200_1d_aligned[i] and
+                ema_50_1w_aligned[i] > ema_50_1w_aligned[i-1] and  # Weekly EMA rising
+                rsi_14_1d_aligned[i] < 30 and
+                rsi_14_6h[i] > 30 and rsi_14_6h[i-1] <= 30):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S3, below 1d EMA34 (downtrend), with volume spike
-            elif (close[i] < s3_aligned[i] - buffer and 
-                  close[i] < ema_34_1d_aligned[i] - buffer and   # 1d downtrend
-                  volume_spike):
+            # Short: Price below daily 200EMA (bearish regime),
+            # weekly 50EMA confirms downtrend, daily RSI overbought (>70), 6h RSI crosses below 70
+            elif (close[i] < ema_200_1d_aligned[i] and
+                  ema_50_1w_aligned[i] < ema_50_1w_aligned[i-1] and  # Weekly EMA falling
+                  rsi_14_1d_aligned[i] > 70 and
+                  rsi_14_6h[i] < 70 and rsi_14_6h[i-1] >= 70):
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: Price returns to midpoint of prior day's range (H3/L3)
-            range_hl = prev_high - prev_low
-            h3 = prev_close + range_hl * 0.275  # Standard Camarilla H3: close + (high-low)*1.1/4
-            l3 = prev_close - range_hl * 0.275  # Standard Camarilla L3: close - (high-low)*1.1/4
-            h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-            l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-            
-            camarilla_mid = (h3_aligned[i] + l3_aligned[i]) / 2
-            range_hl_1d = h3_aligned[i] - l3_aligned[i]
-            # Exit when within 30% of midpoint (tighter exit to reduce holding losing positions)
-            at_mid = abs(close[i] - camarilla_mid) < range_hl_1d * 0.30
-            
-            if at_mid:
+            # Exit: RSI mean reversion - exit when RSI returns to neutral zone (40-60)
+            if 40 <= rsi_14_6h[i] <= 60:
                 signals[i] = 0.0
                 position = 0
             else:
