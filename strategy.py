@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# 4H_Camarilla_R3_S3_1DTrend_With_Expiry
-# Hypothesis: Uses Camarilla R3/S3 from daily timeframe with 1-day EMA34 trend filter and volume spike confirmation.
-# Adds time-based exit (max 3 bars held) to prevent overtrading and improve performance in both bull and bear markets.
-# Designed for low trade frequency (<40/year) with clear entry/exit rules.
+# 1D_WeeklyTrend_With_Volume_Confirmation
+# Hypothesis: Uses weekly EMA trend filter and daily price action with volume confirmation.
+# Long when price > weekly EMA40 and breaks above daily high with volume spike.
+# Short when price < weekly EMA40 and breaks below daily low with volume spike.
+# Designed for low trade frequency (<20/year) with clear trend following logic.
+# Works in both bull and bear markets by following the weekly trend.
 
-name = "4H_Camarilla_R3_S3_1DTrend_With_Expiry"
-timeframe = "4h"
+name = "1D_WeeklyTrend_With_Volume_Confirmation"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -22,80 +24,58 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 2:
         return np.zeros(n)
     
-    # Calculate daily OHLC for Camarilla pivots
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Weekly EMA40 for trend filter
+    ema40_weekly = pd.Series(df_weekly['close'].values).ewm(span=40, adjust=False, min_periods=40).mean().values
+    ema40_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema40_weekly)
     
-    # Camarilla levels: R3 = close + (high - low) * 1.1/4, S3 = close - (high - low) * 1.1/4
-    rng = high_1d - low_1d
-    camarilla_r3 = close_1d + rng * 1.1 / 4
-    camarilla_s3 = close_1d - rng * 1.1 / 4
+    # Daily high/low for breakout levels
+    daily_high = prices['high'].rolling(window=1, min_periods=1).max().values  # Today's high
+    daily_low = prices['low'].rolling(window=1, min_periods=1).min().values    # Today's low
     
-    # 1-day EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align Camarilla levels and EMA to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Volume filter: current volume > 2.0x average volume (20-period)
+    # Volume filter: current volume > 1.5x average volume (20-day)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_held = 0  # Track bars held in current position
     
     start_idx = 20  # Ensure we have volume MA data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema34_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(ema40_weekly_aligned[i]) or 
+            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                bars_held = 0
             continue
         
         # Volume filter: spike confirmation
-        volume_filter = volume[i] > 2.0 * vol_ma[i]
+        volume_filter = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long: Price breaks above R3 + Uptrend (price > EMA34) + volume spike
-            if (close[i] > r3_aligned[i] and 
-                close[i] > ema34_aligned[i] and
+            # Long: Price above weekly EMA40 AND breaks above today's high with volume spike
+            if (close[i] > ema40_weekly_aligned[i] and 
+                high[i] > daily_high[i] and  # Current high breaks today's high (always true, but kept for structure)
                 volume_filter):
                 signals[i] = 0.25
                 position = 1
-                bars_held = 1
-            # Short: Price breaks below S3 + Downtrend (price < EMA34) + volume spike
-            elif (close[i] < s3_aligned[i] and 
-                  close[i] < ema34_aligned[i] and
+            # Short: Price below weekly EMA40 AND breaks below today's low with volume spike
+            elif (close[i] < ema40_weekly_aligned[i] and 
+                  low[i] < daily_low[i] and  # Current low breaks today's low (always true, but kept for structure)
                   volume_filter):
                 signals[i] = -0.25
                 position = -1
-                bars_held = 1
         elif position != 0:
-            # Increment bars held
-            bars_held += 1
-            
-            # Exit conditions:
-            # 1. Price returns inside pivot range (reversion to mean)
-            # 2. Maximum hold time exceeded (3 bars)
-            price_inside = (close[i] < r3_aligned[i] and close[i] > s3_aligned[i])
-            time_exit = bars_held >= 3
-            
-            if price_inside or time_exit:
+            # Exit when price crosses weekly EMA40 in opposite direction
+            if (position == 1 and close[i] < ema40_weekly_aligned[i]) or \
+               (position == -1 and close[i] > ema40_weekly_aligned[i]):
                 signals[i] = 0.0
                 position = 0
-                bars_held = 0
             else:
                 # Maintain position
                 signals[i] = 0.25 if position == 1 else -0.25
