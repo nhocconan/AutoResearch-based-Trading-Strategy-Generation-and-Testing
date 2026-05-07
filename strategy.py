@@ -1,12 +1,13 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-# 12H_Camarilla_R3_S3_WeeklyTrend_1DayVolume
-# Hypothesis: 12-hour Camarilla R3/S3 level breakout with weekly trend filter (price > weekly EMA20) and daily volume spike confirmation.
-# Uses weekly trend to avoid counter-trend trades in both bull and bear markets.
-# Volume spike ensures momentum confirmation. Targets 15-35 trades/year to minimize fee drag.
+# 4h_1D_Camarilla_R3_S3_Breakout_TrendFilter_Volume
+# Hypothesis: 4-hour Camarilla R3/S3 breakout with 1-day EMA trend filter and volume spike confirmation.
+# Uses daily trend to avoid counter-trend trades in both bull and bear markets.
+# Volume spike ensures momentum confirmation. Targets 20-40 trades/year to minimize fee drag.
 # Uses discrete position sizing (0.25).
 
-name = "12H_Camarilla_R3_S3_WeeklyTrend_1DayVolume"
-timeframe = "12h"
+name = "4h_1D_Camarilla_R3_S3_Breakout_TrendFilter_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,39 +24,29 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:  # Need enough data for EMA20
-        return np.zeros(n)
-    
-    # Calculate weekly EMA20 for trend filter
-    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    
-    # Get daily data for volume filter
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:  # Need enough data for volume MA
+    if len(df_1d) < 20:  # Need enough data for EMA20
         return np.zeros(n)
     
-    # Calculate daily volume MA20
-    vol_ma_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Calculate daily EMA20 for trend filter
+    ema_20_1d = pd.Series(df_1d['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
-    # Calculate previous day's Camarilla levels (R3, S3)
-    # Based on previous day's high, low, close
-    prev_high = np.concatenate([[np.nan], high[:-1]])
-    prev_low = np.concatenate([[np.nan], low[:-1]])
-    prev_close = np.concatenate([[np.nan], close[:-1]])
+    # Calculate Camarilla levels from previous 1d session
+    # Camarilla: R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     
-    # Camarilla calculations
-    # Pivot = (high + low + close) / 3
-    # Range = high - low
-    # R3 = close + (high - low) * 1.1/4
-    # S3 = close - (high - low) * 1.1/4
-    pivot = (prev_high + prev_low + prev_close) / 3
-    rang = prev_high - prev_low
-    r3 = prev_close + rang * 1.1 / 4
-    s3 = prev_close - rang * 1.1 / 4
+    # Align Camarilla levels to 4h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Volume filter: current volume > 2.0x average volume (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Volatility filter: avoid low volatility periods (ATR < 0.3% of price)
     tr1 = high[1:] - low[1:]
@@ -68,38 +59,41 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 1)  # Ensure we have volume MA and previous day data
+    start_idx = max(20, 20)  # Ensure we have EMA and volume MA data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or vol_ma_1d_aligned[i] == 0 or
-            np.isnan(r3[i]) or np.isnan(s3[i]) or np.isnan(vol_filter[i]) or not vol_filter[i]):
+        if (np.isnan(ema_20_1d_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0 or
+            np.isnan(vol_filter[i]) or not vol_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume filter: spike confirmation (2.0x daily average volume)
-        volume_filter = volume[i] > 2.0 * vol_ma_1d_aligned[i]
+        # Volume filter: spike confirmation (2.0x average volume)
+        volume_filter = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long: Price breaks above R3 + weekly uptrend + volume spike
-            if (close[i] > r3[i] and 
-                close[i] > ema_20_1w_aligned[i] and   # Weekly uptrend filter
+            # Long: Price breaks above Camarilla R3 + daily uptrend + volume spike
+            if (close[i] > camarilla_r3_aligned[i] and 
+                close[i] > ema_20_1d_aligned[i] and   # Daily uptrend filter
                 volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S3 + weekly downtrend + volume spike
-            elif (close[i] < s3[i] and 
-                  close[i] < ema_20_1w_aligned[i] and   # Weekly downtrend filter
+            # Short: Price breaks below Camarilla S3 + daily downtrend + volume spike
+            elif (close[i] < camarilla_s3_aligned[i] and 
+                  close[i] < ema_20_1d_aligned[i] and   # Daily downtrend filter
                   volume_filter):
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: Price returns to the pivot level (mean reversion)
-            at_pivot = abs(close[i] - pivot[i]) < rang[i] * 0.1  # Within 10% of range
+            # Exit: Price returns to the middle of Camarilla range (mean reversion)
+            camarilla_mid = (camarilla_r3_aligned[i] + camarilla_s3_aligned[i]) / 2
+            camarilla_range = camarilla_r3_aligned[i] - camarilla_s3_aligned[i]
+            at_mid = abs(close[i] - camarilla_mid) < camarilla_range * 0.25  # Within 25% of range
             
-            if at_pivot:
+            if at_mid:
                 signals[i] = 0.0
                 position = 0
             else:
