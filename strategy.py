@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_KAMA_Trend_With_RSI_Momentum"
-timeframe = "1d"
+name = "12h_1d_Camarilla_R3_S3_Breakout_Trend_Filter_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,70 +17,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Weekly KAMA for trend filter
-    close_1w = df_1w['close'].values
-    change = np.abs(np.diff(close_1w, prepend=close_1w[0]))
-    dir = np.abs(np.diff(close_1w, k=10))  # direction over 10 periods
-    vol = np.sum(change.reshape(-1, 10), axis=1)  # volatility over 10 periods
-    er = np.where(vol != 0, dir / vol, 0)
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # k=2, n=30
-    kama = np.zeros_like(close_1w)
-    kama[0] = close_1w[0]
-    for i in range(1, len(close_1w)):
-        kama[i] = kama[i-1] + sc[i] * (close_1w[i] - kama[i-1])
-    kama_1w = kama
+    # 1d Close for calculations
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Weekly RSI for momentum filter
-    delta = pd.Series(close_1w).diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=14).mean()
-    rs = gain / loss
-    rsi1w = 100 - (100 / (1 + rs))
-    rsi1w = rsi1w.fillna(50).values  # Neutral when undefined
-    rsi1w_aligned = align_htf_to_ltf(prices, df_1w, rsi1w)
+    # Calculate 1d Camarilla levels (based on previous day)
+    # Camarilla: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), etc.
+    # Using previous day's values (shifted by 1)
+    if len(close_1d) > 1:
+        prev_close = np.roll(close_1d, 1)
+        prev_high = np.roll(high_1d, 1)
+        prev_low = np.roll(low_1d, 1)
+        prev_close[0] = close_1d[0]  # First value
+        prev_high[0] = high_1d[0]
+        prev_low[0] = low_1d[0]
+    else:
+        prev_close = close_1d
+        prev_high = high_1d
+        prev_low = low_1d
     
-    # Daily volume spike: > 2.0x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > 2.0 * vol_ma
+    # Camarilla R3 and S3 levels
+    R3 = prev_close + ((prev_high - prev_low) * 1.1 / 4)
+    S3 = prev_close - ((prev_high - prev_low) * 1.1 / 4)
+    
+    # Align Camarilla levels to 12h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    
+    # 12h volume spike: > 1.8x 6-period average (3 days)
+    vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
+    vol_spike = volume > 1.8 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)  # Wait for volume MA and KAMA
+    start_idx = max(6, 34)  # Wait for volume MA and EMA34
     
     for i in range(start_idx, n):
-        if np.isnan(kama_1w_aligned[i]) or np.isnan(rsi1w_aligned[i]):
+        if np.isnan(ema34_1d_aligned[i]) or np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price above weekly KAMA, RSI > 55, volume spike
-            if close[i] > kama_1w_aligned[i] and rsi1w_aligned[i] > 55 and vol_spike[i]:
+            # Long: Price above EMA34 AND breaks above R3 with volume spike
+            if close[i] > ema34_1d_aligned[i] and close[i] > R3_aligned[i] and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price below weekly KAMA, RSI < 45, volume spike
-            elif close[i] < kama_1w_aligned[i] and rsi1w_aligned[i] < 45 and vol_spike[i]:
+            # Short: Price below EMA34 AND breaks below S3 with volume spike
+            elif close[i] < ema34_1d_aligned[i] and close[i] < S3_aligned[i] and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Price below weekly KAMA or RSI < 40
-            if close[i] < kama_1w_aligned[i] or rsi1w_aligned[i] < 40:
+            # Exit: Price below EMA34 OR below S3 (reversal signal)
+            if close[i] < ema34_1d_aligned[i] or close[i] < S3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price above weekly KAMA or RSI > 60
-            if close[i] > kama_1w_aligned[i] or rsi1w_aligned[i] > 60:
+            # Exit: Price above EMA34 OR above R3 (reversal signal)
+            if close[i] > ema34_1d_aligned[i] or close[i] > R3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -88,10 +96,12 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Weekly KAMA trend filter with RSI momentum and daily volume spike confirmation.
-# Long when price > weekly KAMA, RSI > 55 (bullish momentum), and volume spike confirms conviction.
-# Short when price < weekly KAMA, RSI < 45 (bearish momentum), and volume spike confirms.
-# Uses weekly timeframe for trend/momentum to avoid whipsaws, daily for execution.
-# Volume spike (>2.0x average) ensures strong conviction. Discrete 0.25 position size limits risk.
-# Designed to work in both bull and bear markets by following the higher timeframe trend.
-# Target: ~15-25 trades/year to minimize fee drag while capturing sustained moves.
+# Hypothesis: 12h strategy using 1d Camarilla R3/S3 levels as key support/resistance,
+# combined with 1d EMA34 trend filter and volume confirmation for breakouts.
+# Long when: price > 1d EMA34 (uptrend) AND breaks above R3 resistance with volume spike.
+# Short when: price < 1d EMA34 (downtrend) AND breaks below S3 support with volume spike.
+# Exits when price crosses back below EMA34 or retests the broken level.
+# Camarilla levels provide mathematically derived support/resistance that work well
+# in both ranging and trending markets. Volume spike ensures breakout conviction.
+# Target: 15-25 trades/year to minimize fee drag while capturing meaningful moves.
+# Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
