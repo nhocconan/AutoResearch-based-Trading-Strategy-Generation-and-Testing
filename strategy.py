@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_WeeklyPivot_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_WeeklyPivot_Breakout_1dTrend_Volume_v2"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -33,7 +33,7 @@ def generate_signals(prices):
     r3 = pivot + 2 * (prev_high - prev_low)  # R3 = P + 2*(H-L)
     s3 = pivot - 2 * (prev_high - prev_low)  # S3 = P - 2*(H-L)
     
-    # Align Weekly levels to 6h
+    # Align Weekly levels to 12h
     r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
     
@@ -88,7 +88,7 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 6s Weekly Pivot R3/S3 breakout with 1d EMA(34) trend filter and volume confirmation.
+# Hypothesis: 12h Weekly Pivot R3/S3 breakout with 1d EMA(34) trend filter and volume confirmation.
 # Weekly R3/S3 are strong institutional levels that act as magnet/resistance.
 # Breakouts beyond these levels indicate strong momentum with follow-through.
 # 1d EMA(34) ensures alignment with daily trend, reducing whipsaw in choppy markets.
