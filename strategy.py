@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_1d_Camarilla_R3S3_Trend_Filter"
-timeframe = "4h"
+name = "6h_1d_1w_Camarilla_Pivot_Breakout_Trend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -19,67 +19,94 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily Camarilla R3/S3 from previous day
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
+        return np.zeros(n)
     
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
+    # Calculate weekly Camarilla pivot levels from previous week
+    prev_high_w = df_1w['high'].shift(1).values
+    prev_low_w = df_1w['low'].shift(1).values
+    prev_close_w = df_1w['close'].shift(1).values
     
-    # Camarilla R3 and S3 levels (stronger support/resistance)
-    s3 = prev_close - (range_hl * 1.26 / 4)
-    r3 = prev_close + (range_hl * 1.26 / 4)
+    pivot_w = (prev_high_w + prev_low_w + prev_close_w) / 3
+    range_w = prev_high_w - prev_low_w
     
-    # Align daily levels to 4h timeframe
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    # Weekly Camarilla levels
+    s1_w = prev_close_w - (range_w * 1.08 / 2)
+    r1_w = prev_close_w + (range_w * 1.08 / 2)
+    s2_w = prev_close_w - (range_w * 1.16 / 2)
+    r2_w = prev_close_w + (range_w * 1.16 / 2)
+    s3_w = prev_close_w - (range_w * 1.26 / 4)
+    r3_w = prev_close_w + (range_w * 1.26 / 4)
+    
+    # Calculate daily Camarilla pivot levels from previous day
+    prev_high_d = df_1d['high'].shift(1).values
+    prev_low_d = df_1d['low'].shift(1).values
+    prev_close_d = df_1d['close'].shift(1).values
+    
+    pivot_d = (prev_high_d + prev_low_d + prev_close_d) / 3
+    range_d = prev_high_d - prev_low_d
+    
+    # Daily Camarilla levels
+    s1_d = prev_close_d - (range_d * 1.08 / 2)
+    r1_d = prev_close_d + (range_d * 1.08 / 2)
+    s2_d = prev_close_d - (range_d * 1.16 / 2)
+    r2_d = prev_close_d + (range_d * 1.16 / 2)
+    s3_d = prev_close_d - (range_d * 1.26 / 4)
+    r3_d = prev_close_d + (range_d * 1.26 / 4)
+    
+    # Align weekly and daily levels to 6h timeframe
+    s1_w_aligned = align_htf_to_ltf(prices, df_1w, s1_w)
+    r1_w_aligned = align_htf_to_ltf(prices, df_1w, r1_w)
+    s1_d_aligned = align_htf_to_ltf(prices, df_1d, s1_d)
+    r1_d_aligned = align_htf_to_ltf(prices, df_1d, r1_d)
     
     # Daily trend filter: EMA(34) on daily close
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume spike detection: 6-period average (1.5 days of 4h bars)
-    vol_ma_6 = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
+    # Volume spike detection: 4-period average (1 day of 6h bars)
+    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 6)  # Wait for EMA and volume MA
+    start_idx = max(34, 4)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or np.isnan(vol_ma_6[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(s1_d_aligned[i]) or 
+            np.isnan(r1_d_aligned[i]) or np.isnan(vol_ma_4[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above S3 with volume and daily uptrend
-            vol_condition = volume[i] > vol_ma_6[i] * 2.0
+            # Long: price above S1 daily with volume and daily uptrend
+            vol_condition = volume[i] > vol_ma_4[i] * 2.0
             uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
             
-            if close[i] > s3_aligned[i] and vol_condition and uptrend:
+            if close[i] > s1_d_aligned[i] and vol_condition and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below R3 with volume and daily downtrend
-            elif close[i] < r3_aligned[i] and vol_condition and not uptrend:
+            # Short: price below R1 daily with volume and daily downtrend
+            elif close[i] < r1_d_aligned[i] and vol_condition and not uptrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below S3 or volume drops
-            if close[i] < s3_aligned[i] or volume[i] < vol_ma_6[i] * 1.2:
+            # Exit: price back below S1 daily or volume drops
+            if close[i] < s1_d_aligned[i] or volume[i] < vol_ma_4[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above R3 or volume drops
-            if close[i] > r3_aligned[i] or volume[i] < vol_ma_6[i] * 1.2:
+            # Exit: price back above R1 daily or volume drops
+            if close[i] > r1_d_aligned[i] or volume[i] < vol_ma_4[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -87,14 +114,14 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with daily trend and volume confirmation
-# - Daily Camarilla R3/S3 act as stronger support/resistance levels (wider bands)
-# - Breakout above S3 with volume in daily uptrend = high-probability long
-# - Breakdown below R3 with volume in daily downtrend = high-probability short
-# - Volume spike (2.0x average) filters for institutional participation
-# - Daily EMA(34) trend filter ensures alignment with higher timeframe momentum
-# - Designed to work in both bull (buy S3 breaks in uptrend) and bear (sell R3 breaks in downtrend)
-# - Exit when price returns to S3/R3 or volume weakens
-# - Position size 0.25 targets ~25-40 trades/year, minimizing fee drag
-# - Uses stronger R3/S3 levels vs S1/R1 for fewer, higher quality signals
-# - Requires multiple confluence: price level + volume + trend direction
+# Hypothesis: 6h Camarilla S1/R1 breakout with daily trend and volume confirmation
+# - Daily Camarilla S1/R1 act as strong support/resistance levels
+# - Breakout above S1 with volume in daily uptrend = long opportunity
+# - Breakdown below R1 with volume in daily downtrend = short opportunity
+# - Volume spike (2.0x average) confirms institutional participation
+# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
+# - Exit when price returns to S1/R1 or volume weakens
+# - Position size 0.25 targets ~20-50 trades/year, avoiding fee drag
+# - Uses actual daily Camarilla levels for better responsiveness
+# - Designed to work in BOTH bull and bear markets via trend filter
+# - Weekly pivot used for context but not direct trigger (focus on daily for responsiveness)
