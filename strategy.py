@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3_S3_1dEMA34_VolumeBreak"
-timeframe = "4h"
+name = "6h_RiverFlow_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,73 +19,58 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Daily high, low, close for Camarilla calculation
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    # River Flow: 1-day EMA(50) trend
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Camarilla levels (R3, S3) from previous day
-    # R3 = close + 1.1 * (high - low)
-    # S3 = close - 1.1 * (high - low)
-    prev_high = np.roll(daily_high, 1)
-    prev_low = np.roll(daily_low, 1)
-    prev_close = np.roll(daily_close, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # River Flow: 1-day volume strength (volume > 20-period average)
+    vol_ma_20_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
-    camarilla_r3 = prev_close + 1.1 * (prev_high - prev_low)
-    camarilla_s3 = prev_close - 1.1 * (prev_high - prev_low)
-    
-    # Align daily Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Daily trend filter: EMA(34) on daily close
-    ema_34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume spike: current 4h volume > 2x average of last 24 periods (6 days)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # River Flow: 6-hour volatility filter (ATR-based)
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 24)  # Wait for EMA and volume MA
+    start_idx = max(50, 20, 14)
     
     for i in range(start_idx, n):
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]) or 
+            np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price crosses above S3 with volume and daily uptrend
-            vol_condition = volume[i] > vol_ma[i] * 2.0
-            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
+            # Long: price above EMA50 (1d), volume strong, and volatility above average
+            price_above_ema = close[i] > ema_50_1d_aligned[i]
+            volume_strong = df_1d['volume'].iloc[-1] > vol_ma_20_1d_aligned[i] if len(df_1d) > 0 else False
+            vol_conditions = atr[i] > np.nanmean(atr[max(0, i-50):i]) * 0.8
             
-            if close[i] > s3_aligned[i] and vol_condition and uptrend:
+            if price_above_ema and volume_strong and vol_conditions:
                 signals[i] = 0.25
                 position = 1
-            # Short: price crosses below R3 with volume and daily downtrend
-            elif close[i] < r3_aligned[i] and vol_condition and not uptrend:
+            # Short: price below EMA50 (1d), volume strong, and volatility above average
+            elif (not price_above_ema) and volume_strong and vol_conditions:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price returns below S3 or volume drops
-            if close[i] < s3_aligned[i] or volume[i] < vol_ma[i] * 1.5:
+            # Exit: price crosses below EMA50 or volatility drops significantly
+            if close[i] < ema_50_1d_aligned[i] or atr[i] < np.nanmean(atr[max(0, i-50):i]) * 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price returns above R3 or volume drops
-            if close[i] > r3_aligned[i] or volume[i] < vol_ma[i] * 1.5:
+            # Exit: price crosses above EMA50 or volatility drops significantly
+            if close[i] > ema_50_1d_aligned[i] or atr[i] < np.nanmean(atr[max(0, i-50):i]) * 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -93,12 +78,12 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R3/S3 levels act as strong support/resistance in 4h timeframe
-# - Break above S3 with volume in daily uptrend = long opportunity
-# - Break below R3 with volume in daily downtrend = short opportunity
-# - Volume spike (2x 6-day average) confirms institutional participation
-# - Daily EMA(34) filter ensures alignment with higher timeframe trend
-# - Works in bull (buy S3 breaks in uptrend) and bear (sell R3 breaks in downtrend)
-# - Exit when price returns to S3/R3 or volume weakens
-# - Position size 0.25 targets 20-35 trades/year, avoiding fee drag
-# - Camarilla levels from daily data provide institutional reference points that work across regimes
+# Hypothesis: River Flow strategy for 6h timeframe
+# - Uses 1-day EMA(50) as primary trend filter (works in both bull/bear markets)
+# - Requires 1-day volume strength (>20-period average) for institutional confirmation
+# - Uses 6-hour ATR volatility filter to avoid low-volatility whipsaws
+# - Long when price > EMA50 + volume strong + volatility adequate
+# - Short when price < EMA50 + volume strong + volatility adequate
+# - Exits when price crosses EMA50 or volatility drops significantly
+# - Position size 0.25 targets 15-35 trades/year, avoiding fee drag
+# - River Flow concept: follows institutional money flow like a river follows terrain
