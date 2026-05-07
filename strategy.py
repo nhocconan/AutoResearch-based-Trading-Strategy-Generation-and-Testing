@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
+"""
+4h_EquiVolume_Trend_Filter_v1
+Hypothesis: Uses EquiVolume-weighted moving average on 4h timeframe for trend direction,
+combined with volume confirmation and 1-day trend filter to reduce false signals.
+EquiVolume gives more weight to high-volume periods, making it effective in both
+trending and ranging markets. Targets 20-40 trades/year to minimize fee drag.
+"""
 
-# 12h_Donchian_Breakout_20_Trend_Filter
-# Hypothesis: Donchian(20) breakout on 12h timeframe with 1-day EMA trend filter and volume confirmation.
-# Breakouts capture momentum in both bull and bear markets. EMA filter ensures we trade with the daily trend.
-# Volume confirmation reduces false breakouts. Target: 20-40 trades/year to minimize fee drag.
-# Works in bull markets by catching breakouts and in bear markets by filtering with daily trend.
-
-name = "12h_Donchian_Breakout_20_Trend_Filter"
-timeframe = "12h"
+name = "4h_EquiVolume_Trend_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,57 +25,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for EMA trend filter
+    # Calculate EquiVolume-weighted moving average (EMA-like)
+    # EquiVolume: price weighted by volume
+    # Using 21-period for balance between responsiveness and smoothness
+    pv = close * volume  # price-volume product
+    vol_sum = pd.Series(volume).rolling(window=21, min_periods=21).sum().values
+    pv_sum = pd.Series(pv).rolling(window=21, min_periods=21).sum().values
+    eva = np.divide(pv_sum, vol_sum, out=np.zeros_like(pv_sum), where=vol_sum!=0)
+    
+    # 1-day trend filter: EMA of daily close
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 1-day EMA(34) for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Calculate 12h Donchian(20) channels
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume confirmation: volume > 20-period average
+    # Volume confirmation: current volume > 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(21, n):
         # Skip if any critical value is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(high_20[i]) or 
-            np.isnan(low_20[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(eva[i]) or np.isnan(ema_1d_aligned[i]) or 
+            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian upper band, above daily EMA, with volume
-            if (close[i] > high_20[i] and close[i] > ema_34_1d_aligned[i] and 
-                volume[i] > vol_ma[i]):
+            # Long: price above EVA AND above 1-day EMA with volume confirmation
+            if close[i] > eva[i] and close[i] > ema_1d_aligned[i] and volume[i] > vol_ma[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower band, below daily EMA, with volume
-            elif (close[i] < low_20[i] and close[i] < ema_34_1d_aligned[i] and 
-                  volume[i] > vol_ma[i]):
+            # Short: price below EVA AND below 1-day EMA with volume confirmation
+            elif close[i] < eva[i] and close[i] < ema_1d_aligned[i] and volume[i] > vol_ma[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price closes below Donchian lower band
-            if close[i] < low_20[i]:
+            # Exit: price crosses below EVA OR below 1-day EMA
+            if close[i] < eva[i] or close[i] < ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price closes above Donchian upper band
-            if close[i] > high_20[i]:
+            # Exit: price crosses above EVA OR above 1-day EMA
+            if close[i] > eva[i] or close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
