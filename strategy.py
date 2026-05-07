@@ -1,6 +1,13 @@
+# Hypothesis: 4h/12h Camarilla Pivot Reversal with Volume Spike and ADX Trend Filter
+# - Uses 12h Camarilla levels for higher timeframe structure
+# - 4h price action at these levels with volume confirmation for entry
+# - ADX > 25 filters for trending conditions to avoid false breakouts in ranges
+# - Works in bull markets (buy dips to S1/S2 in uptrend) and bear markets (sell rallies to R1/R2 in downtrend)
+# - Target: 20-40 trades/year to avoid fee drag while capturing meaningful moves
+
 #!/usr/bin/env python3
-name = "12h_1d_Camarilla_R1S1_Breakout_Trend_Volume"
-timeframe = "12h"
+name = "4h_12h_Camarilla_Pivot_Reversal_ADX_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,86 +24,100 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels from previous day
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Calculate 12h Camarilla pivot levels from previous 12h bar
+    prev_high = df_12h['high'].shift(1).values
+    prev_low = df_12h['low'].shift(1).values
+    prev_close = df_12h['close'].shift(1).values
     
     pivot = (prev_high + prev_low + prev_close) / 3
     range_hl = prev_high - prev_low
     
-    # Camarilla levels
+    # Camarilla levels (using widely accepted multipliers)
     s1 = prev_close - (range_hl * 1.08 / 2)
+    s2 = prev_close - (range_hl * 1.16 / 2)
     r1 = prev_close + (range_hl * 1.08 / 2)
+    r2 = prev_close + (range_hl * 1.16 / 2)
     
-    # Align daily levels to 12h timeframe
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    # Align 12h levels to 4h timeframe
+    s1_aligned = align_htf_to_ltf(prices, df_12h, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_12h, s2)
+    r1_aligned = align_htf_to_ltf(prices, df_12h, r1)
+    r2_aligned = align_htf_to_ltf(prices, df_12h, r2)
     
-    # Daily trend filter: EMA(34) on daily close
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # ADX trend filter on 12h data (ADX > 25 = trending)
+    # Calculate True Range
+    tr1 = df_12h['high'] - df_12h['low']
+    tr2 = abs(df_12h['high'] - df_12h['close'].shift(1))
+    tr3 = abs(df_12h['low'] - df_12h['close'].shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     
-    # Volume spike detection: 2-period average (1 day of 12h bars)
-    vol_ma_2 = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
+    # Calculate Directional Movement
+    up_move = df_12h['high'] - df_12h['high'].shift(1)
+    down_move = df_12h['low'].shift(1) - df_12h['low']
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values
+    tr_ma = pd.Series(tr).ewm(span=14, adjust=False).mean()
+    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False).mean() / tr_ma
+    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False).mean() / tr_ma
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = dx.ewm(span=14, adjust=False).mean()
+    adx_values = adx.values
+    
+    # Align ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx_values)
+    
+    # Volume spike detection: 4-period average (2 periods of 12h = 1 day)
+    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 2)  # Wait for EMA and volume MA
+    start_idx = max(30, 4)  # Wait for ADX and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(vol_ma_2[i])):
+        if (np.isnan(s1_aligned[i]) or np.isnan(s2_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_4[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above S1 with volume and daily uptrend
-            vol_condition = volume[i] > vol_ma_2[i] * 2.0
-            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
+            # Long: price near S1/S2 with volume spike and uptrend (ADX rising)
+            vol_condition = volume[i] > vol_ma_4[i] * 1.5
+            uptrend = adx_aligned[i] > 25 and adx_aligned[i] > adx_aligned[i-1]
             
-            if close[i] > s1_aligned[i] and vol_condition and uptrend:
+            # Enter long near support levels in uptrend
+            if (close[i] <= s1_aligned[i] * 1.005 or close[i] <= s2_aligned[i] * 1.005) and vol_condition and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below R1 with volume and daily downtrend
-            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
+            # Enter short near resistance levels in downtrend
+            elif (close[i] >= r1_aligned[i] * 0.995 or close[i] >= r2_aligned[i] * 0.995) and vol_condition and not uptrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below S1 or volume drops
-            if close[i] < s1_aligned[i] or volume[i] < vol_ma_2[i] * 1.5:
+            # Exit: price reaches middle or opposite resistance, or trend weakens
+            if (close[i] >= (pivot := (s1_aligned[i] + r1_aligned[i]) / 2) * 0.995 or 
+                adx_aligned[i] < 20):  # Trend weakening
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above R1 or volume drops
-            if close[i] > r1_aligned[i] or volume[i] < vol_ma_2[i] * 1.5:
+            # Exit: price reaches middle or opposite support, or trend weakens
+            if (close[i] <= (pivot := (s1_aligned[i] + r1_aligned[i]) / 2) * 1.005 or 
+                adx_aligned[i] < 20):  # Trend weakening
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
-
-# Hypothesis: 12h Camarilla S1/R1 breakout with daily trend and volume confirmation
-# - Daily Camarilla S1/R1 act as strong support/resistance levels
-# - Breakout above S1 with volume in daily uptrend = long opportunity
-# - Breakdown below R1 with volume in daily downtrend = short opportunity
-# - Volume spike (2.0x average) confirms institutional participation
-# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
-# - Exit when price returns to S1/R1 or volume weakens
-# - Position size 0.25 targets ~15-30 trades/year, avoiding fee drag
-# - Uses actual daily Camarilla levels (not weekly) for better responsiveness
-# - Designed to work in BOTH bull and bear markets via trend filter
-# - 12h timeframe reduces noise and trade frequency vs 4h/6h
-# - Volume multiplier increased to 2.0 and exit threshold to 1.5 to reduce trade frequency and avoid overtrading
-# - Focus on BTC/ETH as primary targets (avoid SOL-only strategies)
