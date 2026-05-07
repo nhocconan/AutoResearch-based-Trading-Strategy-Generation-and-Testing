@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_4h_1d_Camarilla_R1S1_Breakout_TrendVolume"
-timeframe = "1h"
+name = "6h_1w_1d_WaveTrend_Oscillator_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,96 +17,96 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Time-based filter: 8-20 UTC only
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    
-    # Load 4h data ONCE for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Load weekly data ONCE before loop for WaveTrend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # Load 1d data ONCE for Camarilla levels
+    # Load daily data ONCE before loop for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 4h EMA(50) for trend filter
-    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate WaveTrend (WT) oscillator on weekly
+    # WT1 = EMA(EMA(hlc3, n1), n2)
+    # WT2 = SMA(WT1, n3)
+    hlc3 = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
+    esa = pd.Series(hlc3).ewm(span=10, adjust=False, min_periods=10).mean()
+    d = pd.Series(abs(hlc3 - esa)).ewm(span=10, adjust=False, min_periods=10).mean()
+    ei = pd.Series(np.where(d != 0, (hlc3 - esa) / d, 0)).ewm(span=10, adjust=False, min_periods=10).mean()
+    wt1 = pd.Series(ei).ewm(span=21, adjust=False, min_periods=21).mean()
+    wt2 = pd.Series(wt1).rolling(window=4, min_periods=4).mean()
     
-    # Previous day's Camarilla levels (R1, S1)
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    wt1_values = wt1.values
+    wt2_values = wt2.values
     
-    range_hl = prev_high - prev_low
-    r1 = prev_close + 1.1 * range_hl / 12  # Resistance 1
-    s1 = prev_close - 1.1 * range_hl / 12  # Support 1
+    # Align weekly WT to 6h
+    wt1_aligned = align_htf_to_ltf(prices, df_1w, wt1_values)
+    wt2_aligned = align_htf_to_ltf(prices, df_1w, wt2_values)
     
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Daily EMA(50) for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume spike detection: 24-period average (1 day of 1h bars)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume spike detection: 4-period average (1 day of 6h bars)
+    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 24)  # Wait for EMA and volume MA
+    start_idx = max(50, 4)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        # Skip if outside trading session
-        if not (8 <= hours[i] <= 20):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(vol_ma_24[i])):
+        if (np.isnan(wt1_aligned[i]) or np.isnan(wt2_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_4[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above S1 with volume and 4h uptrend
-            vol_condition = volume[i] > vol_ma_24[i] * 2.0
-            uptrend = ema_50_4h_aligned[i] > ema_50_4h_aligned[i-1]
+            # Long: WT crosses above -50 (oversold recovery) with volume and daily uptrend
+            wt_cross_up = wt1_aligned[i] > wt2_aligned[i] and wt1_aligned[i-1] <= wt2_aligned[i-1]
+            wt_oversold = wt1_aligned[i] < -50
+            vol_condition = volume[i] > vol_ma_4[i] * 1.5
+            uptrend = ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1]
             
-            if close[i] > s1_aligned[i] and vol_condition and uptrend:
-                signals[i] = 0.20
+            if wt_cross_up and wt_oversold and vol_condition and uptrend:
+                signals[i] = 0.25
                 position = 1
-            # Short: price below R1 with volume and 4h downtrend
-            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
-                signals[i] = -0.20
+            # Short: WT crosses below 50 (overbought rejection) with volume and daily downtrend
+            elif wt1_aligned[i] < wt2_aligned[i] and wt1_aligned[i-1] >= wt2_aligned[i-1] and \
+                 wt1_aligned[i] > 50 and vol_condition and not uptrend:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below S1 or volume drops
-            if close[i] < s1_aligned[i] or volume[i] < vol_ma_24[i] * 1.2:
+            # Exit: WT crosses below 0 or volume drops
+            wt_cross_down = wt1_aligned[i] < wt2_aligned[i] and wt1_aligned[i-1] >= wt2_aligned[i-1]
+            if wt_cross_down or volume[i] < vol_ma_4[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above R1 or volume drops
-            if close[i] > r1_aligned[i] or volume[i] < vol_ma_24[i] * 1.2:
+            # Exit: WT crosses above 0 or volume drops
+            wt_cross_up = wt1_aligned[i] > wt2_aligned[i] and wt1_aligned[i-1] <= wt2_aligned[i-1]
+            if wt_cross_up or volume[i] < vol_ma_4[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-# Hypothesis: 1h Camarilla R1/S1 breakout with 4h trend and volume confirmation
-# - Camarilla R1/S1 from previous day act as intraday support/resistance
-# - Breakout above S1 with volume in 4h uptrend = long opportunity
-# - Breakdown below R1 with volume in 4h downtrend = short opportunity
-# - Volume spike (2.0x average) confirms institutional participation
-# - Session filter (08-20 UTC) reduces noise from low-volume hours
-# - Position size 0.20 limits drawdown from adverse moves
-# - Target: 15-35 trades/year (60-140 over 4 years) to avoid fee drag
-# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend) markets
-# - Uses actual daily Camarilla levels (not weekly) for better responsiveness
-# - 4h trend filter reduces whipsaws vs using same timeframe
-# - Novel combination: Camarilla (1d) + trend (4h) + volume (1h) on 1h timeframe
+# Hypothesis: 6h WaveTrend oscillator from weekly + daily trend + volume confirmation
+# - WaveTrend (WT) identifies overbought/oversold conditions on weekly timeframe
+# - Long when WT crosses above -50 from oversold (< -50) with volume in daily uptrend
+# - Short when WT crosses below 50 from overbought (> 50) with volume in daily downtrend
+# - Volume spike (1.5x average) confirms institutional participation
+# - Works in BOTH bull (buy oversold bounces in uptrend) and bear (sell overbought rejections in downtrend)
+# - Exit when WT crosses zero line or volume weakens
+# - Position size 0.25 targets ~30-80 trades/year, avoiding fee drag
+# - Novel: WT oscillator not recently tried on 6h; combines weekly oscillator with daily trend
+# - Uses actual weekly data (no resampling) via mtf_data for proper alignment
+# - WT provides early reversal signals vs lagging indicators like RSI/MACD
+# - Aims for 50-150 total trades over 4 years (12-37/year) to stay within limits
