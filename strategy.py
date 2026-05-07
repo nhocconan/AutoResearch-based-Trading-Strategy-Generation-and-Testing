@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1S1_Breakout_1wTrend_Volume
-Hypothesis: Price breaking above/below weekly Camarilla R1/S1 with weekly EMA34 trend filter and volume spike (2x average) captures institutional breakouts on daily timeframe. Weekly trend filter ensures alignment with higher timeframe momentum, reducing false signals in choppy markets. Target: 30-100 total trades over 4 years (7-25/year) to avoid fee drag. Works in bull/bear by following weekly trend.
+6h_ElderRay_BullBearPower_1dTrend
+Hypothesis: Elder Ray Bull Power (high - EMA13) and Bear Power (EMA13 - low) combined with 1d EMA34 trend filter captures institutional accumulation/distribution.
+Long when Bull Power > 0 and Bear Power < 0 with 1d uptrend. Short when Bear Power > 0 and Bull Power < 0 with 1d downtrend.
+Uses 13-period EMA for Ray calculation, works in bull/bear by following higher timeframe trend.
+Target: 50-120 total trades over 4 years (12-30/year) to avoid fee drag.
 """
-name = "1d_Camarilla_R1S1_Breakout_1wTrend_Volume"
-timeframe = "1d"
+
+name = "6h_ElderRay_BullBearPower_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -13,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,67 +25,56 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla pivot calculation and trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate weekly Camarilla pivot levels (R1, S1) from previous week
-    prev_high = df_1w['high'].shift(1).values
-    prev_low = df_1w['low'].shift(1).values
-    prev_close = df_1w['close'].shift(1).values
+    # Calculate EMA13 for Elder Ray (using close)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Pivot point
-    pivot = (prev_high + prev_low + prev_close) / 3
-    # Camarilla levels
-    r1 = pivot + 1.1 * (prev_high - prev_low) / 12
-    s1 = pivot - 1.1 * (prev_high - prev_low) / 12
+    # Elder Ray components
+    bull_power = high - ema13  # High minus EMA13
+    bear_power = ema13 - low   # EMA13 minus Low
     
-    # Align to daily timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    
-    # Weekly EMA34 for trend filter
-    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Volume filter: current volume > 2.0 * 20-period average (daily)
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_avg * 2.0)
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need sufficient warmup for averages
+    start_idx = 20  # Need sufficient warmup for EMA13
     
     for i in range(start_idx, n):
         # Skip if any data is not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_avg[i])):
+        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R1 + weekly uptrend + volume spike
-            if close[i] > r1_aligned[i] and close[i] > ema_34_1w_aligned[i] and volume_filter[i]:
+            # Long: Bull Power > 0 (strong buying) AND Bear Power < 0 (weak selling) AND 1d uptrend
+            if bull_power[i] > 0 and bear_power[i] < 0 and ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + weekly downtrend + volume spike
-            elif close[i] < s1_aligned[i] and close[i] < ema_34_1w_aligned[i] and volume_filter[i]:
+            # Short: Bear Power > 0 (strong selling) AND Bull Power < 0 (weak buying) AND 1d downtrend
+            elif bear_power[i] > 0 and bull_power[i] < 0 and ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]:
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: price returns to opposite Camarilla level (mean reversion)
+            # Exit: when the power signals weaken or reverse
             if position == 1:
-                if close[i] <= s1_aligned[i]:
+                # Exit long when Bull Power turns negative or Bear Power turns positive
+                if bull_power[i] <= 0 or bear_power[i] >= 0:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] >= r1_aligned[i]:
+                # Exit short when Bear Power turns negative or Bull Power turns positive
+                if bear_power[i] <= 0 or bull_power[i] >= 0:
                     signals[i] = 0.0
                     position = 0
                 else:
