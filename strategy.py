@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Donchian20_WeeklyPivot_Direction_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,39 +17,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation and trend filter
-    df_w = get_htf_data(prices, '1w')
-    if len(df_w) < 20:
+    # Get weekly data for trend filter (EMA34)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate weekly Donchian channels (20-period)
-    high_w = df_w['high'].values
-    low_w = df_w['low'].values
-    donchian_high = pd.Series(high_w).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_w).rolling(window=20, min_periods=20).min().values
+    # Calculate 1w EMA34 for trend filter
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Align weekly Donchian to 6h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_w, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_w, donchian_low)
+    # Get daily data for Camarilla calculation (previous day)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Calculate weekly pivot points (using prior week's OHLC)
-    high_w_shifted = np.roll(high_w, 1)
-    low_w_shifted = np.roll(low_w, 1)
-    close_w_shifted = np.roll(df_w['close'].values, 1)
+    # Calculate Camarilla levels from previous 1d candle
+    # Using R3 and S3: R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    pivot = (high_w_shifted + low_w_shifted + close_w_shifted) / 3
-    r1 = 2 * pivot - low_w_shifted
-    s1 = 2 * pivot - high_w_shifted
-    r2 = pivot + (high_w_shifted - low_w_shifted)
-    s2 = pivot - (high_w_shifted - low_w_shifted)
-    r3 = high_w_shifted + 2 * (pivot - low_w_shifted)
-    s3 = low_w_shifted - 2 * (high_w_shifted - pivot)
+    # Shift to get previous day's values
+    high_1d_prev = np.roll(high_1d, 1)
+    low_1d_prev = np.roll(low_1d, 1)
+    close_1d_prev = np.roll(close_1d, 1)
     
-    # Align weekly pivot levels to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_w, s3)
+    # Calculate Camarilla width and levels
+    camarilla_width = (high_1d_prev - low_1d_prev) * 1.1 / 4
+    r3 = close_1d_prev + camarilla_width  # R3 level
+    s3 = close_1d_prev - camarilla_width  # S3 level
     
-    # Calculate volume confirmation (current volume vs 20-period average)
+    # Align Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Volume confirmation: current volume vs 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / vol_ma20
     
@@ -60,8 +63,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data is not ready
-        if (np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or 
+        if (np.isnan(ema_34_1w_aligned[i]) or 
             np.isnan(r3_aligned[i]) or 
             np.isnan(s3_aligned[i]) or 
             np.isnan(volume_ratio[i])):
@@ -71,28 +73,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above weekly Donchian high AND above weekly R3 pivot, with volume confirmation
-            if (close[i] > donchian_high_aligned[i] and 
-                close[i] > r3_aligned[i] and 
+            # Long: price breaks above R3 level, weekly uptrend (price > EMA34), volume confirmation
+            if (close[i] > r3_aligned[i] and 
+                close[i] > ema_34_1w_aligned[i] and 
                 volume_ratio[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly Donchian low AND below weekly S3 pivot, with volume confirmation
-            elif (close[i] < donchian_low_aligned[i] and 
-                  close[i] < s3_aligned[i] and 
+            # Short: price breaks below S3 level, weekly downtrend (price < EMA34), volume confirmation
+            elif (close[i] < s3_aligned[i] and 
+                  close[i] < ema_34_1w_aligned[i] and 
                   volume_ratio[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below weekly Donchian low (trend reversal)
-            if close[i] < donchian_low_aligned[i]:
+            # Exit long: price breaks below S3 level (reversal signal)
+            if close[i] < s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above weekly Donchian high (trend reversal)
-            if close[i] > donchian_high_aligned[i]:
+            # Exit short: price breaks above R3 level (reversal signal)
+            if close[i] > r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
