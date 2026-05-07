@@ -3,28 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Williams Alligator with 1-day trend filter and volume confirmation.
-# Long when: Price > Alligator's Jaw (13-period SMMA) AND Jaw > Teeth > Lips (bullish alignment) AND 1-day EMA50 rising AND volume > 1.5 * EMA20(volume).
-# Short when: Price < Alligator's Jaw AND Jaw < Teeth < Lips (bearish alignment) AND 1-day EMA50 falling AND volume > 1.5 * EMA20(volume).
-# Exit when price crosses back below/above the Alligator's Teeth (8-period SMMA).
-# Designed for low trade frequency (target: 20-35/year) to minimize fee drift and improve generalization.
-# Williams Alligator uses smoothed moving averages (SMMA) which reduce whipsaws in choppy markets.
-# Works in bull markets via bullish alignment and upward price position, and in bear markets via bearish alignment and downward price position.
-name = "4h_WilliamsAlligator_1dEMA50_Volume"
-timeframe = "4h"
+# Hypothesis: 6-hour Williams Fractal breakout with 1-day trend filter and volume confirmation.
+# Long when: Bullish fractal breakout above resistance AND 1-day EMA34 rising AND volume > 2.0 * EMA20(volume).
+# Short when: Bearish fractal breakdown below support AND 1-day EMA34 falling AND volume > 2.0 * EMA20(volume).
+# Exit when price crosses back below/above the 6-hour EMA20.
+# Williams Fractals identify key swing points; breakouts from these levels with trend and volume
+# confirmation capture strong moves in both bull and bear markets.
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+name = "6h_WilliamsFractal_1dEMA34_Volume"
+timeframe = "6h"
 leverage = 1.0
-
-def smma(data, period):
-    """Smoothed Moving Average (SMMA) - same as Wilder's smoothing"""
-    if len(data) < period:
-        return np.full_like(data, np.nan, dtype=float)
-    result = np.full_like(data, np.nan, dtype=float)
-    # First value is simple SMA
-    result[period-1] = np.mean(data[:period])
-    # Subsequent values: SMMA = (prev_smma * (period-1) + current_price) / period
-    for i in range(period, len(data)):
-        result[i] = (result[i-1] * (period-1) + data[i]) / period
-    return result
 
 def generate_signals(prices):
     n = len(prices)
@@ -36,38 +24,56 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Williams Alligator: Jaw (13), Teeth (8), Lips (5) - all SMMA
-    jaw = smma(close, 13)
-    teeth = smma(close, 8)
-    lips = smma(close, 5)
+    # EMA20 for exit
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Bullish alignment: Lips > Teeth > Jaw
-    bullish_alignment = (lips > teeth) & (teeth > jaw)
-    # Bearish alignment: Lips < Teeth < Jaw
-    bearish_alignment = (lips < teeth) & (teeth < jaw)
+    # Volume confirmation: current volume > 2.0 * 20-period EMA of volume
+    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ema_20)
     
-    # Exit condition: price crosses Teeth (8-period SMMA)
-    
-    # Load 1-day data for EMA50 trend filter
+    # Load 1-day data for EMA34 trend and Williams Fractals
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    # EMA50 on 1d close
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # EMA34 on 1-day close for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     # Rising if current > previous, falling if current < previous
-    ema_50_rising = np.zeros_like(ema_50_1d, dtype=bool)
-    ema_50_falling = np.zeros_like(ema_50_1d, dtype=bool)
-    ema_50_rising[1:] = ema_50_1d[1:] > ema_50_1d[:-1]
-    ema_50_falling[1:] = ema_50_1d[1:] < ema_50_1d[:-1]
+    ema_34_rising = np.zeros_like(ema_34_1d, dtype=bool)
+    ema_34_falling = np.zeros_like(ema_34_1d, dtype=bool)
+    ema_34_rising[1:] = ema_34_1d[1:] > ema_34_1d[:-1]
+    ema_34_falling[1:] = ema_34_1d[1:] < ema_34_1d[:-1]
     
-    ema_50_rising_aligned = align_htf_to_ltf(prices, df_1d, ema_50_rising)
-    ema_50_falling_aligned = align_htf_to_ltf(prices, df_1d, ema_50_falling)
+    # Williams Fractals: bearish (high) and bullish (low)
+    # Bearish fractal: high[n-2] < high[n-1] > high[n] and high[n-1] > high[n-3] and high[n-1] > high[n+1]
+    # Bullish fractal: low[n-2] > low[n-1] < low[n] and low[n-1] < low[n-3] and low[n-1] < low[n+1]
+    # We'll compute the fractal values (price level) where the pattern occurs
+    bearish_fractal = np.full(len(high_1d), np.nan)
+    bullish_fractal = np.full(len(low_1d), np.nan)
     
-    # Volume confirmation: current volume > 1.5 * 20-period EMA of volume
-    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ema_20)
+    for i in range(2, len(high_1d) - 2):
+        if (high_1d[i-2] < high_1d[i-1] and 
+            high_1d[i] < high_1d[i-1] and
+            high_1d[i-3] < high_1d[i-1] and
+            high_1d[i+1] < high_1d[i-1]):
+            bearish_fractal[i] = high_1d[i]
+        
+        if (low_1d[i-2] > low_1d[i-1] and 
+            low_1d[i] > low_1d[i-1] and
+            low_1d[i-3] > low_1d[i-1] and
+            low_1d[i+1] > low_1d[i-1]):
+            bullish_fractal[i] = low_1d[i]
+    
+    # Align 1-day indicators to 6-hour timeframe with additional delay for fractals
+    # Williams fractals need 2 extra 1-day bars for confirmation (pattern completes at bar i, but needs i+1 and i+2 to confirm)
+    ema_34_rising_aligned = align_htf_to_ltf(prices, df_1d, ema_34_rising)
+    ema_34_falling_aligned = align_htf_to_ltf(prices, df_1d, ema_34_falling)
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -75,18 +81,18 @@ def generate_signals(prices):
     start_idx = 50  # Sufficient warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema_50_rising_aligned[i]) or np.isnan(ema_50_falling_aligned[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(ema_20[i]) or np.isnan(ema_34_rising_aligned[i]) or np.isnan(ema_34_falling_aligned[i]) or
+            np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Bullish alignment AND price > Jaw AND EMA50(1d) rising AND volume spike
-            long_condition = bullish_alignment[i] and (close[i] > jaw[i]) and ema_50_rising_aligned[i] and volume_spike[i]
-            # Short: Bearish alignment AND price < Jaw AND EMA50(1d) falling AND volume spike
-            short_condition = bearish_alignment[i] and (close[i] < jaw[i]) and ema_50_falling_aligned[i] and volume_spike[i]
+            # Long: Price > bullish fractal level (breakout above support) AND EMA34 rising AND volume spike
+            long_condition = (close[i] > bullish_fractal_aligned[i]) and ema_34_rising_aligned[i] and volume_spike[i]
+            # Short: Price < bearish fractal level (breakdown below resistance) AND EMA34 falling AND volume spike
+            short_condition = (close[i] < bearish_fractal_aligned[i]) and ema_34_falling_aligned[i] and volume_spike[i]
             
             if long_condition:
                 signals[i] = 0.25
@@ -95,15 +101,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Price < Teeth (8-period SMMA)
-            if close[i] < teeth[i]:
+            # Exit: Close < EMA20
+            if close[i] < ema_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price > Teeth (8-period SMMA)
-            if close[i] > teeth[i]:
+            # Exit: Close > EMA20
+            if close[i] > ema_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
