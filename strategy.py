@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_TRIX_DMI_Crossover_Volume_Filter
-Hypothesis: TRIX (12-period EMA rate-of-change) crossing above/below zero indicates momentum shifts. Combined with DMI (ADX>25) for trend strength and volume > 1.5x 20-period average for confirmation. Designed to capture sustained moves in both bull and bear markets with low trade frequency.
+6h_WeeklyPivot_Breakout_1dTrend_Volume
+Hypothesis: Use weekly (W) pivot points as structural support/resistance, with 1d EMA50 trend filter and volume confirmation. Weekly pivots are less noisy than daily and hold better in trends. Enter long when price breaks above weekly R1 with 1d uptrend and volume spike; short when breaks below weekly S1 with 1d downtrend and volume spike. Designed for low trade frequency (10-25/year) to avoid fee drag.
 """
-name = "4h_TRIX_DMI_Crossover_Volume_Filter"
-timeframe = "4h"
+name = "6h_WeeklyPivot_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -21,79 +21,77 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # TRIX: 12-period EMA of EMA of EMA of close, then 1-period percent change
-    close_series = pd.Series(close)
-    ema1 = close_series.ewm(span=12, adjust=False).mean()
-    ema2 = ema1.ewm(span=12, adjust=False).mean()
-    ema3 = ema2.ewm(span=12, adjust=False).mean()
-    trix = ema3.pct_change() * 100  # Convert to percentage
+    # Get weekly data for pivot points
+    df_w = get_htf_data(prices, '1w')
+    if len(df_w) < 2:
+        return np.zeros(n)
     
-    # DMI (ADX) calculation
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Directional Movement
-    up_move = high - np.roll(high, 1)
-    down_move = np.roll(low, 1) - low
-    up_move[0] = 0
-    down_move[0] = 0
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Calculate weekly OHLC for pivot points
+    high_w = df_w['high'].values
+    low_w = df_w['low'].values
+    close_w = df_w['close'].values
     
-    # Smooth TR and DM
-    tr_period = 14
-    atr = pd.Series(tr).ewm(span=tr_period, adjust=False).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(span=tr_period, adjust=False).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(span=tr_period, adjust=False).mean().values / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(span=tr_period, adjust=False).mean().values
+    # Weekly pivot points (standard formula)
+    pivot_w = (high_w + low_w + close_w) / 3
+    range_w = high_w - low_w
+    r1_w = pivot_w + (range_w * 1.0)  # R1 = P + (H-L)
+    s1_w = pivot_w - (range_w * 1.0)  # S1 = P - (H-L)
     
-    # Volume filter: current volume > 1.5x 20-period average
+    # Align weekly pivot levels to 6h timeframe
+    r1_w_aligned = align_htf_to_ltf(prices, df_w, r1_w)
+    s1_w_aligned = align_htf_to_ltf(prices, df_w, s1_w)
+    
+    # Daily EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume filter: current volume > 1.5 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_avg * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Need sufficient warmup for indicators
+    start_idx = 60  # Need sufficient warmup for averages
     
     for i in range(start_idx, n):
         # Skip if any data is not ready
-        if (np.isnan(trix[i]) or np.isnan(adx[i]) or 
-            np.isnan(plus_di[i]) or np.isnan(minus_di[i]) or 
-            np.isnan(vol_avg[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(r1_w_aligned[i]) or np.isnan(s1_w_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg[i]) or 
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: TRIX crosses above zero + ADX > 25 + volume filter
-            if (trix[i] > 0 and trix[i-1] <= 0 and 
-                adx[i] > 25 and 
+            # Long: price breaks above weekly R1 + 1d uptrend + volume spike
+            if (close[i] > r1_w_aligned[i] and 
+                close[i] > ema_50_1d_aligned[i] and 
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX crosses below zero + ADX > 25 + volume filter
-            elif (trix[i] < 0 and trix[i-1] >= 0 and 
-                  adx[i] > 25 and 
+            # Short: price breaks below weekly S1 + 1d downtrend + volume spike
+            elif (close[i] < s1_w_aligned[i] and 
+                  close[i] < ema_50_1d_aligned[i] and 
                   volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: TRIX crosses back through zero (opposite direction)
+            # Exit: price returns to opposite weekly pivot level (S1 for long, R1 for short)
             if position == 1:
-                if trix[i] < 0:
+                if close[i] <= s1_w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if trix[i] > 0:
+                if close[i] >= r1_w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
