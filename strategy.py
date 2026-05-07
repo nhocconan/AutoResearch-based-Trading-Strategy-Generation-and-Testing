@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3S3_1dTrend_Volume_S
-Hypothesis: On 12h timeframe, buy when price breaks above Camarilla R3 level with daily EMA34 trend filter and volume spike; sell when breaks below S3 level with trend filter and volume spike. Uses daily EMA34 for trend direction to avoid counter-trend whipsaws and volume spike for confirmation. Camarilla levels calculated from prior day's OHLC. Designed to work in both bull and bear markets by using trend filter and mean-reversion levels. Target 12-37 trades per year.
+4h_Vortex_Volume_Spike_1dTrend_v1
+Hypothesis: On 4h timeframe, use Vortex Indicator to identify trend direction and strength, 
+filtered by daily EMA trend and volume spikes to avoid false signals. 
+Long when VI+ > VI- and price above daily EMA with volume spike. 
+Short when VI- > VI+ and price below daily EMA with volume spike. 
+Vortex helps distinguish between trending and ranging markets, reducing whipsaws in chop.
+Works in both bull and bear markets by requiring alignment with daily trend.
 """
-name = "12h_Camarilla_R3S3_1dTrend_Volume_S"
-timeframe = "12h"
+name = "4h_Vortex_Volume_Spike_1dTrend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -21,22 +26,26 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla levels and EMA
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day's OHLC
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Calculate Vortex Indicator (period=14)
+    vm_plus = np.abs(high - np.roll(low, 1))
+    vm_minus = np.abs(low - np.roll(high, 1))
+    vm_plus[0] = 0
+    vm_minus[0] = 0
     
-    camarilla_r3 = prev_close + 1.1 * (prev_high - prev_low)
-    camarilla_s3 = prev_close - 1.1 * (prev_high - prev_low)
+    tr = np.maximum(high - low, 
+                    np.maximum(np.abs(high - np.roll(close, 1)), 
+                               np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]
     
-    # Align Camarilla levels to 12h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    vi_plus = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values / \
+              pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    vi_minus = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values / \
+               pd.Series(tr).rolling(window=14, min_periods=14).sum().values
     
     # Daily EMA34 for trend filter
     ema_34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
@@ -50,13 +59,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_entry = 0
     
-    start_idx = max(34, 20)  # Ensure sufficient warmup for EMA and volume
+    start_idx = max(34, 20, 14)  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
         bars_since_entry += 1
         
         # Skip if any data is not ready
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+        if (np.isnan(vi_plus[i]) or np.isnan(vi_minus[i]) or 
             np.isnan(ema_34_aligned[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -65,35 +74,35 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Minimum 4 bars between trades to reduce frequency (12h timeframe)
-            if bars_since_entry < 4:
+            # Minimum 8 bars between trades to reduce frequency (4h timeframe)
+            if bars_since_entry < 8:
                 continue
                 
-            # Long: price breaks above R3 + price above EMA34 + volume filter
-            if (close[i] > camarilla_r3_aligned[i] and 
+            # Long: VI+ > VI- (bullish vortex) + price above EMA34 + volume filter
+            if (vi_plus[i] > vi_minus[i] and 
                 close[i] > ema_34_aligned[i] and 
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_entry = 0
-            # Short: price breaks below S3 + price below EMA34 + volume filter
-            elif (close[i] < camarilla_s3_aligned[i] and 
+            # Short: VI- > VI+ (bearish vortex) + price below EMA34 + volume filter
+            elif (vi_minus[i] > vi_plus[i] and 
                   close[i] < ema_34_aligned[i] and 
                   volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_entry = 0
         elif position != 0:
-            # Exit: price returns to opposite Camarilla level (S3 for long, R3 for short)
+            # Exit: Vortex crossover in opposite direction
             if position == 1:
-                if close[i] < camarilla_s3_aligned[i]:
+                if vi_minus[i] > vi_plus[i]:  # Bearish crossover
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > camarilla_r3_aligned[i]:
+                if vi_plus[i] > vi_minus[i]:  # Bullish crossover
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
