@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_RSI_Trend_Squeeze_Bounce
-# Hypothesis: Combines RSI mean reversion with trend alignment and volatility squeeze to capture high-probability bounces in both bull and bear markets.
-# Uses 1-day RSI (14) for mean reversion signals (oversold/overbought), aligned with 4-hour trend (EMA50) and Bollinger Band squeeze (low volatility) for entry.
-# Exits on RSI mean reversion or trend violation. Designed for low trade frequency (20-40/year) to minimize fee drag while maintaining edge in choppy and trending regimes.
-# Works in bull markets by buying oversold dips in uptrends and in bear markets by selling overbought rallies in downtrends.
+# 1d_KAMA_Trend_1wTrend_Volume
+# Hypothesis: Uses Kaufman Adaptive Moving Average (KAMA) on daily timeframe for trend direction, filtered by 1-week KAMA trend and volume confirmation.
+# KAMA adapts to market noise, reducing false signals in choppy markets while capturing strong trends.
+# Works in both bull and bear markets by only trading in the direction of the 1-week trend.
+# Target: 7-25 trades/year to stay within optimal frequency range and minimize fee drag.
 
-name = "4h_RSI_Trend_Squeeze_Bounce"
-timeframe = "4h"
+name = "1d_KAMA_Trend_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -15,83 +15,80 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-day data for RSI and Bollinger Bands
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 1-week data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate 1-day RSI (14-period)
-    close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate KAMA (14-period) on daily data
+    close_series = pd.Series(close)
+    change = abs(close_series - close_series.shift(10))
+    volatility = abs(close_series - close_series.shift(1)).rolling(window=10, min_periods=10).sum()
+    er = change / volatility.replace(0, np.nan)
+    er = er.fillna(0)
+    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Wilder's smoothing (equivalent to EMA with alpha=1/14)
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])  # First average of first 14 gains
-    avg_loss[13] = np.mean(loss[1:14])  # First average of first 14 losses
+    # Calculate KAMA (14-period) on 1-week data for trend filter
+    close_1w = df_1w['close'].values
+    close_1w_series = pd.Series(close_1w)
+    change_1w = abs(close_1w_series - close_1w_series.shift(10))
+    volatility_1w = abs(close_1w_series - close_1w_series.shift(1)).rolling(window=10, min_periods=10).sum()
+    er_1w = change_1w / volatility_1w.replace(0, np.nan)
+    er_1w = er_1w.fillna(0)
+    sc_1w = (er_1w * (0.6645 - 0.0645) + 0.0645) ** 2
+    kama_1w = np.zeros(len(close_1w))
+    kama_1w[0] = close_1w[0]
+    for i in range(1, len(close_1w)):
+        kama_1w[i] = kama_1w[i-1] + sc_1w[i] * (close_1w[i] - kama_1w[i-1])
     
-    for i in range(14, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # Align 1-week KAMA to daily timeframe
+    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
     
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d[:14] = np.nan  # Not enough data for first 14 periods
-    
-    # Calculate Bollinger Bands (20, 2) on 1-day
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
-    bb_width = (upper_bb - lower_bb) / sma_20  # Normalized width
-    
-    # Align 1D indicators to 4h
-    rsi_1d_4h = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    bb_width_4h = align_htf_to_ltf(prices, df_1d, bb_width)
-    
-    # Calculate 4-hour EMA50 for trend filter
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Volume confirmation: volume above 20-day average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ok = volume > vol_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after EMA50 warmup
+    for i in range(30, n):  # Start after sufficient data for indicators
         # Skip if any critical value is NaN
-        if (np.isnan(rsi_1d_4h[i]) or np.isnan(bb_width_4h[i]) or np.isnan(ema_50[i])):
+        if (np.isnan(kama[i]) or np.isnan(kama_1w_aligned[i]) or 
+            np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: RSI oversold (<30) + low volatility squeeze (BB width < 0.05) + price above EMA50 (uptrend)
-            if rsi_1d_4h[i] < 30 and bb_width_4h[i] < 0.05 and close[i] > ema_50[i]:
+            # Long: Price above daily KAMA AND above weekly KAMA AND volume confirmation
+            if close[i] > kama[i] and close[i] > kama_1w_aligned[i] and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI overbought (>70) + low volatility squeeze (BB width < 0.05) + price below EMA50 (downtrend)
-            elif rsi_1d_4h[i] > 70 and bb_width_4h[i] < 0.05 and close[i] < ema_50[i]:
+            # Short: Price below daily KAMA AND below weekly KAMA AND volume confirmation
+            elif close[i] < kama[i] and close[i] < kama_1w_aligned[i] and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: RSI mean reversion (>50) or price breaks below EMA50 (trend failure)
-            if rsi_1d_4h[i] > 50 or close[i] < ema_50[i]:
+            # Exit: Price crosses below daily KAMA OR weekly KAMA
+            if close[i] < kama[i] or close[i] < kama_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: RSI mean reversion (<50) or price breaks above EMA50 (trend failure)
-            if rsi_1d_4h[i] < 50 or close[i] > ema_50[i]:
+            # Exit: Price crosses above daily KAMA OR weekly KAMA
+            if close[i] > kama[i] or close[i] > kama_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
