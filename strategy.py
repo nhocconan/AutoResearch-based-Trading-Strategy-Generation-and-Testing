@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-name = "1h_4h_1d_Trend_Pullback_v1"
-timeframe = "1h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtr_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -17,108 +17,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h data ONCE before loop for trend and pullback
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    # Load daily data ONCE before loop for trend filter
+    # Load daily data ONCE before loop for Camarilla and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 4h EMA(21) for trend direction
-    ema_21_4h = pd.Series(df_4h['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
+    # Camarilla levels from previous day
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # 4h EMA(50) for trend strength filter
-    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    range_hl = prev_high - prev_low
+    R3 = prev_close + range_hl * 1.1 / 2
+    S3 = prev_close - range_hl * 1.1 / 2
     
-    # Daily EMA(50) for higher timeframe trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align daily Camarilla levels to 12h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
-    # 1h RSI(14) for pullback entry
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_vals = rsi.values
+    # Daily EMA(34) for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 1h ATR(14) for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    # Volume spike detection: 2-period average (1 day of 12h bars)
+    vol_ma_2 = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 14)  # Wait for indicators
+    start_idx = max(34, 2)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_21_4h_aligned[i]) or np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(rsi_vals[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(R3_aligned[i]) or 
+            np.isnan(S3_aligned[i]) or np.isnan(vol_ma_2[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
         if position == 0:
-            # Long: 4h uptrend + price pullback to 4h EMA21 + RSI oversold + daily uptrend
-            uptrend_4h = ema_21_4h_aligned[i] > ema_50_4h_aligned[i]
-            uptrend_1d = ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1]
-            pullback = close[i] <= ema_21_4h_aligned[i] + 0.5 * atr[i]
-            rsi_oversold = rsi_vals[i] < 40
+            # Long: price above S3 with volume and daily uptrend
+            vol_condition = volume[i] > vol_ma_2[i] * 2.0
+            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
             
-            if uptrend_4h and uptrend_1d and pullback and rsi_oversold and in_session:
-                signals[i] = 0.20
+            if close[i] > S3_aligned[i] and vol_condition and uptrend:
+                signals[i] = 0.25
                 position = 1
-            # Short: 4h downtrend + price pullback to 4h EMA21 + RSI overbought + daily downtrend
-            elif (not uptrend_4h) and (not uptrend_1d) and (close[i] >= ema_21_4h_aligned[i] - 0.5 * atr[i]) and (rsi_vals[i] > 60) and in_session:
-                signals[i] = -0.20
+            # Short: price below R3 with volume and daily downtrend
+            elif close[i] < R3_aligned[i] and vol_condition and not uptrend:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: 4h trend reversal or RSI overbought
-            if (ema_21_4h_aligned[i] <= ema_50_4h_aligned[i]) or (rsi_vals[i] > 70):
+            # Exit: price back below S3 or volume drops
+            if close[i] < S3_aligned[i] or volume[i] < vol_ma_2[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: 4h trend reversal or RSI oversold
-            if (ema_21_4h_aligned[i] >= ema_50_4h_aligned[i]) or (rsi_vals[i] < 30):
+            # Exit: price back above R3 or volume drops
+            if close[i] > R3_aligned[i] or volume[i] < vol_ma_2[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-# Hypothesis: 1h trend pullback strategy using 4h trend direction and daily trend filter
-# - Uses 4h EMA21/EMA50 crossover for trend direction (avoids whipsaws)
-# - Enters on 1h pullbacks to 4h EMA21 during trend (buys dips in uptrend, sells rallies in downtrend)
-# - RSI(14) for entry timing (oversold in uptrend, overbought in downtrend)
-# - Daily EMA50 ensures alignment with higher timeframe trend
-# - ATR-based pullback zone adapts to volatility
-# - Session filter (08-20 UTC) reduces noise from low-volume periods
-# - Position size 0.20 manages risk during drawdowns
-# - Target: 15-30 trades/year to avoid fee drag
-# - Works in both bull (buy dips in uptrend) and bear (sell rallies in downtrend) markets
-# - Simple, robust logic with minimal overfitting risk
-# - Avoids saturated indicator combinations (no pivots, no Donchian, no CMF)
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d trend and volume confirmation
+# - Camarilla R3/S3 act as key support/resistance levels from prior day
+# - Breakout above S3 with volume in daily uptrend = long opportunity
+# - Breakdown below R3 with volume in daily downtrend = short opportunity
+# - Volume spike (2.0x average) confirms institutional participation
+# - Works in both bull (buy S3 breaks in uptrend) and bear (sell R3 breaks in downtrend)
+# - Exit when price returns to S3/R3 or volume weakens
+# - Position size 0.25 targets ~20-50 trades/year, avoiding fee drag
+# - Uses actual daily Camarilla levels (not weekly) for better stability on 12h
+# - Daily trend filter reduces whipsaws vs using same timeframe
+# - Designed to work in BOTH bull and bear markets via trend filter
+# - Volume confirmation reduces false breakouts
+# - Novel combination: Camarilla R3/S3 (1d) + trend (1d) + volume (12h) on 12h timeframe
+# - Aims for 50-150 total trades over 4 years (12-37/year) to stay within limits
+# - Avoids overtrading by requiring strong volume confirmation and trend alignment
