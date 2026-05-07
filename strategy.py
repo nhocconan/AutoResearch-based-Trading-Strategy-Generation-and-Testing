@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-name = "4h_KAMA_Direction_RSI_ChopFilter_v1"
-timeframe = "4h"
+
+name = "1h_Camarilla_R1S1_Breakout_4h1dTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,103 +18,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for KAMA and RSI
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
+        return np.zeros(n)
+    
+    # Calculate 4h EMA30 for trend filter
+    ema_30_4h = pd.Series(df_4h['close'].values).ewm(span=30, adjust=False, min_periods=30).mean().values
+    ema_30_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_30_4h)
+    
+    # Get 1d data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate KAMA on daily close
-    close_1d = df_1d['close'].values
-    direction = np.abs(np.diff(close_1d, n=10))  # 10-period net change
-    volatility = np.sum(np.abs(np.diff(close_1d, n=1)), axis=0) if len(close_1d) > 1 else np.zeros_like(close_1d)
-    volatility = np.concatenate([np.zeros(9), volatility])  # align length
-    er = np.where(volatility != 0, direction / volatility, 0)
-    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # Calculate Camarilla R1 and S1 from previous day
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Align KAMA to 4h
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    kama_direction = kama_aligned > np.roll(kama_aligned, 1)
+    camarilla_R1 = prev_close + 1.1 * (prev_high - prev_low)
+    camarilla_S1 = prev_close - 1.1 * (prev_high - prev_low)
     
-    # Calculate RSI(14) on daily close
-    delta = np.diff(close_1d, n=1)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = np.zeros_like(close_1d)
-    avg_loss = np.zeros_like(close_1d)
-    for i in range(14, len(close_1d)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = np.concatenate([np.full(14, 50), rsi[14:]])  # pad beginning
+    # Align Camarilla levels to 1h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
     
-    # Align RSI to 4h
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # Volume filter: current volume > 2.0x 24-period average (1h)
+    vol_ma_24 = np.full(n, np.nan)
+    for i in range(24, n):
+        vol_ma_24[i] = np.mean(volume[i-24:i])
+    vol_filter = volume > (2.0 * vol_ma_24)
     
-    # Get 12h data for Choppiness Index
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
-    # Calculate Choppiness Index(14) on 12h
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    atr_12h = np.zeros_like(close_12h)
-    for i in range(1, len(close_12h)):
-        tr = max(high_12h[i] - low_12h[i], 
-                 abs(high_12h[i] - close_12h[i-1]), 
-                 abs(low_12h[i] - close_12h[i-1]))
-        if i == 1:
-            atr_12h[i] = tr
-        else:
-            atr_12h[i] = (atr_12h[i-1] * 13 + tr) / 14
-    
-    # Calculate highest high and lowest low over 14 periods
-    highest_high = np.zeros_like(close_12h)
-    lowest_low = np.zeros_like(close_12h)
-    for i in range(13, len(close_12h)):
-        highest_high[i] = np.max(high_12h[i-13:i+1])
-        lowest_low[i] = np.min(low_12h[i-13:i+1])
-    
-    # Chop = 100 * log10(sum(atr14) / (max(high14) - min(low14))) / log10(14)
-    sum_atr14 = np.zeros_like(close_12h)
-    for i in range(13, len(close_12h)):
-        sum_atr14[i] = np.sum(atr_12h[i-13:i+1])
-    
-    denominator = highest_high - lowest_low
-    chop = np.where(denominator != 0, 
-                    100 * np.log10(sum_atr14 / denominator) / np.log10(14), 
-                    50)
-    chop = np.concatenate([np.full(13, 50), chop[13:]])  # pad beginning
-    
-    # Align Chop to 4h
-    chop_aligned = align_htf_to_ltf(prices, df_12h, chop)
-    
-    # Volume filter: current volume > 1.5x 20-period average (4h)
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma_20[i] = np.mean(volume[i-20:i])
-    vol_filter = volume > (1.5 * vol_ma_20)
+    # Breakout threshold
+    breakout_threshold = 0.003  # 0.3%
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 12  # ~2 days for 4h
+    cooldown_bars = 6  # 6 hours cooldown to reduce trades
     
-    start_idx = max(30, 20, 14)
+    start_idx = max(30, 24)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(kama_aligned[i]) or 
-            np.isnan(rsi_aligned[i]) or 
-            np.isnan(chop_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(R1_aligned[i]) or 
+            np.isnan(S1_aligned[i]) or 
+            np.isnan(ema_30_4h_aligned[i]) or 
+            np.isnan(vol_ma_24[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -124,40 +80,54 @@ def generate_signals(prices):
         
         bars_since_last_trade += 1
         
+        # Determine 4h trend direction
+        close_4h_aligned = align_htf_to_ltf(prices, df_4h, df_4h['close'].values)
+        trend_4h_up = close_4h_aligned[i] > ema_30_4h_aligned[i]
+        trend_4h_down = close_4h_aligned[i] < ema_30_4h_aligned[i]
+        
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: KAMA up, RSI > 50, Chop > 50 (ranging market)
-            if kama_direction[i] and rsi_aligned[i] > 50 and chop_aligned[i] > 50 and vol_filter[i]:
-                signals[i] = 0.25
+            # Check session filter
+            if not session_filter[i]:
+                continue
+                
+            # Long: Break above R1 with volume in 4h uptrend
+            if (close[i] > R1_aligned[i] * (1 + breakout_threshold) and 
+                close[i-1] <= R1_aligned[i-1] and 
+                trend_4h_up and 
+                vol_filter[i]):
+                signals[i] = 0.20
                 position = 1
                 bars_since_last_trade = 0
-            # Short: KAMA down, RSI < 50, Chop > 50 (ranging market)
-            elif not kama_direction[i] and rsi_aligned[i] < 50 and chop_aligned[i] > 50 and vol_filter[i]:
-                signals[i] = -0.25
+            # Short: Break below S1 with volume in 4h downtrend
+            elif (close[i] < S1_aligned[i] * (1 - breakout_threshold) and 
+                  close[i-1] >= S1_aligned[i-1] and 
+                  trend_4h_down and 
+                  vol_filter[i]):
+                signals[i] = -0.20
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit: KAMA down OR RSI < 40
-            if not kama_direction[i] or rsi_aligned[i] < 40:
+            # Exit: Close below S1 OR trend change
+            if (close[i] < S1_aligned[i]) or not trend_4h_up:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit: KAMA up OR RSI > 60
-            if kama_direction[i] or rsi_aligned[i] > 60:
+            # Exit: Close above R1 OR trend change
+            if (close[i] > R1_aligned[i]) or not trend_4h_down:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-# Hypothesis: KAMA direction with RSI momentum filter in choppy markets on 4h timeframe.
-# Long when KAMA is rising (trending up), RSI > 50 (bullish momentum), and Chop > 50 (ranging/volatile market).
-# Short when KAMA is falling (trending down), RSI < 50 (bearish momentum), and Chop > 50.
-# Uses daily KAMA for trend, daily RSI for momentum, and 12h Chop for regime filter.
-# Volume confirmation filters weak signals. Cooldown reduces trade frequency.
-# Works in bull markets (KAMA up + RSI > 50) and bear markets (KAMA down + RSI < 50).
-# Chop > 50 ensures we trade in volatile/ranging conditions where mean reversion works.
+# Hypothesis: 1h Camarilla R1/S1 breakout with 4h trend filter and volume confirmation.
+# Long when price breaks above R1 level (with 0.3% buffer) with volume spike in 4h uptrend during active session (08-20 UTC).
+# Short when price breaks below S1 level (with 0.3% buffer) with volume spike in 4h downtrend during active session.
+# Uses 1d Camarilla levels for intraday support/resistance and 4h EMA30 for trend.
+# Volume confirmation and session filter reduce false signals. 6-hour cooldown limits trades to 15-35/year.
+# Designed to work in both bull and bear markets by following higher timeframe trend.
