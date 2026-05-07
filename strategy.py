@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-6H_OrderFlow_Volume_Imbalance
-Hypothesis: Uses volume imbalance between consecutive 6h bars to detect institutional order flow.
-Strong buying pressure (positive imbalance) in uptrend or selling pressure (negative imbalance) in downtrend signals continuation.
-Works in bull markets by riding institutional buying, in bear markets by following institutional distribution.
-Uses 1-day trend filter to avoid counter-trend trades and reduce whipsaw.
-Targets 12-30 trades/year by requiring volume imbalance + trend alignment + minimum bar size.
+12H_Camarilla_R3S3_Breakout_1DTrend_Volume
+Hypothesis: Use daily Camarilla R3/S3 levels for breakout entries, with daily trend filter and volume confirmation.
+Camarilla levels provide precise support/resistance for intraday breaks. Daily trend ensures alignment with higher timeframe momentum.
+Volume confirmation filters false breakouts. Works in bull markets (breakouts in uptrend) and bear markets (breakdowns in downtrend).
+Targets 12-37 trades/year to minimize fee drag on 12h timeframe.
 """
-name = "6H_OrderFlow_Volume_Imbalance"
-timeframe = "6h"
+name = "12H_Camarilla_R3S3_Breakout_1DTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,71 +24,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1D data for trend filter
+    # Get 1D data for Camarilla calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1D EMA50 for trend filter
+    # Calculate Camarilla levels (R3, S3) from previous day's range
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate volume imbalance: (current volume - previous volume) / previous volume
-    vol_change = np.diff(volume)
-    vol_prev = volume[:-1]
-    vol_imbalance = np.where(vol_prev != 0, vol_change / vol_prev, 0)
-    vol_imbalance = np.concatenate([[0], vol_imbalance])  # align with volume index
+    # Previous day's range
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    # First element will be NaN due to roll, handled by min_periods later
     
-    # Calculate minimum bar size filter: true range > 0.5 * ATR(14)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[0], tr])
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    min_size = atr14 * 0.5
-    size_filter = tr >= min_size
+    # Camarilla R3 and S3 levels
+    r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    
+    # Align R3 and S3 to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Daily trend filter: EMA34
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume filter: current 12h volume > 1.5 x 20-period average volume
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_avg * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(14, 50)  # Ensure sufficient warmup
+    start_idx = max(35, 20)  # Ensure sufficient warmup for EMA34 and volume
     
     for i in range(start_idx, n):
         # Skip if any data is not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(atr14[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: positive volume imbalance (buying pressure) + uptrend + sufficient bar size
-            if (vol_imbalance[i] > 0.15 and 
-                close[i] > ema_50_1d_aligned[i] and 
-                size_filter[i]):
+            # Long: price breaks above R3, daily uptrend, and volume confirmation
+            if (close[i] > r3_aligned[i] and 
+                close[i] > ema_34_1d_aligned[i] and 
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: negative volume imbalance (selling pressure) + downtrend + sufficient bar size
-            elif (vol_imbalance[i] < -0.15 and 
-                  close[i] < ema_50_1d_aligned[i] and 
-                  size_filter[i]):
+            # Short: price breaks below S3, daily downtrend, and volume confirmation
+            elif (close[i] < s3_aligned[i] and 
+                  close[i] < ema_34_1d_aligned[i] and 
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: volume imbalance turns negative OR price breaks trend
-            if (vol_imbalance[i] < -0.05 or 
-                close[i] < ema_50_1d_aligned[i]):
+            # Exit long: price crosses below S3 (reversion to mean)
+            if close[i] < s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: volume imbalance turns positive OR price breaks trend
-            if (vol_imbalance[i] > 0.05 or 
-                close[i] > ema_50_1d_aligned[i]):
+            # Exit short: price crosses above R3 (reversion to mean)
+            if close[i] > r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
