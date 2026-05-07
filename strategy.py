@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-name = "4h_TRIX_VolumeSpike_1dTrend"
+name = "4h_Trix_Momentum_With_Volume_And_Trend"
 timeframe = "4h"
 leverage = 1.0
 
