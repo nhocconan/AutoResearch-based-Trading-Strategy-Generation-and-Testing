@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Donchian20_1dTrend_VolumeFilter_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,54 +17,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # 1d EMA34 trend filter (requires 34 periods)
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Weekly EMA34 trend filter
+    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Donchian channel (20-period) on 4h
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    # Get daily data for Camarilla pivot calculation (use previous day's close, high, low)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Volume filter: current volume > 1.5 * 20-period average
+    # Previous day's OHLC for Camarilla calculation
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    
+    # Calculate Camarilla levels (R3, S3) from previous day
+    # R3 = close + 1.1 * (high - low) / 2
+    # S3 = close - 1.1 * (high - low) / 2
+    camarilla_r3 = prev_close + 1.1 * (prev_high - prev_low) / 2
+    camarilla_s3 = prev_close - 1.1 * (prev_high - prev_low) / 2
+    
+    # Align Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Volume filter: current volume > 2.0 * 20-period average (more selective)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > (vol_ma * 1.5)
+    volume_ok = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)  # Need 20 for Donchian and volume MA
+    start_idx = max(20, 1)  # Need 20 for volume MA, 1 for previous day data
     
     for i in range(start_idx, n):
-        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema_34_1w_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian high AND above daily EMA34 + volume
-            if close[i] > donchian_high[i] and close[i] > ema_34_1d_aligned[i] and volume_ok[i]:
+            # Long: price breaks above Camarilla R3 AND above weekly EMA34 + volume
+            if close[i] > r3_aligned[i] and close[i] > ema_34_1w_aligned[i] and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low AND below daily EMA34 + volume
-            elif close[i] < donchian_low[i] and close[i] < ema_34_1d_aligned[i] and volume_ok[i]:
+            # Short: price breaks below Camarilla S3 AND below weekly EMA34 + volume
+            elif close[i] < s3_aligned[i] and close[i] < ema_34_1w_aligned[i] and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: price returns to Donchian range or breaks in opposite direction
+            # Exit: price returns to opposite Camarilla level or breaks trend
             if position == 1:
-                if close[i] < donchian_low[i] or close[i] < ema_34_1d_aligned[i]:
+                if close[i] < s3_aligned[i] or close[i] < ema_34_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > donchian_high[i] or close[i] > ema_34_1d_aligned[i]:
+                if close[i] > r3_aligned[i] or close[i] > ema_34_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
