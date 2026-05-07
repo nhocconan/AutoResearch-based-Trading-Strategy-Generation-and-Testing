@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_KAMA_Direction_With_1dTrend_Filter
-Hypothesis: KAMA (Kaufman Adaptive Moving Average) on 4h for trend direction,
-filtered by 1-day EMA to avoid counter-trend trades. Works in bull/bear via
-trend filter, with volatility-based position sizing to manage drawdown.
-Targets 20-40 trades/year to minimize fee drag.
+6h_Ichimoku_Cloud_Breakout_1dTrend_Volume
+Hypothesis: Ichimoku cloud breakout on 6h with 1-day trend filter and volume confirmation.
+Works in bull/bear via 1-day EMA trend filter. Tenkan/Kijun cross provides momentum,
+cloud acts as dynamic support/resistance. Targets 15-25 trades/year to minimize fee drag.
 """
 
-name = "4h_KAMA_Direction_With_1dTrend_Filter"
-timeframe = "4h"
+name = "6h_Ichimoku_Cloud_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,36 +24,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # KAMA parameters
-    er_period = 10
-    fast_ema = 2
-    slow_ema = 30
+    # Ichimoku components (9, 26, 52 periods)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan = (high_9 + low_9) / 2
     
-    # Calculate Efficiency Ratio (ER)
-    change = np.abs(np.diff(close, n=er_period))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # placeholder, will fix in loop
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun = (high_26 + low_26) / 2
     
-    # Calculate ER properly with loop to avoid future leakage
-    er = np.full(n, np.nan)
-    for i in range(er_period, n):
-        change_val = np.abs(close[i] - close[i-er_period])
-        volatility_val = np.sum(np.abs(np.diff(close[i-er_period:i+1])))
-        if volatility_val > 0:
-            er[i] = change_val / volatility_val
-        else:
-            er[i] = 0
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2
     
-    # Smoothing constants
-    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
-    
-    # Calculate KAMA
-    kama = np.full(n, np.nan)
-    kama[0] = close[0]
-    for i in range(1, n):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    high_52 = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    low_52 = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_b = (high_52 + low_52) / 2
     
     # 1-day trend filter: EMA of daily close
     df_1d = get_htf_data(prices, '1d')
@@ -65,54 +52,54 @@ def generate_signals(prices):
     ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Volatility filter: ATR-based position sizing
-    atr_period = 14
-    tr = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])))
-    tr = np.insert(tr, 0, high[0] - low[0])
-    atr = np.full(n, np.nan)
-    for i in range(atr_period, n):
-        atr[i] = np.mean(tr[i-atr_period+1:i+1])
+    # Volume confirmation: current volume > 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(max(er_period, atr_period), n):
+    for i in range(52, n):
         # Skip if any critical value is NaN
-        if (np.isnan(kama[i]) or np.isnan(ema_1d_aligned[i]) or 
-            np.isnan(atr[i]) or atr[i] == 0):
+        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or np.isnan(senkou_a[i]) or 
+            np.isnan(senkou_b[i]) or np.isnan(ema_1d_aligned[i]) or 
+            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Dynamic position size based on volatility (inverse volatility scaling)
-        base_size = 0.25
-        vol_scaling = min(1.0, 0.015 / atr[i])  # target ~1.5% ATR
-        size = base_size * vol_scaling
-        size = min(size, 0.35)  # cap at 35%
+        # Determine cloud boundaries (Senkou Span A/B)
+        upper_cloud = np.maximum(senkou_a[i], senkou_b[i])
+        lower_cloud = np.minimum(senkou_a[i], senkou_b[i])
         
         if position == 0:
-            # Long: price above KAMA AND above 1-day EMA
-            if close[i] > kama[i] and close[i] > ema_1d_aligned[i]:
-                signals[i] = size
+            # Long: Tenkan crosses above Kijun AND price above cloud AND above 1-day EMA with volume
+            if (tenkan[i] > kijun[i] and tenkan[i-1] <= kijun[i-1] and  # TK cross up
+                close[i] > upper_cloud and 
+                close[i] > ema_1d_aligned[i] and 
+                volume[i] > vol_ma[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA AND below 1-day EMA
-            elif close[i] < kama[i] and close[i] < ema_1d_aligned[i]:
-                signals[i] = -size
+            # Short: Tenkan crosses below Kijun AND price below cloud AND below 1-day EMA with volume
+            elif (tenkan[i] < kijun[i] and tenkan[i-1] >= kijun[i-1] and  # TK cross down
+                  close[i] < lower_cloud and 
+                  close[i] < ema_1d_aligned[i] and 
+                  volume[i] > vol_ma[i]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price crosses below KAMA
-            if close[i] < kama[i]:
+            # Exit: Tenkan crosses below Kijun OR price falls below cloud
+            if (tenkan[i] < kijun[i] and tenkan[i-1] >= kijun[i-1]) or close[i] < lower_cloud:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = size
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: price crosses above KAMA
-            if close[i] > kama[i]:
+            # Exit: Tenkan crosses above Kijun OR price rises above cloud
+            if (tenkan[i] > kijun[i] and tenkan[i-1] <= kijun[i-1]) or close[i] > upper_cloud:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -size
+                signals[i] = -0.25
     
     return signals
