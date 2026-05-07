@@ -1,18 +1,17 @@
-#!/usr/bin/env python3
-"""
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
-Hypothesis: Camarilla pivot levels (R1/S1) from daily timeframe provide high-probability
-intraday support/resistance. Trade breakouts above R1 in uptrend (price > daily EMA50) 
-and breakdowns below S1 in downtrend (price < daily EMA50) with volume confirmation.
-Uses 4h for execution to avoid overtrading. Target: 20-50 trades per year.
-"""
+# 6h_1d_Gap_Fade_Momentum
+# Hypothesis: Price gaps on daily chart often reverse on 6h timeframe due to overnight/weekend liquidity imbalances.
+# In bull markets: fade down gaps (price < prior day low) with momentum confirmation.
+# In bear markets: fade up gaps (price > prior day high) with momentum confirmation.
+# Uses 60-period EMA on 6h for trend filter and volume spike for entry confirmation.
+# Targets 15-30 trades/year with position size 0.25 to avoid fee drag.
+# Works in both bull/bear by fading gaps against prevailing trend.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
-timeframe = "4h"
+name = "6h_1d_Gap_Fade_Momentum"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,82 +24,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE for Camarilla pivots and trend filter
+    # Load daily data ONCE for gap detection
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Daily EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Camarilla pivot points from previous day's OHLC
-    # Pivot = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
+    # Daily gap detection: today's open vs yesterday's close
+    daily_open = df_1d['open'].values
     daily_close = df_1d['close'].values
+    gap_up = daily_open > daily_close  # Gap up when open > prior close
+    gap_down = daily_open < daily_close  # Gap down when open < prior close
     
-    pivot = (daily_high + daily_low + daily_close) / 3.0
-    camarilla_r1 = daily_close + (daily_high - daily_low) * 1.1 / 12.0
-    camarilla_s1 = daily_close - (daily_high - daily_low) * 1.1 / 12.0
+    # Align daily gap signals to 6h timeframe
+    gap_up_aligned = align_htf_to_ltf(prices, df_1d, gap_up.astype(float))
+    gap_down_aligned = align_htf_to_ltf(prices, df_1d, gap_down.astype(float))
     
-    # Align daily levels to 4h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # 60-period EMA on 6h for trend filter (responsive but smooth)
+    close_series = pd.Series(close)
+    ema_60 = close_series.ewm(span=60, adjust=False, min_periods=60).mean().values
     
-    # Volume ratio: current volume / 20-period average volume
+    # Volume spike detection: current volume > 2x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.where(vol_ma > 0, volume / vol_ma, 1.0)
+    vol_spike = np.where(vol_ma > 0, volume / vol_ma, 1.0) > 2.0
+    
+    # Momentum confirmation: 6-period ROC > 0 for longs, < 0 for shorts
+    roc_6 = ((close_series / close_series.shift(6)) - 1) * 100
+    roc_6_values = roc_6.fillna(0).values
+    mom_long = roc_6_values > 0
+    mom_short = roc_6_values < 0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Need sufficient warmup for calculations
+    start_idx = 100  # Sufficient warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(pivot_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(ema_60[i]) or np.isnan(gap_up_aligned[i]) or 
+            np.isnan(gap_down_aligned[i]) or np.isnan(vol_spike[i]) or
+            np.isnan(mom_long[i]) or np.isnan(mom_short[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine trend from daily EMA50
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
-        
-        # Volume confirmation: volume > 1.5x average
-        volume_confirm = vol_ratio[i] > 1.5
+        # Trend filter: price above/below EMA60
+        uptrend = close[i] > ema_60[i]
+        downtrend = close[i] < ema_60[i]
         
         if position == 0:
-            # Long: price breaks above Camarilla R1 in uptrend + volume
-            long_entry = (close[i] > camarilla_r1_aligned[i]) and uptrend and volume_confirm
-            # Short: price breaks below Camarilla S1 in downtrend + volume
-            short_entry = (close[i] < camarilla_s1_aligned[i]) and downtrend and volume_confirm
+            # Long: gap down day + volume spike + bullish momentum in uptrend
+            long_condition = (gap_down_aligned[i] > 0.5) and vol_spike[i] and mom_long[i] and uptrend
+            # Short: gap up day + volume spike + bearish momentum in downtrend
+            short_condition = (gap_up_aligned[i] > 0.5) and vol_spike[i] and mom_short[i] and downtrend
             
-            if long_entry:
+            if long_condition:
                 signals[i] = 0.25
                 position = 1
-            elif short_entry:
+            elif short_condition:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price crosses below Camarilla pivot or trend changes to downtrend
-            if (close[i] < pivot_aligned[i]) or (not uptrend):
+            # Exit: gap up day or momentum turns bearish
+            if (gap_up_aligned[i] > 0.5) or (not mom_long[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price crosses above Camarilla pivot or trend changes to uptrend
-            if (close[i] > pivot_aligned[i]) or (not downtrend):
+            # Exit: gap down day or momentum turns bullish
+            if (gap_down_aligned[i] > 0.5) or (not mom_short[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
+
+#!/usr/bin/env python3
