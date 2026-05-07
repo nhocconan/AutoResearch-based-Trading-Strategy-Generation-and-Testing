@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_WeeklyPivot_Trend_Break"
-timeframe = "4h"
+name = "1d_TRIX_VolumeSpike_1wTrend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,75 +17,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Weekly high/low/close from daily data (using last 5 trading days)
-    # Convert daily OHLC to weekly by rolling 5 days (approximate week)
-    daily_close = df_1d['close'].values
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
+    # TRIX calculation on weekly close (15-period EMA of EMA of EMA, then ROC)
+    close_1w = pd.Series(df_1w['close'])
+    ema1 = close_1w.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
+    trix_raw = 100 * (ema3.pct_change())
+    trix = trix_raw.fillna(0).values
+    trix_signal = pd.Series(trix).ewm(span=9, adjust=False, min_periods=9).mean().values
     
-    # Weekly aggregation using 5-day rolling window
-    weekly_high = pd.Series(daily_high).rolling(window=5, min_periods=5).max().values
-    weekly_low = pd.Series(daily_low).rolling(window=5, min_periods=5).min().values
-    weekly_close = pd.Series(daily_close).rolling(window=5, min_periods=5).mean().values
+    # Weekly EMA(34) for trend filter
+    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Weekly pivot levels
-    pp = (weekly_high + weekly_low + weekly_close) / 3
-    r1 = 2 * pp - weekly_low
-    s1 = 2 * pp - weekly_high
+    # Align TRIX signal and weekly EMA to daily timeframe
+    trix_signal_aligned = align_htf_to_ltf(prices, df_1w, trix_signal)
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Align weekly pivot levels to 4h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    
-    # Daily trend filter: EMA(34) on daily close
-    ema_34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume spike: 6-period average (1.5 days of 4h bars)
-    vol_ma_6 = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
+    # Volume spike detection: 20-period average (20 days)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 6, 5)  # Wait for all indicators
+    start_idx = max(34, 20)  # Wait for all indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(pp_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(r1_aligned[i]) or
-            np.isnan(vol_ma_6[i])):
+        if (np.isnan(trix_signal_aligned[i]) or np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above S1 with volume and daily uptrend
-            vol_condition = volume[i] > vol_ma_6[i] * 2.0
-            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
+            # Long: TRIX crosses above signal line with volume and weekly uptrend
+            trix_cross_up = trix[i] > trix_signal_aligned[i] and trix[i-1] <= trix_signal_aligned[i-1]
+            vol_condition = volume[i] > vol_ma_20[i] * 2.0
+            weekly_uptrend = ema_34_1w_aligned[i] > ema_34_1w_aligned[i-1]
             
-            if close[i] > s1_aligned[i] and vol_condition and uptrend:
+            if trix_cross_up and vol_condition and weekly_uptrend:
                 signals[i] = 0.30
                 position = 1
-            # Short: price below R1 with volume and daily downtrend
-            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
+            # Short: TRIX crosses below signal line with volume and weekly downtrend
+            elif trix[i] < trix_signal_aligned[i] and trix[i-1] >= trix_signal_aligned[i-1] and \
+                 vol_condition and not weekly_uptrend:
                 signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit: price back below S1 or volume drops
-            if close[i] < s1_aligned[i] or volume[i] < vol_ma_6[i] * 1.5:
+            # Exit: TRIX crosses below signal line or volume drops
+            trix_cross_down = trix[i] < trix_signal_aligned[i] and trix[i-1] >= trix_signal_aligned[i-1]
+            if trix_cross_down or volume[i] < vol_ma_20[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.30
         elif position == -1:
-            # Exit: price back above R1 or volume drops
-            if close[i] > r1_aligned[i] or volume[i] < vol_ma_6[i] * 1.5:
+            # Exit: TRIX crosses above signal line or volume drops
+            trix_cross_up = trix[i] > trix_signal_aligned[i] and trix[i-1] <= trix_signal_aligned[i-1]
+            if trix_cross_up or volume[i] < vol_ma_20[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -93,12 +87,12 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Weekly pivot (S1/R1) breakout with daily trend and volume confirmation
-# - Weekly pivot points act as strong support/resistance levels
-# - Break above S1 with volume in daily uptrend = long opportunity
-# - Break below R1 with volume in daily downtrend = short opportunity
-# - Volume spike (2x average) confirms institutional participation
-# - Works in bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
-# - Exit when price returns to weekly S1/R1 or volume weakens
-# - Position size 0.30 targets ~30 trades/year, avoiding fee drag
-# - Weekly pivot provides structure that works across market regimes
+# Hypothesis: TRIX momentum with volume confirmation on weekly timeframe
+# - TRIX (15,15,15) identifies momentum shifts via triple-smoothed EMA ROC
+# - Signal line (9-period EMA of TRIX) provides entry/exit triggers
+# - Volume spike (2x 20-day average) confirms institutional participation
+# - Weekly EMA(34) filter ensures trades align with higher-timeframe trend
+# - Works in bull markets (buy TRIX crosses up in uptrend) and bear markets (sell crosses down in downtrend)
+# - Exit on TRIX signal cross or volume weakening to avoid whipsaws
+# - Position size 0.30 targets 15-30 trades/year, minimizing fee drag
+# - Weekly TRIX + volume + trend filter provides robust edge across market regimes
