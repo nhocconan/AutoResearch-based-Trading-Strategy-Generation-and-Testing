@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_4H_TripleConfirmation_Strategy"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,76 +17,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter (EMA50)
+    # Get 1d data for multiple confirmations
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate 1d EMA20 for trend
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
-    # Get 1d data for Camarilla levels (R1, S1) and volume filter
+    # Calculate 1d ATR for volatility filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    tr1 = np.maximum(high_1d - low_1d, np.abs(high_1d - np.roll(close_1d, 1)), np.abs(low_1d - np.roll(close_1d, 1)))
+    tr1[0] = high_1d[0] - low_1d[0]
+    atr_1d = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Camarilla: R1 = close + (high - low) * 1.1 / 12, S1 = close - (high - low) * 1.1 / 12
-    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
-    
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Volume filter: current 1d volume > 20-period average volume
+    # Calculate 1d volume average
     vol_1d = df_1d['volume'].values
-    vol_avg = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    volume_filter = vol_1d > vol_avg
-    volume_filter_aligned = align_htf_to_ltf(prices, df_1d, volume_filter)
+    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Ensure sufficient warmup
+    start_idx = 30  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any data is not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(volume_filter_aligned[i])):
+        if (np.isnan(ema_20_1d_aligned[i]) or 
+            np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(vol_avg_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above 1d EMA50 (uptrend), 12h close above daily R1, volume confirmation
-            if (close[i] > ema_50_1d_aligned[i] and 
-                close[i] > r1_aligned[i] and 
-                volume_filter_aligned[i]):
-                signals[i] = 0.30
+            # Long: price above 1d EMA20 (uptrend), volume above average, and price > open + 0.5 * ATR (momentum)
+            if (close[i] > ema_20_1d_aligned[i] and 
+                volume[i] > vol_avg_1d_aligned[i] and
+                close[i] > prices['open'].iloc[i] + 0.5 * atr_1d_aligned[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: price below 1d EMA50 (downtrend), 12h close below daily S1, volume confirmation
-            elif (close[i] < ema_50_1d_aligned[i] and 
-                  close[i] < s1_aligned[i] and 
-                  volume_filter_aligned[i]):
-                signals[i] = -0.30
+            # Short: price below 1d EMA20 (downtrend), volume above average, and price < open - 0.5 * ATR (momentum)
+            elif (close[i] < ema_20_1d_aligned[i] and 
+                  volume[i] > vol_avg_1d_aligned[i] and
+                  close[i] < prices['open'].iloc[i] - 0.5 * atr_1d_aligned[i]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below 1d EMA50 (trend change)
-            if close[i] < ema_50_1d_aligned[i]:
+            # Exit long: price crosses below 1d EMA20 (trend change) or volatility drops
+            if close[i] < ema_20_1d_aligned[i] or volume[i] < vol_avg_1d_aligned[i] * 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above 1d EMA50 (trend change)
-            if close[i] > ema_50_1d_aligned[i]:
+            # Exit short: price crosses above 1d EMA20 (trend change) or volatility drops
+            if close[i] > ema_20_1d_aligned[i] or volume[i] < vol_avg_1d_aligned[i] * 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
