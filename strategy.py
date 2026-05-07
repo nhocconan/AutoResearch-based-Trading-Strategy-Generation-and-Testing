@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-6h_Aroon_Oscillator_12hTrend_Volume
-Hypothesis: 6h Aroon Oscillator (25-period) detects early trend changes with 12h EMA50 trend filter and volume confirmation. Works in bull/bear markets by capturing momentum shifts early, avoiding whipsaws via trend alignment. Targets 15-35 trades/year to minimize fee drag on 6h timeframe.
+4H_Camarilla_R3_S3_Breakout_1DTrend_Volume
+Hypothesis: 4h price breaks above/below 1D Camarilla R3/S3 levels with 1D EMA34 trend confirmation and volume spike.
+Works in bull/bear markets: R3/S1 breakouts capture strong moves while avoiding minor retracements.
+EMA34 filter ensures alignment with daily trend, volume validation confirms breakout strength.
+Targets 20-50 trades/year to minimize fee drag on 4h timeframe.
 """
-name = "6h_Aroon_Oscillator_12hTrend_Volume"
-timeframe = "6h"
+name = "4H_Camarilla_R3_S3_Breakout_1DTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -21,54 +24,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Aroon calculation and EMA trend
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1D data for Camarilla levels, EMA trend, and volume average
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate Aroon Oscillator on 12h high/low (25-period)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    period = 25
+    # Calculate 1D Camarilla levels (R3, S3)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    r3 = pivot + (range_1d * 1.1 / 2)  # R3 level
+    s3 = pivot - (range_1d * 1.1 / 2)  # S3 level
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    def calculate_aroon(high_arr, low_arr, period):
-        n_len = len(high_arr)
-        aroon_up = np.full(n_len, np.nan)
-        aroon_down = np.full(n_len, np.nan)
-        for i in range(period-1, n_len):
-            window_high = high_arr[i-period+1:i+1]
-            window_low = low_arr[i-period+1:i+1]
-            # Find periods since highest high and lowest low
-            high_idx = np.argmax(window_high)
-            low_idx = np.argmin(window_low)
-            aroon_up[i] = ((period - 1 - high_idx) / (period - 1)) * 100
-            aroon_down[i] = ((period - 1 - low_idx) / (period - 1)) * 100
-        return aroon_up - aroon_down  # Aroon Oscillator
+    # Calculate 1D EMA34 for trend direction
+    close_1d_series = pd.Series(df_1d['close'])
+    ema_34 = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    aroon_osc = calculate_aroon(high_12h, low_12h, period)
-    aroon_osc_aligned = align_htf_to_ltf(prices, df_12h, aroon_osc)
-    
-    # Calculate 12h EMA50 for trend direction
-    close_12h = df_12h['close'].values
-    ema_50 = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
-    
-    # Volume filter: current 6h volume > 1.8 x 30-period average volume
-    vol_avg = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_filter = volume > (vol_avg * 1.8)
+    # Volume filter: current 4h volume > 1.5 x 20-period average volume
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_avg * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_exit = 0  # bars since last exit to prevent overtrading
     
-    start_idx = max(50, 30)  # Ensure sufficient warmup
+    start_idx = max(34, 20)  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
         bars_since_exit += 1
         
         # Skip if any data is not ready
-        if (np.isnan(aroon_osc_aligned[i]) or np.isnan(ema_50_aligned[i]) or 
-            np.isnan(vol_avg[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -76,29 +68,29 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Minimum 24 bars between trades (4 days on 6h TF) to reduce frequency
-            if bars_since_exit < 24:
+            # Minimum 48 bars between trades (8 days on 4h TF) to reduce frequency
+            if bars_since_exit < 48:
                 continue
                 
-            # Long: Aroon Oscillator crosses above 0 with 12h uptrend and volume spike
-            if (aroon_osc_aligned[i] > 0 and aroon_osc_aligned[i-1] <= 0 and 
-                close[i] > ema_50_aligned[i] and volume_filter[i]):
+            # Long: price breaks above R3 with EMA34 uptrend and volume spike
+            if (close[i] > r3_aligned[i] and close[i-1] <= r3_aligned[i-1] and 
+                close[i] > ema_34_aligned[i] and volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_exit = 0
-            # Short: Aroon Oscillator crosses below 0 with 12h downtrend and volume spike
-            elif (aroon_osc_aligned[i] < 0 and aroon_osc_aligned[i-1] >= 0 and 
-                  close[i] < ema_50_aligned[i] and volume_filter[i]):
+            # Short: price breaks below S3 with EMA34 downtrend and volume spike
+            elif (close[i] < s3_aligned[i] and close[i-1] >= s3_aligned[i-1] and 
+                  close[i] < ema_34_aligned[i] and volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_exit = 0
         elif position != 0:
-            # Exit: Aroon Oscillator crosses back through 0 (momentum shift)
-            if position == 1 and aroon_osc_aligned[i] < 0:
+            # Exit: price returns to opposite EMA34 side (trend reversal)
+            if position == 1 and close[i] < ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_exit = 0
-            elif position == -1 and aroon_osc_aligned[i] > 0:
+            elif position == -1 and close[i] > ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_exit = 0
