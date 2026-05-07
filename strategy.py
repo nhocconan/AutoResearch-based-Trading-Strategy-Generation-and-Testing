@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_Camarilla_R3S3_Breakout_1dTrend_With_4hFilter"
-timeframe = "1h"
+name = "6h_Liquidity_Sweep_Reversal_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,130 +17,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d and 4h data ONCE before loop
+    # Load 1d and 1w data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    df_4h = get_htf_data(prices, '4h')
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 20 or len(df_4h) < 20:
+    if len(df_1d) < 20 or len(df_1w) < 2:
         return np.zeros(n)
     
-    # 1d Camarilla levels: R3, S3 from previous day
-    prev_close_1d = df_1d['close'].shift(1).values
+    # 1d daily range for liquidity levels (previous day high/low)
     prev_high_1d = df_1d['high'].shift(1).values
     prev_low_1d = df_1d['low'].shift(1).values
-    camarilla_r3_1d = prev_close_1d + (prev_high_1d - prev_low_1d) * 1.1 / 2
-    camarilla_s3_1d = prev_close_1d - (prev_high_1d - prev_low_1d) * 1.1 / 2
     
-    # Align 1d Camarilla levels to 1h timeframe
-    camarilla_r3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
-    camarilla_s3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
+    # Align 1d liquidity levels to 6h timeframe
+    liq_high_1d = align_htf_to_ltf(prices, df_1d, prev_high_1d)
+    liq_low_1d = align_htf_to_ltf(prices, df_1d, prev_low_1d)
     
-    # 1d ADX for trend filter (ADX > 25 indicates strong trend)
-    def calculate_adx(high, low, close, period=14):
-        plus_dm = np.zeros_like(high)
-        minus_dm = np.zeros_like(high)
-        tr = np.zeros_like(high)
-        
-        for i in range(1, len(high)):
-            plus_dm[i] = max(0, high[i] - high[i-1])
-            minus_dm[i] = max(0, low[i-1] - low[i])
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        # Smooth using Wilder's smoothing (alpha = 1/period)
-        atr = np.zeros_like(tr)
-        plus_dm_smooth = np.zeros_like(plus_dm)
-        minus_dm_smooth = np.zeros_like(minus_dm)
-        
-        atr[period] = np.nansum(tr[1:period+1])
-        plus_dm_smooth[period] = np.nansum(plus_dm[1:period+1])
-        minus_dm_smooth[period] = np.nansum(plus_dm[1:period+1])  # Note: should be minus_dm
-        
-        for i in range(period+1, len(tr)):
-            atr[i] = atr[i-1] - (atr[i-1] / period) + tr[i]
-            plus_dm_smooth[i] = plus_dm_smooth[i-1] - (plus_dm_smooth[i-1] / period) + plus_dm[i]
-            minus_dm_smooth[i] = minus_dm_smooth[i-1] - (minus_dm_smooth[i-1] / period) + minus_dm[i]
-        
-        # Avoid division by zero
-        plus_di = np.where(atr != 0, 100 * plus_dm_smooth / atr, 0)
-        minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
-        dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-        
-        # Smooth DX to get ADX
-        adx = np.zeros_like(dx)
-        adx[2*period] = np.nansum(dx[period+1:2*period+1]) / period
-        for i in range(2*period+1, len(dx)):
-            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx
+    # 1w trend filter: price above/below 20-period EMA
+    close_1w = df_1w['close'].values
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # 4h volume spike: > 2.0x 20-period average (balanced filter)
-    vol_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike_4h = volume > 2.0 * vol_ma_4h
-    
-    # Align 4h volume spike to 1h timeframe
-    vol_spike_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_spike_4h)
-    
-    # 1h EMA20 for entry filter
-    ema20_1h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
+    # 6h volume filter: > 2x 24-period average (6h * 24 = 6 days)
+    vol_ma_6h = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_filter = volume > 2.0 * vol_ma_6h
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 34)  # Wait for ADX and volume MA
+    start_idx = max(30, 24)  # Wait for volume MA and EMA
     
     for i in range(start_idx, n):
-        # Skip if outside trading session
-        if hours[i] < 8 or hours[i] > 20:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-            
-        if (np.isnan(camarilla_r3_1d_aligned[i]) or np.isnan(camarilla_s3_1d_aligned[i]) or 
-            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_spike_4h_aligned[i])):
+        if (np.isnan(liq_high_1d[i]) or np.isnan(liq_low_1d[i]) or 
+            np.isnan(ema20_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Break above R3 with volume spike, strong trend (ADX > 25), and price above EMA20
-            if (close[i] > camarilla_r3_1d_aligned[i] and vol_spike_4h_aligned[i] and 
-                adx_1d_aligned[i] > 25 and close[i] > ema20_1h[i]):
-                signals[i] = 0.20
+            # Long: sweep below previous day low then reverse with volume
+            # Look for rejection of lows: current low touches/slightly breaks liq_low then closes back above
+            if (low[i] <= liq_low_1d[i] * 1.002 and  # Allow 0.2% slippage for sweep
+                close[i] > liq_low_1d[i] and        # Close back above liquidity low
+                vol_filter[i] and                   # Volume confirmation
+                close[i] > ema20_1w_aligned[i]):    # Weekly uptrend filter
+                signals[i] = 0.25
                 position = 1
-            # Short: Break below S3 with volume spike, strong trend (ADX > 25), and price below EMA20
-            elif (close[i] < camarilla_s3_1d_aligned[i] and vol_spike_4h_aligned[i] and 
-                  adx_1d_aligned[i] > 25 and close[i] < ema20_1h[i]):
-                signals[i] = -0.20
+            # Short: sweep above previous day high then reverse with volume
+            elif (high[i] >= liq_high_1d[i] * 0.998 and  # Allow 0.2% slippage for sweep
+                  close[i] < liq_high_1d[i] and          # Close back below liquidity high
+                  vol_filter[i] and                      # Volume confirmation
+                  close[i] < ema20_1w_aligned[i]):       # Weekly downtrend filter
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Price below S3 or trend weakening (ADX < 20)
-            if close[i] < camarilla_s3_1d_aligned[i] or adx_1d_aligned[i] < 20:
+            # Exit: price breaks below liquidity low or weekly trend fails
+            if close[i] < liq_low_1d[i] * 0.998 or close[i] < ema20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: Price above R3 or trend weakening (ADX < 20)
-            if close[i] > camarilla_r3_1d_aligned[i] or adx_1d_aligned[i] < 20:
+            # Exit: price breaks above liquidity high or weekly trend fails
+            if close[i] > liq_high_1d[i] * 1.002 or close[i] > ema20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-# Hypothesis: 1h timeframe with 1d Camarilla levels and ADX trend filter, combined with 4h volume confirmation and session filtering (08-20 UTC) will produce high-quality trades in both bull and bear markets.
-# The strategy uses 1d Camarilla R3/S3 as dynamic support/resistance levels, requiring breakouts with volume confirmation and strong trend alignment.
-# Session filter reduces noise during low-liquidity hours. Position size of 0.20 limits risk while allowing meaningful returns.
-# Expected trade frequency: 15-35 trades/year per symbol to minimize fee drag.
+# Hypothesis: Liquidity sweeps (stop hunts) at daily high/low levels create reversal opportunities
+# with institutional order flow. Volume confirms genuine reversal vs fakeout. Weekly EMA filter
+# ensures alignment with higher timeframe trend. Works in both bull/bear markets as liquidity
+# sweeps occur in all conditions. Target: 15-25 trades/year per symbol to minimize fee drag.
