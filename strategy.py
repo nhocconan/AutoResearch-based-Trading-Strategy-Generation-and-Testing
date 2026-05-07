@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_v2"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v4"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 34:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -34,11 +34,8 @@ def generate_signals(prices):
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume spike: current volume > 2.0 x 24-period average (4h * 24 = 4 days)
+    # Volume spike: current volume > 2.0 x 24-period average (12h * 24 = 12 days)
     vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    
-    # Previous day's close (pivot point)
-    prev_close_aligned = align_htf_to_ltf(prices, df_1d, prev_close)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -47,7 +44,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(prev_close_aligned[i]) or vol_ma[i] == 0):
+            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,6 +63,7 @@ def generate_signals(prices):
                 position = -1
         elif position != 0:
             # Exit: Price returns to previous day's close (pivot point)
+            prev_close_aligned = align_htf_to_ltf(prices, df_1d, prev_close)
             if position == 1 and close[i] < prev_close_aligned[i]:
                 signals[i] = 0.0
                 position = 0
