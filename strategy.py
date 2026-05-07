@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy combining weekly trend filter, daily momentum, and volume confirmation.
-# Long when: price > weekly VWAP AND daily RSI(14) > 55 AND 6h volume > 20-period average
-# Short when: price < weekly VWAP AND daily RSI(14) < 45 AND 6h volume > 20-period average
-# Exit when daily RSI crosses 50.
-# Weekly VWAP acts as dynamic support/resistance, daily RSI provides momentum,
-# volume confirms institutional interest. Designed for 6h timeframe with target 20-40 trades/year.
-# Weekly trend filter adapts to bull/bear markets, volume filter reduces whipsaws.
-
-name = "6h_WeeklyVWAP_DailyRSI_Volume"
-timeframe = "6h"
+# Hypothesis: 4-hour Donchian channel breakout with 1-day trend filter and volume confirmation.
+# Long when: price breaks above Donchian(20) high AND 1d EMA(50) rising AND volume > 1.5x 20-period average
+# Short when: price breaks below Donchian(20) low AND 1d EMA(50) falling AND volume > 1.5x 20-period average
+# Exit when price crosses back through Donchian(20) midline or opposite breakout occurs.
+# Designed for 4h timeframe with moderate trade frequency (target: 20-50/year) to avoid fee drag.
+# Uses 1d for trend direction to avoid counter-trend trades and volume to confirm breakout strength.
+# Works in bull markets via breakouts in uptrend, in bear markets via breakdowns in downtrend.
+# Volume filter ensures breakouts have conviction and reduces false signals.
+name = "4h_DonchianBreakout_1dTrend_VolumeConfirm"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,31 +25,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily RSI(14) for momentum
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_daily = 100 - (100 / (1 + rs))
+    # Donchian Channel (20-period)
+    lookback = 20
+    highest_high = np.full_like(high, np.nan)
+    lowest_low = np.full_like(low, np.nan)
     
-    # Weekly VWAP for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
+    for i in range(lookback - 1, n):
+        highest_high[i] = np.max(high[i - lookback + 1:i + 1])
+        lowest_low[i] = np.min(low[i - lookback + 1:i + 1])
+    
+    # Donchian midline for exit
+    donchian_mid = (highest_high + lowest_low) / 2.0
+    
+    # Volume average (20-period)
+    vol_avg = np.full_like(volume, np.nan)
+    for i in range(lookback - 1, n):
+        vol_avg[i] = np.mean(volume[i - lookback + 1:i + 1])
+    vol_threshold = 1.5  # volume must be 1.5x average
+    
+    # 1d EMA(50) for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate VWAP for each weekly bar
-    typical_price_1w = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
-    vwap_1w = (typical_price_1w * df_1w['volume']).cumsum() / df_1w['volume'].cumsum()
-    vwap_1w = vwap_1w.values
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_rising = np.zeros_like(ema_50_1d, dtype=bool)
+    ema_50_falling = np.zeros_like(ema_50_1d, dtype=bool)
+    ema_50_rising[1:] = ema_50_1d[1:] > ema_50_1d[:-1]
+    ema_50_falling[1:] = ema_50_1d[1:] < ema_50_1d[:-1]
     
-    # Align weekly VWAP to 6h timeframe
-    vwap_1w_aligned = align_htf_to_ltf(prices, df_1w, vwap_1w)
-    
-    # 6h volume filter (20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > vol_ma
+    ema_50_rising_aligned = align_htf_to_ltf(prices, df_1d, ema_50_rising)
+    ema_50_falling_aligned = align_htf_to_ltf(prices, df_1d, ema_50_falling)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -57,18 +64,18 @@ def generate_signals(prices):
     start_idx = 50  # Sufficient warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(rsi_daily[i]) or np.isnan(vwap_1w_aligned[i]) or 
-            np.isnan(volume_filter[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(vol_avg[i]) or 
+            np.isnan(ema_50_rising_aligned[i]) or np.isnan(ema_50_falling_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price > weekly VWAP AND daily RSI > 55 AND volume confirmation
-            long_condition = (close[i] > vwap_1w_aligned[i]) and (rsi_daily[i] > 55) and volume_filter[i]
-            # Short: price < weekly VWAP AND daily RSI < 45 AND volume confirmation
-            short_condition = (close[i] < vwap_1w_aligned[i]) and (rsi_daily[i] < 45) and volume_filter[i]
+            # Long: price breaks above Donchian high AND 1d EMA50 rising AND volume confirmation
+            long_condition = (close[i] > highest_high[i]) and ema_50_rising_aligned[i] and (volume[i] > vol_avg[i] * vol_threshold)
+            # Short: price breaks below Donchian low AND 1d EMA50 falling AND volume confirmation
+            short_condition = (close[i] < lowest_low[i]) and ema_50_falling_aligned[i] and (volume[i] > vol_avg[i] * vol_threshold)
             
             if long_condition:
                 signals[i] = 0.25
@@ -77,15 +84,19 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: daily RSI < 50
-            if rsi_daily[i] < 50:
+            # Exit: price crosses below Donchian midline OR opposite breakout with volume
+            exit_condition = (close[i] < donchian_mid[i]) or \
+                           (close[i] < lowest_low[i] and volume[i] > vol_avg[i] * vol_threshold)
+            if exit_condition:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: daily RSI > 50
-            if rsi_daily[i] > 50:
+            # Exit: price crosses above Donchian midline OR opposite breakout with volume
+            exit_condition = (close[i] > donchian_mid[i]) or \
+                           (close[i] > highest_high[i] and volume[i] > vol_avg[i] * vol_threshold)
+            if exit_condition:
                 signals[i] = 0.0
                 position = 0
             else:
