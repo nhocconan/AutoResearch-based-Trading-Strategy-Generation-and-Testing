@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
-# Hypothesis: Combines 12h price action with 1d trend filter to reduce false breakouts.
-# Uses Camarilla R1/S1 from 1d for entry levels, filtered by 1d EMA34 trend and 12h volume spikes.
-# In bull markets: 1d trend up + price breaks R1 with volume = long continuation.
-# In bear markets: 1d trend down + price breaks S1 with volume = short continuation.
-# The 1d trend filter reduces whipsaws vs 12h, improving robustness in both regimes.
-# Target: 15-30 trades/year to minimize fee drag while maintaining edge.
+# 4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeS
+# Hypothesis: Uses Camarilla R1/S1 levels from daily chart, filtered by 1-day EMA34 trend and volume spikes.
+# In bull markets: price above EMA34 + breaks R1 with volume = long.
+# In bear markets: price below EMA34 + breaks S1 with volume = short.
+# The daily EMA34 filter reduces whipsaws vs shorter timeframes, improving robustness.
+# Target: 20-40 trades/year to minimize fee drag while maintaining edge.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -27,7 +26,7 @@ def generate_signals(prices):
     
     # Get 1d data for Camarilla pivot calculation (R1, S1)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
@@ -42,12 +41,12 @@ def generate_signals(prices):
     # Get 1d data for trend filter (EMA34)
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align all indicators to 12h timeframe
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
-    ema_34_1d_12h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align all indicators to 4h timeframe
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    ema_34_1d_4h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume spike filter on 12h (20-period average)
+    # Volume spike filter on 4h (20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma_20)
     
@@ -56,8 +55,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical value is NaN
-        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or 
-            np.isnan(ema_34_1d_12h[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or 
+            np.isnan(ema_34_1d_4h[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,23 +64,23 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: Price > R1, above 1d EMA34 trend, volume spike
-            if close[i] > r1_12h[i] and close[i] > ema_34_1d_12h[i] and volume_spike[i]:
+            if close[i] > r1_4h[i] and close[i] > ema_34_1d_4h[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
             # Short: Price < S1, below 1d EMA34 trend, volume spike
-            elif close[i] < s1_12h[i] and close[i] < ema_34_1d_12h[i] and volume_spike[i]:
+            elif close[i] < s1_4h[i] and close[i] < ema_34_1d_4h[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Exit: Price < R1 or below 1d EMA34 trend
-            if close[i] < r1_12h[i] or close[i] < ema_34_1d_12h[i]:
+            if close[i] < r1_4h[i] or close[i] < ema_34_1d_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Exit: Price > S1 or above 1d EMA34 trend
-            if close[i] > s1_12h[i] or close[i] > ema_34_1d_12h[i]:
+            if close[i] > s1_4h[i] or close[i] > ema_34_1d_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
