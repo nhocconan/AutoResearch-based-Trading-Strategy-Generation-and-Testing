@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v2"
+name = "4h_KAMA_Trend_Direction_12h_TrendFilter_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -18,48 +18,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla levels and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 21:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day's OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # KAMA parameters
+    er_len = 10
+    fast_len = 2
+    slow_len = 30
     
-    # Camarilla R1 and S1 levels (inner levels for tighter entries)
-    range_1d = high_1d - low_1d
-    camarilla_r1 = close_1d + range_1d * 1.1 / 12
-    camarilla_s1 = close_1d - range_1d * 1.1 / 12
+    # Calculate Efficiency Ratio (ER)
+    change = np.abs(np.diff(close, n=er_len))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)
+    er = np.full(n, np.nan)
+    for i in range(er_len, n):
+        if volatility[i] != 0:
+            er[i] = change[i - er_len + 1] / volatility[i]
+        else:
+            er[i] = 0
     
-    # Align Camarilla levels to 4h timeframe (use previous day's levels)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Smoothing constants
+    sc = (er * (2/(fast_len+1) - 2/(slow_len+1)) + 2/(slow_len+1)) ** 2
     
-    # Daily EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate KAMA
+    kama = np.full(n, np.nan)
+    kama[er_len] = close[er_len]
+    for i in range(er_len + 1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Volume filter: current volume > 2.0x 20-period average (on 4h data)
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma_20[i] = np.mean(volume[i-20:i])
-    vol_filter = volume > (2.0 * vol_ma_20)
+    # Get 12h EMA21 for trend filter
+    ema_21_12h = pd.Series(df_12h['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_21_12h)
+    
+    # Volume filter: current volume > 1.8x 30-period average (on 4h data)
+    vol_ma_30 = np.full(n, np.nan)
+    for i in range(30, n):
+        vol_ma_30[i] = np.mean(volume[i-30:i])
+    vol_filter = volume > (1.8 * vol_ma_30)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 6  # Prevent overtrading (approx 1 day for 4h)
+    cooldown_bars = 8  # Prevent overtrading (approx 2 days for 4h)
     
-    start_idx = max(20, 34)  # Warmup for volume MA and EMA
+    start_idx = max(30, er_len)  # Warmup
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(kama[i]) or 
+            np.isnan(ema_21_12h_aligned[i]) or 
+            np.isnan(vol_ma_30[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,37 +79,36 @@ def generate_signals(prices):
         
         bars_since_last_trade += 1
         
-        # Determine daily trend direction
-        close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
-        trend_1d_up = close_1d_aligned[i] > ema_34_1d_aligned[i]
-        trend_1d_down = close_1d_aligned[i] < ema_34_1d_aligned[i]
+        # Determine 12h trend direction
+        trend_12h_up = close[i] > ema_21_12h_aligned[i]
+        trend_12h_down = close[i] < ema_21_12h_aligned[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: break above Camarilla R1 in daily uptrend with volume spike
-            if (close[i] > camarilla_r1_aligned[i] and 
-                trend_1d_up and 
+            # Long: price above KAMA in 12h uptrend with volume filter
+            if (close[i] > kama[i] and 
+                trend_12h_up and 
                 vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: break below Camarilla S1 in daily downtrend with volume spike
-            elif (close[i] < camarilla_s1_aligned[i] and 
-                  trend_1d_down and 
+            # Short: price below KAMA in 12h downtrend with volume filter
+            elif (close[i] < kama[i] and 
+                  trend_12h_down and 
                   vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit: price closes below Camarilla S1 OR trend change
-            if (close[i] < camarilla_s1_aligned[i] or not trend_1d_up):
+            # Exit: price crosses below KAMA OR trend change
+            if (close[i] < kama[i] or not trend_12h_up):
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price closes above Camarilla R1 OR trend change
-            if (close[i] > camarilla_r1_aligned[i] or not trend_1d_down):
+            # Exit: price crosses above KAMA OR trend change
+            if (close[i] > kama[i] or not trend_12h_down):
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
@@ -109,9 +117,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: This strategy combines Camarilla pivot breakouts (from daily levels) with 
-# daily trend filtering (EMA34) and volume confirmation to capture high-probability 
-# breakout moves in both bull and bear markets. The cooldown period prevents overtrading, 
-# while the volume filter ensures entries occur with institutional participation. 
-# The use of daily timeframe for regime and pivot levels ensures alignment with 
-# institutional trading cycles, making it robust across market regimes.
+# Hypothesis: This strategy uses Kaufman's Adaptive Moving Average (KAMA) as the primary trend indicator,
+# with 12h EMA21 as a higher-timeframe trend filter and volume confirmation to avoid false signals.
+# KAMA adapts to market noise, making it effective in both trending and ranging markets.
+# The 12h trend filter ensures alignment with medium-term market direction, while volume confirmation
+# ensures institutional participation. The cooldown period prevents overtrading. This combination
+# should work in both bull and bear markets by adapting to changing volatility conditions.
