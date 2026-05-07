@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_1d_Trix_Trend_Reversal"
-timeframe = "6h"
+name = "4h_1d_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,85 +19,82 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 40:
         return np.zeros(n)
     
-    # Calculate TRIX on daily close (15-period EMA triple)
-    close_1d = df_1d['close'].values
-    ema1 = pd.Series(close_1d).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
+    # Calculate daily Camarilla R3/S3 levels from previous day
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # TRIX = (EMA3 - previous EMA3) / previous EMA3 * 100
-    trix_raw = np.zeros_like(ema3)
-    trix_raw[1:] = (ema3[1:] - ema3[:-1]) / ema3[:-1] * 100
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
     
-    # Signal line: 9-period EMA of TRIX
-    trix_signal = pd.Series(trix_raw).ewm(span=9, adjust=False, min_periods=9).mean().values
+    # Camarilla R3 and S3 levels
+    s3 = prev_close - (range_hl * 1.26 / 4)
+    r3 = prev_close + (range_hl * 1.26 / 4)
     
-    # Align TRIX and signal to 6h timeframe
-    trix_aligned = align_htf_to_ltf(prices, df_1d, trix_raw)
-    trix_signal_aligned = align_htf_to_ltf(prices, df_1d, trix_signal)
+    # Align daily levels to 4h timeframe
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     
-    # Daily trend filter: EMA(50) on daily close
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Daily trend filter: EMA(34) on daily close
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume spike: 4-period average (1 day of 6h bars)
-    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    # Volume spike detection: 6-period average (1.5 days of 4h bars)
+    vol_ma_6 = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 4, 15)  # Wait for EMA, volume MA, and TRIX
+    start_idx = max(40, 6)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(trix_aligned[i]) or np.isnan(trix_signal_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_4[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or np.isnan(vol_ma_6[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: TRIX crosses above signal line with volume and daily uptrend
-            trix_cross_up = trix_aligned[i] > trix_signal_aligned[i] and trix_aligned[i-1] <= trix_signal_aligned[i-1]
-            vol_condition = volume[i] > vol_ma_4[i] * 1.5
-            uptrend = ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1]
+            # Long: price above R3 with volume and daily uptrend
+            vol_condition = volume[i] > vol_ma_6[i] * 2.0
+            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
             
-            if trix_cross_up and vol_condition and uptrend:
-                signals[i] = 0.25
+            if close[i] > r3_aligned[i] and vol_condition and uptrend:
+                signals[i] = 0.30
                 position = 1
-            # Short: TRIX crosses below signal line with volume and daily downtrend
-            elif trix_aligned[i] < trix_signal_aligned[i] and trix_aligned[i-1] >= trix_signal_aligned[i-1] and vol_condition and not uptrend:
-                signals[i] = -0.25
+            # Short: price below S3 with volume and daily downtrend
+            elif close[i] < s3_aligned[i] and vol_condition and not uptrend:
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit: TRIX crosses below signal line or volume drops
-            trix_cross_down = trix_aligned[i] < trix_signal_aligned[i] and trix_aligned[i-1] >= trix_signal_aligned[i-1]
-            if trix_cross_down or volume[i] < vol_ma_4[i] * 0.8:
+            # Exit: price back below R3 or volume drops
+            if close[i] < r3_aligned[i] or volume[i] < vol_ma_6[i] * 1.3:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit: TRIX crosses above signal line or volume drops
-            trix_cross_up = trix_aligned[i] > trix_signal_aligned[i] and trix_aligned[i-1] <= trix_signal_aligned[i-1]
-            if trix_cross_up or volume[i] < vol_ma_4[i] * 0.8:
+            # Exit: price back above S3 or volume drops
+            if close[i] > s3_aligned[i] or volume[i] < vol_ma_6[i] * 1.3:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-# Hypothesis: 6h TRIX trend reversal with daily trend filter and volume confirmation
-# - TRIX (triple EMA) identifies momentum changes and overbought/oversold conditions
-# - Long when TRIX crosses above signal line with volume spike in daily uptrend
-# - Short when TRIX crosses below signal line with volume spike in daily downtrend
-# - Daily EMA(50) filter ensures trades align with higher timeframe trend
-# - Volume confirmation (1.5x average) filters false signals
-# - Exit on TRIX signal reversal or volume drying up
-# - Designed to work in both bull (buy dips in uptrend) and bear (sell rallies in downtrend)
-# - Targets 50-100 total trades over 4 years (12-25/year) to minimize fee drag
-# - Position size 0.25 balances opportunity and risk control
+# Hypothesis: 4h Camarilla R3/S3 breakout with daily EMA34 trend and volume spike
+# - Daily Camarilla R3/S3 are stronger support/resistance levels (wider bands)
+# - Breakout above R3 with volume spike in daily uptrend = high-probability long
+# - Breakdown below S3 with volume spike in daily downtrend = high-probability short
+# - Volume spike (2.0x average) filters weak moves, reduces false signals
+# - EMA34 trend filter ensures alignment with daily momentum
+# - Works in both bull (buy R3 breaks in uptrend) and bear (sell S3 breaks in downtrend)
+# - Exit when price returns to R3/S3 or volume weakens
+# - Position size 0.30 targets ~20-40 trades/year, minimizing fee drag
+# - Uses stronger R3/S3 levels for fewer, higher-quality trades
+# - Designed to work in BOTH bull and bear markets via trend filter and volume confirmation
