@@ -3,20 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h mean reversion with 4h trend filter and volatility filter.
-# Long when price touches 4h Bollinger Lower Band AND RSI(14) < 30 in 4h uptrend.
-# Short when price touches 4h Bollinger Upper Band AND RSI(14) > 70 in 4h downtrend.
-# Uses 4h Bollinger Bands (20,2) as dynamic support/resistance and RSI for exhaustion.
-# Volatility filter: only trade when 4h ATR(14) > its 50-period SMA to avoid low-vol chop.
-# Session filter: 08-20 UTC to avoid low-liquidity hours.
-# Designed for 15-30 trades/year to minimize fee drag while capturing mean reversion in trends.
-name = "1h_BollingerRSI_4hTrend_VolatilityFilter"
-timeframe = "1h"
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1-week trend filter and volume confirmation.
+# Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13).
+# Long when Bull Power > 0 and increasing, Bear Power < 0, in 1-week uptrend with volume spike.
+# Short when Bear Power < 0 and decreasing, Bull Power > 0, in 1-week downtrend with volume spike.
+# Uses 1-week EMA40 trend filter to avoid counter-trend trades in both bull and bear markets.
+# Volume spike filter ensures momentum confirmation. Target: 15-30 trades/year for low fee drag.
+name = "6h_ElderRay_1wEMA40_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,112 +23,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Pre-calculate session hours (08-20 UTC)
-    hours = prices.index.hour
-    
-    # Load 4h data ONCE for trend and filters
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 60:
+    # Load 1w data ONCE for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # 1w trend filter: 40-period EMA on close
+    ema_40_1w = pd.Series(df_1w['close']).ewm(span=40, adjust=False, min_periods=40).mean().values
+    ema_40_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_40_1w)
     
-    # 4h Bollinger Bands (20,2)
-    sma_20_4h = pd.Series(close_4h).rolling(window=20, min_periods=20).mean().values
-    std_20_4h = pd.Series(close_4h).rolling(window=20, min_periods=20).std().values
-    upper_4h = sma_20_4h + 2 * std_20_4h
-    lower_4h = sma_20_4h - 2 * std_20_4h
+    # Elder Ray: EMA13 on close for 6h timeframe
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # 4h RSI(14)
-    delta = pd.Series(close_4h).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_14_4h = 100 - (100 / (1 + rs))
+    # Bull Power = High - EMA13
+    bull_power = high - ema_13
+    # Bear Power = Low - EMA13
+    bear_power = low - ema_13
     
-    # 4h ATR(14) and its 50-period SMA for volatility filter
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    atr_14_4h = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_sma_50_4h = pd.Series(atr_14_4h).rolling(window=50, min_periods=50).mean().values
-    vol_filter = atr_14_4h > atr_sma_50_4h  # High volatility regime
-    
-    # Align all 4h indicators to 1h
-    upper_4h_aligned = align_htf_to_ltf(prices, df_4h, upper_4h)
-    lower_4h_aligned = align_htf_to_ltf(prices, df_4h, lower_4h)
-    rsi_14_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_14_4h)
-    vol_filter_aligned = align_htf_to_ltf(prices, df_4h, vol_filter)
+    # 6h volume average for spike detection
+    vol_ema_6h = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_spike = np.where(vol_ema_6h > 0, volume / vol_ema_6h, 1.0) > 1.8
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # Sufficient warmup
+    start_idx = 40  # Sufficient warmup for calculations
     
     for i in range(start_idx, n):
-        if (np.isnan(upper_4h_aligned[i]) or np.isnan(lower_4h_aligned[i]) or 
-            np.isnan(rsi_14_4h_aligned[i]) or np.isnan(vol_filter_aligned[i])):
+        if (np.isnan(ema_40_1w_aligned[i]) or np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
+        # Trend filter: price above/below 1w EMA40
+        uptrend = close[i] > ema_40_1w_aligned[i]
+        downtrend = close[i] < ema_40_1w_aligned[i]
         
-        if not in_session:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Trend filter from 4h: price vs SMA20
-        uptrend_4h = close[i] > sma_20_4h[-1] if len(sma_20_4h) > 0 else False  # Simplified: use last known
-        downtrend_4h = close[i] < sma_20_4h[-1] if len(sma_20_4h) > 0 else False
-        
-        # Better: use aligned SMA20 from 4h
-        sma_20_4h_aligned = align_htf_to_ltf(prices, df_4h, sma_20_4h)
-        if not np.isnan(sma_20_4h_aligned[i]):
-            uptrend_4h = close[i] > sma_20_4h_aligned[i]
-            downtrend_4h = close[i] < sma_20_4h_aligned[i]
+        # Elder Ray momentum: rising/falling power
+        bull_rising = bull_power[i] > bull_power[i-1]
+        bear_falling = bear_power[i] < bear_power[i-1]
         
         if position == 0:
-            # Long: touch lower BB, RSI oversold, in 4h uptrend, high vol
-            long_condition = (low[i] <= lower_4h_aligned[i]) and \
-                           (rsi_14_4h_aligned[i] < 30) and \
-                           uptrend_4h and \
-                           vol_filter_aligned[i]
-            # Short: touch upper BB, RSI overbought, in 4h downtrend, high vol
-            short_condition = (high[i] >= upper_4h_aligned[i]) and \
-                            (rsi_14_4h_aligned[i] > 70) and \
-                            downtrend_4h and \
-                            vol_filter_aligned[i]
+            # Long condition: Bull Power > 0 and rising, Bear Power < 0, in uptrend with volume spike
+            long_condition = (bull_power[i] > 0) and bull_rising and (bear_power[i] < 0) and uptrend and vol_spike[i]
+            # Short condition: Bear Power < 0 and falling, Bull Power > 0, in downtrend with volume spike
+            short_condition = (bear_power[i] < 0) and bear_falling and (bull_power[i] > 0) and downtrend and vol_spike[i]
             
             if long_condition:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
             elif short_condition:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price crosses above SMA20 or RSI > 50
-            if (close[i] > sma_20_4h_aligned[i]) or (rsi_14_4h_aligned[i] > 50):
+            # Exit: Bull Power <= 0 or trend turns down
+            if (bull_power[i] <= 0) or (not uptrend):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: price crosses below SMA20 or RSI < 50
-            if (close[i] < sma_20_4h_aligned[i]) or (rsi_14_4h_aligned[i] < 50):
+            # Exit: Bear Power >= 0 or trend turns up
+            if (bear_power[i] >= 0) or (not downtrend):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
