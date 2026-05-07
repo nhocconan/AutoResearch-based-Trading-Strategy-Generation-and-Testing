@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1D_1W_Camarilla_R3S3_Trend_Filter_v1"
-timeframe = "1d"
+name = "6H_Camarilla_R3_S3_12HTrend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,31 +17,31 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for structure (daily high/low/close)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 6h data for structure (R3/S3 levels)
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 2:
         return np.zeros(n)
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 34:
         return np.zeros(n)
     
-    # Calculate weekly EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 12h EMA34 for trend filter
+    ema_34_12h = pd.Series(df_12h['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # Calculate previous day's high, low, close for Camarilla levels
-    prev_high = df_1d['high'].values
-    prev_low = df_1d['low'].values
-    prev_close = df_1d['close'].values
+    # Calculate previous 6h bar's high, low, close for Camarilla levels
+    prev_high = df_6h['high'].values
+    prev_low = df_6h['low'].values
+    prev_close = df_6h['close'].values
     
     # Calculate Camarilla levels: R3 and S3 (correct formula)
     r3 = prev_close + 1.1 * (prev_high - prev_low) * 1.1 / 2
     s3 = prev_close - 1.1 * (prev_high - prev_low) * 1.1 / 2
     
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r3_aligned = align_htf_to_ltf(prices, df_6h, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_6h, s3)
     
     # Volume filter: current volume > 2.0x average volume (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -65,7 +65,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
             np.isnan(vol_ma[i]) or vol_ma[i] == 0 or
             np.isnan(vol_filter[i]) or not vol_filter[i] or
             not session_filter[i]):
@@ -78,25 +78,25 @@ def generate_signals(prices):
         volume_filter = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long: Price breaks above R3 + weekly uptrend + volume spike
+            # Long: Price breaks above R3 + 12h uptrend + volume spike
             if (close[i] > r3_aligned[i] and 
-                close[i] > ema_50_1w_aligned[i] and   # Weekly uptrend filter
+                close[i] > ema_34_12h_aligned[i] and   # 12h uptrend filter
                 volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S3 + weekly downtrend + volume spike
+            # Short: Price breaks below S3 + 12h downtrend + volume spike
             elif (close[i] < s3_aligned[i] and 
-                  close[i] < ema_50_1w_aligned[i] and   # Weekly downtrend filter
+                  close[i] < ema_34_12h_aligned[i] and   # 12h downtrend filter
                   volume_filter):
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: Price returns to the middle of the prior day's range (H4/L4)
+            # Exit: Price returns to the middle of the prior 6h range (H4/L4)
             # H4 = close + 1.1*(high-low)*1.1/6, L4 = close - 1.1*(high-low)*1.1/6
             h4 = prev_close + 1.1 * (prev_high - prev_low) * 1.1 / 6
             l4 = prev_close - 1.1 * (prev_high - prev_low) * 1.1 / 6
-            h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-            l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+            h4_aligned = align_htf_to_ltf(prices, df_6h, h4)
+            l4_aligned = align_htf_to_ltf(prices, df_6h, l4)
             
             camarilla_mid = (h4_aligned[i] + l4_aligned[i]) / 2
             at_mid = abs(close[i] - camarilla_mid) < (h4_aligned[i] - l4_aligned[i]) * 0.25  # Within 25% of range
