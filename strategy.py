@@ -1,16 +1,9 @@
-#!/usr/bin/env python3
-# 12h_W1_Donchian_Breakout_Volume_Cam1D
-# Hypothesis: On 12h chart, enter long when price breaks above weekly Donchian upper band with volume confirmation,
-# enter short when price breaks below weekly Donchian lower band with volume confirmation.
-# Filter: Price must be above/below daily 34-period EMA (trend filter).
-# Exit: Price closes back inside Donchian channel.
-# Uses weekly structure for trend direction, daily EMA for trend filter, 12h for execution.
-# Designed for low trade frequency (~15-25/year) to minimize fee decay and work in trending markets.
-# Weekly Donchian adapts to volatility, reducing false breakouts.
-# Works in both bull and bear markets by capturing breakouts with volume and trend filters.
-
-timeframe = "12h"
-name = "12h_W1_Donchian_Breakout_Volume_Cam1D"
+# 4H_RSI_SMA200_CONFIRMATION_V1
+# Hypothesis: Enter long when RSI crosses above 50 and price > 200-period SMA, short when RSI crosses below 50 and price < 200-period SMA.
+# Uses 1d SMA200 for trend direction to avoid whipsaw in ranging markets. RSI provides timely entries.
+# Designed for low trade frequency (~20-40/year) to minimize fee drag. Works in both bull and bear markets.
+timeframe = "4h"
+name = "4H_RSI_SMA200_CONFIRMATION_V1"
 leverage = 1.0
 
 import numpy as np
@@ -19,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -27,57 +20,50 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly Donchian Channel (20-period)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # RSI calculation
+    rsi_period = 14
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    donch_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    
-    donch_high_aligned = align_htf_to_ltf(prices, df_1w, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1w, donch_low)
-    
-    # Daily EMA34 (trend filter)
+    # 1d SMA200 for trend direction
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Volume spike: current volume > 1.5 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    sma200_1d = pd.Series(df_1d['close']).rolling(window=200, min_periods=200).mean().values
+    sma200_1d_aligned = align_htf_to_ltf(prices, df_1d, sma200_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # start after warmup for Donchian
-        # Skip if any critical value is NaN
-        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+    for i in range(200, n):
+        if np.isnan(rsi[i]) or np.isnan(sma200_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above weekly Donchian upper band + volume + above daily EMA34
-            if close[i] > donch_high_aligned[i] and volume[i] > 1.5 * vol_ma[i] and close[i] > ema34_1d_aligned[i]:
+            # Long: RSI crosses above 50 and price > 1d SMA200
+            if rsi[i] > 50 and rsi[i-1] <= 50 and close[i] > sma200_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly Donchian lower band + volume + below daily EMA34
-            elif close[i] < donch_low_aligned[i] and volume[i] > 1.5 * vol_ma[i] and close[i] < ema34_1d_aligned[i]:
+            # Short: RSI crosses below 50 and price < 1d SMA200
+            elif rsi[i] < 50 and rsi[i-1] >= 50 and close[i] < sma200_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price closes back inside weekly Donchian channel
-            if close[i] < donch_high_aligned[i]:
+            # Exit: RSI crosses below 50
+            if rsi[i] < 50 and rsi[i-1] >= 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price closes back inside weekly Donchian channel
-            if close[i] > donch_low_aligned[i]:
+            # Exit: RSI crosses above 50
+            if rsi[i] > 50 and rsi[i-1] <= 50:
                 signals[i] = 0.0
                 position = 0
             else:
