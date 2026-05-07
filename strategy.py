@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_LongOnly_WeeklyTrend_Following_v1
-Hypothesis: Long only strategy using weekly trend filter (price above weekly SMA50) and 6h Donchian(20) breakout with volume confirmation.
-Weekly SMA50 provides a robust trend filter that works in both bull and bear markets by only allowing longs in uptrends and staying flat in downtrends/ranges.
-6h Donchian breakout captures momentum bursts, and volume confirmation reduces false signals.
-Target: 50-150 total trades over 4 years (12-37/year) with position size 0.25.
+1d_Camarilla_R3S3_Breakout_1wTrend_VolumeFilter
+Hypothesis: Use 1w Camarilla R3/S3 levels as breakout levels on 1d timeframe, filtered by 1w EMA trend and volume spike.
+Long when price breaks above weekly R3 and close > weekly EMA34 with volume > 2x average.
+Short when price breaks below weekly S3 and close < weekly EMA34 with volume > 2x average.
+Camarilla levels provide institutional support/resistance, weekly EMA filters trend, volume confirms breakout strength.
+Designed for 1d timeframe to target 15-25 trades/year with low frequency to minimize fee drag in bear markets.
 """
-name = "6h_LongOnly_WeeklyTrend_Following_v1"
-timeframe = "6h"
+name = "1d_Camarilla_R3S3_Breakout_1wTrend_VolumeFilter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,42 +25,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter (SMA50)
+    # Get weekly data for Camarilla levels and trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate weekly SMA50 for trend filter
-    sma_50_1w = pd.Series(df_1w['close']).rolling(window=50, min_periods=50).mean().values
-    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
+    # Calculate weekly Camarilla levels (R3, S3)
+    # Camarilla: R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low), S3 = close - 1.1*(high-low)
+    weekly_range = df_1w['high'] - df_1w['low']
+    camarilla_r3 = df_1w['close'] + 1.1 * weekly_range
+    camarilla_s3 = df_1w['close'] - 1.1 * weekly_range
+    camarilla_r3_vals = camarilla_r3.values
+    camarilla_s3_vals = camarilla_s3.values
     
-    # Get 6h data for Donchian channels
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 20:
-        return np.zeros(n)
+    # Calculate weekly EMA34 for trend filter
+    weekly_ema34 = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate 6h Donchian(20) - upper and lower bands
-    donch_high = pd.Series(df_6h['high']).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(df_6h['low']).rolling(window=20, min_periods=20).min().values
-    donch_high_aligned = align_htf_to_ltf(prices, df_6h, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_6h, donch_low)
+    # Align weekly indicators to daily timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3_vals)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3_vals)
+    weekly_ema34_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema34)
     
-    # Volume filter: current volume > 1.5 * 20-period average volume
+    # Volume filter: current volume > 2x 20-day average volume
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_avg * 1.5)
+    volume_filter = volume > (vol_avg * 2.0)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long
-    bars_since_exit = 0  # bars since last exit to prevent overtrading
+    position = 0  # 0: flat, 1: long, -1: short
+    bars_since_exit = 0  # days since last exit to prevent overtrading
     
-    start_idx = max(50, 20, 20)  # Ensure sufficient warmup
+    start_idx = max(34, 20)  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
         bars_since_exit += 1
         
         # Skip if any data is not ready
-        if (np.isnan(sma_50_1w_aligned[i]) or np.isnan(donch_high_aligned[i]) or 
-            np.isnan(donch_low_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(weekly_ema34_aligned[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,25 +69,36 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Minimum 24 bars between trades (4 days on 6h TF) to reduce frequency
-            if bars_since_exit < 24:
+            # Minimum 10 days between trades to reduce frequency
+            if bars_since_exit < 10:
                 continue
                 
-            # Long: price above weekly SMA50 (uptrend) AND price breaks above 6h Donchian upper + volume filter
-            if (close[i] > sma_50_1w_aligned[i] and 
-                close[i] > donch_high_aligned[i] and 
+            # Long: price breaks above weekly R3 + close > weekly EMA34 + volume filter
+            if (close[i] > camarilla_r3_aligned[i] and 
+                close[i] > weekly_ema34_aligned[i] and 
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_exit = 0
-        elif position == 1:
-            # Exit: price breaks below 6h Donchian lower OR price falls below weekly SMA50 (trend change)
-            if (close[i] < donch_low_aligned[i] or close[i] < sma_50_1w_aligned[i]):
+            # Short: price breaks below weekly S3 + close < weekly EMA34 + volume filter
+            elif (close[i] < camarilla_s3_aligned[i] and 
+                  close[i] < weekly_ema34_aligned[i] and 
+                  volume_filter[i]):
+                signals[i] = -0.25
+                position = -1
+                bars_since_exit = 0
+        elif position != 0:
+            # Exit: price returns to opposite Camarilla level or trend reversal
+            if position == 1 and (close[i] < camarilla_s3_aligned[i] or close[i] < weekly_ema34_aligned[i]):
+                signals[i] = 0.0
+                position = 0
+                bars_since_exit = 0
+            elif position == -1 and (close[i] > camarilla_r3_aligned[i] or close[i] > weekly_ema34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
                 bars_since_exit = 0
             else:
                 # Hold position
-                signals[i] = 0.25
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
