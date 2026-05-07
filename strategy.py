@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_4h_Donchian_Breakout_1dTrend_Filter"
-timeframe = "1h"
+name = "6h_WeeklyPivot_RangeBreakout_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,90 +17,98 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Donchian breakout
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Get weekly data for pivot levels
+    df_w = get_htf_data(prices, '1w')
+    if len(df_w) < 5:
         return np.zeros(n)
     
-    # Get 1d data for trend filter
+    # Calculate weekly pivot points (using previous week's data)
+    high_w = df_w['high'].values
+    low_w = df_w['low'].values
+    close_w = df_w['close'].values
+    
+    # Pivot Point = (High + Low + Close) / 3
+    pivot = (high_w + low_w + close_w) / 3
+    # Support 1 = (2 * Pivot) - High
+    s1 = (2 * pivot) - high_w
+    # Resistance 1 = (2 * Pivot) - Low
+    r1 = (2 * pivot) - low_w
+    # Support 2 = Pivot - (High - Low)
+    s2 = pivot - (high_w - low_w)
+    # Resistance 2 = Pivot + (High - Low)
+    r2 = pivot + (high_w - low_w)
+    
+    # Align weekly pivots to 6h timeframe (no extra delay - pivots are fixed for the week)
+    pivot_aligned = align_htf_to_ltf(prices, df_w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_w, s2)
+    
+    # Get daily trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 4h Donchian channel (20-period)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    
-    # Calculate 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 50-period EMA for trend
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align indicators to 1h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # Calculate volume confirmation (current volume vs 24-period average)
-    vol_ma24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_ratio = volume / vol_ma24
-    
-    # Session filter: 08-20 UTC (already datetime64[ms])
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Volume confirmation (current vs 20-period average)
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ratio = volume / vol_ma20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # Ensure sufficient warmup
+    start_idx = 100  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any data is not ready
-        if (np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or 
+        if (np.isnan(pivot_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
+            np.isnan(r2_aligned[i]) or 
+            np.isnan(s2_aligned[i]) or 
+            np.isnan(ema_50_aligned[i]) or 
             np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
+        # Determine if we're in a ranging market (between S1 and R1)
+        in_range = (s1_aligned[i] <= close[i] <= r1_aligned[i])
         
         if position == 0:
-            # Long: break above 4h Donchian high, price above 1d EMA50, volume confirmation
-            if (close[i] > donchian_high_aligned[i] and 
-                close[i] > ema50_1d_aligned[i] and 
-                volume_ratio[i] > 1.8):
-                signals[i] = 0.20
+            # Long breakout: price breaks above R1 with volume, in uptrend
+            if (close[i] > r1_aligned[i] and 
+                close[i] > ema_50_aligned[i] and 
+                volume_ratio[i] > 1.5):
+                signals[i] = 0.25
                 position = 1
-            # Short: break below 4h Donchian low, price below 1d EMA50, volume confirmation
-            elif (close[i] < donchian_low_aligned[i] and 
-                  close[i] < ema50_1d_aligned[i] and 
-                  volume_ratio[i] > 1.8):
-                signals[i] = -0.20
+            # Short breakdown: price breaks below S1 with volume, in downtrend
+            elif (close[i] < s1_aligned[i] and 
+                  close[i] < ema_50_aligned[i] and 
+                  volume_ratio[i] > 1.5):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: break below 4h Donchian low or price drops below 1d EMA50
-            if (close[i] < donchian_low_aligned[i] or 
-                close[i] < ema50_1d_aligned[i]):
+            # Exit long: price breaks below S1 (range reversion) or breaks above R2 (take profit)
+            if (close[i] < s1_aligned[i] or 
+                close[i] > r2_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: break above 4h Donchian high or price rises above 1d EMA50
-            if (close[i] > donchian_high_aligned[i] or 
-                close[i] > ema50_1d_aligned[i]):
+            # Exit short: price breaks above R1 (range reversion) or breaks below S2 (take profit)
+            if (close[i] > r1_aligned[i] or 
+                close[i] < s2_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
