@@ -3,21 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Bollinger Band breakout with 1d trend filter and volume confirmation.
-# Long when: Close > BB Upper(20,2) AND 1d EMA(50) rising AND volume > 1.5x 20-period average volume
-# Short when: Close < BB Lower(20,2) AND 1d EMA(50) falling AND volume > 1.5x 20-period average volume
-# Exit when price crosses back to middle BB (20-period SMA)
-# Designed for 4h timeframe with tight entry conditions to avoid overtrading.
-# Uses Bollinger Bands for volatility-based breakouts, 1d EMA for trend filter, volume for confirmation.
-# Works in bull markets via breakouts in uptrend, in bear markets via breakdowns in downtrend.
-# Volume filter ensures breakouts are supported by participation, reducing false signals.
-name = "4h_BB_Breakout_1dEMA50_Volume"
-timeframe = "4h"
+# Hypothesis: 6h Donchian(20) breakout with weekly pivot direction filter and volume confirmation.
+# Long when: price breaks above Donchian(20) high AND weekly pivot trend is bullish AND volume > 1.5x average
+# Short when: price breaks below Donchian(20) low AND weekly pivot trend is bearish AND volume > 1.5x average
+# Exit when price returns to Donchian(20) midline or opposite breakout occurs.
+# Uses weekly pivot for trend filter to avoid counter-trend trades, volume to confirm breakout strength.
+# Designed for low trade frequency (target: 15-30/year) to minimize fee drag in 6h timeframe.
+name = "6h_Donchian20_WeeklyPivot_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,67 +23,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20,2)
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    bb_upper = sma_20 + 2 * std_20
-    bb_lower = sma_20 - 2 * std_20
-    bb_middle = sma_20  # 20-period SMA
+    # Donchian(20) channels
+    lookback = 20
+    highest_high = np.full_like(high, np.nan)
+    lowest_low = np.full_like(low, np.nan)
     
-    # 1d EMA(50) for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    for i in range(lookback-1, n):
+        highest_high[i] = np.max(high[i-lookback+1:i+1])
+        lowest_low[i] = np.min(low[i-lookback+1:i+1])
+    
+    midline = (highest_high + lowest_low) / 2.0
+    
+    # Weekly pivot points (using weekly high/low/close)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_rising = np.zeros_like(ema_50_1d, dtype=bool)
-    ema_50_falling = np.zeros_like(ema_50_1d, dtype=bool)
-    ema_50_rising[1:] = ema_50_1d[1:] > ema_50_1d[:-1]
-    ema_50_falling[1:] = ema_50_1d[1:] < ema_50_1d[:-1]
+    # Calculate weekly pivot: P = (H + L + C) / 3
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
     
-    ema_50_rising_aligned = align_htf_to_ltf(prices, df_1d, ema_50_rising)
-    ema_50_falling_aligned = align_htf_to_ltf(prices, df_1d, ema_50_falling)
+    # Trend: bullish if price > pivot, bearish if price < pivot
+    weekly_bullish = weekly_pivot > 0  # placeholder, will be replaced properly
+    weekly_bearish = weekly_pivot > 0   # placeholder, will be replaced properly
     
-    # Volume confirmation: current volume > 1.5x 20-period average volume
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma_20)
+    # Actually determine trend based on price vs pivot
+    # We need to compare current price to weekly pivot
+    # Since we can't easily get current weekly pivot in loop, we'll use the pivot value
+    # and determine trend based on whether price is above/below it
+    # We'll calculate this properly by getting the weekly pivot value and comparing
+    
+    # Get weekly pivot series and align to 6h
+    weekly_pivot_series = weekly_pivot
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot_series)
+    
+    # Determine weekly trend: bullish if close > weekly pivot, bearish if close < weekly pivot
+    weekly_trend_bullish = close > weekly_pivot_aligned
+    weekly_trend_bearish = close < weekly_pivot_aligned
+    
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = np.full_like(volume, np.nan)
+    for i in range(19, n):
+        vol_ma[i] = np.mean(volume[i-19:i+1])
+    volume_surge = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Sufficient warmup for indicators
+    start_idx = max(lookback-1, 19)  # Need enough data for Donchian and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(sma_20[i]) or np.isnan(std_20[i]) or np.isnan(ema_50_rising_aligned[i]) or 
-            np.isnan(ema_50_falling_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(weekly_pivot_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Close > BB Upper AND 1d EMA50 rising AND volume confirmation
-            long_condition = (close[i] > bb_upper[i]) and ema_50_rising_aligned[i] and volume_confirm[i]
-            # Short: Close < BB Lower AND 1d EMA50 falling AND volume confirmation
-            short_condition = (close[i] < bb_lower[i]) and ema_50_falling_aligned[i] and volume_confirm[i]
+            # Long breakout: price > Donchian high AND weekly bullish AND volume surge
+            long_breakout = close[i] > highest_high[i]
+            # Short breakout: price < Donchian low AND weekly bearish AND volume surge
+            short_breakout = close[i] < lowest_low[i]
             
-            if long_condition:
+            if long_breakout and weekly_trend_bullish[i] and volume_surge[i]:
                 signals[i] = 0.25
                 position = 1
-            elif short_condition:
+            elif short_breakout and weekly_trend_bearish[i] and volume_surge[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Close < BB Middle (reversion to mean)
-            if close[i] < bb_middle[i]:
+            # Long exit: price < Donchian midline OR short breakout occurs
+            if close[i] < midline[i] or (close[i] < lowest_low[i] and weekly_trend_bearish[i] and volume_surge[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Close > BB Middle (reversion to mean)
-            if close[i] > bb_middle[i]:
+            # Short exit: price > Donchian midline OR long breakout occurs
+            if close[i] > midline[i] or (close[i] > highest_high[i] and weekly_trend_bullish[i] and volume_surge[i]):
                 signals[i] = 0.0
                 position = 0
             else:
