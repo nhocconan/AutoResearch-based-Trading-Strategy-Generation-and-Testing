@@ -1,30 +1,22 @@
 #!/usr/bin/env python3
-# 12h_WMA_Cross_ADX_Trend
-# Hypothesis: 12h strategy using weighted moving average cross (WMA10/30) with ADX trend filter and volume confirmation.
-# Enters long when WMA10 crosses above WMA30, ADX > 25 (trending), and volume > 1.5x average.
-# Enters short when WMA10 crosses below WMA30, ADX > 25 (trending), and volume > 1.5x average.
-# Uses 1d timeframe for ADX calculation to avoid whipsaw in ranging markets.
-# Designed for low trade frequency (~20-40 trades/year) to minimize fee drag while capturing trending moves.
-# Works in both bull and bear markets by only trading when ADX confirms strong trend.
+# 1h_Camarilla_R1_S1_4hTrend_1dVol
+# Hypothesis: 1h strategy using 4h Camarilla R1/S1 levels with 1d trend filter and volume confirmation.
+# Enters long when price breaks above 4h R1, close > 1d EMA50 (uptrend), and volume > 1.5x average.
+# Enters short when price breaks below 4h S1, close < 1d EMA50 (downtrend), and volume > 1.5x average.
+# Exits when price returns to opposite S1/R1 level. Uses session filter (08-20 UTC) to reduce noise.
+# Target: 15-30 trades/year by combining 4h structure with 1d trend and volume filters.
 
-name = "12h_WMA_Cross_ADX_Trend"
-timeframe = "12h"
+name = "1h_Camarilla_R1_S1_4hTrend_1dVol"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def wma(array, period):
-    """Calculate Weighted Moving Average"""
-    if len(array) < period:
-        return np.full_like(array, np.nan, dtype=float)
-    weights = np.arange(1, period + 1)
-    return np.convolve(array, weights[::-1], mode='valid') / weights.sum()
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -32,122 +24,80 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX calculation (trend filter)
+    # Get 4h data for Camarilla pivot calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) == 0:
+        return np.zeros(n)
+    
+    # Calculate Camarilla pivot levels from previous 4h period's OHLC
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    hl_range_4h = high_4h - low_4h
+    r1_4h = close_4h + 1.1 * hl_range_4h / 12
+    s1_4h = close_4h - 1.1 * hl_range_4h / 12
+    
+    # Align 4h levels to 1h timeframe
+    r1_4h_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
+    s1_4h_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
+    
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) == 0:
         return np.zeros(n)
     
-    # Calculate WMA10 and WMA30 on 12h close prices
-    wma10 = np.full(n, np.nan)
-    wma30 = np.full(n, np.nan)
+    # Calculate EMA50 for trend filter (1d)
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate WMA10
-    if n >= 10:
-        wma10_vals = wma(close, 10)
-        wma10[9:] = wma10_vals
+    # Volume spike detection: 1.5x average volume (24-period for 1h)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
-    # Calculate WMA30
-    if n >= 30:
-        wma30_vals = wma(close, 30)
-        wma30[29:] = wma30_vals
-    
-    # Calculate ADX components on 1d data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value is NaN
-    
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.concatenate([[np.nan], dm_minus])
-    
-    # Smooth TR, DM+, DM- using Wilder's smoothing (14-period)
-    def wilder_smooth(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nansum(arr[1:period])  # Skip first NaN
-        # Subsequent values: smoothed = prev_smoothed - (prev_smoothed/period) + current
-        for i in range(period, len(arr)):
-            if not np.isnan(result[i-1]) and not np.isnan(arr[i]):
-                result[i] = result[i-1] - (result[i-1]/period) + arr[i]
-        return result
-    
-    atr = wilder_smooth(tr, 14)
-    dm_plus_smooth = wilder_smooth(dm_plus, 14)
-    dm_minus_smooth = wilder_smooth(dm_minus, 14)
-    
-    # Directional Indicators
-    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
-    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = wilder_smooth(dx, 14)
-    
-    # Align 1d ADX to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume spike detection: 1.5x average volume (30-period for stability)
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 30)  # WMA30 and volume MA
+    start_idx = max(50, 24)  # Ensure we have EMA50 and volume MA data
     
     for i in range(start_idx, n):
-        # Skip if any critical value is NaN
-        if (np.isnan(wma10[i]) or np.isnan(wma30[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        # Skip if any critical value is NaN or outside session
+        if (np.isnan(r1_4h_aligned[i]) or np.isnan(s1_4h_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0 or
+            hours[i] < 8 or hours[i] > 20):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # WMA cross signals
-        wma10_prev = wma10[i-1] if i > 0 else np.nan
-        wma30_prev = wma30[i-1] if i > 0 else np.nan
-        wma10_cross_above = (wma10[i] > wma30[i]) and (wma10_prev <= wma30_prev)
-        wma10_cross_below = (wma10[i] < wma30[i]) and (wma10_prev >= wma30_prev)
-        
         if position == 0:
-            # Long: WMA10 crosses above WMA30, ADX > 25 (trending), volume spike (>1.5x)
-            if (wma10_cross_above and 
-                adx_aligned[i] > 25 and 
+            # Long: price breaks above 4h R1, close > 1d EMA50 (uptrend), volume spike (>1.5x)
+            if (close[i] > r1_4h_aligned[i] and 
+                close[i] > ema50_1d_aligned[i] and 
                 volume[i] > 1.5 * vol_ma[i]):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
-            # Short: WMA10 crosses below WMA30, ADX > 25 (trending), volume spike (>1.5x)
-            elif (wma10_cross_below and 
-                  adx_aligned[i] > 25 and 
+            # Short: price breaks below 4h S1, close < 1d EMA50 (downtrend), volume spike (>1.5x)
+            elif (close[i] < s1_4h_aligned[i] and 
+                  close[i] < ema50_1d_aligned[i] and 
                   volume[i] > 1.5 * vol_ma[i]):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit: WMA10 crosses below WMA30 (trend reversal)
-            if wma10_cross_below:
+            # Exit: price returns to or below 4h S1 (opposite level)
+            if close[i] <= s1_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit: WMA10 crosses above WMA30 (trend reversal)
-            if wma10_cross_above:
+            # Exit: price returns to or above 4h R1 (opposite level)
+            if close[i] >= r1_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
