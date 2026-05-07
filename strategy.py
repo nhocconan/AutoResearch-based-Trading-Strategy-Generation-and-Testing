@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_ADX_Trend_With_Volume_Confirmation
-# Hypothesis: Trend-following strategy using ADX(14) from daily timeframe to identify strong trends,
-# combined with 4h EMA50 for direction and volume confirmation to reduce false signals.
-# Designed to work in both bull and bear markets by only taking trades when trend strength (ADX > 25)
-# is present. Targets 20-40 trades/year to avoid excessive fee churn.
+# 6h_Camarilla_R3_S3_Breakout_1dTrend_Volume
+# Hypothesis: Use Camarilla pivot levels from daily timeframe (R3/S3 for reversal, R4/S4 for breakout)
+# combined with daily trend filter (EMA34) and volume confirmation to capture both reversal and breakout moves.
+# Works in bull markets via breakouts and in bear markets via reversals at extreme levels.
+# Targets 15-30 trades/year to avoid fee drag while maintaining edge.
 
-name = "4h_ADX_Trend_With_Volume_Confirmation"
-timeframe = "4h"
+name = "6h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,81 +23,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ADX calculation
+    # Get 1d data for Camarilla pivots and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate True Range (TR)
-    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Calculate previous day's Camarilla pivot levels
+    # Using previous day's data to avoid look-ahead
+    pp = np.zeros(len(high_1d))  # Pivot Point
+    r4 = np.zeros(len(high_1d))  # Resistance 4
+    r3 = np.zeros(len(high_1d))  # Resistance 3
+    s3 = np.zeros(len(high_1d))  # Support 3
+    s4 = np.zeros(len(high_1d))  # Support 4
     
-    # Calculate Directional Movement (+DM and -DM)
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    
-    # Smooth TR, +DM, -DM over 14 periods (Wilder's smoothing)
-    n_1d = len(high_1d)
-    atr = np.zeros(n_1d)
-    dm_plus_smooth = np.zeros(n_1d)
-    dm_minus_smooth = np.zeros(n_1d)
-    
-    # Initial values (simple average of first 14 periods)
-    if n_1d >= 14:
-        atr[13] = np.sum(tr[:14])
-        dm_plus_smooth[13] = np.sum(dm_plus[:14])
-        dm_minus_smooth[13] = np.sum(dm_minus[:14])
+    for i in range(1, len(high_1d)):
+        # Use previous day's OHLC
+        high_prev = high_1d[i-1]
+        low_prev = low_1d[i-1]
+        close_prev = close_1d[i-1]
         
-        # Wilder's smoothing for subsequent periods
-        for i in range(14, n_1d):
-            atr[i] = atr[i-1] - (atr[i-1] / 14) + tr[i]
-            dm_plus_smooth[i] = dm_plus_smooth[i-1] - (dm_plus_smooth[i-1] / 14) + dm_plus[i]
-            dm_minus_smooth[i] = dm_minus_smooth[i-1] - (dm_minus_smooth[i-1] / 14) + dm_minus[i]
+        # Calculate pivot point
+        pp[i] = (high_prev + low_prev + close_prev) / 3.0
+        
+        # Calculate ranges
+        range_prev = high_prev - low_prev
+        
+        # Camarilla levels
+        r4[i] = pp[i] + range_prev * 1.1 / 2.0
+        r3[i] = pp[i] + range_prev * 1.1 / 4.0
+        s3[i] = pp[i] - range_prev * 1.1 / 4.0
+        s4[i] = pp[i] - range_prev * 1.1 / 2.0
     
-    # Calculate Directional Indicators (+DI and -DI)
-    plus_di = np.zeros(n_1d)
-    minus_di = np.zeros(n_1d)
-    for i in range(14, n_1d):
-        if atr[i] > 0:
-            plus_di[i] = 100 * (dm_plus_smooth[i] / atr[i])
-            minus_di[i] = 100 * (dm_minus_smooth[i] / atr[i])
+    # Calculate daily EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate DX and ADX
-    dx = np.zeros(n_1d)
-    for i in range(14, n_1d):
-        di_sum = plus_di[i] + minus_di[i]
-        if di_sum > 0:
-            dx[i] = 100 * np.abs(plus_di[i] - minus_di[i]) / di_sum
+    # Volume confirmation: volume > 24-period average (24*6h = 4 days)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
-    adx = np.zeros(n_1d)
-    if n_1d >= 28:  # Need 14 periods for DX smoothing
-        adx[27] = np.sum(dx[14:28])  # First ADX is average of first 14 DX values
-        for i in range(28, n_1d):
-            adx[i] = (adx[i-1] * 13 + dx[i]) / 14  # Wilder's smoothing
-    
-    # Align ADX to 4h timeframe
-    adx_4h = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # 4h EMA50 for trend direction
-    ema_50_4h = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Volume confirmation: volume > 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align 1d indicators to 6h timeframe
+    pp_6h = align_htf_to_ltf(prices, df_1d, pp)
+    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
+    r4_6h = align_htf_to_ltf(prices, df_1d, r4)
+    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
+    s4_6h = align_htf_to_ltf(prices, df_1d, s4)
+    ema_34_6h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if any critical value is NaN
-        if (np.isnan(adx_4h[i]) or np.isnan(ema_50_4h[i]) or 
+        if (np.isnan(pp_6h[i]) or np.isnan(r3_6h[i]) or np.isnan(r4_6h[i]) or 
+            np.isnan(s3_6h[i]) or np.isnan(s4_6h[i]) or np.isnan(ema_34_6h[i]) or 
             np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
@@ -105,26 +86,46 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Enter only when trend is strong (ADX > 25) and volume confirms
-            if adx_4h[i] > 25 and volume[i] > vol_ma[i]:
-                # Long: strong trend + price above EMA50
-                if close[i] > ema_50_4h[i]:
-                    signals[i] = 0.25
-                    position = 1
-                # Short: strong trend + price below EMA50
-                elif close[i] < ema_50_4h[i]:
-                    signals[i] = -0.25
-                    position = -1
+            vol_ok = volume[i] > vol_ma[i]
+            
+            # Long reversal: price at S3 with bullish trend
+            if (close[i] <= s3_6h[i] * 1.005 and  # Allow small buffer
+                close[i] > s4_6h[i] and          # Above S4 to avoid extreme
+                ema_34_6h[i] > close[i] * 0.98 and  # Uptrend filter (price near EMA)
+                vol_ok):
+                signals[i] = 0.25
+                position = 1
+            # Short reversal: price at R3 with bearish trend
+            elif (close[i] >= r3_6h[i] * 0.995 and   # Allow small buffer
+                  close[i] < r4_6h[i] and            # Below R4 to avoid extreme
+                  ema_34_6h[i] < close[i] * 1.02 and # Downtrend filter
+                  vol_ok):
+                signals[i] = -0.25
+                position = -1
+            # Long breakout: price breaks R4 with bullish trend
+            elif (close[i] > r4_6h[i] and 
+                  ema_34_6h[i] > close[i] * 0.95 and  # Strong uptrend
+                  vol_ok):
+                signals[i] = 0.25
+                position = 1
+            # Short breakdown: price breaks S4 with bearish trend
+            elif (close[i] < s4_6h[i] and 
+                  ema_34_6h[i] < close[i] * 1.05 and  # Strong downtrend
+                  vol_ok):
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Exit: trend weakens or price crosses below EMA50
-            if adx_4h[i] < 25 or close[i] < ema_50_4h[i]:
+            # Exit long: price reaches R3 (take profit) or breaks S4 (stop reversal)
+            if (close[i] >= r3_6h[i] * 0.995 or  # Near R3 for profit
+                close[i] < s4_6h[i]):            # Breakdown below S4
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: trend weakens or price crosses above EMA50
-            if adx_4h[i] < 25 or close[i] > ema_50_4h[i]:
+            # Exit short: price reaches S3 (take profit) or breaks R4 (stop reversal)
+            if (close[i] <= s3_6h[i] * 1.005 or  # Near S3 for profit
+                close[i] > r4_6h[i]):            # Breakout above R4
                 signals[i] = 0.0
                 position = 0
             else:
