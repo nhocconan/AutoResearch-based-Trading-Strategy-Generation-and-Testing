@@ -1,9 +1,7 @@
-# Hypothesis: 12h Camarilla R3/S3 breakout with daily trend and volume spike. Uses proven Camarilla pivot breakout logic with daily EMA trend filter and volume confirmation. Focuses on high-probability breakouts in trending markets with volume validation to reduce false signals. Designed for moderate trade frequency (~15-25/year) to minimize fee drag while capturing significant moves in both bull and bear markets.
-
 #!/usr/bin/env python3
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -34,7 +32,7 @@ def generate_signals(prices):
     camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 2
     camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 2
     
-    # Align Camarilla levels to 12h timeframe (use previous day's levels)
+    # Align Camarilla levels to 4h timeframe (use previous day's levels)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
@@ -42,7 +40,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume filter: current volume > 2.0x 20-period average (on 12h data)
+    # Volume filter: current volume > 2.0x 20-period average (on 4h data)
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-20:i])
@@ -51,7 +49,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 3  # Prevent overtrading (approx 1.5 days for 12h)
+    cooldown_bars = 6  # Prevent overtrading (approx 1 day for 4h)
     
     start_idx = max(20, 34)  # Warmup for volume MA and EMA
     
