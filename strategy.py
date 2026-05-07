@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_RangeBreakout_WeeklyPivot_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_RangeBreakout_WeeklyPivot_VolumeSpike_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -36,12 +36,9 @@ def generate_signals(prices):
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # 6h range breakout detection
-    range_high = pd.Series(high).rolling(window=4, min_periods=4).max().shift(1).values  # Previous 4 periods (24h)
-    range_low = pd.Series(low).rolling(window=4, min_periods=4).min().shift(1).values
-    
-    range_high_aligned = range_high  # Already aligned to 6h
-    range_low_aligned = range_low
+    # 4h range breakout detection (24h lookback = 6 periods)
+    range_high = pd.Series(high).rolling(window=6, min_periods=6).max().shift(1).values  # Previous 6 periods (24h)
+    range_low = pd.Series(low).rolling(window=6, min_periods=6).min().shift(1).values
     
     # Volume confirmation: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -50,7 +47,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(4, 20)
+    start_idx = max(6, 20)
     
     for i in range(start_idx, n):
         if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
@@ -61,24 +58,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above weekly R1 AND above 6h range high + volume spike
-            if close[i] > r1_aligned[i] and close[i] > range_high_aligned[i] and volume_ok[i]:
+            # Long: price breaks above weekly R1 AND above 4h range high + volume spike
+            if close[i] > r1_aligned[i] and close[i] > range_high[i] and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly S1 AND below 6h range low + volume spike
-            elif close[i] < s1_aligned[i] and close[i] < range_low_aligned[i] and volume_ok[i]:
+            # Short: price breaks below weekly S1 AND below 4h range low + volume spike
+            elif close[i] < s1_aligned[i] and close[i] < range_low[i] and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
             # Exit: price returns to weekly pivot or range breaks in opposite direction
             if position == 1:
-                if close[i] < weekly_pivot_aligned[i] or close[i] < range_low_aligned[i]:
+                if close[i] < weekly_pivot_aligned[i] or close[i] < range_low[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > weekly_pivot_aligned[i] or close[i] > range_high_aligned[i]:
+                if close[i] > weekly_pivot_aligned[i] or close[i] > range_high[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
