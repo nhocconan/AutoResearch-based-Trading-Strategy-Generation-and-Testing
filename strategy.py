@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-1d_WedgeBreakout_1wTrend_v1
-Hypothesis: On daily timeframe, detect ascending/descending wedge patterns combined with weekly trend filter.
-Enter long when price breaks above descending wedge resistance with weekly uptrend.
-Enter short when price breaks below ascending wedge support with weekly downtrend.
-Wedges provide high-probability breakout signals, weekly trend filters reduce counter-trend trades.
-Designed for low frequency (target 10-25 trades/year) to minimize fee impact in 2025 bear market.
+4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeS_v2
+Hypothesis: Camarilla R1/S1 breakout with 12h EMA trend filter and volume spike.
+Long when price breaks above R1 and closes above 12h EMA with volume spike.
+Short when price breaks below S1 and closes below 12h EMA with volume spike.
+Exit on opposite Camarilla level touch. Works in bull/bear via trend filter.
 """
-name = "1d_WedgeBreakout_1wTrend_v1"
-timeframe = "1d"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeS_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,137 +24,92 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Weekly EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate wedge pattern: converging trendlines
-    # Descending wedge: lower highs + higher lows (bullish)
-    # Ascending wedge: higher highs + lower lows (bearish)
+    # Calculate daily Camarilla levels (using previous day's OHLC)
+    # We need daily data, but we'll calculate levels per 4h bar using previous day's values
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Find swing points (simplified: local peaks/troughs over 5 periods)
-    def find_swing_highs(arr, window=5):
-        highs = np.full_like(arr, np.nan)
-        for i in range(window, len(arr) - window):
-            if arr[i] == np.max(arr[i-window:i+window+1]):
-                highs[i] = arr[i]
-        return highs
+    # Calculate Camarilla levels for each day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    def find_swing_lows(arr, window=5):
-        lows = np.full_like(arr, np.nan)
-        for i in range(window, len(arr) - window):
-            if arr[i] == np.min(arr[i-window:i+window+1]):
-                lows[i] = arr[i]
-        return lows
+    # Camarilla R1 and S1 levels
+    # R1 = C + (H-L)*1.1/12
+    # S1 = C - (H-L)*1.1/12
+    camarilla_range = (high_1d - low_1d) * 1.1 / 12
+    r1_levels = close_1d + camarilla_range
+    s1_levels = close_1d - camarilla_range
     
-    # Get recent swing points for trendline calculation
-    swing_highs = find_swing_highs(high, 3)
-    swing_lows = find_swing_lows(low, 3)
+    # Align Camarilla levels to 4h timeframe (each level applies to the entire following day)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_levels)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_levels)
     
-    # Calculate trendlines using linear regression on last 3 swing points
-    def calc_trendline(points, lookback=20):
-        valid = ~np.isnan(points)
-        if np.sum(valid) < 3:
-            return np.full_like(points, np.nan)
-        
-        # Get indices and values of valid points
-        indices = np.where(valid)[0]
-        values = points[valid]
-        
-        # Use last 3 points for trendline
-        if len(indices) >= 3:
-            idx_last3 = indices[-3:]
-            val_last3 = values[-3:]
-            # Linear fit: y = mx + b
-            A = np.vstack([idx_last3, np.ones(len(idx_last3))]).T
-            m, b = np.linalg.lstsq(A, val_last3, rcond=None)[0]
-            # Generate trendline values
-            trendline = m * np.arange(len(points)) + b
-            return trendline
-        return np.full_like(points, np.nan)
-    
-    # Resistance trendline (from swing highs)
-    resistance = calc_trendline(swing_highs, 20)
-    # Support trendline (from swing lows)
-    support = calc_trendline(swing_lows, 20)
-    
-    # Wedge conditions
-    # Descending wedge: resistance sloping down, support sloping up
-    # Ascending wedge: resistance sloping up, support sloping down
-    
-    # Calculate slopes of trendlines (last 5 periods)
-    def calc_slope(arr, lookback=5):
-        slopes = np.full_like(arr, np.nan)
-        for i in range(lookback, len(arr)):
-            if not np.isnan(arr[i]) and not np.isnan(arr[i-lookback]):
-                slopes[i] = (arr[i] - arr[i-lookback]) / lookback
-        return slopes
-    
-    resist_slope = calc_slope(resistance, 5)
-    support_slope = calc_slope(support, 5)
-    
-    # Wedge detection
-    descending_wedge = (resist_slope < 0) & (support_slope > 0)  # Falling resistance, rising support
-    ascending_wedge = (resist_slope > 0) & (support_slope < 0)   # Rising resistance, falling support
-    
-    # Breakout conditions
-    # Long: price breaks above resistance in descending wedge
-    # Short: price breaks below support in ascending wedge
-    
-    # Volume confirmation: volume > 1.5 * 20-day average
+    # Volume filter: current volume > 2.0 * 20-period average volume
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_avg * 1.5)
+    volume_filter = volume > (vol_avg * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    bars_since_entry = 0
     
-    start_idx = max(50, 20)
+    start_idx = max(50, 20)  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
+        bars_since_entry += 1
+        
         # Skip if any data is not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(resist_slope[i]) or 
-            np.isnan(support_slope[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
             continue
         
         if position == 0:
-            # Long: descending wedge breakout + weekly uptrend + volume
-            if (descending_wedge[i] and 
-                close[i] > resistance[i] and 
-                close[i] > ema_50_1w_aligned[i] and  # Price above weekly EMA50 (uptrend)
+            # Minimum 12 bars between trades to reduce frequency (4h timeframe)
+            if bars_since_entry < 12:
+                continue
+                
+            # Long: price breaks above R1 + close above 12h EMA50 + volume filter
+            if (close[i] > r1_aligned[i] and 
+                close[i] > ema_50_12h_aligned[i] and 
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: ascending wedge breakdown + weekly downtrend + volume
-            elif (ascending_wedge[i] and 
-                  close[i] < support[i] and 
-                  close[i] < ema_50_1w_aligned[i] and  # Price below weekly EMA50 (downtrend)
+                bars_since_entry = 0
+            # Short: price breaks below S1 + close below 12h EMA50 + volume filter
+            elif (close[i] < s1_aligned[i] and 
+                  close[i] < ema_50_12h_aligned[i] and 
                   volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
+                bars_since_entry = 0
         elif position != 0:
-            # Exit conditions: opposite wedge breakout or trend reversal
-            if position == 1:  # Long position
-                # Exit: price breaks below support OR weekly trend turns down
-                if (close[i] < support[i] or 
-                    close[i] < ema_50_1w_aligned[i]):
+            # Exit: price touches opposite Camarilla level
+            if position == 1:
+                if close[i] < s1_aligned[i]:  # Touch S1
                     signals[i] = 0.0
                     position = 0
+                    bars_since_entry = 0
                 else:
                     signals[i] = 0.25
-            else:  # position == -1 (Short position)
-                # Exit: price breaks above resistance OR weekly trend turns up
-                if (close[i] > resistance[i] or 
-                    close[i] > ema_50_1w_aligned[i]):
+            else:  # position == -1
+                if close[i] > r1_aligned[i]:  # Touch R1
                     signals[i] = 0.0
                     position = 0
+                    bars_since_entry = 0
                 else:
                     signals[i] = -0.25
     
