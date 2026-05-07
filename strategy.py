@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3S3_1dTrend_Volume"
-timeframe = "12h"
+name = "1d_2024_WeeklyPivot_Breakout_Momentum"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 20:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,34 +17,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily EMA34 for trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Weekly Pivot calculation (from weekly OHLC)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate weekly pivot points: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Daily trend: price above/below EMA34
-    daily_trend_up = close > ema_34_1d_aligned
-    daily_trend_down = close < ema_34_1d_aligned
+    pivot = (weekly_high + weekly_low + weekly_close) / 3
+    r1 = 2 * pivot - weekly_low
+    s1 = 2 * pivot - weekly_high
     
-    # Camarilla levels from daily OHLC
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    # Align weekly pivot levels to daily timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
     
-    pivot = (daily_high + daily_low + daily_close) / 3
-    range_hl = daily_high - daily_low
-    r3 = pivot + (range_hl * 1.1 / 2)
-    s3 = pivot - (range_hl * 1.1 / 2)
+    # Momentum: RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Align Camarilla levels to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
+    for i in range(14, n):
+        if i == 14:
+            avg_gain[i] = np.mean(gain[1:15])
+            avg_loss[i] = np.mean(loss[1:15])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # Volume filter: current volume > 1.5x 20-period average
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi = np.where(avg_loss == 0, 100, 100 - (100 / (1 + rs)))
+    
+    # Volume filter: current volume > 1.5x 20-day average
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-20:i])
@@ -53,14 +63,16 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 4  # ~48 hours to prevent overtrading
+    cooldown_bars = 2  # ~2 days to prevent overtrading
     
-    start_idx = 20
+    start_idx = max(20, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or 
+        if (np.isnan(pivot_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
+            np.isnan(rsi[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -72,32 +84,36 @@ def generate_signals(prices):
         
         bars_since_last_trade += 1
         
+        # Determine position relative to weekly pivot
+        above_pivot = close[i] > pivot_aligned[i]
+        below_pivot = close[i] < pivot_aligned[i]
+        
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: Price crosses above R3 with volume in daily uptrend
-            if (close[i] > r3_aligned[i] and 
-                daily_trend_up[i] and 
+            # Long: Price above weekly pivot with RSI > 50 and volume
+            if (above_pivot and 
+                rsi[i] > 50 and 
                 vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: Price crosses below S3 with volume in daily downtrend
-            elif (close[i] < s3_aligned[i] and 
-                  daily_trend_down[i] and 
+            # Short: Price below weekly pivot with RSI < 50 and volume
+            elif (below_pivot and 
+                  rsi[i] < 50 and 
                   vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit: Price falls back below pivot or daily trend changes to down
-            if close[i] < pivot[i] or not daily_trend_up[i]:
+            # Exit: Price falls below weekly pivot or RSI < 40
+            if close[i] < pivot_aligned[i] or rsi[i] < 40:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price rises back above pivot or daily trend changes to up
-            if close[i] > pivot[i] or not daily_trend_down[i]:
+            # Exit: Price rises above weekly pivot or RSI > 60
+            if close[i] > pivot_aligned[i] or rsi[i] > 60:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
@@ -106,4 +122,4 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: On 12h timeframe, price crossing above/below Camarilla R3/S3 levels with volume confirmation and daily EMA34 trend filter captures institutional breakout momentum. Camarilla levels provide mathematically derived support/resistance based on prior day's range, effective in both trending and mean-reverting markets. Daily trend filter ensures trades align with higher-timeframe momentum. Target: 50-150 trades over 4 years (12-37/year) to minimize fee drag while capturing significant moves. Works in bull markets (breakouts above R3 in daily uptrend) and bear markets (breakdowns below S3 in daily downtrend).
+# Hypothesis: On daily timeframe, price position relative to weekly pivot points (support/resistance) combined with RSI momentum filter captures institutional trend continuation. Weekly pivot provides stronger structural levels than daily, reducing false signals. RSI > 50 confirms bullish momentum for longs, RSI < 50 confirms bearish momentum for shorts. Volume filter ensures institutional participation. Works in bull markets (price above weekly pivot with bullish momentum) and bear markets (price below weekly pivot with bearish momentum). Target: 20-60 trades over 4 years (5-15/year) to minimize fee decay while capturing significant trend moves. Weekly pivot adds institutional value area context often missing in daily-only systems.
