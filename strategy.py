@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeS
-# Hypothesis: Uses weekly Camarilla R1/S1 levels filtered by weekly trend (EMA34) and volume spikes.
-# Weekly trend filter reduces whipsaws; volume confirms breakout strength.
-# Target: 15-35 trades/year to minimize fee drag while maintaining edge in both bull and bear markets.
+# 4h_WilliamsAlligator_ElderRay_Signal
+# Hypothesis: Combines Williams Alligator trend (Jaw/Teeth/Lips) with Elder Ray (Bull/Bear Power) on 1d.
+# Long when Green line above Red (bullish alignment) AND Bull Power > 0 with rising trend.
+# Short when Red line above Green (bearish alignment) AND Bear Power < 0 with falling trend.
+# Uses 1d timeframe for alignment, reducing whipsaws vs lower timeframes.
+# Target: 20-40 trades/year to minimize fee drag while maintaining edge in both bull and bear markets.
 
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeS"
-timeframe = "12h"
+name = "4h_WilliamsAlligator_ElderRay_Signal"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,63 +24,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla pivot calculation (R1, S1)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for Williams Alligator and Elder Ray calculations
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly Camarilla pivot levels: R1, S1
-    camarilla_range = high_1w - low_1w
-    r1 = close_1w + 1.1 * camarilla_range / 12
-    s1 = close_1w - 1.1 * camarilla_range / 12
+    # Williams Alligator: Jaw (13-period SMMA, shifted 8), Teeth (8-period SMMA, shifted 5), Lips (5-period SMMA, shifted 3)
+    def smma(arr, period):
+        """Smoothed Moving Average"""
+        if len(arr) < period:
+            return np.full_like(arr, np.nan)
+        result = np.full_like(arr, np.nan)
+        # First value is simple SMA
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CURRENT_VALUE) / period
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    # Get weekly data for trend filter (EMA34)
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    jaw = smma(close_1d, 13)  # Blue line (Jaw)
+    teeth = smma(close_1d, 8)  # Red line (Teeth)
+    lips = smma(close_1d, 5)   # Green line (Lips)
     
-    # Align all indicators to 12h timeframe
-    r1_12h = align_htf_to_ltf(prices, df_1w, r1)
-    s1_12h = align_htf_to_ltf(prices, df_1w, s1)
-    ema_34_1w_12h = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Shift the lines as per Alligator definition
+    jaw = np.roll(jaw, 8)   # Jaw shifted 8 bars forward
+    teeth = np.roll(teeth, 5) # Teeth shifted 5 bars forward
+    lips = np.roll(lips, 3)   # Lips shifted 3 bars forward
     
-    # Volume spike filter on 12h (20-period average)
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high_1d - ema_13_1d
+    bear_power = low_1d - ema_13_1d
+    
+    # Align all indicators to 4h timeframe
+    jaw_4h = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_4h = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_4h = align_htf_to_ltf(prices, df_1d, lips)
+    bull_power_4h = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_4h = align_htf_to_ltf(prices, df_1d, bear_power)
+    
+    # Volume spike filter on 4h (20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)
+    volume_spike = volume > (1.5 * vol_ma_20)  # Reduced threshold to avoid too few trades
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if any critical value is NaN
-        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or 
-            np.isnan(ema_34_1w_12h[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(jaw_4h[i]) or np.isnan(teeth_4h[i]) or np.isnan(lips_4h[i]) or 
+            np.isnan(bull_power_4h[i]) or np.isnan(bear_power_4h[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price > R1, above weekly EMA34 trend, volume spike
-            if close[i] > r1_12h[i] and close[i] > ema_34_1w_12h[i] and volume_spike[i]:
+            # Long: Lips > Teeth (Green above Red) AND Bull Power > 0 AND rising AND volume spike
+            if lips_4h[i] > teeth_4h[i] and bull_power_4h[i] > 0 and bull_power_4h[i] > bull_power_4h[i-1] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price < S1, below weekly EMA34 trend, volume spike
-            elif close[i] < s1_12h[i] and close[i] < ema_34_1w_12h[i] and volume_spike[i]:
+            # Short: Teeth > Lips (Red above Green) AND Bear Power < 0 AND falling AND volume spike
+            elif teeth_4h[i] > lips_4h[i] and bear_power_4h[i] < 0 and bear_power_4h[i] < bear_power_4h[i-1] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Price < R1 or below weekly EMA34 trend
-            if close[i] < r1_12h[i] or close[i] < ema_34_1w_12h[i]:
+            # Exit: Lips <= Teeth OR Bull Power <= 0
+            if lips_4h[i] <= teeth_4h[i] or bull_power_4h[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price > S1 or above weekly EMA34 trend
-            if close[i] > s1_12h[i] or close[i] > ema_34_1w_12h[i]:
+            # Exit: Teeth <= Lips OR Bear Power >= 0
+            if teeth_4h[i] <= lips_4h[i] or bear_power_4h[i] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
