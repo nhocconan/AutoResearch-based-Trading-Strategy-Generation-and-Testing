@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_WeeklyPivot_RangeReversal"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 300:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,86 +19,64 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Weekly high/low/close from daily data (last completed week)
-    # Use 5 trading days of daily data (approximates a week)
-    window_days = 5
-    weekly_high = pd.Series(high).rolling(window=window_days*24//6, min_periods=window_days*24//6).max().values
-    weekly_low = pd.Series(low).rolling(window=window_days*24//6, min_periods=window_days*24//6).min().values
-    weekly_close = pd.Series(close).rolling(window=window_days*24//6, min_periods=window_days*24//6).mean().values
+    # Previous day's high, low, close for Camarilla levels
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Weekly pivot points
-    pp = (weekly_high + weekly_low + weekly_close) / 3
-    r1 = 2 * pp - weekly_low
-    s1 = 2 * pp - weekly_high
-    r2 = pp + (weekly_high - weekly_low)
-    s2 = pp - (weekly_high - weekly_low)
+    # Camarilla R1 and S1 levels
+    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     
-    # Align weekly pivot levels to 6h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    # Align Camarilla levels to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
     # Daily trend filter: EMA(34) on daily close
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Range detection: Bollinger Bands width percentile (20-period)
-    close_series = pd.Series(close)
-    sma_20 = close_series.rolling(window=20, min_periods=20).mean().values
-    std_20 = close_series.rolling(window=20, min_periods=20).std().values
-    bb_upper = sma_20 + 2 * std_20
-    bb_lower = sma_20 - 2 * std_20
-    bb_width = (bb_upper - bb_lower) / sma_20
-    bb_width_percentile = pd.Series(bb_width).rolling(window=100, min_periods=50).rank(pct=True).values
-    
-    # Volume filter: above average volume
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume spike detection: 2-period average (1 day of 12h bars)
+    vol_ma_2 = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20*24//6, 20, 34)  # Wait for indicators
+    start_idx = max(34, 2)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(pp_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(bb_width_percentile[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(vol_ma_2[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Range condition: low volatility environment (BB width < 30th percentile)
-        is_range = bb_width_percentile[i] < 0.30
-        vol_filter = volume[i] > vol_ma_20[i] * 1.2
-        
         if position == 0:
-            if is_range and vol_filter:
-                # Long near S1 support with rejection
-                if close[i] > s1_aligned[i] and close[i-1] <= s1_aligned[i-1]:
-                    signals[i] = 0.25
-                    position = 1
-                # Short near R1 resistance with rejection
-                elif close[i] < r1_aligned[i] and close[i-1] >= r1_aligned[i-1]:
-                    signals[i] = -0.25
-                    position = -1
+            # Long: price above S1 with volume and daily uptrend
+            vol_condition = volume[i] > vol_ma_2[i] * 2.0
+            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
+            
+            if close[i] > s1_aligned[i] and vol_condition and uptrend:
+                signals[i] = 0.25
+                position = 1
+            # Short: price below R1 with volume and daily downtrend
+            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Exit: price reaches P-P or R1, or range breaks down
-            if (close[i] >= pp_aligned[i] or close[i] >= r1_aligned[i] or 
-                bb_width_percentile[i] > 0.70):
+            # Exit: price back below S1 or volume drops
+            if close[i] < s1_aligned[i] or volume[i] < vol_ma_2[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price reaches P-P or S1, or range breaks down
-            if (close[i] <= pp_aligned[i] or close[i] <= s1_aligned[i] or 
-                bb_width_percentile[i] > 0.70):
+            # Exit: price back above R1 or volume drops
+            if close[i] > r1_aligned[i] or volume[i] < vol_ma_2[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,11 +84,13 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 6s weekly pivot range reversal in low volatility environments
-# - Weekly pivot S1/R1 act as strong support/resistance in ranging markets
-# - Enter long at S1 bounce, short at R1 rejection during low volatility (BB width < 30th percentile)
-# - Volume filter ensures institutional participation (1.2x average volume)
-# - Exit at weekly pivot (PP) or opposite pivot level, or when volatility expands
-# - Works in both bull/bear: ranges occur in all markets, pivot levels provide structure
-# - Position size 0.25 targets 50-100 trades/year, avoiding excessive fee drag
-# - Weekly pivot from daily data provides reliable structure that adapts to regimes
+# Hypothesis: 12h Camarilla R1/S1 breakout with daily trend and volume confirmation
+# - Camarilla R1/S1 levels act as intraday support/resistance derived from prior day's range
+# - Breakout above S1 with volume in daily uptrend = long opportunity
+# - Breakdown below R1 with volume in daily downtrend = short opportunity
+# - Volume spike (2x average) confirms institutional participation
+# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
+# - Exit when price returns to Camarilla S1/R1 or volume weakens
+# - Position size 0.25 targets 20-40 trades/year, avoiding fee drag
+# - Daily EMA(34) filter ensures trades align with higher timeframe trend
+# - Uses 12h timeframe to reduce trade frequency and fee drag while capturing multi-day moves
