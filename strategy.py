@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3S3_1dTrend_VolumeSpike_v1
-Hypothesis: Trade 6-hour breakouts of Camarilla R3/S3 levels only when aligned with daily trend (EMA34) and confirmed by volume spike (>2x average). Uses daily timeframe for trend direction and 6h for precise entry. Designed to work in both bull and bear markets by requiring trend alignment and volume confirmation. Targets 15-35 trades/year with low fee impact.
+4h_Camarilla_R3S3_Breakout_12hEMA50_Trend_VolumeS
+Hypothesis: Trade 4-hour breakouts of Camarilla R3/S3 levels only when aligned with 12-hour trend (EMA50) and confirmed by volume spike (>2x average). Uses 12h timeframe for trend direction and 4h for precise entry. Designed to work in both bull and bear markets by requiring trend alignment and volume confirmation. Targets 20-40 trades/year with low fee impact.
 """
 
-name = "6h_Camarilla_R3S3_1dTrend_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Breakout_12hEMA50_Trend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,22 +22,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter and Camarilla calculation
-    df_d = get_htf_data(prices, '1d')
-    if len(df_d) < 34:
+    # Get 12h data for trend filter and Camarilla calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    daily_high = df_d['high'].values
-    daily_low = df_d['low'].values
-    daily_close = df_d['close'].values
+    daily_high = df_12h['high'].values
+    daily_low = df_12h['low'].values
+    daily_close = df_12h['close'].values
     
-    # Calculate daily EMA34 for trend filter
-    ema_34_d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_d_aligned = align_htf_to_ltf(prices, df_d, ema_34_d)
+    # Calculate 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate Camarilla levels from previous day's range
-    # Camarilla: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
-    # R4 = close + 1.1*(high-low), S4 = close - 1.1*(high-low)
+    # Calculate Camarilla levels from previous 12h period's range
     prev_daily_high = np.concatenate([[np.nan], daily_high[:-1]])
     prev_daily_low = np.concatenate([[np.nan], daily_low[:-1]])
     prev_daily_close = np.concatenate([[np.nan], daily_close[:-1]])
@@ -48,13 +46,13 @@ def generate_signals(prices):
     R4 = prev_daily_close + 1.1 * (prev_daily_high - prev_daily_low)
     S4 = prev_daily_close - 1.1 * (prev_daily_high - prev_daily_low)
     
-    # Align Camarilla levels to 6h timeframe (need to wait for daily close)
-    R3_aligned = align_htf_to_ltf(prices, df_d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_d, S3)
-    R4_aligned = align_htf_to_ltf(prices, df_d, R4)
-    S4_aligned = align_htf_to_ltf(prices, df_d, S4)
+    # Align Camarilla levels to 4h timeframe (need to wait for 12h close)
+    R3_aligned = align_htf_to_ltf(prices, df_12h, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_12h, S3)
+    R4_aligned = align_htf_to_ltf(prices, df_12h, R4)
+    S4_aligned = align_htf_to_ltf(prices, df_12h, S4)
     
-    # Get 6h volume for confirmation
+    # Get 4h volume for confirmation
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.divide(volume, vol_ma20, out=np.zeros_like(volume), where=vol_ma20!=0)
     
@@ -69,23 +67,23 @@ def generate_signals(prices):
             np.isnan(S3_aligned[i]) or 
             np.isnan(R4_aligned[i]) or 
             np.isnan(S4_aligned[i]) or 
-            np.isnan(ema_34_d_aligned[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or 
             np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine daily trend using aligned close
-        daily_close_aligned = align_htf_to_ltf(prices, df_d, daily_close)
+        # Determine 12h trend using aligned close
+        daily_close_aligned = align_htf_to_ltf(prices, df_12h, daily_close)
         if np.isnan(daily_close_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
-        trend_up = daily_close_aligned[i] > ema_34_d_aligned[i]
-        trend_down = daily_close_aligned[i] < ema_34_d_aligned[i]
+        trend_up = daily_close_aligned[i] > ema_50_12h_aligned[i]
+        trend_down = daily_close_aligned[i] < ema_50_12h_aligned[i]
         
         if position == 0:
             # Long breakout: price breaks above R3 with upward trend and volume spike
