@@ -1,14 +1,13 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 """
-4h_Camarilla_R3S3_Breakout_1dTrend_Volume_Enhanced
-Hypothesis: Breaking above R3 or below S3 on 4h chart with 1-day EMA34 trend confirmation 
-and volume spike (2.0x average) captures strong institutional breakouts. Uses tighter 
-volume filter and adds momentum confirmation (close > open) to reduce false signals. 
-Designed for 4h to achieve 20-50 trades/year with high win rate, suitable for both 
-bull and bear markets by following higher timeframe trend.
+12h_Camarilla_R3S3_Breakout_1dTrend_Volume_Enhanced
+Hypothesis: Breaking above R3 or below S3 on 12h chart using prior-day Camarilla levels 
+with 1-day EMA34 trend confirmation and volume spike (2.0x average) captures strong 
+institutional breakouts. Designed for 12h to achieve 12-37 trades/year with high win 
+rate, suitable for both bull and bear markets by following higher timeframe trend.
 """
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_Enhanced"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume_Enhanced"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -42,7 +41,7 @@ def generate_signals(prices):
     r3_1d = close_1d + (range_1d * 1.1 / 2)
     s3_1d = close_1d - (range_1d * 1.1 / 2)
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
