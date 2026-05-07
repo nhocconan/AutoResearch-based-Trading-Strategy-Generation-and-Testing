@@ -1,16 +1,12 @@
-#!/usr/bin/env python3
-"""
-6h_ElderRay_BullBearPower_1dTrend_Volume
-Hypothesis: Elder Ray index (Bull Power = High - EMA13, Bear Power = Low - EMA13) combined with 1-day trend filter and volume confirmation.
-In bull markets (price > 1-day EMA50), we take long signals when Bull Power turns positive with volume.
-In bear markets (price < 1-day EMA50), we take short signals when Bear Power turns negative with volume.
-This captures institutional buying/selling pressure while avoiding counter-trend trades.
-Target: 20-50 trades per year (~80-200 over 4 years) with position size 0.25.
-Works in both bull (captures strength) and bear (captures weakness) via regime filter.
-"""
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: Camarilla pivot levels (R1/S1) on daily chart provide key support/resistance levels.
+# Breakout above R1 with volume confirmation in uptrend (price > daily EMA50) triggers long.
+# Breakdown below S1 with volume confirmation in downtrend (price < daily EMA50) triggers short.
+# Uses 1-day trend filter to avoid counter-trend trades, targeting 20-50 trades per year.
+# Works in both bull (captures breakouts) and bear (captures breakdowns) via regime filter.
 
-name = "6h_ElderRay_BullBearPower_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -27,22 +23,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1-day data ONCE for trend filter and EMA13
+    # Load 1-day data ONCE for Camarilla calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
+    # Calculate Camarilla pivot levels from previous day
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # Using previous day's OHLC to avoid look-ahead
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    
+    # Avoid look-ahead: use shifted values (previous day's data)
+    camarilla_range = (prev_high - prev_low) * 1.1 / 12
+    r1 = prev_close + camarilla_range
+    s1 = prev_close - camarilla_range
+    
+    # Align Camarilla levels to 12h timeframe (available after daily bar closes)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
     # 1-day EMA50 for trend filter
     ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # 1-day EMA13 for Elder Ray calculation
-    ema_13_1d = pd.Series(df_1d['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
-    
-    # Calculate Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high - ema_13_1d_aligned
-    bear_power = low - ema_13_1d_aligned
     
     # Volume ratio: current volume / 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,10 +55,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need 50 periods for EMA50
+    start_idx = 50  # Need 50 periods for EMA50 and Camarilla calculation
     
     for i in range(start_idx, n):
-        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(vol_ratio[i]):
+        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(vol_ratio[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,10 +72,10 @@ def generate_signals(prices):
         volume_confirm = vol_ratio[i] > 1.5
         
         if position == 0:
-            # Long: bull power turning positive in uptrend regime + volume
-            long_entry = (bull_power[i] > 0) and (bull_power[i-1] <= 0) and uptrend_regime and volume_confirm
-            # Short: bear power turning negative in downtrend regime + volume
-            short_entry = (bear_power[i] < 0) and (bear_power[i-1] >= 0) and downtrend_regime and volume_confirm
+            # Long: breakout above R1 in uptrend regime + volume
+            long_entry = (close[i] > r1_aligned[i]) and uptrend_regime and volume_confirm
+            # Short: breakdown below S1 in downtrend regime + volume
+            short_entry = (close[i] < s1_aligned[i]) and downtrend_regime and volume_confirm
             
             if long_entry:
                 signals[i] = 0.25
@@ -80,18 +84,20 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: bull power turns negative or regime changes to downtrend
-            if (bull_power[i] < 0) or (not uptrend_regime):
+            # Exit: price returns below R1 or regime changes to downtrend
+            if (close[i] < r1_aligned[i]) or (not uptrend_regime):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: bear power turns positive or regime changes to uptrend
-            if (bear_power[i] > 0) or (not downtrend_regime):
+            # Exit: price returns above S1 or regime changes to uptrend
+            if (close[i] > s1_aligned[i]) or (not downtrend_regime):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
+
+#!/usr/bin/env python3
