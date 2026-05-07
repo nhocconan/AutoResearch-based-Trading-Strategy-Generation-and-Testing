@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend_Volume
-Hypothesis: On 12h timeframe, enter long when price breaks above Camarilla R3 level from previous day, 
-and short when price breaks below S3 level, with confirmation from 1d EMA trend and volume spikes.
-Camarilla levels provide precise intraday support/resistance; EMA trend ensures alignment with higher timeframe direction;
-volume filter avoids false breakouts. Designed for fewer trades (12-37/year) to minimize fee drag.
-Works in bull markets via breakouts above R3 and in bear markets via breakdowns below S3.
+1d_KAMA_RSI_ChopFilter_v1
+Hypothesis: On daily timeframe, use Kaufman's Adaptive Moving Average (KAMA) to identify trend direction,
+combined with RSI for overbought/oversold conditions and Choppiness Index to avoid choppy markets.
+Long when KAMA upward, RSI < 50, and CHOP > 61.8 (range). Short when KAMA downward, RSI > 50, and CHOP > 61.8.
+This avoids whipsaws in chop while capturing trend moves. Weekly trend filter ensures alignment with higher timeframe.
+Works in both bull and bear markets by requiring alignment with weekly trend and using range-bound signals.
 """
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "1d_KAMA_RSI_ChopFilter_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -25,89 +25,90 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla levels and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels for previous day (using OHLC of prior day)
-    # Camarilla: R4 = C + (H-L)*1.1/2, R3 = C + (H-L)*1.1/4, R2 = C + (H-L)*1.1/6, R1 = C + (H-L)*1.1/12
-    # S1 = C - (H-L)*1.1/12, S2 = C - (H-L)*1.1/6, S3 = C - (H-L)*1.1/4, S4 = C - (H-L)*1.1/2
-    # We use R3 and S3 as breakout levels
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # === KAMA (10,2,30) ===
+    # Efficiency Ratio
+    change = np.abs(close - np.roll(close, 10))
+    change[0:10] = 0
+    # Sum of absolute daily changes
+    abs_change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = pd.Series(abs_change).rolling(window=10, min_periods=10).sum().values
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # Initialize KAMA
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Calculate Camarilla R3 and S3 for each day
-    H_L = high_1d - low_1d
-    C = close_1d
-    R3 = C + H_L * 1.1 / 4
-    S3 = C - H_L * 1.1 / 4
+    # === RSI (14) ===
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Align Camarilla levels to 12h timeframe (values from previous day)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    # === Choppiness Index (14) ===
+    atr = np.maximum(high - low,
+                     np.maximum(np.abs(high - np.roll(close, 1)),
+                                np.abs(low - np.roll(close, 1))))
+    atr[0] = high[0] - low[0]
+    sum_atr = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
+    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(sum_atr / (hh - ll)) / np.log10(14)
+    # Handle division by zero or invalid
+    chop = np.where((hh - ll) != 0, chop, 50)
     
-    # Daily EMA34 for trend filter
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
-    
-    # Volume filter: current volume > 2.0 * 20-period average volume
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_avg * 2.0)
+    # === Weekly EMA50 for trend filter ===
+    ema_50 = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_exit = 0  # bars since last exit to prevent overtrading
     
-    start_idx = 1  # start from second bar to ensure we have previous day's levels
+    start_idx = max(30, 14, 14)  # KAMA(30), RSI(14), CHOP(14)
     
     for i in range(start_idx, n):
-        bars_since_exit += 1
-        
-        # Skip if any data is not ready
-        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_avg[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-                bars_since_exit = 0
-            continue
-        
         if position == 0:
-            # Minimum 4 bars between trades to reduce frequency (12h timeframe)
-            if bars_since_exit < 4:
-                continue
-                
-            # Long: price breaks above R3 + price above EMA34 + volume filter
-            if (close[i] > R3_aligned[i] and 
-                close[i] > ema_34_aligned[i] and 
-                volume_filter[i]):
+            # Long: KAMA upward (close > kama), RSI < 50, CHOP > 61.8 (range), price above weekly EMA50
+            if (close[i] > kama[i] and
+                rsi[i] < 50 and
+                chop[i] > 61.8 and
+                close[i] > ema_50_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-                bars_since_exit = 0
-            # Short: price breaks below S3 + price below EMA34 + volume filter
-            elif (close[i] < S3_aligned[i] and 
-                  close[i] < ema_34_aligned[i] and 
-                  volume_filter[i]):
+            # Short: KAMA downward (close < kama), RSI > 50, CHOP > 61.8 (range), price below weekly EMA50
+            elif (close[i] < kama[i] and
+                  rsi[i] > 50 and
+                  chop[i] > 61.8 and
+                  close[i] < ema_50_aligned[i]):
                 signals[i] = -0.25
                 position = -1
-                bars_since_exit = 0
-        elif position != 0:
-            # Exit: price returns to opposite Camarilla level (S3 for long, R3 for short)
-            if position == 1:
-                if close[i] < S3_aligned[i]:  # price breaks below S3
-                    signals[i] = 0.0
-                    position = 0
-                    bars_since_exit = 0
-                else:
-                    signals[i] = 0.25
-            else:  # position == -1
-                if close[i] > R3_aligned[i]:  # price breaks above R3
-                    signals[i] = 0.0
-                    position = 0
-                    bars_since_exit = 0
-                else:
-                    signals[i] = -0.25
+        elif position == 1:
+            # Exit long: KAMA downward or RSI > 70 (overbought) or CHOP < 38.2 (trending)
+            if (close[i] < kama[i] or
+                rsi[i] > 70 or
+                chop[i] < 38.2):
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        elif position == -1:
+            # Exit short: KAMA upward or RSI < 30 (oversold) or CHOP < 38.2 (trending)
+            if (close[i] > kama[i] or
+                rsi[i] < 30 or
+                chop[i] < 38.2):
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
