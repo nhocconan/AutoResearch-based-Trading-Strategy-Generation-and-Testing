@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS
-# Hypothesis: Combines 4h price action with 12h trend filter to reduce false breakouts.
-# Uses Camarilla R1/S1 from 1d for entry levels, filtered by 12h EMA50 trend and 4h volume spikes.
-# In bull markets: 12h trend up + price breaks R1 with volume = long continuation.
-# In bear markets: 12h trend down + price breaks S1 with volume = short continuation.
-# The 12h trend filter reduces whipsaws vs 1d, improving robustness in both regimes.
-# Target: 20-40 trades/year to minimize fee drag while maintaining edge.
+# 1h_Camarilla_R1_S1_4hTrend_1dVolSlope
+# Hypothesis: Combines 4h trend filter with 1d volume slope to reduce false breakouts in 1h timeframe.
+# Uses 1d Camarilla R1/S1 for entry levels, filtered by 4h EMA20 trend and 1d volume slope (rising volume = institutional interest).
+# In bull markets: 4h trend up + price breaks R1 with rising 1d volume = long continuation.
+# In bear markets: 4h trend down + price breaks S1 with rising 1d volume = short continuation.
+# The 4h trend filter reduces whipsaws vs 1d, improving robustness in both regimes.
+# Volume slope filter ensures breakouts are supported by increasing participation.
+# Target: 20-30 trades/year to minimize fee drag while maintaining edge.
 
-name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS"
-timeframe = "4h"
+name = "1h_Camarilla_R1_S1_4hTrend_1dVolSlope"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +18,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -39,57 +40,63 @@ def generate_signals(prices):
     r1 = close_1d + 1.1 * camarilla_range / 12
     s1 = close_1d - 1.1 * camarilla_range / 12
     
-    # Get 12h data for trend filter (EMA50)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 4h data for trend filter (EMA20)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    close_4h = df_4h['close'].values
+    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align all indicators to 4h timeframe
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
-    ema_50_12h_4h = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Get 1d volume slope (5-period linear regression slope)
+    vol_1d = df_1d['volume'].values
+    vol_slope_1d = np.zeros(len(vol_1d))
+    for i in range(4, len(vol_1d)):
+        y = vol_1d[i-4:i+1]
+        x = np.arange(5)
+        slope = np.polyfit(x, y, 1)[0]
+        vol_slope_1d[i] = slope
     
-    # Volume spike filter on 4h (20-period average)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)
+    # Align all indicators to 1h timeframe
+    r1_1h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_1h = align_htf_to_ltf(prices, df_1d, s1)
+    ema_20_4h_1h = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    vol_slope_1d_1h = align_htf_to_ltf(prices, df_1d, vol_slope_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if any critical value is NaN
-        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or 
-            np.isnan(ema_50_12h_4h[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(r1_1h[i]) or np.isnan(s1_1h[i]) or 
+            np.isnan(ema_20_4h_1h[i]) or np.isnan(vol_slope_1d_1h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price > R1, above 12h EMA50 trend, volume spike
-            if close[i] > r1_4h[i] and close[i] > ema_50_12h_4h[i] and volume_spike[i]:
-                signals[i] = 0.25
+            # Long: Price > R1, above 4h EMA20 trend, positive 1d volume slope
+            if close[i] > r1_1h[i] and close[i] > ema_20_4h_1h[i] and vol_slope_1d_1h[i] > 0:
+                signals[i] = 0.20
                 position = 1
-            # Short: Price < S1, below 12h EMA50 trend, volume spike
-            elif close[i] < s1_4h[i] and close[i] < ema_50_12h_4h[i] and volume_spike[i]:
-                signals[i] = -0.25
+            # Short: Price < S1, below 4h EMA20 trend, positive 1d volume slope
+            elif close[i] < s1_1h[i] and close[i] < ema_20_4h_1h[i] and vol_slope_1d_1h[i] > 0:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit: Price < R1 or below 12h EMA50 trend
-            if close[i] < r1_4h[i] or close[i] < ema_50_12h_4h[i]:
+            # Exit: Price < R1 or below 4h EMA20 trend
+            if close[i] < r1_1h[i] or close[i] < ema_20_4h_1h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit: Price > S1 or above 12h EMA50 trend
-            if close[i] > s1_4h[i] or close[i] > ema_50_12h_4h[i]:
+            # Exit: Price > S1 or above 4h EMA20 trend
+            if close[i] > s1_1h[i] or close[i] > ema_20_4h_1h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
