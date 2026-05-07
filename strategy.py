@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_WeeklyPivot_DailyTrend_VolumeBreak"
-timeframe = "1d"
+name = "6h_12h_Camarilla_Pivot_Reversal"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,82 +17,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 5:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
+    # Calculate 12h Camarilla pivot levels using previous 12h bar
+    # H, L, C from previous 12h bar
+    h_prev = df_12h['high'].shift(1).values
+    l_prev = df_12h['low'].shift(1).values
+    c_prev = df_12h['close'].shift(1).values
     
-    # Weekly pivot points from weekly data
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    # Calculate pivot and levels
+    pp = (h_prev + l_prev + c_prev) / 3
+    range_hl = h_prev - l_prev
+    r3 = c_prev + range_hl * 1.1 / 2
+    s3 = c_prev - range_hl * 1.1 / 2
+    r4 = c_prev + range_hl * 1.1
+    s4 = c_prev - range_hl * 1.1
     
-    # Pivot levels
-    pp = (weekly_high + weekly_low + weekly_close) / 3
-    r1 = 2 * pp - weekly_low
-    s1 = 2 * pp - weekly_high
-    r2 = pp + (weekly_high - weekly_low)
-    s2 = pp - (weekly_high - weekly_low)
-    r3 = weekly_high + 2 * (pp - weekly_low)
-    s3 = weekly_low - 2 * (weekly_high - pp)
+    # Align to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_12h, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_12h, s4)
     
-    # Align weekly pivot levels to daily timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
-    
-    # Daily trend filter: EMA(34) on daily close
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume spike detection: 5-period average (5 days)
-    vol_ma_5 = pd.Series(volume).rolling(window=5, min_periods=5).mean().values
+    # Volume confirmation: 12-period average (3 days of 6h bars)
+    vol_ma_12 = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 5)  # Wait for all indicators
+    start_idx = 12  # Wait for volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(pp_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(vol_ma_5[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(vol_ma_12[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above S1 with volume and daily uptrend
-            vol_condition = volume[i] > vol_ma_5[i] * 2.0
-            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
+            # Long: price crosses above S3 with volume, targeting S4 as stop
+            vol_condition = volume[i] > vol_ma_12[i] * 1.8
             
-            if close[i] > s1_aligned[i] and vol_condition and uptrend:
+            if close[i] > s3_aligned[i] and vol_condition:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below R1 with volume and daily downtrend
-            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
+            # Short: price crosses below R3 with volume, targeting R4 as stop
+            elif close[i] < r3_aligned[i] and vol_condition:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below pivot or volume drops
-            if close[i] < pp_aligned[i] or volume[i] < vol_ma_5[i] * 1.5:
+            # Exit: price reaches S4 (target) or closes back below S3 (failed breakout)
+            if close[i] >= s4_aligned[i] or close[i] < s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above pivot or volume drops
-            if close[i] > pp_aligned[i] or volume[i] < vol_ma_5[i] * 1.5:
+            # Exit: price reaches R4 (target) or closes back above R3 (failed breakdown)
+            if close[i] <= r4_aligned[i] or close[i] > r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -100,13 +87,12 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Daily weekly pivot breakout with daily trend and volume confirmation
-# - Weekly pivot points (S1/R1) act as dynamic support/resistance levels
-# - Breakout above S1 with volume in daily uptrend = long opportunity
-# - Breakdown below R1 with volume in daily downtrend = short opportunity
-# - Volume spike (2x average) confirms institutional participation
-# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
-# - Exit when price returns to weekly pivot (PP) or volume weakens
-# - Position size 0.25 targets 10-25 trades/year, avoiding fee drag
-# - Weekly pivot provides structure that works across market regimes
-# - Weekly data loaded once, aligned properly to avoid look-ahead bias
+# Hypothesis: 6s Camarilla pivot reversal with 12h structure
+# - Camarilla R3/S3 act as intraday support/resistance levels where reversals often occur
+# - Break of R3/S3 with volume indicates potential continuation to R4/S4 targets
+# - Fade at R3/S3 in ranging markets, breakout continuation in trending markets
+# - Volume confirmation (1.8x average) filters false breakouts
+# - Works in both bull (buy S3 breaks in uptrends) and bear (sell R3 breaks in downtrends)
+# - Target R4/S4 levels provide clear profit targets
+# - Position size 0.25 targets 50-150 trades over 4 years, avoiding fee drag
+# - Uses 12h timeframe for structure, 6h for execution timing
