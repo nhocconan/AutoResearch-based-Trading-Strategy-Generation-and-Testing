@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS
-# Hypothesis: Uses Camarilla pivot levels (R1, S1) on 4h timeframe for breakout entries.
-# Trend filter uses 12h EMA50 to ensure trades align with higher timeframe trend.
-# Volume confirmation requires volume > 1.5x 20-period moving average.
-# Works in both bull and bear markets by following the 12h trend direction.
-# Designed for 4h to achieve optimal trade frequency (target: 20-50 trades/year).
+# 1h_Camarilla_R1_S1_4hTrend_1dVolSlope
+# Hypothesis: 1h Camarilla pivot breakout at R1/S1 with 4h EMA trend filter and 1d volume slope confirmation.
+# Uses daily volume slope to detect institutional accumulation/distribution, works in bull/bear via trend filter.
+# Targets 20-50 trades/year by requiring confluence of pivot break, trend alignment, and volume slope.
 
-name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS"
-timeframe = "4h"
+name = "1h_Camarilla_R1_S1_4hTrend_1dVolSlope"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,7 +22,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Camarilla pivot calculation
+    # Get 4h data for Camarilla pivot calculation and trend filter
     df_4h = get_htf_data(prices, '4h')
     if len(df_4h) < 5:
         return np.zeros(n)
@@ -33,67 +31,97 @@ def generate_signals(prices):
     low_4h = df_4h['low'].values
     close_4h = df_4h['close'].values
     
-    # Calculate Camarilla pivot levels for 4h
-    # Pivot = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    pivot_4h = (high_4h + low_4h + close_4h) / 3
-    r1_4h = close_4h + (high_4h - low_4h) * 1.1 / 12
-    s1_4h = close_4h - (high_4h - low_4h) * 1.1 / 12
+    # Calculate previous 4h bar's Camarilla levels (R1, S1)
+    # Using previous bar to avoid look-ahead
+    prev_high = np.roll(high_4h, 1)
+    prev_low = np.roll(low_4h, 1)
+    prev_close = np.roll(close_4h, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Align 4h Camarilla levels to 4h timeframe (no additional delay needed)
-    r1_4h_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
-    s1_4h_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    r1 = pivot + (prev_high - prev_low) * 1.1 / 12.0
+    s1 = pivot - (prev_high - prev_low) * 1.1 / 12.0
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Calculate 4h EMA20 for trend filter
+    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Get 1d data for volume slope confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    volume_1d = df_1d['volume'].values
+    # Calculate volume slope (5-period linear regression slope)
+    def linreg_slope(arr, window):
+        if len(arr) < window:
+            return np.full_like(arr, np.nan)
+        slopes = np.full_like(arr, np.nan)
+        for i in range(window-1, len(arr)):
+            y = arr[i-window+1:i+1]
+            x = np.arange(window)
+            if np.all(np.isnan(y)):
+                slopes[i] = np.nan
+            else:
+                # Remove NaNs if any
+                valid = ~np.isnan(y)
+                if np.sum(valid) < 2:
+                    slopes[i] = np.nan
+                else:
+                    x_valid = x[valid]
+                    y_valid = y[valid]
+                    slope = np.polyfit(x_valid, y_valid, 1)[0]
+                    slopes[i] = slope
+        return slopes
     
-    # Calculate 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    vol_slope_1d = linreg_slope(volume_1d, 5)
     
-    # Volume confirmation: volume > 1.5x 20-period moving average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma_20)
+    # Align all indicators to 1h timeframe
+    r1_1h = align_htf_to_ltf(prices, df_4h, r1)
+    s1_1h = align_htf_to_ltf(prices, df_4h, s1)
+    ema_20_4h_1h = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    vol_slope_1d_1h = align_htf_to_ltf(prices, df_1d, vol_slope_1d)
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        # Skip if any critical value is NaN
-        if (np.isnan(r1_4h_aligned[i]) or np.isnan(s1_4h_aligned[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_spike[i])):
+    for i in range(100, n):
+        # Skip if any critical value is NaN or outside session
+        if (np.isnan(r1_1h[i]) or np.isnan(s1_1h[i]) or 
+            np.isnan(ema_20_4h_1h[i]) or np.isnan(vol_slope_1d_1h[i]) or
+            not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Close > R1 (breakout above resistance) + above 12h EMA50 trend + volume spike
-            if close[i] > r1_4h_aligned[i] and close[i] > ema_50_12h_aligned[i] and volume_spike[i]:
-                signals[i] = 0.25
+            # Long: Close > R1 + above 4h EMA20 + positive volume slope
+            if close[i] > r1_1h[i] and close[i] > ema_20_4h_1h[i] and vol_slope_1d_1h[i] > 0:
+                signals[i] = 0.20
                 position = 1
-            # Short: Close < S1 (breakdown below support) + below 12h EMA50 trend + volume spike
-            elif close[i] < s1_4h_aligned[i] and close[i] < ema_50_12h_aligned[i] and volume_spike[i]:
-                signals[i] = -0.25
+            # Short: Close < S1 + below 4h EMA20 + negative volume slope
+            elif close[i] < s1_1h[i] and close[i] < ema_20_4h_1h[i] and vol_slope_1d_1h[i] < 0:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit: Close < R1 (break below resistance level) or trend reversal
-            if close[i] < r1_4h_aligned[i] or close[i] < ema_50_12h_aligned[i]:
+            # Exit: Close < S1 or below 4h EMA20
+            if close[i] < s1_1h[i] or close[i] < ema_20_4h_1h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit: Close > S1 (break above support level) or trend reversal
-            if close[i] > s1_4h_aligned[i] or close[i] > ema_50_12h_aligned[i]:
+            # Exit: Close > R1 or above 4h EMA20
+            if close[i] > r1_1h[i] or close[i] > ema_20_4h_1h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
