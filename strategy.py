@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_1d_Camarilla_S1R1_Breakout_VolumeTrend_v2"
-timeframe = "4h"
+name = "1d_1w_Donchian_Breakout_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,69 +17,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels from previous day
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Weekly Donchian channels (20-period high/low)
+    high_20 = pd.Series(df_1w['high']).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(df_1w['low']).rolling(window=20, min_periods=20).min().values
     
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
+    # Align weekly Donchian to daily timeframe
+    high_20_aligned = align_htf_to_ltf(prices, df_1w, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1w, low_20)
     
-    # Camarilla levels (focus on S1 and R1 for breakouts)
-    s1 = prev_close - (range_hl * 1.08 / 2)
-    r1 = prev_close + (range_hl * 1.08 / 2)
+    # Weekly trend filter: EMA(50) on weekly close
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Align daily levels to 4h timeframe
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    
-    # Daily trend filter: EMA(34) on daily close
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume spike detection: 6-period average (1.5 days of 4h bars)
-    vol_ma_6 = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
+    # Daily volume spike detection: 5-period average
+    vol_ma_5 = pd.Series(volume).rolling(window=5, min_periods=5).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 6)  # Wait for EMA and volume MA
+    start_idx = max(50, 5)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(vol_ma_6[i])):
+        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_5[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above S1 with volume and daily uptrend
-            vol_condition = volume[i] > vol_ma_6[i] * 2.0
-            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
+            # Long: price breaks above weekly high with volume and weekly uptrend
+            vol_condition = volume[i] > vol_ma_5[i] * 2.0
+            uptrend = ema_50_1w_aligned[i] > ema_50_1w_aligned[i-1]
             
-            if close[i] > s1_aligned[i] and vol_condition and uptrend:
+            if close[i] > high_20_aligned[i] and vol_condition and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below R1 with volume and daily downtrend
-            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
+            # Short: price breaks below weekly low with volume and weekly downtrend
+            elif close[i] < low_20_aligned[i] and vol_condition and not uptrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below S1 or volume drops significantly
-            if close[i] < s1_aligned[i] or volume[i] < vol_ma_6[i] * 0.8:
+            # Exit: price back below weekly low or volume drops
+            if close[i] < low_20_aligned[i] or volume[i] < vol_ma_5[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above R1 or volume drops significantly
-            if close[i] > r1_aligned[i] or volume[i] < vol_ma_6[i] * 0.8:
+            # Exit: price back above weekly high or volume drops
+            if close[i] > high_20_aligned[i] or volume[i] < vol_ma_5[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -87,14 +79,13 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 4h Camarilla S1/R1 breakout with daily trend and volume confirmation
-# - Daily Camarilla S1/R1 act as strong support/resistance levels
-# - Breakout above S1 with volume in daily uptrend = long opportunity
-# - Breakdown below R1 with volume in daily downtrend = short opportunity
+# Hypothesis: 1d Donchian breakout with weekly trend and volume confirmation
+# - Weekly Donchian (20-period) acts as major support/resistance
+# - Breakout above weekly high with volume in weekly uptrend = long opportunity
+# - Breakdown below weekly low with volume in weekly downtrend = short opportunity
 # - Volume spike (2.0x average) confirms institutional participation
-# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
-# - Exit when price returns to S1/R1 or volume weakens
-# - Position size 0.25 targets ~30-50 trades/year, avoiding fee drag
-# - Uses actual daily Camarilla levels (not weekly) for better responsiveness
-# - Designed to work in BOTH bull and bear markets via trend filter
-# - Tightened volume threshold to reduce trades and improve signal quality
+# - Weekly EMA(50) filter ensures we trade with the higher timeframe trend
+# - Works in both bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend)
+# - Exit when price returns to weekly low (for longs) or high (for shorts) or volume weakens
+# - Position size 0.25 targets ~15-25 trades/year, avoiding fee drag on daily timeframe
+# - Uses actual weekly Donchian channels from Binance data (no resampling)
