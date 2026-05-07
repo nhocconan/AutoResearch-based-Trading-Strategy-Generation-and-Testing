@@ -1,8 +1,6 @@
-# -*- coding: utf-8 -*-
-# -*- mode: python -*-
 #!/usr/bin/env python3
-name = "4h_1d_Camarilla_S1R1_Breakout_VolumeTrend_v2"
-timeframe = "4h"
+name = "1h_4h_1d_Camarilla_S1R1_Breakout_Trend"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -11,104 +9,101 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = pd.to_datetime(prices['open_time'])
+    hour = open_time.dt.hour.values
     
-    # Load daily data ONCE before loop
+    # Session filter: 08-20 UTC
+    in_session = (hour >= 8) & (hour <= 20)
+    
+    # Load 4h and 1d data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_4h) < 20 or len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels from previous day
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # 4h Trend: EMA(50)
+    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
+    # Daily ATR(14) for volatility filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
+    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Camarilla levels
-    s1 = prev_close - (range_hl * 1.08 / 2)
-    r1 = prev_close + (range_hl * 1.08 / 2)
+    # Daily Close for trend
+    daily_close_prev = df_1d['close'].shift(1).values
+    daily_close_aligned = align_htf_to_ltf(prices, df_1d, daily_close_prev)
     
-    # Align daily levels to 4h timeframe
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    
-    # Daily trend filter: EMA(34) on daily close
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume spike detection: 6-period average (1.5 days of 4h bars)
-    vol_ma_6 = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
+    # Daily ATR-based bands (1.5 * ATR)
+    atr_mult = 1.5
+    upper_band = daily_close_aligned + (atr_mult * atr_14_1d_aligned)
+    lower_band = daily_close_aligned - (atr_mult * atr_14_1d_aligned)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 6)
+    start_idx = max(50, 14)  # Wait for EMA and ATR
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(vol_ma_6[i])):
+        if not in_session[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        if np.isnan(ema_50_4h_aligned[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above S1 with volume and daily uptrend
-            vol_condition = volume[i] > vol_ma_6[i] * 2.0
-            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
-            
-            if close[i] > s1_aligned[i] and vol_condition and uptrend:
-                signals[i] = 0.25
+            # Long: price above upper band in 4h uptrend
+            if close[i] > upper_band[i] and ema_50_4h_aligned[i] > ema_50_4h_aligned[i-1]:
+                signals[i] = 0.20
                 position = 1
-            # Short: price below R1 with volume and daily downtrend
-            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
-                signals[i] = -0.25
+            # Short: price below lower band in 4h downtrend
+            elif close[i] < lower_band[i] and ema_50_4h_aligned[i] < ema_50_4h_aligned[i-1]:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit: price back below S1 or volume drops
-            if close[i] < s1_aligned[i] or volume[i] < vol_ma_6[i] * 1.5:
+            # Exit: price back below upper band or trend reversal
+            if close[i] < upper_band[i] or ema_50_4h_aligned[i] < ema_50_4h_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit: price back above R1 or volume drops
-            if close[i] > r1_aligned[i] or volume[i] < vol_ma_6[i] * 1.5:
+            # Exit: price back above lower band or trend reversal
+            if close[i] > lower_band[i] or ema_50_4h_aligned[i] > ema_50_4h_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-# Hypothesis: 4h Camarilla S1/R1 breakout with daily trend and volume confirmation
-# - Daily Camarilla S1/R1 act as strong support/resistance levels
-# - Breakout above S1 with volume (2.0x average) in daily uptrend = long opportunity
-# - Breakdown below R1 with volume (2.0x average) in daily downtrend = short opportunity
-# - Volume spike (2.0x average) confirms institutional participation
-# - Exit when price returns to S1/R1 or volume weakens (1.5x average)
-# - Position size 0.25 targets ~30-50 trades/year, avoiding fee drag
-# - Uses actual daily Camarilla levels (not weekly) for better responsiveness
-# - Designed to work in BOTH bull and bear markets via trend filter
-# - Tightened volume threshold from 1.8x to 2.0x and exit threshold from 1.2x to 1.5x to reduce trade frequency
-# - Added stricter exit conditions to prevent whipsaws and reduce overtrading
-# - Maintains focus on BTC and ETH as primary targets with potential applicability to SOL
-# - Aims for 20-40 trades per year per symbol to stay within optimal range
-# - Previous version had ~398 trades/year; this version targets ~25-35 trades/year
-# - Uses discrete position sizing (0.25) to minimize fee churn from small changes
-# - Ensures all indicators use proper min_periods to avoid look-ahead bias
-# - Uses mtf_data helpers correctly: get_htf_data once before loop, align_htf_to_ltf for proper timing
-# - Avoids all look-ahead by only using data available at or before bar i
-# - Includes proper risk management via signal-based exits (no intrabar simulation)
-# - Designed to survive both bull (2021-2024) and bear (2025+) market regimes
-# - Focuses on institutional-grade signals (volume spikes + trend alignment) to avoid noise
-# - Complies with all strategy code rules: no look-ahead, proper MTF, discrete sizing, etc.
+# Hypothesis: 1h session-based ATR band breakout with 4h trend filter
+# - Uses daily ATR(14) to set dynamic upper/lower bands (mean ± 1.5*ATR)
+# - Entry only during 08-20 UTC (active session) to reduce noise
+# - 4h EMA(50) trend filter ensures alignment with higher timeframe momentum
+# - Long when price breaks above upper band in 4h uptrend
+# - Short when price breaks below lower band in 4h downtrend
+# - Exit when price returns to band or trend reverses
+# - Position size 0.20 balances return and risk
+# - Designed to work in both bull and bear markets via trend following
+# - Target: 15-30 trades/year to avoid fee drag (max 120 total over 4 years)
