@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6H_Camarilla_R3S3_1DTrend_VolumeSpike"
-timeframe = "6h"
+name = "12H_Camarilla_R3_S3_1DTrend_VolumeSpike_v19"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -17,9 +17,9 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 6h data for structure (R3/S3 levels)
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 2:
+    # Get 12h data for structure (R3/S3 levels)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
     # Get 1d data for trend filter
@@ -31,17 +31,17 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate previous 6h bar's high, low, close for Camarilla levels
-    prev_high = df_6h['high'].values
-    prev_low = df_6h['low'].values
-    prev_close = df_6h['close'].values
+    # Calculate previous 12h bar's high, low, close for Camarilla levels
+    prev_high = df_12h['high'].values
+    prev_low = df_12h['low'].values
+    prev_close = df_12h['close'].values
     
     # Calculate Camarilla levels: R3 and S3 (correct formula)
     r3 = prev_close + 1.1 * (prev_high - prev_low) * 1.1 / 2
     s3 = prev_close - 1.1 * (prev_high - prev_low) * 1.1 / 2
     
-    r3_aligned = align_htf_to_ltf(prices, df_6h, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_6h, s3)
+    r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
     
     # Volume filter: current volume > 2.0x average volume (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -91,12 +91,12 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: Price returns to the middle of the prior 6h range (H4/L4)
+            # Exit: Price returns to the middle of the prior 12h range (H4/L4)
             # H4 = close + 1.1*(high-low)*1.1/6, L4 = close - 1.1*(high-low)*1.1/6
             h4 = prev_close + 1.1 * (prev_high - prev_low) * 1.1 / 6
             l4 = prev_close - 1.1 * (prev_high - prev_low) * 1.1 / 6
-            h4_aligned = align_htf_to_ltf(prices, df_6h, h4)
-            l4_aligned = align_htf_to_ltf(prices, df_6h, l4)
+            h4_aligned = align_htf_to_ltf(prices, df_12h, h4)
+            l4_aligned = align_htf_to_ltf(prices, df_12h, l4)
             
             camarilla_mid = (h4_aligned[i] + l4_aligned[i]) / 2
             at_mid = abs(close[i] - camarilla_mid) < (h4_aligned[i] - l4_aligned[i]) * 0.25  # Within 25% of range
