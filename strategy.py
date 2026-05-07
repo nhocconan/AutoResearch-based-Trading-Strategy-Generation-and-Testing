@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 1D_KAMA_Reversal_With_Volume_Filter
-# Hypothesis: Uses Kaufman Adaptive Moving Average (KAMA) to detect trend reversals, combined with volume spikes and RSI confirmation for high-probability entries. Designed to work in both bull and bear markets by avoiding whipsaws through adaptive smoothing and volume confirmation. Target: 10-25 trades/year on 1d timeframe to minimize fee drag while capturing major reversals.
+# 6h_Aroon_BullBear_Trend_With_Volume
+# Hypothesis: Uses Aroon Oscillator on 6h to detect early trend changes (strength of uptrend/downtrend), confirmed by 1d EMA50 trend and volume spike. Designed to capture trending moves in both bull and bear markets with low trade frequency to minimize fee drag. Aroon helps identify when a new trend is starting, reducing whipsaw in choppy markets.
 
-name = "1D_KAMA_Reversal_With_Volume_Filter"
-timeframe = "1d"
+timeframe = "6h"
+name = "6h_Aroon_BullBear_Trend_With_Volume"
 leverage = 1.0
 
 import numpy as np
@@ -20,68 +20,48 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) == 0:
+    # Get daily data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) == 0:
         return np.zeros(n)
     
-    # Calculate weekly EMA21 for trend filter
-    ema_21_1w = pd.Series(df_1w['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    # Calculate EMA50 on daily closes
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate KAMA ( Kaufman Adaptive Moving Average )
-    # Parameters: ER length=10, Fast SC=2/(2+1), Slow SC=2/(30+1)
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0) if False else None  # placeholder
+    # Aroon Oscillator (25-period) on 6h data
+    # Aroon Up = ((25 - periods since 25-period high) / 25) * 100
+    # Aroon Down = ((25 - periods since 25-period low) / 25) * 100
+    # Aroon Oscillator = Aroon Up - Aroon Down
+    period = 25
+    aroon_up = np.full(n, np.nan)
+    aroon_down = np.full(n, np.nan)
     
-    # Proper volatility calculation: sum of absolute changes over ER period
-    er_period = 10
-    change_arr = np.abs(np.diff(close, prepend=close[0]))
-    volatility_arr = np.zeros_like(change)
-    for i in range(len(change)):
-        if i < er_period:
-            volatility_arr[i] = np.sum(change_arr[max(0, i-er_period+1):i+1])
-        else:
-            volatility_arr[i] = np.sum(change_arr[i-er_period+1:i+1])
+    for i in range(period - 1, n):
+        # Find highest high and lowest low in the last 'period' bars
+        window_high = high[i - period + 1:i + 1]
+        window_low = low[i - period + 1:i + 1]
+        # Find index of max high and min low (most recent if tie)
+        high_idx = i - np.argmax(window_high[::-1])  # argmax from reversed gives most recent
+        low_idx = i - np.argmin(window_low[::-1])
+        periods_since_high = i - high_idx
+        periods_since_low = i - low_idx
+        aroon_up[i] = ((period - periods_since_high) / period) * 100
+        aroon_down[i] = ((period - periods_since_low) / period) * 100
     
-    # Avoid division by zero
-    er = np.where(volatility_arr != 0, change_arr / volatility_arr, 0)
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    aroon_osc = aroon_up - aroon_down  # Range: -100 to +100
     
-    # Initialize KAMA
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # Calculate RSI for confirmation
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
-    for i in range(14, n):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Volume spike detection: 1.5x average volume (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume spike detection: 1.5x average volume (72-period = 3 days on 6h chart)
+    vol_ma = pd.Series(volume).rolling(window=72, min_periods=72).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 21)  # Ensure we have volume MA, RSI, and EMA data
+    start_idx = max(72, 50, period - 1)  # Ensure we have all data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(ema_21_1w_aligned[i]) or 
+        if (np.isnan(aroon_osc[i]) or np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
@@ -89,24 +69,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price crosses above KAMA with volume spike and RSI > 50, weekly uptrend
-            if close[i] > kama[i] and close[i-1] <= kama[i-1] and volume[i] > 1.5 * vol_ma[i] and rsi[i] > 50 and close[i] > ema_21_1w_aligned[i]:
+            # Long: Aroon > 50 (strong uptrend) + volume spike + 1d uptrend
+            if aroon_osc[i] > 50 and volume[i] > 1.5 * vol_ma[i] and close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price crosses below KAMA with volume spike and RSI < 50, weekly downtrend
-            elif close[i] < kama[i] and close[i-1] >= kama[i-1] and volume[i] > 1.5 * vol_ma[i] and rsi[i] < 50 and close[i] < ema_21_1w_aligned[i]:
+            # Short: Aroon < -50 (strong downtrend) + volume spike + 1d downtrend
+            elif aroon_osc[i] < -50 and volume[i] > 1.5 * vol_ma[i] and close[i] < ema_50_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price crosses below KAMA or trend failure
-            if close[i] < kama[i] or close[i] < ema_21_1w_aligned[i]:
+            # Exit: Aroon turns negative (trend weakness) or 1d trend fails
+            if aroon_osc[i] < 0 or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price crosses above KAMA or trend failure
-            if close[i] > kama[i] or close[i] > ema_21_1w_aligned[i]:
+            # Exit: Aroon turns positive (trend weakness) or 1d trend fails
+            if aroon_osc[i] > 0 or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
