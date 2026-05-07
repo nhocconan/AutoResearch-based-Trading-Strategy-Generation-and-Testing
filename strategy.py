@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_KAMA_TRIX_Confluence"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,63 +17,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and pivot levels
+    # Get 1d data for KAMA and TRIX
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 1d EMA34 for trend filter
-    ema_34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
-    
-    # Calculate 1d Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate KAMA on 1d close
     close_1d = df_1d['close'].values
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    volatility = np.abs(np.diff(close_1d)).cumsum()
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (0.6667 - 0.0645) + 0.0645) ** 2
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    kama_1d = kama
     
-    range_1d = high_1d - low_1d
-    r1_1d = close_1d + 1.083 * range_1d * 1.1 / 2
-    s1_1d = close_1d - 1.083 * range_1d * 1.1 / 2
+    # Calculate TRIX on 1d close (15-period EMA of EMA of EMA)
+    ema1 = pd.Series(close_1d).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
+    trix = np.diff(ema3, prepend=ema3[0]) / ema3 * 100
     
-    # Align 1d R1/S1 to 12h timeframe
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Align KAMA and TRIX to 4h timeframe
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
+    trix_1d_aligned = align_htf_to_ltf(prices, df_1d, trix)
     
-    # Volume filter: current volume > 2.0 * 20-period average
+    # Volume filter: current volume > 1.5 * 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_avg * 2.0)
+    volume_filter = volume > (vol_avg * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 34)
+    start_idx = max(30, 30)
     
     for i in range(start_idx, n):
-        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or np.isnan(vol_avg[i]):
+        if np.isnan(kama_1d_aligned[i]) or np.isnan(trix_1d_aligned[i]) or np.isnan(vol_avg[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R1 + uptrend (1d EMA34) + volume
-            if close[i] > r1_1d_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_filter[i]:
+            # Long: price > KAMA AND TRIX > 0 (bullish momentum) + volume
+            if close[i] > kama_1d_aligned[i] and trix_1d_aligned[i] > 0 and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + downtrend (1d EMA34) + volume
-            elif close[i] < s1_1d_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_filter[i]:
+            # Short: price < KAMA AND TRIX < 0 (bearish momentum) + volume
+            elif close[i] < kama_1d_aligned[i] and trix_1d_aligned[i] < 0 and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: price crosses back through the pivot level
+            # Exit: price crosses KAMA in opposite direction
             if position == 1:
-                if close[i] < s1_1d_aligned[i]:
+                if close[i] < kama_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > r1_1d_aligned[i]:
+                if close[i] > kama_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
