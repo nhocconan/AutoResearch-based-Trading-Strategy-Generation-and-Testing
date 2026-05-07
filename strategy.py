@@ -1,16 +1,12 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-"""
-12h_1dKAMA_RSI_Chop_Filter
-KAMA trend direction + RSI momentum + Choppiness regime filter.
-Long when KAMA rising, RSI > 50, and choppy market (CHOP > 61.8).
-Short when KAMA falling, RSI < 50, and choppy market (CHOP > 61.8).
-Uses daily timeframe for KAMA and RSI, 12h for execution.
-Designed to work in both bull and bear markets by avoiding strong trends.
-"""
+# 4h_12hCAMARILLA_R1S1_BREAKOUT_12HTREND_VOLUME
+# Breakout above CAMARILLA_R1S1 (1d) with 12h EMA50 trend and volume confirmation.
+# Long when price breaks above R1S1 in uptrend, short when breaks below S1S1 in downtrend.
+# Uses volume spike and minimum holding period to reduce churn. Designed for 4h timeframe
+# to work in both bull and bear markets via trend filter and volatility-based entries.
 
-name = "12h_1dKAMA_RSI_Chop_Filter"
-timeframe = "12h"
+name = "4h_12hCAMARILLA_R1S1_BREAKOUT_12HTREND_VOLUME"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -27,69 +23,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for KAMA and RSI
+    # Get daily data for CAMARILLA levels and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily KAMA (ER=10, fast=2, slow=30)
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
+    
+    # Calculate CAMARILLA levels from previous day
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
     close_1d = df_1d['close'].values
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0)  # Will be calculated properly below
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Proper ER calculation
-    er = np.zeros_like(close_1d)
-    for i in range(1, len(close_1d)):
-        direction = abs(close_1d[i] - close_1d[i-9]) if i >= 9 else abs(close_1d[i] - close_1d[0])
-        volatility_sum = np.sum(np.abs(np.diff(close_1d[max(0,i-9):i+1]))) if i >= 9 else np.sum(np.abs(np.diff(close_1d[:i+1])))
-        er[i] = direction / volatility_sum if volatility_sum > 0 else 0
+    # Shift by 1 to use previous day's data (no look-ahead)
+    R1 = np.roll(close_1d + (high_1d - low_1d) * 1.1 / 12, 1)
+    S1 = np.roll(close_1d - (high_1d - low_1d) * 1.1 / 12, 1)
+    R1[0] = np.nan
+    S1[0] = np.nan
     
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # Calculate 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate daily RSI(14)
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Align indicators to 4h timeframe
+    R1_4h = align_htf_to_ltf(prices, df_1d, R1)
+    S1_4h = align_htf_to_ltf(prices, df_1d, S1)
+    ema_50_12h_4h = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Calculate daily Choppiness Index(14)
-    atr = np.zeros_like(close_1d)
-    tr1 = np.abs(np.diff(high))
-    tr2 = np.abs(np.diff(low))
-    tr3 = np.abs(np.diff(close_1d))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    
-    chop = np.zeros_like(close_1d)
-    for i in range(13, len(close_1d)):
-        if atr[i] > 0 and (max_high[i] - min_low[i]) > 0:
-            chop[i] = 100 * np.log10(atr[i] / (max_high[i] - min_low[i])) / np.log10(14)
-        else:
-            chop[i] = 50
-    
-    # Align indicators to 12h timeframe
-    kama_12h = align_htf_to_ltf(prices, df_1d, kama)
-    rsi_12h = align_htf_to_ltf(prices, df_1d, rsi)
-    chop_12h = align_htf_to_ltf(prices, df_1d, chop)
+    # Volume filter: 20-period MA on 4h
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma_20)  # Volume at least 2x average
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_entry = 0
+    bars_since_entry = 0  # Track holding period
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Skip if any critical value is NaN
-        if (np.isnan(kama_12h[i]) or np.isnan(rsi_12h[i]) or np.isnan(chop_12h[i])):
+        if (np.isnan(R1_4h[i]) or np.isnan(S1_4h[i]) or 
+            np.isnan(ema_50_12h_4h[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -99,27 +75,29 @@ def generate_signals(prices):
         bars_since_entry += 1
         
         if position == 0:
-            # Long: KAMA rising, RSI > 50, choppy market (CHOP > 61.8)
-            if kama_12h[i] > kama_12h[i-1] and rsi_12h[i] > 50 and chop_12h[i] > 61.8:
+            # Long: price breaks above R1 with uptrend and volume
+            if close[i] > R1_4h[i] and close[i] > ema_50_12h_4h[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
                 bars_since_entry = 0
-            # Short: KAMA falling, RSI < 50, choppy market (CHOP > 61.8)
-            elif kama_12h[i] < kama_12h[i-1] and rsi_12h[i] < 50 and chop_12h[i] > 61.8:
+            # Short: price breaks below S1 with downtrend and volume
+            elif close[i] < S1_4h[i] and close[i] < ema_50_12h_4h[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
                 bars_since_entry = 0
         elif position == 1:
-            # Exit: KAMA falling or RSI < 50 or chop < 61.8 (trending market)
-            if bars_since_entry >= 2 and (kama_12h[i] < kama_12h[i-1] or rsi_12h[i] < 50 or chop_12h[i] < 61.8):
+            # Exit: price returns below EMA50 or breaks below S1
+            # Minimum holding period of 3 bars to reduce churn
+            if bars_since_entry >= 3 and (close[i] < ema_50_12h_4h[i] or close[i] < S1_4h[i]):
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: KAMA rising or RSI > 50 or chop < 61.8 (trending market)
-            if bars_since_entry >= 2 and (kama_12h[i] > kama_12h[i-1] or rsi_12h[i] > 50 or chop_12h[i] < 61.8):
+            # Exit: price returns above EMA50 or breaks above R1
+            # Minimum holding period of 3 bars to reduce churn
+            if bars_since_entry >= 3 and (close[i] > ema_50_12h_4h[i] or close[i] > R1_4h[i]):
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
