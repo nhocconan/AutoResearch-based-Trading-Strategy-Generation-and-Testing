@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dTrend_Volume
-Hypothesis: Enter long/short when price breaks above/below daily Camarilla R1/S1 levels on 12h timeframe with volume confirmation (>2x 20-bar average) and in direction of daily EMA34 trend. Exit when price crosses opposite Camarilla level or volume drops below average. Designed for low trade frequency (~15-30/year) to minimize fee flood. Works in both bull and bear markets by aligning with daily trend.
+4h_Camarilla_R1S1_Breakout_1dTrend_Volume
+Hypothesis: Enter long/short when price breaks above/below daily Camarilla R1/S1 levels on 4h timeframe with volume confirmation (>2x 20-bar average) and in direction of daily EMA34 trend. Exit when price crosses opposite Camarilla level or volume drops below average. Designed for low trade frequency (~20-40/year) to minimize flood. Works in both bull and bear markets by aligning with daily trend.
 """
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -36,7 +36,7 @@ def generate_signals(prices):
     prev_daily_low = df_1d['low'].shift(1).values
     prev_daily_close = df_1d['close'].shift(1).values
     
-    # Align previous day's OHLC to 12h timeframe
+    # Align previous day's OHLC to 4h timeframe
     prev_daily_high_aligned = align_htf_to_ltf(prices, df_1d, prev_daily_high)
     prev_daily_low_aligned = align_htf_to_ltf(prices, df_1d, prev_daily_low)
     prev_daily_close_aligned = align_htf_to_ltf(prices, df_1d, prev_daily_close)
