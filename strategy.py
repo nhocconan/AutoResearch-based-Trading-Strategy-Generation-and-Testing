@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_PivotPoint_Reversal_1dTrend
-Hypothesis: Daily pivot points act as significant support/resistance levels. Price rejection at these levels with 1d trend filter and volume confirmation captures reversals. Works in both bull and bear markets as pivot levels adapt to price action. 4h timeframe balances trade frequency and signal quality. Target: 20-50 trades/year.
+4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: Camarilla pivot levels derived from the daily (1D) range provide strong intraday support/resistance levels. 
+A breakout above R1 or below S1, aligned with the 1D trend (EMA34), and confirmed by volume spikes, captures directional momentum. 
+This strategy avoids overtrading by requiring multiple confluence factors and uses the 4H timeframe for lower trade frequency.
+The 1D EMA34 trend filter ensures alignment with the higher timeframe direction, reducing false signals in choppy markets.
+Volume confirmation adds conviction to breakouts.
+Target: 20-50 trades per year (80-200 over 4 years).
 """
-name = "4h_PivotPoint_Reversal_1dTrend"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -21,77 +26,69 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot points and trend
+    # Get 1D data for Camarilla calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate daily pivot points: P = (H + L + C)/3
-    # Resistance: R1 = 2*P - L, R2 = P + (H - L)
-    # Support: S1 = 2*P - H, S2 = P - (H - L)
+    # Calculate Camarilla levels from previous day's range
+    # Camarilla: R1 = close + (high - low) * 1.1 / 12, S1 = close - (high - low) * 1.1 / 12
+    # We use the previous day's OHLC to avoid look-ahead
     daily_high = df_1d['high'].values
     daily_low = df_1d['low'].values
     daily_close = df_1d['close'].values
     
-    pivot = (daily_high + daily_low + daily_close) / 3
-    r1 = 2 * pivot - daily_low
-    s1 = 2 * pivot - daily_high
-    r2 = pivot + (daily_high - daily_low)
-    s2 = pivot - (daily_high - daily_low)
+    # Calculate R1 and S1 for each day
+    r1 = daily_close + (daily_high - daily_low) * 1.1 / 12
+    s1 = daily_close - (daily_high - daily_low) * 1.1 / 12
     
-    # Align pivot levels to 4h timeframe (use previous day's levels)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    # Align these levels to the 4H timeframe (they are valid for the entire day after the daily close)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
-    # 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # 1D EMA34 for trend filter (using daily close)
+    ema_34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume filter: current volume > 1.3 * 24-period average (approx 2 days)
-    vol_avg = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_filter = volume > (vol_avg * 1.3)
+    # Volume filter: current volume > 2.0 * 20-period average (on 4H)
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_avg * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 24  # Need volume average
+    start_idx = 34  # Need enough data for EMA
     
     for i in range(start_idx, n):
         # Skip if any data is not ready
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(vol_avg[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price rejects S1 or S2 (bounces off support) + 1d uptrend + volume
-            if ((close[i] > s1_aligned[i] and close[i-1] <= s1_aligned[i-1]) or
-                (close[i] > s2_aligned[i] and close[i-1] <= s2_aligned[i-1])) and \
-               close[i] > ema_50_1d_aligned[i] and volume_filter[i]:
+            # Long: price breaks above R1 + 1D uptrend + volume spike
+            if close[i] > r1_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price rejects R1 or R2 (fails at resistance) + 1d downtrend + volume
-            elif ((close[i] < r1_aligned[i] and close[i-1] >= r1_aligned[i-1]) or
-                  (close[i] < r2_aligned[i] and close[i-1] >= r2_aligned[i-1])) and \
-                  close[i] < ema_50_1d_aligned[i] and volume_filter[i]:
+            # Short: price breaks below S1 + 1D downtrend + volume spike
+            elif close[i] < s1_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: price crosses pivot point (mean reversion to daily average)
+            # Exit: price returns to the opposite Camarilla level or crosses the EMA
             if position == 1:
-                if close[i] <= pivot_aligned[i]:
+                # Exit long if price breaks below S1 or crosses below EMA
+                if close[i] < s1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] >= pivot_aligned[i]:
+                # Exit short if price breaks above R1 or crosses above EMA
+                if close[i] > r1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
