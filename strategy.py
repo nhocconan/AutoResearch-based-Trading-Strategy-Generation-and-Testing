@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_Weekly_Pivot_Breakout_Trend_Filter_v1
-Hypothesis: On 1d timeframe, buy when price breaks above weekly pivot R1 with weekly uptrend (weekly close > weekly EMA20); sell when breaks below weekly pivot S1 with weekly downtrend (weekly close < weekly EMA20). Uses weekly EMA20 for trend filter to avoid whipsaws. Designed for low trade frequency (<25/year) to minimize fee drag and work in both bull and bear markets.
+6h_Donchian20_WeeklyPivotDirection_Volume
+Hypothesis: On 6h timeframe, buy when price breaks above 20-period Donchian high with weekly pivot support (price > weekly pivot) and volume confirmation; sell when breaks below 20-period Donchian low with weekly pivot resistance (price < weekly pivot) and volume confirmation. Uses weekly pivot for trend filter to avoid whipsaws and volume spike for confirmation. Weekly pivot calculated from prior week's OHLC. Designed to work in both bull and bear markets by using weekly pivot as dynamic support/resistance and Donchian breakouts for trend continuation.
 """
-name = "1d_Weekly_Pivot_Breakout_Trend_Filter_v1"
-timeframe = "1d"
+name = "6h_Donchian20_WeeklyPivotDirection_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -13,76 +13,90 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for pivot and trend filter
+    # Get weekly data for pivot calculation
     df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 20:
+    if len(df_weekly) < 1:
         return np.zeros(n)
     
-    close_weekly = df_weekly['close'].values
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
+    # Calculate weekly pivot points from previous week's OHLC
+    # Pivot = (High + Low + Close) / 3
+    weekly_high = df_weekly['high'].shift(1).values
+    weekly_low = df_weekly['low'].shift(1).values
+    weekly_close = df_weekly['close'].shift(1).values
     
-    # Calculate weekly EMA20 for trend filter
-    ema20_weekly = pd.Series(close_weekly).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema20_weekly)
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
     
-    # Calculate weekly pivot points (standard formula)
-    # Pivot = (H + L + C) / 3
-    # R1 = 2*P - L
-    # S1 = 2*P - H
-    pivot_weekly = (high_weekly + low_weekly + close_weekly) / 3.0
-    r1_weekly = 2 * pivot_weekly - low_weekly
-    s1_weekly = 2 * pivot_weekly - high_weekly
+    # Align weekly pivot to 6h timeframe
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_weekly, weekly_pivot)
     
-    # Align weekly pivot levels to daily timeframe
-    r1_weekly_aligned = align_htf_to_ltf(prices, df_weekly, r1_weekly)
-    s1_weekly_aligned = align_htf_to_ltf(prices, df_weekly, s1_weekly)
+    # Calculate Donchian channels (20-period)
+    lookback = 20
+    donchian_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    donchian_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    
+    # Volume filter: current volume > 1.5 * 20-period average volume
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_avg * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    bars_since_entry = 0
     
-    start_idx = 20  # Ensure sufficient warmup for weekly EMA20
+    start_idx = max(lookback, 20)  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
+        bars_since_entry += 1
+        
         # Skip if any data is not ready
-        if (np.isnan(ema20_weekly_aligned[i]) or 
-            np.isnan(r1_weekly_aligned[i]) or 
-            np.isnan(s1_weekly_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(weekly_pivot_aligned[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
             continue
         
         if position == 0:
-            # Long: price breaks above weekly R1 + weekly uptrend
-            if (close[i] > r1_weekly_aligned[i] and 
-                close[i] > ema20_weekly_aligned[i]):
+            # Minimum 10 bars between trades to reduce frequency (6h timeframe)
+            if bars_since_entry < 10:
+                continue
+                
+            # Long: price breaks above Donchian high + price above weekly pivot + volume filter
+            if (close[i] > donchian_high[i] and 
+                close[i] > weekly_pivot_aligned[i] and 
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly S1 + weekly downtrend
-            elif (close[i] < s1_weekly_aligned[i] and 
-                  close[i] < ema20_weekly_aligned[i]):
+                bars_since_entry = 0
+            # Short: price breaks below Donchian low + price below weekly pivot + volume filter
+            elif (close[i] < donchian_low[i] and 
+                  close[i] < weekly_pivot_aligned[i] and 
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
+                bars_since_entry = 0
         elif position != 0:
-            # Exit: price returns to opposite weekly pivot level
+            # Exit: price returns to opposite Donchian level
             if position == 1:
-                if close[i] < s1_weekly_aligned[i]:
+                if close[i] < donchian_low[i]:
                     signals[i] = 0.0
                     position = 0
+                    bars_since_entry = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > r1_weekly_aligned[i]:
+                if close[i] > donchian_high[i]:
                     signals[i] = 0.0
                     position = 0
+                    bars_since_entry = 0
                 else:
                     signals[i] = -0.25
     
