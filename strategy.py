@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
-name = "1d_Camarilla_R3_S3_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume_v2"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -18,20 +18,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and volume
+    # Get 1d data for Camarilla levels and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # 1w EMA20 for trend filter
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate Camarilla levels from previous 1d bar
     prev_close = df_1d['close'].shift(1).values
@@ -41,11 +36,11 @@ def generate_signals(prices):
     R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
     S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     
-    # Align Camarilla levels to 1d timeframe
+    # Align Camarilla levels to 12h timeframe
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
-    # Volume filter: current volume > 1.5x 20-period average (using 1d volume)
+    # Volume filter: current volume > 1.5x 20-period average
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-20:i])
@@ -54,13 +49,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 3  # Prevent overtrading (approx 3 days for 1d)
+    cooldown_bars = 6  # Prevent overtrading (approx 3 days for 12h)
     
-    start_idx = max(20, 2)  # Warmup for volume MA
+    start_idx = max(20, 34)  # Warmup for volume MA and EMA
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_20_1w_aligned[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(R3_aligned[i]) or 
             np.isnan(S3_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
@@ -74,28 +69,29 @@ def generate_signals(prices):
         
         bars_since_last_trade += 1
         
-        # Determine 1w trend direction
-        trend_1w_up = close[i] > ema_20_1w_aligned[i]
-        trend_1w_down = close[i] < ema_20_1w_aligned[i]
+        # Determine 1d trend direction
+        close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
+        trend_1d_up = close_1d_aligned[i] > ema_34_1d_aligned[i]
+        trend_1d_down = close_1d_aligned[i] < ema_34_1d_aligned[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: breakout above R3 in 1w uptrend with volume filter
-            if (close[i] >= R3_aligned[i] * 0.995 and  # Allow 0.5% tolerance
-                trend_1w_up and 
+            # Long: breakout above R3 in 1d uptrend with volume filter
+            if (close[i] >= R3_aligned[i] and 
+                trend_1d_up and 
                 vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: breakdown below S3 in 1w downtrend with volume filter
-            elif (close[i] <= S3_aligned[i] * 1.005 and  # Allow 0.5% tolerance
-                  trend_1w_down and 
+            # Short: breakdown below S3 in 1d downtrend with volume filter
+            elif (close[i] <= S3_aligned[i] and 
+                  trend_1d_down and 
                   vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
             # Exit conditions: price closes below S3 OR trend change
-            if (close[i] <= S3_aligned[i] * 1.005 or not trend_1w_up):
+            if (close[i] <= S3_aligned[i] or not trend_1d_up):
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
@@ -103,7 +99,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         elif position == -1:
             # Exit conditions: price closes above R3 OR trend change
-            if (close[i] >= R3_aligned[i] * 0.995 or not trend_1w_down):
+            if (close[i] >= R3_aligned[i] or not trend_1d_down):
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
