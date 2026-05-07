@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 12h_WilsonBreakout_1wTrend_VolumeFilter
-# Hypothesis: Use weekly trend (price above/below 200 EMA) to filter 12h Wilson (breakout of 12h high/low over 20 periods) with volume confirmation (1.5x 50-period volume average). Target: 15-30 trades/year per symbol. Wilson channels adapt to volatility, providing dynamic support/resistance. Works in bull (breakouts with trend) and bear (fades from extremes with volume). Weekly trend filter reduces whipsaws.
+# 4H_Camarilla_R3S3_1DTrend_Volume_Signal_v5
+# Hypothesis: Refine proven Camarilla R3/S3 breakout with volume confirmation and trend filter. Use 4h timeframe with 1d HTF for levels and trend. Target 20-40 trades/year by requiring volume > 2.0x 20-period average and price > 100 EMA for trend filter. Focus on high-probability breakouts in both bull and bear markets with controlled trade frequency.
 
-name = "12h_WilsonBreakout_1wTrend_VolumeFilter"
-timeframe = "12h"
+name = "4H_Camarilla_R3S3_1DTrend_Volume_Signal_v5"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -20,64 +20,69 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) == 0:
+    # Get daily data for Camarilla pivot calculation and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) == 0:
         return np.zeros(n)
     
-    # Weekly 200 EMA for trend filter
-    close_1w = df_1w['close'].values
-    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    # Calculate Camarilla R3 and S3 levels from previous daily period's OHLC
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Wilson channels: 20-period high/low on 12h
-    period = 20
-    # Calculate rolling max/min using pandas for efficiency
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    wilson_high = high_series.rolling(window=period, min_periods=period).max().values
-    wilson_low = low_series.rolling(window=period, min_periods=period).min().values
+    # Calculate Camarilla R3 and S3 levels
+    hl_range = high_1d - low_1d
+    r3_1d = close_1d + 1.1 * hl_range / 2
+    s3_1d = close_1d - 1.1 * hl_range / 2
     
-    # Volume confirmation: 1.5x 50-period average
-    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    # Align all levels to 4h timeframe (use previous daily period's levels)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    
+    # Calculate EMA100 for trend filter (daily)
+    ema100_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
+    ema100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema100_1d)
+    
+    # Volume spike detection: 2.0x average volume (20-period for responsiveness)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(200, 50)  # Ensure we have weekly EMA and volume MA data
+    start_idx = max(100, 20)  # Ensure we have volume MA and EMA100 data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(ema200_1w_aligned[i]) or np.isnan(wilson_high[i]) or 
-            np.isnan(wilson_low[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
+            np.isnan(ema100_1d_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above Wilson high, above weekly EMA200 (uptrend), volume spike
-            if (close[i] > wilson_high[i] and 
-                close[i] > ema200_1w_aligned[i] and 
-                volume[i] > 1.5 * vol_ma[i]):
+            # Long: price breaks above daily R3, price above daily EMA100 (uptrend), volume spike (>2.0x)
+            if (close[i] > r3_1d_aligned[i] and 
+                close[i] > ema100_1d_aligned[i] and 
+                volume[i] > 2.0 * vol_ma[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Wilson low, below weekly EMA200 (downtrend), volume spike
-            elif (close[i] < wilson_low[i] and 
-                  close[i] < ema200_1w_aligned[i] and 
-                  volume[i] > 1.5 * vol_ma[i]):
+            # Short: price breaks below daily S3, price below daily EMA100 (downtrend), volume spike (>2.0x)
+            elif (close[i] < s3_1d_aligned[i] and 
+                  close[i] < ema100_1d_aligned[i] and 
+                  volume[i] > 2.0 * vol_ma[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price returns to or below Wilson low (opposite boundary)
-            if close[i] <= wilson_low[i]:
+            # Exit: price returns to or below daily S3 (opposite level)
+            if close[i] <= s3_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price returns to or above Wilson high (opposite boundary)
-            if close[i] >= wilson_high[i]:
+            # Exit: price returns to or above daily R3 (opposite level)
+            if close[i] >= r3_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
