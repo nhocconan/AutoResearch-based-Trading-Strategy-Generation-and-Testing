@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_MultiTF_Momentum_Aligned_1dTrend_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,44 +17,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and momentum
+    # Get 1d data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 1d EMA50 trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate Camarilla pivot levels from previous 1d OHLC
+    # Camarilla: R4 = C + ((H-L) * 1.1/2), R3 = C + ((H-L) * 1.1/4)
+    #          S3 = C - ((H-L) * 1.1/4), S4 = C - ((H-L) * 1.1/2)
+    # We use R3 and S3 as key levels
+    prev_close = df_1d['close'].values
+    prev_high = df_1d['high'].values
+    prev_low = df_1d['low'].values
     
-    # 1d RSI(14) momentum
-    delta = np.diff(df_1d['close'].values)
-    up = np.where(delta > 0, delta, 0)
-    down = np.where(delta < 0, -delta, 0)
-    roll_up = pd.Series(up).ewm(alpha=1/14, adjust=False).values
-    roll_down = pd.Series(down).ewm(alpha=1/14, adjust=False).values
-    rs = roll_up / (roll_down + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     
-    # 6h Bollinger Bands for mean reversion in ranging markets
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    bb_upper = sma_20 + 2 * std_20
-    bb_lower = sma_20 - 2 * std_20
+    # Align Camarilla levels to 12h timeframe (previous day's levels available at 12h open)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    # 20-period EMA on weekly close for trend filter
+    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    
+    # Volume filter: current volume > 1.5x 20-period average (for 12h)
+    vol_ma_20 = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma_20[i] = np.mean(volume[i-20:i])
+    vol_filter = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 2  # ~12 hours for 6h to reduce trades
+    cooldown_bars = 2  # ~1 day for 12h to reduce trades
     
-    start_idx = max(100, 50, 20)
+    start_idx = max(100, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(sma_20[i]) or 
-            np.isnan(std_20[i])):
+        if (np.isnan(ema_20_1w_aligned[i]) or 
+            np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,48 +75,36 @@ def generate_signals(prices):
         
         bars_since_last_trade += 1
         
-        # Determine 1d trend direction and momentum
-        trend_up = close[i] > ema_50_1d_aligned[i]
-        trend_down = close[i] < ema_50_1d_aligned[i]
-        rsi = rsi_1d_aligned[i]
-        
-        # Determine market regime: trending vs ranging
-        bb_width = (bb_upper[i] - bb_lower[i]) / sma_20[i] if sma_20[i] > 0 else 0
-        is_trending = bb_width > 0.03  # >3% width indicates trending
-        is_ranging = bb_width <= 0.03  # <=3% width indicates ranging
+        # Determine 1w trend direction
+        trend_up = close > ema_20_1w_aligned[i]
+        trend_down = close < ema_20_1w_aligned[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            if is_trending:
-                # Trending regime: follow 1d trend with momentum confirmation
-                if trend_up and rsi > 50 and rsi < 70:
-                    signals[i] = 0.25
-                    position = 1
-                    bars_since_last_trade = 0
-                elif trend_down and rsi < 50 and rsi > 30:
-                    signals[i] = -0.25
-                    position = -1
-                    bars_since_last_trade = 0
-            else:
-                # Ranging regime: mean reversion at Bollinger Bands
-                if close[i] <= bb_lower[i] and rsi < 40:
-                    signals[i] = 0.25
-                    position = 1
-                    bars_since_last_trade = 0
-                elif close[i] >= bb_upper[i] and rsi > 60:
-                    signals[i] = -0.25
-                    position = -1
-                    bars_since_last_trade = 0
+            # Long: Price breaks above Camarilla R3 with volume in uptrend
+            if (close[i] > camarilla_r3_aligned[i] and 
+                trend_up[i] and 
+                vol_filter[i]):
+                signals[i] = 0.25
+                position = 1
+                bars_since_last_trade = 0
+            # Short: Price breaks below Camarilla S3 with volume in downtrend
+            elif (close[i] < camarilla_s3_aligned[i] and 
+                  trend_down[i] and 
+                  vol_filter[i]):
+                signals[i] = -0.25
+                position = -1
+                bars_since_last_trade = 0
         elif position == 1:
-            # Exit: trend reversal or overbought conditions
-            if not trend_up or rsi >= 70 or close[i] >= bb_upper[i]:
+            # Exit: Price falls below Camarilla S3 or trend changes
+            if close[i] < camarilla_s3_aligned[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: trend reversal or oversold conditions
-            if not trend_down or rsi <= 30 or close[i] <= bb_lower[i]:
+            # Exit: Price rises above Camarilla R3 or trend changes
+            if close[i] > camarilla_r3_aligned[i] or not trend_down[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
@@ -115,9 +113,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 6s strategy combining 1d EMA50 trend filter with RSI momentum and 6h Bollinger Bands.
-# In trending markets (BB width > 3%): follow 1d trend with RSI confirmation (avoid extremes).
-# In ranging markets (BB width <= 3%): mean revert at Bollinger Bands with RSI filtering.
-# Uses 6h timeframe to balance trade frequency and capture multi-timeframe alignment.
-# Designed to work in both bull and bear markets by adapting to regime conditions.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# Hypothesis: Camarilla R3/S3 breakout with 1-week EMA20 trend filter and volume confirmation on 12h timeframe.
+# Long when price breaks above Camarilla R3 in uptrend with volume confirmation.
+# Short when price breaks below Camarilla S3 in downtrend with volume confirmation.
+# Uses 12h timeframe to balance trade frequency and capture meaningful swings.
+# Target: 50-150 total trades over 4 years (12-37/year) as per experiment guidelines.
+# Works in bull markets (breakouts in uptrend) and bear markets (breakdowns in downtrend).
+# Based on top-performing pattern from DB: Camarilla pivot + volume + trend filter.
