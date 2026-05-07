@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Confirm_v1
-# Hypothesis: Uses 12h timeframe with 1d timeframe for trend and pivot calculation. 
-# Enter long when price closes above R1 with bullish 1d trend and volume spike.
-# Enter short when price closes below S1 with bearish 1d trend and volume spike.
-# Uses volume spike (2.5x 30-period average) and requires price to be on correct side of 1d EMA34.
-# Target: 15-25 trades/year to minimize fee drag while capturing medium-term swings.
+# 4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeS_v5
+# Hypothesis: Uses Camarilla R1/S1 levels from 1d timeframe as entry triggers,
+# confirmed by 1d EMA34 trend filter and 4h volume spikes. Designed for low trade
+# frequency (target: 20-30 trades/year) to minimize fee drag while capturing
+# directional moves in both bull and bear markets via breakouts from key
+# intraday support/resistance levels derived from prior day's range.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Confirm_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeS_v5"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -41,12 +41,12 @@ def generate_signals(prices):
     # Get 1d data for trend filter (EMA34)
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align all indicators to 12h timeframe
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
-    ema_34_1d_12h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align all indicators to 4h timeframe
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    ema_34_1d_4h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume spike filter on 12h (30-period average)
+    # Volume spike filter on 4h (30-period average)
     vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     volume_spike = volume > (2.5 * vol_ma_30)
     
@@ -56,8 +56,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical value is NaN
-        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or 
-            np.isnan(ema_34_1d_12h[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or 
+            np.isnan(ema_34_1d_4h[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,30 +68,38 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: Price > R1, above 1d EMA34 trend, volume spike
-            if close[i] > r1_12h[i] and close[i] > ema_34_1d_12h[i] and volume_spike[i]:
+            if close[i] > r1_4h[i] and close[i] > ema_34_1d_4h[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
                 bars_since_entry = 0
             # Short: Price < S1, below 1d EMA34 trend, volume spike
-            elif close[i] < s1_12h[i] and close[i] < ema_34_1d_12h[i] and volume_spike[i]:
+            elif close[i] < s1_4h[i] and close[i] < ema_34_1d_4h[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
                 bars_since_entry = 0
         elif position == 1:
-            # Exit: price below R1 or below 1d EMA34 trend
-            if close[i] < r1_12h[i] or close[i] < ema_34_1d_12h[i]:
-                signals[i] = 0.0
-                position = 0
-                bars_since_entry = 0
+            # Exit conditions: require minimum 3 bars held
+            if bars_since_entry >= 3:
+                if close[i] < r1_4h[i] or close[i] < ema_34_1d_4h[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                else:
+                    signals[i] = 0.25
             else:
+                # Hold position for minimum period
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price above S1 or above 1d EMA34 trend
-            if close[i] > s1_12h[i] or close[i] > ema_34_1d_12h[i]:
-                signals[i] = 0.0
-                position = 0
-                bars_since_entry = 0
+            # Exit conditions: require minimum 3 bars held
+            if bars_since_entry >= 3:
+                if close[i] > s1_4h[i] or close[i] > ema_34_1d_4h[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                else:
+                    signals[i] = -0.25
             else:
+                # Hold position for minimum period
                 signals[i] = -0.25
     
     return signals
