@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 1d_Weekly_Camarilla_R3_S3_Breakout_Trend_Volume
-# Hypothesis: Weekly Camarilla pivot breakouts on 1d capture multi-week trends.
-# Uses weekly Camarilla R3/S3 levels for entry, 1w EMA34 trend filter, and volume spike confirmation.
-# Works in bull markets via long breakouts above weekly R3 and bear via short breakdowns below weekly S3.
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+# Hypothesis: Camarilla pivot levels (R1/S1) derived from 1d OHLC act as key support/resistance.
+# Breakouts above R1 or below S1 with volume (>2x average) and 1d EMA34 trend filter capture
+# short-term momentum. Works in bull markets via long breakouts and bear via short breakdowns.
 # Volume filter reduces false breakouts, trend filter avoids counter-trend trades.
-# Target: 15-25 trades per year (~60-100 over 4 years) with position size 0.25.
+# Target: 20-50 trades per year (~80-200 over 4 years) with position size 0.25.
 
-name = "1d_Weekly_Camarilla_R3_S3_Breakout_Trend_Volume"
-timeframe = "1d"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,32 +24,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE for Camarilla levels and trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Load 1d data ONCE for Camarilla pivot and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Weekly Camarilla levels (based on previous week's range)
-    # Calculate pivot and levels from previous week's OHLC
-    wk_high = df_1w['high'].values
-    wk_low = df_1w['low'].values
-    wk_close = df_1w['close'].values
+    # Calculate daily Camarilla levels: R1, S1 from previous day
+    # R1 = Close + 1.1 * (High - Low) / 12
+    # S1 = Close - 1.1 * (High - Low) / 12
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
     
-    # Pivot point = (H + L + C) / 3
-    pivot = (wk_high + wk_low + wk_close) / 3.0
-    # Range = H - L
-    range_wk = wk_high - wk_low
-    # Camarilla levels
-    r3 = pivot + range_wk * 1.1 / 2  # R3 = pivot + (range * 1.1/2)
-    s3 = pivot - range_wk * 1.1 / 2  # S3 = pivot - (range * 1.1/2)
+    r1 = daily_close + 1.1 * (daily_high - daily_low) / 12
+    s1 = daily_close - 1.1 * (daily_high - daily_low) / 12
     
-    # Align weekly levels to daily (wait for weekly bar to close)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    # Align Camarilla levels to 4h timeframe (use previous day's levels)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Weekly EMA34 for trend filter
-    ema_34_1w = pd.Series(wk_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume ratio: current volume / 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -58,45 +54,45 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Need 34 periods for weekly EMA
+    start_idx = 20  # Need 20 periods for volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_ratio[i]):
+        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ratio[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Breakout conditions: price breaks above weekly R3 or below weekly S3
-        breakout_up = close[i] > r3_aligned[i]
-        breakout_down = close[i] < s3_aligned[i]
+        # Breakout conditions: price breaks above R1 or below S1
+        breakout_up = close[i] > r1_aligned[i]
+        breakout_down = close[i] < s1_aligned[i]
         
         # Volume confirmation: volume > 2x average
         volume_confirm = vol_ratio[i] > 2.0
         
-        # Trend filter from weekly EMA34
-        uptrend = close[i] > ema_34_1w_aligned[i]
-        downtrend = close[i] < ema_34_1w_aligned[i]
+        # Trend filter from 1d EMA34
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Long: upward breakout above R3 + volume + uptrend
+            # Long: upward breakout + volume + uptrend
             if breakout_up and volume_confirm and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: downward breakout below S3 + volume + downtrend
+            # Short: downward breakout + volume + downtrend
             elif breakout_down and volume_confirm and downtrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price breaks back below weekly S3 or trend reversal
-            if close[i] < s3_aligned[i] or not uptrend:
+            # Exit: price breaks back below S1 or trend reversal
+            if close[i] < s1_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price breaks back above weekly R3 or trend reversal
-            if close[i] > r3_aligned[i] or not downtrend:
+            # Exit: price breaks back above R1 or trend reversal
+            if close[i] > r1_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
