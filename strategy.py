@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-1h_4H_Donchian_Breakout_1D_Trend_Filter_v1
-Hypothesis: Use 4h Donchian(20) breakout for signal direction and 1d EMA(34) for trend filter. 
-Long when price breaks above 4h Donchian upper band and close > 1d EMA(34); 
-Short when price breaks below 4h Donchian lower band and close < 1d EMA(34).
-Volume confirmation: current volume > 1.5x 20-period average volume.
-Session filter: only trade between 08:00-20:00 UTC.
-This combines trend-following structure with volume confirmation and session filtering to reduce false signals and manage trade frequency.
+6h_LongOnly_WeeklyTrend_Following_v1
+Hypothesis: Long only strategy using weekly trend filter (price above weekly SMA50) and 6h Donchian(20) breakout with volume confirmation.
+Weekly SMA50 provides a robust trend filter that works in both bull and bear markets by only allowing longs in uptrends and staying flat in downtrends/ranges.
+6h Donchian breakout captures momentum bursts, and volume confirmation reduces false signals.
+Target: 50-150 total trades over 4 years (12-37/year) with position size 0.25.
 """
-name = "1h_4H_Donchian_Breakout_1D_Trend_Filter_v1"
-timeframe = "1h"
+name = "6h_LongOnly_WeeklyTrend_Following_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -26,46 +24,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Donchian channels
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get weekly data for trend filter (SMA50)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 4h Donchian(20) - upper and lower bands
-    donch_high = pd.Series(df_4h['high']).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(df_4h['low']).rolling(window=20, min_periods=20).min().values
-    donch_high_aligned = align_htf_to_ltf(prices, df_4h, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_4h, donch_low)
+    # Calculate weekly SMA50 for trend filter
+    sma_50_1w = pd.Series(df_1w['close']).rolling(window=50, min_periods=50).mean().values
+    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
     
-    # Get 1d data for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 6h data for Donchian channels
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend
-    ema_34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # Calculate 6h Donchian(20) - upper and lower bands
+    donch_high = pd.Series(df_6h['high']).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(df_6h['low']).rolling(window=20, min_periods=20).min().values
+    donch_high_aligned = align_htf_to_ltf(prices, df_6h, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_6h, donch_low)
     
     # Volume filter: current volume > 1.5 * 20-period average volume
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_avg * 1.5)
     
-    # Session filter: 08:00-20:00 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
-    
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0  # 0: flat, 1: long
     bars_since_exit = 0  # bars since last exit to prevent overtrading
     
-    start_idx = max(20, 34, 20)  # Ensure sufficient warmup
+    start_idx = max(50, 20, 20)  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
         bars_since_exit += 1
         
         # Skip if any data is not ready
-        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(sma_50_1w_aligned[i]) or np.isnan(donch_high_aligned[i]) or 
+            np.isnan(donch_low_aligned[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,40 +67,25 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Minimum 12 bars between trades (12 hours on 1h TF) to reduce frequency
-            if bars_since_exit < 12:
+            # Minimum 24 bars between trades (4 days on 6h TF) to reduce frequency
+            if bars_since_exit < 24:
                 continue
                 
-            # Check session filter
-            if not session_filter[i]:
-                continue
-                
-            # Long: price breaks above 4h Donchian upper + close > 1d EMA + volume filter
-            if (close[i] > donch_high_aligned[i] and 
-                close[i] > ema_34_aligned[i] and 
+            # Long: price above weekly SMA50 (uptrend) AND price breaks above 6h Donchian upper + volume filter
+            if (close[i] > sma_50_1w_aligned[i] and 
+                close[i] > donch_high_aligned[i] and 
                 volume_filter[i]):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
                 bars_since_exit = 0
-            # Short: price breaks below 4h Donchian lower + close < 1d EMA + volume filter
-            elif (close[i] < donch_low_aligned[i] and 
-                  close[i] < ema_34_aligned[i] and 
-                  volume_filter[i]):
-                signals[i] = -0.20
-                position = -1
-                bars_since_exit = 0
-        elif position != 0:
-            # Exit: price returns to opposite Donchian band or trend reversal
-            if position == 1 and (close[i] < donch_low_aligned[i] or close[i] < ema_34_aligned[i]):
-                signals[i] = 0.0
-                position = 0
-                bars_since_exit = 0
-            elif position == -1 and (close[i] > donch_high_aligned[i] or close[i] > ema_34_aligned[i]):
+        elif position == 1:
+            # Exit: price breaks below 6h Donchian lower OR price falls below weekly SMA50 (trend change)
+            if (close[i] < donch_low_aligned[i] or close[i] < sma_50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
                 bars_since_exit = 0
             else:
                 # Hold position
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25
     
     return signals
