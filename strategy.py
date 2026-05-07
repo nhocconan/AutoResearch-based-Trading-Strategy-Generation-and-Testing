@@ -1,12 +1,13 @@
-# 4H_Camarilla_R3_S3_Breakout_12HTF_Trend_Volume
-# Hypothesis: Uses Camarilla R3/S3 levels from daily timeframe with 12-hour EMA trend filter and volume spike confirmation.
-# The 12-hour EMA provides stronger trend filtering than daily EMA, reducing false signals during choppy periods.
-# Only enters long on breakout above R3 when 12h EMA is rising (trend up) or short on breakdown below S3 when 12h EMA is falling (trend down).
-# Exits when price returns inside the pivot range (S3 to R3) to capture mean reversion and avoid overtrading.
-# Designed for low trade frequency (target 25-40 trades/year) and works in both bull and bear markets by following higher timeframe trend.
+#!/usr/bin/env python3
+# 6H_WeeklyPivot_Momentum_Volume
+# Hypothesis: Combines weekly pivot points (calculated from prior week) with 60-period EMA trend filter and volume confirmation.
+# Long when price breaks above weekly R1 in uptrend (close > EMA60) with volume spike.
+# Short when price breaks below weekly S1 in downtrend (close < EMA60) with volume spike.
+# Exits when price returns to weekly pivot (PP) level.
+# Designed for low trade frequency (<30/year) and works in both bull and bear markets by following weekly trend.
 
-name = "4H_Camarilla_R3_S3_Breakout_12HTF_Trend_Volume"
-timeframe = "4h"
+name = "6H_WeeklyPivot_Momentum_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,47 +24,42 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for pivot calculation
+    df_w = get_htf_data(prices, '1w')
+    if len(df_w) < 2:
         return np.zeros(n)
     
-    # Calculate daily OHLC for Camarilla pivots
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly OHLC for pivot points (using previous week's data)
+    high_w = df_w['high'].values
+    low_w = df_w['low'].values
+    close_w = df_w['close'].values
     
-    # Camarilla levels: R3 = close + (high - low) * 1.1/4, S3 = close - (high - low) * 1.1/4
-    rng = high_1d - low_1d
-    camarilla_r3 = close_1d + rng * 1.1 / 4
-    camarilla_s3 = close_1d - rng * 1.1 / 4
+    # Weekly pivot points: PP = (H + L + C)/3, R1 = 2*PP - L, S1 = 2*PP - H
+    pp_w = (high_w + low_w + close_w) / 3
+    r1_w = 2 * pp_w - low_w
+    s1_w = 2 * pp_w - high_w
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
+    # 60-period EMA for trend filter (on 6h timeframe)
+    ema60 = pd.Series(close).ewm(span=60, adjust=False, min_periods=60).mean().values
     
-    # 12-hour EMA34 for trend filter (more responsive than daily)
-    close_12h = df_12h['close'].values
-    ema34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Align weekly pivot levels to 6h timeframe
+    pp_w_aligned = align_htf_to_ltf(prices, df_w, pp_w)
+    r1_w_aligned = align_htf_to_ltf(prices, df_w, r1_w)
+    s1_w_aligned = align_htf_to_ltf(prices, df_w, s1_w)
     
-    # Align all indicators to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    ema34_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
-    
-    # Volume filter: current volume > 2.0x average volume (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume filter: current volume > 2.0x average volume (24-period ~ 4 days)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure we have volume MA data
+    start_idx = 60  # Ensure we have EMA and volume MA data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema34_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(pp_w_aligned[i]) or np.isnan(r1_w_aligned[i]) or 
+            np.isnan(s1_w_aligned[i]) or np.isnan(ema60[i]) or 
+            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,28 +69,28 @@ def generate_signals(prices):
         volume_filter = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long: Price breaks above R3 + Uptrend (12h EMA rising) + volume spike
-            if (close[i] > r3_aligned[i] and 
-                ema34_aligned[i] > ema34_aligned[i-1] and  # 12h EMA rising
+            # Long: Price breaks above R1 + Uptrend (close > EMA60) + volume spike
+            if (close[i] > r1_w_aligned[i] and 
+                close[i] > ema60[i] and
                 volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S3 + Downtrend (12h EMA falling) + volume spike
-            elif (close[i] < s3_aligned[i] and 
-                  ema34_aligned[i] < ema34_aligned[i-1] and  # 12h EMA falling
+            # Short: Price breaks below S1 + Downtrend (close < EMA60) + volume spike
+            elif (close[i] < s1_w_aligned[i] and 
+                  close[i] < ema60[i] and
                   volume_filter):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Price returns inside pivot range (below R3 and above S3) - reversion to mean
-            if close[i] < r3_aligned[i] and close[i] > s3_aligned[i]:
+            # Exit: Price returns to weekly pivot (PP) level
+            if close[i] <= pp_w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price returns inside pivot range (below R3 and above S3) - reversion to mean
-            if close[i] < r3_aligned[i] and close[i] > s3_aligned[i]:
+            # Exit: Price returns to weekly pivot (PP) level
+            if close[i] >= pp_w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
