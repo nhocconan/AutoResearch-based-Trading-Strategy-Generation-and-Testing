@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 4h_RangeBreakout_1dTrend_VolumeFilter
-# Hypothesis: Range-bound markets (low volatility) followed by breakouts with volume and trend confirmation
-# capture institutional moves. Uses 4h Bollinger Bands to detect range (low BB width), then breaks
-# above upper BB or below lower BB with volume > 2x average and 1d EMA50 trend filter.
-# Works in bull markets via long breakouts and bear via short breakdowns. Target: 25-40 trades/year.
+# 6h_Volume_Weighted_RSI_Pullback_1wTrend
+# Hypothesis: On 6b timeframe, RSI(14) pullbacks to 40-60 range during strong weekly trends
+# (above/below weekly EMA50) with volume confirmation (1.5x average) capture high-probability
+# mean-reversion entries within the trend. Works in bull markets via long pullbacks in uptrend
+# and bear markets via short pullbacks in downtrend. Volume filter ensures institutional
+# participation, reducing false signals. Target: 60-120 trades over 4 years (15-30/year).
 
-name = "4h_RangeBreakout_1dTrend_VolumeFilter"
-timeframe = "4h"
+name = "6h_Volume_Weighted_RSI_Pullback_1wTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,68 +24,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load weekly data ONCE for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 4h Bollinger Bands (20, 2) for range detection
-    close_series = pd.Series(close)
-    bb_mid = close_series.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_series.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_mid + 2 * bb_std
-    bb_lower = bb_mid - 2 * bb_std
-    bb_width = bb_upper - bb_lower
+    # Weekly EMA50 for trend filter
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Range condition: BB width < 20th percentile (tight range)
-    bb_width_series = pd.Series(bb_width)
-    bb_width_p20 = bb_width_series.rolling(window=50, min_periods=50).quantile(0.20).values
-    range_condition = bb_width < bb_width_p20
+    # RSI(14) calculation
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
-    # 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Volume filter: volume > 2x 20-period average
+    # Volume ratio: current volume / 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (2 * vol_ma)
+    vol_ratio = np.where(vol_ma > 0, volume / vol_ma, 1.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need 50 periods for BB width percentile
+    start_idx = max(20, 14)  # Need 20 for volume MA, 14 for RSI
     
     for i in range(start_idx, n):
-        if (np.isnan(bb_width[i]) or np.isnan(bb_width_p20[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(rsi_values[i]) or 
+            np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Breakout conditions
-        breakout_up = close[i] > bb_upper[i]
-        breakout_down = close[i] < bb_lower[i]
+        # Determine weekly trend
+        uptrend = close[i] > ema_50_1w_aligned[i]
+        downtrend = close[i] < ema_50_1w_aligned[i]
+        
+        # RSI pullback conditions: 40-60 range (avoid extremes)
+        rsi_pullback = (rsi_values[i] >= 40) & (rsi_values[i] <= 60)
+        
+        # Volume confirmation: volume > 1.5x average
+        volume_confirm = vol_ratio[i] > 1.5
         
         if position == 0:
-            # Enter long: range breakout up + volume + uptrend
-            if range_condition[i] and breakout_up and vol_filter[i] and (close[i] > ema_50_1d_aligned[i]):
+            # Long: RSI pullback in uptrend with volume
+            if rsi_pullback and uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: range breakout down + volume + downtrend
-            elif range_condition[i] and breakout_down and vol_filter[i] and (close[i] < ema_50_1d_aligned[i]):
+            # Short: RSI pullback in downtrend with volume
+            elif rsi_pullback and downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price returns to middle band or trend reversal
-            if close[i] < bb_mid[i] or (close[i] < ema_50_1d_aligned[i]):
+            # Exit: RSI reaches overbought (>70) or trend reversal
+            if rsi_values[i] > 70 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price returns to middle band or trend reversal
-            if close[i] > bb_mid[i] or (close[i] > ema_50_1d_aligned[i]):
+            # Exit: RSI reaches oversold (<30) or trend reversal
+            if rsi_values[i] < 30 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
