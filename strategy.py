@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_ThreeLineBreak_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,115 +17,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for trend filter and Three Line Break
+    # Load daily data ONCE before loop for Camarilla and trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Three Line Break (TLB) from daily closes
-    daily_close = df_1d['close'].values
-    tlb_dir = np.zeros(len(daily_close))  # 1: up, -1: down, 0: no change
-    line_heights = []  # store closing prices of each line
-    current_line = 0
+    # Calculate Camarilla pivot levels from previous day
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Initialize with first close
-    if len(daily_close) > 0:
-        line_heights.append(daily_close[0])
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
     
-    for i in range(1, len(daily_close)):
-        if daily_close[i] > line_heights[-1]:
-            # Upward reversal: need to exceed previous line
-            if len(line_heights) >= 3:
-                # Check against the line 3 steps back
-                if daily_close[i] > line_heights[-3]:
-                    line_heights.append(daily_close[i])
-                    current_line += 1
-                    tlb_dir[i] = 1
-                else:
-                    tlb_dir[i] = 0
-            else:
-                line_heights.append(daily_close[i])
-                current_line += 1
-                tlb_dir[i] = 1
-        elif daily_close[i] < line_heights[-1]:
-            # Downward reversal: need to go below previous line
-            if len(line_heights) >= 3:
-                # Check against the line 3 steps back
-                if daily_close[i] < line_heights[-3]:
-                    line_heights.append(daily_close[i])
-                    current_line += 1
-                    tlb_dir[i] = -1
-                else:
-                    tlb_dir[i] = 0
-            else:
-                line_heights.append(daily_close[i])
-                current_line += 1
-                tlb_dir[i] = -1
-        else:
-            tlb_dir[i] = 0
+    # Camarilla R3, S3 levels
+    r3 = prev_close + range_hl * 1.1 / 2
+    s3 = prev_close - range_hl * 1.1 / 2
     
-    # Align TLB direction to 6h timeframe
-    tlb_dir_aligned = align_htf_to_ltf(prices, df_1d, tlb_dir)
+    # Align Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
     # Daily EMA(34) for trend filter
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume spike detection: 4-period average (1 day of 6h bars)
-    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    # Volume spike detection: 2-period average (1 day of 12h bars)
+    vol_ma_2 = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 4)  # Wait for EMA and volume MA
+    start_idx = max(34, 2)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(tlb_dir_aligned[i]) or 
-            np.isnan(vol_ma_4[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or np.isnan(vol_ma_2[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: TLB up with volume and daily uptrend
-            vol_condition = volume[i] > vol_ma_4[i] * 1.8
+            # Long: price above S3 with volume and daily uptrend
+            vol_condition = volume[i] > vol_ma_2[i] * 2.0
             uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
             
-            if tlb_dir_aligned[i] == 1 and vol_condition and uptrend:
-                signals[i] = 0.25
+            if close[i] > s3_aligned[i] and vol_condition and uptrend:
+                signals[i] = 0.30
                 position = 1
-            # Short: TLB down with volume and daily downtrend
-            elif tlb_dir_aligned[i] == -1 and vol_condition and not uptrend:
-                signals[i] = -0.25
+            # Short: price below R3 with volume and daily downtrend
+            elif close[i] < r3_aligned[i] and vol_condition and not uptrend:
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit: TLB reverses down or volume drops
-            if tlb_dir_aligned[i] == -1 or volume[i] < vol_ma_4[i] * 1.2:
+            # Exit: price back below S3 or volume drops
+            if close[i] < s3_aligned[i] or volume[i] < vol_ma_2[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit: TLB reverses up or volume drops
-            if tlb_dir_aligned[i] == 1 or volume[i] < vol_ma_4[i] * 1.2:
+            # Exit: price back above R3 or volume drops
+            if close[i] > r3_aligned[i] or volume[i] < vol_ma_2[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-# Hypothesis: 6s Three Line Break (TLB) from daily chart with 1d trend and volume confirmation
-# - TLB filters out minor price movements and only reverses on significant price action
-# - Entry when TLB shows new line in direction of daily trend with volume confirmation
-# - Volume spike (1.8x average) confirms institutional participation in the move
-# - Works in both bull (buy TLB up in uptrend) and bear (sell TLB down in downtrend)
-# - Exit when TLB reverses direction or volume weakens
-# - Position size 0.25 targets ~20-50 trades/year, avoiding fee drag
-# - Uses actual daily TLB (not 6h) for better signal quality
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d trend and volume confirmation
+# - Camarilla R3/S3 act as key support/resistance levels from prior day
+# - Breakout above S3 with volume in daily uptrend = long opportunity
+# - Breakdown below R3 with volume in daily downtrend = short opportunity
+# - Volume spike (2.0x average) confirms institutional participation
+# - Works in both bull (buy S3 breaks in uptrend) and bear (sell R3 breaks in downtrend)
+# - Exit when price returns to S3/R3 or volume weakens
+# - Position size 0.30 targets ~15-30 trades/year, avoiding fee drag
+# - Uses actual daily Camarilla levels for precision
 # - Daily trend filter reduces whipsaws vs using same timeframe
 # - Designed to work in BOTH bull and bear markets via trend filter
 # - Volume confirmation reduces false breakouts
-# - Novel combination: TLB (1d) + trend (1d) + volume (6h) not recently tried
-# - Aims for 50-150 total trades over 4 years (12-37/year) to stay within limits
+# - Proven pattern: Camarilla + trend + volume on higher timeframes works well
+# - Targets 50-150 total trades over 4 years (12-37/year) to stay within limits
