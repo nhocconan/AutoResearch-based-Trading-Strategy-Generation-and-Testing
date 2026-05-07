@@ -1,6 +1,11 @@
+# 1h_Camarilla_R3S3_1dTrend_VolumeSpike_v1
+# Hypothesis: Use 1d trend (EMA34) to filter direction, 4h Camarilla R3/S3 for breakout levels, and volume spike for entry confirmation on 1h timeframe. 1d trend filter ensures alignment with higher timeframe momentum, reducing false breakouts in choppy markets. Volume spike confirms institutional interest. Designed to work in both bull and bear markets by following the 1d trend.
+# Target: 15-35 trades/year via strict 1d trend + 4h breakout + volume confluence.
+# Timeframe: 1h, Leverage: 1.0
+
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_12hTrend_VolumeSpike_v1"
-timeframe = "4h"
+name = "1h_Camarilla_R3S3_1dTrend_VolumeSpike_v1"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -17,27 +22,26 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for structure (R3/S3 levels)
+    # Get 4h data for Camarilla levels (structure)
     df_4h = get_htf_data(prices, '4h')
     if len(df_4h) < 2:
         return np.zeros(n)
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate previous 4h bar's high, low, close for Camarilla levels
+    # Calculate previous 4h bar's high, low, close for Camarilla R3/S3
     prev_high = df_4h['high'].values
     prev_low = df_4h['low'].values
     prev_close = df_4h['close'].values
     
-    # Calculate Camarilla levels: R3 and S3 (correct formula)
-    # R3 = C + (H-L) * 1.1/2 * 1.1, S3 = C - (H-L) * 1.1/2 * 1.1
+    # Camarilla R3 = C + (H-L) * 1.1/2 * 1.1, S3 = C - (H-L) * 1.1/2 * 1.1
     range_hl = prev_high - prev_low
     r3 = prev_close + range_hl * 1.1 / 2 * 1.1
     s3 = prev_close - range_hl * 1.1 / 2 * 1.1
@@ -45,10 +49,10 @@ def generate_signals(prices):
     r3_aligned = align_htf_to_ltf(prices, df_4h, r3)
     s3_aligned = align_htf_to_ltf(prices, df_4h, s3)
     
-    # Volume filter: current volume > 2.0x average volume (20-period)
+    # Volume filter: 20-period average volume for spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Volatility filter: avoid low volatility periods (ATR > 0.3% of price)
+    # Volatility filter: avoid low volatility (ATR > 0.3% of price)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -56,18 +60,18 @@ def generate_signals(prices):
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     vol_filter = atr > 0.003 * close  # ATR > 0.3% of price
     
-    # Session filter: 08:00 - 20:00 UTC (80% of day)
+    # Session filter: 08:00 - 20:00 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
     session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)  # Ensure we have volume MA data
+    start_idx = max(20, 34)  # Ensure volume MA and EMA data
     
     for i in range(start_idx, n):
-        # Skip if any critical value is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+        # Skip if any critical value is NaN or invalid
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
             np.isnan(vol_ma[i]) or vol_ma[i] == 0 or
             np.isnan(vol_filter[i]) or not vol_filter[i] or
             not session_filter[i]):
@@ -76,26 +80,25 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Volume filter: spike confirmation (2.0x average volume)
-        volume_filter = volume[i] > 2.0 * vol_ma[i]
+        # Volume spike: current volume > 2.0 x 20-period average
+        volume_spike = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long: Price closes beyond R3 + beyond 12h EMA50 by buffer + volume spike
-            buffer = 0.001 * close[i]  # 0.1% buffer
+            # Long: Price breaks above R3, above 1d EMA34 (uptrend), with volume spike
+            buffer = 0.001 * close[i]  # 0.1% buffer to avoid whipsaws
             if (close[i] > r3_aligned[i] + buffer and 
-                close[i] > ema_50_12h_aligned[i] + buffer and   # 12h uptrend with buffer
-                volume_filter):
-                signals[i] = 0.25
+                close[i] > ema_34_1d_aligned[i] + buffer and   # 1d uptrend
+                volume_spike):
+                signals[i] = 0.20
                 position = 1
-            # Short: Price closes below S3 + below 12h EMA50 by buffer + volume spike
+            # Short: Price breaks below S3, below 1d EMA34 (downtrend), with volume spike
             elif (close[i] < s3_aligned[i] - buffer and 
-                  close[i] < ema_50_12h_aligned[i] - buffer and   # 12h downtrend with buffer
-                  volume_filter):
-                signals[i] = -0.25
+                  close[i] < ema_34_1d_aligned[i] - buffer and   # 1d downtrend
+                  volume_spike):
+                signals[i] = -0.20
                 position = -1
         elif position != 0:
-            # Exit: Price returns to the middle of the prior 4h range (H4/L4)
-            # H4 = close + 1.1*(high-low)*1.1/6, L4 = close - 1.1*(high-low)*1.1/6
+            # Exit: Price returns to midpoint of prior 4h range (H4/L4)
             range_hl = prev_high - prev_low
             h4 = prev_close + range_hl * 1.1 / 6 * 1.1
             l4 = prev_close - range_hl * 1.1 / 6 * 1.1
@@ -104,14 +107,14 @@ def generate_signals(prices):
             
             camarilla_mid = (h4_aligned[i] + l4_aligned[i]) / 2
             range_hl_4h = h4_aligned[i] - l4_aligned[i]
-            # Exit when within 35% of the mid-point (wider band to reduce churn)
-            at_mid = abs(close[i] - camarilla_mid) < range_hl_4h * 0.35
+            # Exit when within 40% of midpoint (balanced to reduce churn)
+            at_mid = abs(close[i] - camarilla_mid) < range_hl_4h * 0.40
             
             if at_mid:
                 signals[i] = 0.0
                 position = 0
             else:
                 # Maintain position
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.20 if position == 1 else -0.20
     
     return signals
