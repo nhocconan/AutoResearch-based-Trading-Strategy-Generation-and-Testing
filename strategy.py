@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -58,11 +58,11 @@ def generate_signals(prices):
         if position == 0:
             # Long: Close breaks above R1 with volume surge and 1d uptrend
             if close[i] > R1_aligned[i] and vol_surge[i] and trend_up[i]:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
             # Short: Close breaks below S1 with volume surge and 1d downtrend
             elif close[i] < S1_aligned[i] and vol_surge[i] and trend_down[i]:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Exit: Close below S1 or trend turns down
@@ -70,14 +70,14 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
             # Exit: Close above R1 or trend turns up
             if close[i] > R1_aligned[i] or not trend_down[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
@@ -85,5 +85,6 @@ def generate_signals(prices):
 # Long when price breaks above R1 (first resistance) with volume confirmation in 1d uptrend.
 # Short when price breaks below S1 (first support) with volume confirmation in 1d downtrend.
 # Uses daily Camarilla levels for institutional relevance, 1d EMA34 for trend, and volume surge for conviction.
-# Designed for 12h timeframe to balance trade frequency (~12-37/year) and capture multi-day trends.
+# Reduced position size to 0.25 to lower trade frequency and improve risk-adjusted returns.
+# Designed for 4h timeframe to balance trade frequency (~20-50/year) and capture multi-day trends.
 # Works in bull markets (breaks above R1 in uptrend) and bear markets (breaks below S1 in downtrend).
