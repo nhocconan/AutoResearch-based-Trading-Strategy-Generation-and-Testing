@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """
-1D_Donchian_Breakout_1W_Trend_Volume
-Hypothesis: Daily breakouts above/below Donchian(20) channels with weekly EMA50 trend and volume confirmation.
-Works in bull/bear markets: Donchian breakouts capture strong directional moves; weekly trend filter avoids counter-trend trades.
-Volume confirmation ensures breakout strength. Targets 8-20 trades/year to minimize fee drag on 1d timeframe.
+4h_TRIX_VolumeSpike_Regime
+Hypothesis: 4h TRIX momentum with volume spike and chop regime filter captures
+strong trending moves while avoiding whipsaws in range markets. TRIX > 0 with
+volume confirmation indicates bullish momentum, TRIX < 0 indicates bearish.
+Chop filter (CHOP > 61.8) avoids false signals in ranging markets. Designed
+to work in both bull and bear markets by following momentum with regime awareness.
+Targets 20-50 trades/year to minimize fee drag on 4h timeframe.
 """
-name = "1D_Donchian_Breakout_1W_Trend_Volume"
-timeframe = "1d"
+name = "4h_TRIX_VolumeSpike_Regime"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +18,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,71 +26,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1D data for chop regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate weekly EMA50 for trend direction
-    close_1w_series = pd.Series(df_1w['close'])
-    ema_50 = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    # Calculate TRIX (12,12,12) - triple EMA of ROC
+    # ROC = (close - close[12]) / close[12] * 100
+    close_series = pd.Series(close)
+    roc = close_series.pct_change(12) * 100  # 12-period ROC
+    ema1 = roc.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
+    trix = ema3.values
     
-    # Calculate daily Donchian channels (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate Chop Index for regime detection (using 1D data)
+    # CHOP = 100 * log10(sum(ATR,14) / (max(high,14) - min(low,14))) / log10(14)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Volume filter: current daily volume > 1.5 x 20-period average volume
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align with index
+    
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    max_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    min_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    range_14 = max_high_14 - min_low_14
+    
+    chop = 100 * np.log10(pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values / range_14) / np.log10(14)
+    
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # Volume filter: current 4h volume > 1.8 x 20-period average volume
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_avg * 1.5)
+    volume_filter = volume > (vol_avg * 1.8)
+    
+    # Align TRIX to LTF (no additional delay needed for TRIX)
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_exit = 0  # bars since last exit to prevent overtrading
     
-    start_idx = max(50, 20)  # Ensure sufficient warmup
+    start_idx = max(50, 20)  # Ensure sufficient warmup for all indicators
     
     for i in range(start_idx, n):
-        bars_since_exit += 1
-        
         # Skip if any data is not ready
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(trix_aligned[i]) or np.isnan(chop_aligned[i]) or 
+            np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                bars_since_exit = 0
             continue
         
         if position == 0:
-            # Minimum 20 days between trades to reduce frequency
-            if bars_since_exit < 20:
-                continue
-                
-            # Long: price breaks above Donchian high with weekly uptrend and volume spike
-            if (close[i] > donchian_high[i] and close[i-1] <= donchian_high[i-1] and 
-                close[i] > ema_50_aligned[i] and volume_filter[i]):
+            # Long: TRIX positive, volume spike, and not in chop regime (trending market)
+            if (trix_aligned[i] > 0 and trix_aligned[i-1] <= 0 and 
+                volume_filter[i] and chop_aligned[i] < 61.8):
                 signals[i] = 0.25
                 position = 1
-                bars_since_exit = 0
-            # Short: price breaks below Donchian low with weekly downtrend and volume spike
-            elif (close[i] < donchian_low[i] and close[i-1] >= donchian_low[i-1] and 
-                  close[i] < ema_50_aligned[i] and volume_filter[i]):
+            # Short: TRIX negative, volume spike, and not in chop regime (trending market)
+            elif (trix_aligned[i] < 0 and trix_aligned[i-1] >= 0 and 
+                  volume_filter[i] and chop_aligned[i] < 61.8):
                 signals[i] = -0.25
                 position = -1
-                bars_since_exit = 0
         elif position != 0:
-            # Exit: price returns to opposite Donchian side (mean reversion)
-            if position == 1 and close[i] < donchian_low[i]:
+            # Exit: TRIX crosses zero (momentum reversal)
+            if position == 1 and trix_aligned[i] < 0:
                 signals[i] = 0.0
                 position = 0
-                bars_since_exit = 0
-            elif position == -1 and close[i] > donchian_high[i]:
+            elif position == -1 and trix_aligned[i] > 0:
                 signals[i] = 0.0
                 position = 0
-                bars_since_exit = 0
             else:
                 # Hold position
                 signals[i] = 0.25 if position == 1 else -0.25
