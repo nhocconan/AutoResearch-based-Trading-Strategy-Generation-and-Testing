@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -35,14 +35,14 @@ def generate_signals(prices):
     r1 = 2 * pivot - prev_low
     s1 = 2 * pivot - prev_high
     
-    # Align Pivot levels to 12h
+    # Align Pivot levels to 4h
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume filter: > 1.5x 20-period average
+    # Volume filter: > 1.8x 20-period average (tightened from 1.5x)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > 1.5 * vol_ma
+    vol_filter = volume > 1.8 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -82,7 +82,8 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA(34) trend filter and volume confirmation.
+# Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA(34) trend filter and volume confirmation.
 # Pivot levels from prior day provide key support/resistance. Breaking R1/S1 indicates momentum.
 # Daily EMA filter ensures alignment with higher timeframe trend. Volume confirms institutional participation.
-# Target: 12-37 trades/year to minimize fee drift. Position size 0.25 limits drawdown in volatile markets.
+# Tightened volume filter (1.8x vs 1.5x) to reduce trade frequency and avoid overtrading.
+# Target: 25-35 trades/year to minimize fee drift. Position size 0.25 limits drawdown in volatile markets.
