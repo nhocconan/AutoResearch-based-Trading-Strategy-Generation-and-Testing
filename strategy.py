@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_Engulfing_1dTrend_Volume
-# Hypothesis: 4h chart strategy using bullish/bearish engulfing candle patterns filtered by 1d EMA50 trend and volume confirmation (1.5x average volume).
-# Engulfing patterns signal strong reversal momentum. 1d EMA50 provides trend filter to avoid counter-trend trades.
-# Volume confirms breakout validity. Designed to work in both bull and bear markets by filtering with trend and requiring volume confirmation.
-# Target: 20-40 trades/year per symbol to minimize fee drag while maintaining edge.
+# 1d_WeeklyTrend_DailyBreakout_Volume
+# Hypothesis: Daily chart strategy using weekly trend filter with daily price breakouts and volume confirmation.
+# Uses weekly EMA to determine trend direction, then looks for breakouts of daily high/low with volume confirmation.
+# Designed to work in both bull and bear markets by only taking trades in the direction of the weekly trend.
+# Target: 10-25 trades/year per symbol to minimize fee drag while maintaining edge.
 
-timeframe = "4h"
-name = "4h_Engulfing_1dTrend_Volume"
+name = "1d_WeeklyTrend_DailyBreakout_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -18,64 +18,68 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    open_prices = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter (EMA50)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) == 0:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) == 0:
         return np.zeros(n)
     
-    # Calculate daily EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate weekly EMA21 for trend filter
+    close_1w = df_1w['close'].values
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
-    # Volume spike detection: 1.5x average volume (6-period = 1 day on 4h chart)
-    vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
+    # Daily high/low for breakout levels (using previous day's values)
+    daily_high = np.maximum.accumulate(high)
+    daily_low = np.minimum.accumulate(low)
+    
+    # Volume spike detection: 2x average volume (20-period = ~1 month on daily)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 6)  # Ensure we have EMA50 and volume MA data
+    start_idx = max(30, 20)  # Ensure we have enough data for weekly EMA and volume MA
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(ema_21_1w_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Bullish engulfing: current green candle completely engulfs previous red candle
-        bullish_engulf = (close[i] > open_prices[i]) and (open_prices[i-1] > close[i-1]) and \
-                         (close[i] >= open_prices[i-1]) and (open_prices[i] <= close[i-1])
-        # Bearish engulfing: current red candle completely engulfs previous green candle
-        bearish_engulf = (close[i] < open_prices[i]) and (open_prices[i-1] < close[i-1]) and \
-                         (open_prices[i] >= close[i-1]) and (close[i] <= open_prices[i-1])
+        # Determine weekly trend: price above/below weekly EMA21
+        weekly_uptrend = close[i] > ema_21_1w_aligned[i]
+        weekly_downtrend = close[i] < ema_21_1w_aligned[i]
         
         if position == 0:
-            # Long: bullish engulfing with volume, and 1d trend is bullish (price > EMA50)
-            if bullish_engulf and volume[i] > 1.5 * vol_ma[i] and close[i] > ema_50_1d_aligned[i]:
+            # Long: price breaks above previous day's high with volume, in weekly uptrend
+            if (high[i] > daily_high[i-1] and 
+                volume[i] > 2.0 * vol_ma[i] and 
+                weekly_uptrend):
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish engulfing with volume, and 1d trend is bearish (price < EMA50)
-            elif bearish_engulf and volume[i] > 1.5 * vol_ma[i] and close[i] < ema_50_1d_aligned[i]:
+            # Short: price breaks below previous day's low with volume, in weekly downtrend
+            elif (low[i] < daily_low[i-1] and 
+                  volume[i] > 2.0 * vol_ma[i] and 
+                  weekly_downtrend):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: bearish engulfing (reversal signal)
-            if bearish_engulf:
+            # Exit: price breaks below previous day's low (reversal signal)
+            if low[i] < daily_low[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: bullish engulfing (reversal signal)
-            if bullish_engulf:
+            # Exit: price breaks above previous day's high (reversal signal)
+            if high[i] > daily_high[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
