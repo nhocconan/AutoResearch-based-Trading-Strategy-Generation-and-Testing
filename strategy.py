@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_Keltner_Breakout_Pullback
-Hypothesis: 4h timeframe with Keltner Channel breakout and EMA pullback entry.
-Goes long when price breaks above upper Keltner Channel (EMA20 + 2*ATR) and pulls back to EMA20 in uptrend.
-Goes short when price breaks below lower Keltner Channel (EMA20 - 2*ATR) and pulls back to EMA20 in downtrend.
-Uses 1-day ADX for trend strength filter (ADX > 25) to avoid ranging markets.
-Designed for 20-40 trades/year to avoid fee drag in 4h timeframe.
-Works in bull/bear via trend filter and pullback entries at dynamic support/resistance.
+4h_DonchianBreakout_Volume_TrendFilter
+Hypothesis: 4h timeframe with Donchian(20) breakout, volume confirmation, and 1w EMA trend filter.
+Enters long when price breaks above Donchian upper band with volume > 1.5x 20-period average and weekly uptrend.
+Enters short when price breaks below Donchian lower band with volume > 1.5x 20-period average and weekly downtrend.
+Uses ATR(14) for volatility-based stop loss and position sizing of 0.25.
+Designed for 20-50 trades/year to avoid fee drag in 4h timeframe.
+Works in bull/bear via trend filter and volatility-adjusted breakouts.
 """
 
-name = "4h_Keltner_Breakout_Pullback"
+name = "4h_DonchianBreakout_Volume_TrendFilter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -27,116 +27,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-day data for ADX trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly EMA20 for trend
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Calculate ADX(14) on daily timeframe
-    def calculate_adx(high, low, close, period=14):
-        plus_dm = np.zeros_like(high)
-        minus_dm = np.zeros_like(high)
-        tr = np.zeros_like(high)
-        
-        for i in range(1, len(high)):
-            plus_dm[i] = max(high[i] - high[i-1], 0)
-            minus_dm[i] = max(low[i-1] - low[i], 0)
-            if plus_dm[i] < minus_dm[i]:
-                plus_dm[i] = 0
-            if minus_dm[i] < plus_dm[i]:
-                minus_dm[i] = 0
-            if plus_dm[i] == minus_dm[i]:
-                plus_dm[i] = 0
-                minus_dm[i] = 0
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        atr = np.zeros_like(high)
-        atr[period] = np.mean(tr[1:period+1])
-        for i in range(period+1, len(high)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        
-        plus_di = 100 * (pd.Series(plus_dm).ewm(alpha=1/period, adjust=False).mean().values / atr)
-        minus_di = 100 * (pd.Series(minus_dm).ewm(alpha=1/period, adjust=False).mean().values / atr)
-        dx = np.zeros_like(high)
-        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-        adx = pd.Series(dx).ewm(alpha=1/period, adjust=False).mean().values
-        
-        # Set first 'period' values to NaN
-        adx[:period] = np.nan
-        return adx
+    # Get weekly close aligned to 4h for trend comparison
+    close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
     
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Donchian(20) channels
+    donchian_window = 20
+    upper_band = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
+    lower_band = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
     
-    # Calculate Keltner Channel on 4h timeframe
-    def calculate_atr(high, low, close, period=10):
-        tr = np.zeros_like(high)
-        for i in range(1, len(high)):
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        atr = np.zeros_like(high)
-        atr[period] = np.mean(tr[1:period+1])
-        for i in range(period+1, len(high)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        
-        # Set first 'period' values to NaN
-        atr[:period] = np.nan
-        return atr
-    
-    atr_4h = calculate_atr(high, low, close, 10)
-    ema_20_4h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    upper_keltner = ema_20_4h + 2 * atr_4h
-    lower_keltner = ema_20_4h - 2 * atr_4h
+    # Volume confirmation
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = np.divide(volume, vol_ma20, out=np.zeros_like(volume), where=vol_ma20!=0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Warmup
+    start_idx = max(20, 50)  # Warmup for Donchian and volume MA
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_20_4h[i]) or 
-            np.isnan(upper_keltner[i]) or 
-            np.isnan(lower_keltner[i]) or
-            np.isnan(adx_1d_aligned[i])):
+        if (np.isnan(upper_band[i]) or 
+            np.isnan(lower_band[i]) or 
+            np.isnan(vol_ratio[i]) or
+            np.isnan(ema_20_1w_aligned[i]) or
+            np.isnan(close_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: only trade when ADX > 25 (trending market)
-        strong_trend = adx_1d_aligned[i] > 25
+        # Determine weekly trend
+        trend_up = close_1w_aligned[i] > ema_20_1w_aligned[i]
+        trend_down = close_1w_aligned[i] < ema_20_1w_aligned[i]
         
         if position == 0:
-            # Long: price breaks above upper Keltner and pulls back to EMA20 in uptrend
-            if (high[i] > upper_keltner[i] and 
-                low[i] <= ema_20_4h[i] and 
-                close[i] > ema_20_4h[i] and
-                strong_trend):
+            # Long: price breaks above upper band with volume and weekly uptrend
+            if (high[i] > upper_band[i] and 
+                close[i] > upper_band[i] and  # close confirmation
+                vol_ratio[i] > 1.5 and 
+                trend_up):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Keltner and pulls back to EMA20 in downtrend
-            elif (low[i] < lower_keltner[i] and 
-                  high[i] >= ema_20_4h[i] and 
-                  close[i] < ema_20_4h[i] and
-                  strong_trend):
+            # Short: price breaks below lower band with volume and weekly downtrend
+            elif (low[i] < lower_band[i] and 
+                  close[i] < lower_band[i] and  # close confirmation
+                  vol_ratio[i] > 1.5 and 
+                  trend_down):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below lower Keltner or trend weakens
-            if low[i] < lower_keltner[i] or not strong_trend:
+            # Exit long: price breaks below lower band or trend turns down
+            if (low[i] < lower_band[i] and 
+                close[i] < lower_band[i]) or \
+               not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above upper Keltner or trend weakens
-            if high[i] > upper_keltner[i] or not strong_trend:
+            # Exit short: price breaks above upper band or trend turns up
+            if (high[i] > upper_band[i] and 
+                close[i] > upper_band[i]) or \
+               not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
