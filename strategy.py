@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_Camarilla_R3_S3_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "6h_Donchian20_1dTrend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,69 +17,50 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot (R3, S3)
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels (R3, S3) from previous day
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # 1d EMA20 trend filter
+    ema_20_1d = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
-    r3 = pivot + (range_hl * 1.1 / 4)   # R3 level
-    s3 = pivot - (range_hl * 1.1 / 4)   # S3 level
-    
-    # Align Camarilla levels to 1d timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # 1w EMA50 trend filter
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Volume filter: current volume > 1.5 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > (vol_ma * 1.5)
+    # Donchian(20) on 6h
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for EMA50 and volume MA
+    start_idx = 20
     
     for i in range(start_idx, n):
-        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema_20_1d_aligned[i]) or np.isnan(high_max[i]) or np.isnan(low_min[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above R3 + above 1w EMA50 + volume spike
-            if close[i] > r3_aligned[i] and close[i] > ema_50_1w_aligned[i] and volume_ok[i]:
+            # Long: break above Donchian high + above 1d EMA20
+            if close[i] > high_max[i] and close[i] > ema_20_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S3 + below 1w EMA50 + volume spike
-            elif close[i] < s3_aligned[i] and close[i] < ema_50_1w_aligned[i] and volume_ok[i]:
+            # Short: break below Donchian low + below 1d EMA20
+            elif close[i] < low_min[i] and close[i] < ema_20_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: price returns to opposite Camarilla level or breaks in opposite direction
+            # Exit: price returns to opposite Donchian level or breaks in opposite direction
             if position == 1:
-                if close[i] < s3_aligned[i] or close[i] < ema_50_1w_aligned[i]:
+                if close[i] < low_min[i] or close[i] < ema_20_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > r3_aligned[i] or close[i] > ema_50_1w_aligned[i]:
+                if close[i] > high_max[i] or close[i] > ema_20_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
