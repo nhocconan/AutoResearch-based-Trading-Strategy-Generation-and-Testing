@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-# 1D_KAMA_1WTrend_RSI_Dip
-# Hypothesis: On the daily timeframe, use KAMA to determine trend direction from weekly trend, buy dips in RSI during uptrends, sell rallies in RSI during downtrends. Uses 1d timeframe with 1h trend filter. Target: 15-25 trades/year to stay under 100 total trades. KAMA adapts to market noise, RSI dip/ride provides mean reversion within trend, reducing whipsaws in both bull and bear markets.
+# 6H_Ichimoku_TK_Cross_CloudFilter_1DTrend
+# Hypothesis: Ichimoku system on 6h with trend filter from daily Ichimoku cloud (Senkou Span A/B).
+# Long when TK cross > 0 AND price above daily cloud (bullish regime).
+# Short when TK cross < 0 AND price below daily cloud (bearish regime).
+# Uses cloud as dynamic support/resistance and trend filter, reducing whipsaws in sideways markets.
+# Targets 20-40 trades/year per symbol by requiring both TK cross and cloud alignment.
 
-name = "1D_KAMA_1WTrend_RSI_Dip"
-timeframe = "1d"
+name = "6H_Ichimoku_TK_Cross_CloudFilter_1DTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -12,90 +16,92 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) == 0:
+    # Get daily data for Ichimoku cloud calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 52:  # Need at least 52 periods for Ichimoku
         return np.zeros(n)
     
-    # Calculate KAMA for trend direction (daily)
-    def calculate_kama(close_vals, er_length=10, fast_sc=2, slow_sc=30):
-        change = np.abs(np.diff(close_vals, n=er_length))
-        volatility = np.sum(np.abs(np.diff(close_vals)), axis=0)
-        er = np.where(volatility != 0, change / volatility, 0)
-        sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
-        kama = np.zeros_like(close_vals)
-        kama[0] = close_vals[0]
-        for i in range(1, len(close_vals)):
-            kama[i] = kama[i-1] + sc[i] * (close_vals[i] - kama[i-1])
-        return kama
+    # Calculate Ichimoku components on daily data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    kama = calculate_kama(close, 10, 2, 30)
+    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
+    period_tenkan = 9
+    tenkan_sen = (pd.Series(high_1d).rolling(window=period_tenkan, min_periods=period_tenkan).max() + 
+                  pd.Series(low_1d).rolling(window=period_tenkan, min_periods=period_tenkan).min()) / 2
     
-    # Weekly trend: price above/below weekly KAMA
-    close_1w = df_1w['close'].values
-    kama_1w = calculate_kama(close_1w, 10, 2, 30)
-    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
+    # Kijun-sen (Base Line): (26-period high + low) / 2
+    period_kijun = 26
+    kijun_sen = (pd.Series(high_1d).rolling(window=period_kijun, min_periods=period_kijun).max() + 
+                 pd.Series(low_1d).rolling(window=period_kijun, min_periods=period_kijun).min()) / 2
     
-    # RSI(14) for dip/ride signals
-    def calculate_rsi(close_vals, length=14):
-        delta = np.diff(close_vals)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        avg_gain = np.zeros_like(close_vals)
-        avg_loss = np.zeros_like(close_vals)
-        avg_gain[length] = np.mean(gain[:length])
-        avg_loss[length] = np.mean(loss[:length])
-        for i in range(length+1, len(close_vals)):
-            avg_gain[i] = (avg_gain[i-1] * (length-1) + gain[i-1]) / length
-            avg_loss[i] = (avg_loss[i-1] * (length-1) + loss[i-1]) / length
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi = 100 - (100 / (1 + rs))
-        rsi[:length] = 50  # neutral before enough data
-        return rsi
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2).shift(period_kijun)  # shifted 26 periods ahead
     
-    rsi = calculate_rsi(close, 14)
+    # Senkou Span B (Leading Span B): (52-period high + low) / 2
+    period_senkou_b = 52
+    senkou_span_b = ((pd.Series(high_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).max() + 
+                      pd.Series(low_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).min()) / 2).shift(period_kijun)
+    
+    # Calculate TK cross on 6h data
+    period_tenkan_6h = 9
+    period_kijun_6h = 26
+    tenkan_sen_6h = (pd.Series(high).rolling(window=period_tenkan_6h, min_periods=period_tenkan_6h).max() + 
+                     pd.Series(low).rolling(window=period_tenkan_6h, min_periods=period_tenkan_6h).min()) / 2
+    kijun_sen_6h = (pd.Series(high).rolling(window=period_kijun_6h, min_periods=period_kijun_6h).max() + 
+                    pd.Series(low).rolling(window=period_kijun_6h, min_periods=period_kijun_6h).min()) / 2
+    tk_cross = tenkan_sen_6h - kijun_sen_6h  # Positive when bullish, negative when bearish
+    
+    # Align daily Ichimoku components to 6h timeframe
+    tenkan_sen_1d_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen.values)
+    kijun_sen_1d_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen.values)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a.values)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b.values)
+    
+    # Calculate cloud boundaries (A and B)
+    cloud_top = np.maximum(senkou_span_a_aligned, senkou_span_b_aligned)
+    cloud_bottom = np.minimum(senkou_span_a_aligned, senkou_span_b_aligned)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # after KAMA and RSI warmup
+    start_idx = max(52, 26)  # Ensure we have Ichimoku data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(kama[i]) or np.isnan(kama_1w_aligned[i]) or 
-            np.isnan(rsi[i])):
+        if (np.isnan(tk_cross[i]) or np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: weekly uptrend (price > weekly KAMA) and RSI dip (< 40)
-            if (close[i] > kama_1w_aligned[i] and rsi[i] < 40):
+            # Long: TK cross bullish AND price above daily cloud
+            if tk_cross[i] > 0 and close[i] > cloud_top[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: weekly downtrend (price < weekly KAMA) and RSI rally (> 60)
-            elif (close[i] < kama_1w_aligned[i] and rsi[i] > 60):
+            # Short: TK cross bearish AND price below daily cloud
+            elif tk_cross[i] < 0 and close[i] < cloud_bottom[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: RSI reaches overbought (> 70) or trend turns down
-            if (rsi[i] > 70 or close[i] < kama_1w_aligned[i]):
+            # Exit: TK cross turns bearish OR price falls below cloud bottom
+            if tk_cross[i] < 0 or close[i] < cloud_bottom[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: RSI reaches oversold (< 30) or trend turns up
-            if (rsi[i] < 30 or close[i] > kama_1w_aligned[i]):
+            # Exit: TK cross turns bullish OR price rises above cloud top
+            if tk_cross[i] > 0 or close[i] > cloud_top[i]:
                 signals[i] = 0.0
                 position = 0
             else:
