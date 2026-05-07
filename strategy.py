@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-6h_TP_DualBarrier_VolumeConfirmation
-Hypothesis: Uses a dual-barrier system (ATR-based upper/lower bands) on 6h timeframe
-to capture breakouts with volume confirmation, filtered by 12h trend direction.
-The dual barriers prevent whipsaws in ranging markets while capturing strong moves.
-Volume confirmation ensures breakouts have conviction. Designed for 12-37 trades/year.
+4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeS
+Hypothesis: Uses daily Camarilla pivot levels (R1/S1) for breakout entries with
+1-day EMA34 trend filter and volume confirmation. Targets 20-30 trades/year to
+minimize fee drift. Camarilla levels provide institutional support/resistance
+that work in both trending and ranging markets. EMA34 filters direction,
+volume confirms breakout strength.
 """
 
-name = "6h_TP_DualBarrier_VolumeConfirmation"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -20,33 +21,40 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # ATR for volatility measurement
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = np.inf
-    tr3[0] = np.inf
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Dual barriers: upper and lower bands based on ATR
-    mult = 2.5
-    upper_band = close + (atr * mult)
-    lower_band = close - (atr * mult)
-    
-    # 12h trend filter: EMA of daily close
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get daily data for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate Camarilla levels from previous day's OHLC
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Previous day's values (shift by 1 to avoid look-ahead)
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close[0] = np.nan  # First day has no previous
+    
+    # Calculate Camarilla levels
+    camarilla_range = prev_high - prev_low
+    r1 = prev_close + camarilla_range * 1.1 / 12
+    s1 = prev_close - camarilla_range * 1.1 / 12
+    
+    # Align to 4h timeframe (wait for daily close)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # 1-day EMA34 trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume confirmation: current volume > 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -54,38 +62,34 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(34, n):
         # Skip if any critical value is NaN
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
-            np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above upper band with volume confirmation and 12h uptrend
-            if (close[i] > upper_band[i] and 
-                volume[i] > vol_ma[i] and 
-                close[i] > ema_12h_aligned[i]):
+            # Long: break above R1 with EMA34 uptrend and volume confirmation
+            if close[i] > r1_aligned[i] and close[i] > ema_34_aligned[i] and volume[i] > vol_ma[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower band with volume confirmation and 12h downtrend
-            elif (close[i] < lower_band[i] and 
-                  volume[i] > vol_ma[i] and 
-                  close[i] < ema_12h_aligned[i]):
+            # Short: break below S1 with EMA34 downtrend and volume confirmation
+            elif close[i] < s1_aligned[i] and close[i] < ema_34_aligned[i] and volume[i] > vol_ma[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price returns to middle (close) or reverses below lower band
-            if close[i] < close[i-1] or close[i] < lower_band[i]:
+            # Exit: price breaks below S1 or EMA34 turns down
+            if close[i] < s1_aligned[i] or close[i] < ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price returns to middle (close) or reverses above upper band
-            if close[i] > close[i-1] or close[i] > upper_band[i]:
+            # Exit: price breaks above R1 or EMA34 turns up
+            if close[i] > r1_aligned[i] or close[i] > ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
