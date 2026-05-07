@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12H_Camarilla_R3S3_1dTrend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dTrend_VolumeSpike_v10"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +17,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter (using close prices)
+    # Get 1d data for trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -33,8 +33,8 @@ def generate_signals(prices):
     
     # Calculate Camarilla R3 and S3 levels from previous 1d bar
     range_hl = prev_high - prev_low
-    r3 = prev_close + range_hl * 1.1 / 2
-    s3 = prev_close - range_hl * 1.1 / 2
+    r3 = prev_close + range_hl * 0.55  # Standard Camarilla formula: close + (high-low)*1.1/2
+    s3 = prev_close - range_hl * 0.55  # Standard Camarilla formula: close - (high-low)*1.1/2
     
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
@@ -42,13 +42,13 @@ def generate_signals(prices):
     # Volume filter: 20-period average volume for spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Volatility filter: avoid low volatility (ATR > 0.3% of price)
+    # Volatility filter: avoid low volatility (ATR > 0.4% of price)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    vol_filter = atr > 0.003 * close  # ATR > 0.3% of price
+    vol_filter = atr > 0.004 * close  # ATR > 0.4% of price
     
     # Session filter: 08:00 - 20:00 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -90,15 +90,15 @@ def generate_signals(prices):
         elif position != 0:
             # Exit: Price returns to midpoint of prior 1d range (H3/L3)
             range_hl = prev_high - prev_low
-            h3 = prev_close + range_hl * 1.1 / 4
-            l3 = prev_close - range_hl * 1.1 / 4
+            h3 = prev_close + range_hl * 0.275  # Standard Camarilla H3: close + (high-low)*1.1/4
+            l3 = prev_close - range_hl * 0.275  # Standard Camarilla L3: close - (high-low)*1.1/4
             h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
             l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
             
             camarilla_mid = (h3_aligned[i] + l3_aligned[i]) / 2
             range_hl_1d = h3_aligned[i] - l3_aligned[i]
-            # Exit when within 35% of midpoint (balanced to reduce churn)
-            at_mid = abs(close[i] - camarilla_mid) < range_hl_1d * 0.35
+            # Exit when within 30% of midpoint (tighter exit to reduce holding losing positions)
+            at_mid = abs(close[i] - camarilla_mid) < range_hl_1d * 0.30
             
             if at_mid:
                 signals[i] = 0.0
