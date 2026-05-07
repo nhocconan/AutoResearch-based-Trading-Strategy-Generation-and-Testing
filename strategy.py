@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3S3_Breakout_1dTrend_Volume_v1
-Hypothesis: On 4h timeframe, enter long when price breaks above Camarilla R3 level with 
-daily uptrend and volume spike; enter short when price breaks below S3 level with 
-daily downtrend and volume spike. Camarilla levels provide institutional support/resistance,
-and combining with daily trend and volume filters reduces false signals. 
-This structure has shown strong performance in ETH and SOL, and should work for BTC/ETH 
-in both bull and bear markets by requiring alignment with higher timeframe trend.
+6h_Williams_Alligator_ADX_Signal_v1
+Hypothesis: On 6h timeframe, combine Williams Alligator (Jaw/Teeth/Lips) for trend identification 
+with ADX for trend strength, filtered by 1d EMA34 to align with higher timeframe trend.
+Long when Lips > Teeth > Jaw (bullish alignment), ADX > 25, and price above 1d EMA34.
+Short when Lips < Teeth < Jaw (bearish alignment), ADX > 25, and price below 1d EMA34.
+This combination filters whipsaws in ranging markets while capturing strong trends in both bull and bear markets.
 """
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_v1"
-timeframe = "4h"
+name = "6h_Williams_Alligator_ADX_Signal_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -31,41 +30,44 @@ def generate_signals(prices):
     if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend filter
+    # Williams Alligator (13,8,5)
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
+    
+    # ADX (14)
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    plus_dm = np.insert(plus_dm, 0, 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    minus_dm = np.insert(minus_dm, 0, 0)
+    
+    tr = np.maximum(high - low, 
+                    np.maximum(np.abs(high - np.roll(close, 1)), 
+                               np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]
+    
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values / (atr * 14)
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values / (atr * 14)
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Daily EMA34 for trend filter
     ema_34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
-    
-    # Calculate previous day's Camarilla levels (using prior day's OHLC)
-    # We need to shift the daily data by 1 to avoid look-ahead
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_range = prev_high - prev_low
-    
-    # Camarilla levels: R3 = close + 1.1*(high-low)/6, S3 = close - 1.1*(high-low)/6
-    r3 = prev_close + 1.1 * prev_range / 6
-    s3 = prev_close - 1.1 * prev_range / 6
-    
-    # Align Camarilla levels to 4h timeframe (they update only when new daily bar starts)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # Volume filter: current volume > 2.0 * 20-period average volume
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_avg * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_entry = 0
     
-    start_idx = max(34, 20)  # Ensure sufficient warmup for EMA and volume
+    start_idx = max(13, 8, 5, 14)  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
         bars_since_entry += 1
         
         # Skip if any data is not ready
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or 
+            np.isnan(adx[i]) or np.isnan(ema_34_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,35 +75,38 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Minimum 12 bars between trades to reduce frequency (4h timeframe)
-            if bars_since_entry < 12:
+            # Minimum 6 bars between trades to reduce frequency (6h timeframe)
+            if bars_since_entry < 6:
                 continue
                 
-            # Long: price breaks above R3 + daily uptrend + volume filter
-            if (close[i] > r3_aligned[i] and 
-                close[i] > ema_34_aligned[i] and 
-                volume_filter[i]):
+            # Bullish alignment: Lips > Teeth > Jaw
+            bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
+            # Bearish alignment: Lips < Teeth < Jaw
+            bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]
+            
+            # Long: bullish alignment + ADX > 25 + price above EMA34
+            if (bullish_alignment and adx[i] > 25 and 
+                close[i] > ema_34_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_entry = 0
-            # Short: price breaks below S3 + daily downtrend + volume filter
-            elif (close[i] < s3_aligned[i] and 
-                  close[i] < ema_34_aligned[i] and 
-                  volume_filter[i]):
+            # Short: bearish alignment + ADX > 25 + price below EMA34
+            elif (bearish_alignment and adx[i] > 25 and 
+                  close[i] < ema_34_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_entry = 0
         elif position != 0:
-            # Exit: price returns to opposite Camarilla level (S3 for long, R3 for short)
+            # Exit: Loss of alignment or ADX weakening
             if position == 1:
-                if close[i] < s3_aligned[i]:  # Price back below S3
+                if not (lips[i] > teeth[i] and teeth[i] > jaw[i]) or adx[i] < 20:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > r3_aligned[i]:  # Price back above R3
+                if not (lips[i] < teeth[i] and teeth[i] < jaw[i]) or adx[i] < 20:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
