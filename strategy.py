@@ -1,13 +1,6 @@
 #!/usr/bin/env python3
-# 12h_Keltner_Channel_Breakout_Trend_Volume
-# Hypothesis: Keltner Channel breakout with 1d trend filter (EMA34) and volume confirmation
-# Keltner Channel uses ATR-based bands which adapt to volatility, providing dynamic support/resistance
-# Trend filter prevents counter-trend trades in strong trends, improving win rate in both bull and bear markets
-# Volume confirmation ensures breakouts have institutional participation
-# Target: 50-150 trades over 4 years (12-37/year) with position size 0.25
-
-name = "12h_Keltner_Channel_Breakout_Trend_Volume"
-timeframe = "12h"
+name = "4h_WeeklyPivot_Strategy"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,71 +17,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Load weekly data ONCE for pivot points
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # Daily EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate weekly pivot points
+    # Pivot Point (PP) = (High + Low + Close) / 3
+    # Resistance 1 (R1) = (2 * PP) - Low
+    # Support 1 (S1) = (2 * PP) - High
+    pp_weekly = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
+    r1_weekly = (2 * pp_weekly) - df_1w['low']
+    s1_weekly = (2 * pp_weekly) - df_1w['high']
     
-    # ATR(14) for Keltner Channel
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = 0  # First period has no previous close
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Align weekly pivot levels to 4h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1w, pp_weekly.values)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1_weekly.values)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1_weekly.values)
     
-    # EMA20 for Keltner Channel middle line
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Keltner Channel: Upper = EMA20 + 2*ATR, Lower = EMA20 - 2*ATR
-    kc_upper = ema_20 + 2.0 * atr
-    kc_lower = ema_20 - 2.0 * atr
-    
-    # Volume confirmation: volume > 1.5 * average volume (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > 1.5 * vol_ma
+    # Volume filter: volume above 20-period average
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20, 14)
+    start_idx = 20
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_12h[i]) or np.isnan(ema_20[i]) or 
-            np.isnan(atr[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(kc_upper[i]) or np.isnan(kc_lower[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: only take longs in daily uptrend, shorts in daily downtrend
-        daily_uptrend = close[i] > ema_34_12h[i]
-        daily_downtrend = close[i] < ema_34_12h[i]
-        
         if position == 0:
-            # Long: price breaks above KC upper + daily uptrend + volume confirmation
-            if close[i] > kc_upper[i] and daily_uptrend and volume_filter[i]:
+            # Long: price crosses above S1 with volume confirmation
+            if close[i] > s1_aligned[i] and close[i-1] <= s1_aligned[i-1] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below KC lower + daily downtrend + volume confirmation
-            elif close[i] < kc_lower[i] and daily_downtrend and volume_filter[i]:
+            # Short: price crosses below R1 with volume confirmation
+            elif close[i] < r1_aligned[i] and close[i-1] >= r1_aligned[i-1] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price closes below KC middle OR trend reversal
-            if close[i] < ema_20[i] or not daily_uptrend:
+            # Exit: price crosses below PP or opposite signal
+            if close[i] < pp_aligned[i] or (close[i] < s1_aligned[i] and close[i-1] >= s1_aligned[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price closes above KC middle OR trend reversal
-            if close[i] > ema_20[i] or not daily_downtrend:
+            # Exit: price crosses above PP or opposite signal
+            if close[i] > pp_aligned[i] or (close[i] > r1_aligned[i] and close[i-1] <= r1_aligned[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
