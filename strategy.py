@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_KAMA_1wTrend_VolumeFilter_v1"
-timeframe = "1d"
+name = "12h_24hBreakout_1dTrend_VolumeFilter_v2"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,71 +17,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get daily data for trend filter and volatility
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 1w KAMA trend filter (more adaptive than EMA)
-    price_series = pd.Series(df_1w['close'])
-    change = abs(price_series.diff(1))
-    volatility = price_series.diff(1).abs().rolling(window=10, min_periods=10).sum()
-    er = change / volatility.replace(0, np.nan)
-    er = er.fillna(0)
-    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
-    kama = [price_series.iloc[0]]
-    for i in range(1, len(price_series)):
-        kama.append(kama[-1] + sc.iloc[i] * (price_series.iloc[i] - kama[-1]))
-    kama = np.array(kama)
-    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama)
+    # 1d EMA34 trend filter (requires 34 periods)
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Daily KAMA for entry signal
-    price_series_d = pd.Series(close)
-    change_d = abs(price_series_d.diff(1))
-    volatility_d = price_series_d.diff(1).abs().rolling(window=10, min_periods=10).sum()
-    er_d = change_d / volatility_d.replace(0, np.nan)
-    er_d = er_d.fillna(0)
-    sc_d = (er_d * (0.6645 - 0.0645) + 0.0645) ** 2
-    kama_d = [price_series_d.iloc[0]]
-    for i in range(1, len(price_series_d)):
-        kama_d.append(kama_d[-1] + sc_d.iloc[i] * (price_series_d.iloc[i] - kama_d[-1]))
-    kama_d = np.array(kama_d)
+    # 24-hour high/low breakout (2 periods of 12h)
+    high_24h = pd.Series(high).rolling(window=2, min_periods=2).max().shift(1).values
+    low_24h = pd.Series(low).rolling(window=2, min_periods=2).min().shift(1).values
     
-    # Volume filter: current volume > 1.3 * 20-period average
+    # Volume filter: current volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > (vol_ma * 1.3)
+    volume_ok = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 30)  # Need 20 for volume MA, 30 for weekly KAMA warmup
+    start_idx = max(2, 20)  # Need 2 for 24h breakout, 20 for volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(kama_1w_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(kama_d[i]):
+        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above daily KAMA AND above weekly KAMA + volume
-            if close[i] > kama_d[i] and close[i] > kama_1w_aligned[i] and volume_ok[i]:
+            # Long: price breaks above 24h high AND above daily EMA34 + volume
+            if close[i] > high_24h[i] and close[i] > ema_34_1d_aligned[i] and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below daily KAMA AND below weekly KAMA + volume
-            elif close[i] < kama_d[i] and close[i] < kama_1w_aligned[i] and volume_ok[i]:
+            # Short: price breaks below 24h low AND below daily EMA34 + volume
+            elif close[i] < low_24h[i] and close[i] < ema_34_1d_aligned[i] and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: price crosses daily KAMA in opposite direction
+            # Exit: price returns to 24h range or breaks in opposite direction
             if position == 1:
-                if close[i] < kama_d[i]:
+                if close[i] < low_24h[i] or close[i] < ema_34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > kama_d[i]:
+                if close[i] > high_24h[i] or close[i] > ema_34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
