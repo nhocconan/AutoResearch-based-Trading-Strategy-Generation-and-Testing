@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Volume_Spike_v4"
-timeframe = "4h"
+name = "1d_Camarilla_R3S3_Breakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,9 +17,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla levels and trend filter
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # Calculate daily data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     # Calculate Camarilla R3 and S3 levels from previous day
@@ -30,32 +35,32 @@ def generate_signals(prices):
     r3 = close_prev + 1.1 * (high_prev - low_prev) / 4
     s3 = close_prev - 1.1 * (high_prev - low_prev) / 4
     
-    # Align daily levels to 4h timeframe (with 1-day delay for completed bar)
+    # Align daily levels to daily timeframe (with 1-day delay for completed bar)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # 1d trend filter: EMA34
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Weekly trend filter: EMA50
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Volume filter: current volume > 2.5x 20-period average
+    # Volume filter: current volume > 2.0x 20-day average
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-20:i])
-    vol_filter = volume > (2.5 * vol_ma_20)
+    vol_filter = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 8  # ~16 hours for 4h to reduce trades
+    cooldown_bars = 30  # ~1 month for 1d to reduce trades
     
-    start_idx = max(100, 20, 34)
+    start_idx = max(20, 50)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(r3_aligned[i]) or 
             np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -67,9 +72,9 @@ def generate_signals(prices):
         
         bars_since_last_trade += 1
         
-        # Determine 1d trend direction
-        trend_up = close > ema_34_1d_aligned[i]
-        trend_down = close < ema_34_1d_aligned[i]
+        # Determine weekly trend direction
+        trend_up = close > ema_50_1w_aligned[i]
+        trend_down = close < ema_50_1w_aligned[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
             # Long: Break above R3 in uptrend with strong volume
@@ -105,9 +110,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Further increasing the volume threshold to 2.5x average and extending cooldown to 8 bars (16 hours)
-# will reduce trade frequency to target 15-25 trades per year, minimizing fee drag while maintaining
-# the edge of Camarilla R3/S3 breakouts with 1d EMA34 trend confirmation. This should improve
-# generalization to the test period (2025-2026) by focusing only on the strongest institutional breakouts.
-# Position size reduced to 0.25 to manage drawdown during volatile periods. Works in both bull (breakouts above R3)
-# and bear (breakdowns below S3) markets by trading with the higher timeframe trend.
+# Hypothesis: Using daily timeframe with Camarilla R3/S3 breakouts, 1-week EMA50 trend filter, and volume confirmation
+# will generate 15-25 trades per year (60-100 total over 4 years), minimizing fee drag while capturing
+# strong institutional breakouts. The weekly trend filter ensures we only trade with the higher timeframe trend,
+# working in both bull markets (breakouts above R3 in uptrend) and bear markets (breakdowns below S3 in downtrend).
+# Position size of 0.25 manages drawdown during volatile periods. Cooldown of 30 days prevents overtrading.
+# This strategy targets BTC and ETH as primary assets, avoiding SOL-only bias.
