@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_RSI_Pullback_12h_Trend_Volume
-Hypothesis: Use 4-hour RSI pullbacks in the direction of the 12-hour trend with volume confirmation.
-In bull markets, buy dips; in bear markets, sell rallies. The 12-hour trend filter ensures we trade with higher timeframe momentum, reducing counter-trend trades.
-Volume confirmation ensures institutional participation. Targets 20-50 trades/year to minimize fee drag.
+1h_Funding_Rate_Contrarian_4hTrend_Filter
+Hypothesis: Funding rate extremes indicate short-term sentiment extremes. 
+Contrarian entries (short when funding > 0.03%, long when funding < -0.03%) 
+work when aligned with 4h trend (EMA50). 
+Funding mean-reverts quickly, providing edge in ranging/volatile markets.
+4h trend filter ensures we don't fight the medium-term direction.
+Session filter (08-20 UTC) reduces noise. Target 15-30 trades/year.
 """
-name = "4h_RSI_Pullback_12h_Trend_Volume"
-timeframe = "4h"
+name = "1h_Funding_Rate_Contrarian_4hTrend_Filter"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -18,89 +21,85 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
+    # Load funding rate data (8h intervals)
+    funding_path = "/mnt/raid0_ssd_nvme/data/processed/funding/binance_funding_rate_8h.parquet"
+    try:
+        funding_df = pd.read_parquet(funding_path)
+        funding_series = funding_df.set_index('timestamp')['funding_rate']
+    except Exception:
+        funding_series = pd.Series(index=prices.index, data=0.0)
     
-    # Get 12H data for trend filter and RSI calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Align funding rate to 1h (forward fill from 8h data)
+    funding_aligned = pd.Series(index=prices.index, data=0.0, dtype=float)
+    funding_ts = funding_series.index
+    funding_vals = funding_series.values
+    if len(funding_ts) > 0:
+        funding_aligned.values[:] = np.interp(
+            prices.index.view('int64'),
+            funding_ts.view('int64'),
+            funding_vals,
+            left=funding_vals[0] if len(funding_vals) > 0 else 0.0,
+            right=funding_vals[-1] if len(funding_vals) > 0 else 0.0
+        )
+    
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate RSI(14) on 12H close
-    close_12h = df_12h['close'].values
-    delta = np.diff(close_12h)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    # Use Wilder's smoothing (alpha = 1/14)
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    if len(gain) > 0:
-        avg_gain[0] = np.mean(gain[:14]) if len(gain) >= 14 else np.nan
-        avg_loss[0] = np.mean(loss[:14]) if len(loss) >= 14 else np.nan
-        for i in range(1, len(gain)):
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    # Pad to match length
-    rsi = np.concatenate([np.full(14, np.nan), rsi])
-    rsi_12h = rsi[:len(close_12h)]
+    # Calculate 4h EMA50 for trend
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Calculate EMA(50) on 12H close for trend filter
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align to 4H timeframe
-    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # Volume filter: current 4H volume > 1.5 x 20-period average volume
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_avg * 1.5)
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Ensure sufficient warmup
+    start_idx = 50  # Warmup for EMA50
     
     for i in range(start_idx, n):
-        # Skip if any data is not ready
-        if (np.isnan(rsi_12h_aligned[i]) or np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(vol_avg[i])):
+        # Skip if outside session
+        if not in_session[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Skip if data not ready
+        if np.isnan(ema_50_4h_aligned[i]):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        funding = funding_aligned.iloc[i] if hasattr(funding_aligned, 'iloc') else funding_aligned[i]
+        
         if position == 0:
-            # Long: RSI < 40 (pullback), price above EMA50 (uptrend), volume confirmation
-            if (rsi_12h_aligned[i] < 40 and 
-                close[i] > ema_50_12h_aligned[i] and 
-                volume_filter[i]):
-                signals[i] = 0.25
+            # Long: funding extremely negative (< -0.03%) AND price above 4h EMA50 (uptrend)
+            if funding < -0.0003 and prices['close'].iloc[i] > ema_50_4h_aligned[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short: RSI > 60 (pullback), price below EMA50 (downtrend), volume confirmation
-            elif (rsi_12h_aligned[i] > 60 and 
-                  close[i] < ema_50_12h_aligned[i] and 
-                  volume_filter[i]):
-                signals[i] = -0.25
+            # Short: funding extremely positive (> 0.03%) AND price below 4h EMA50 (downtrend)
+            elif funding > 0.0003 and prices['close'].iloc[i] < ema_50_4h_aligned[i]:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: RSI > 60 (overbought) or price crosses below EMA50
-            if (rsi_12h_aligned[i] > 60 or 
-                close[i] < ema_50_12h_aligned[i]):
+            # Exit long: funding returns to neutral OR price crosses below EMA50
+            if funding > -0.0001 or prices['close'].iloc[i] < ema_50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: RSI < 40 (oversold) or price crosses above EMA50
-            if (rsi_12h_aligned[i] < 40 or 
-                close[i] > ema_50_12h_aligned[i]):
+            # Exit short: funding returns to neutral OR price crosses above EMA50
+            if funding < 0.0001 or prices['close'].iloc[i] > ema_50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
