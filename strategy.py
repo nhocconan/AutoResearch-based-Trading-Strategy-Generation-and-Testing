@@ -1,12 +1,15 @@
-#!/usr/bin/env python3
-# 4H_Three_Month_High_Low_Breakout_With_12H_Trend
-# Hypothesis: Breakouts from 3-month (12-week) high/low levels with 12-hour trend filter on 4h timeframe.
-# Uses monthly extremes as structural support/resistance, filtered by 12h EMA trend and volume confirmation.
-# Works in bull markets (breakouts above 3m high in uptrend) and bear markets (breakdowns below 3m low in downtrend).
-# Low-frequency signals reduce fee drag; structural levels provide edge in ranging markets.
+# -*- coding: utf-8 -*-
+# -*- mode: python; -*-
 
-name = "4H_Three_Month_High_Low_Breakout_With_12H_Trend"
-timeframe = "4h"
+#!/usr/bin/env python3
+# 6H_WeeklyPivot_CounterTrend_With1DTrendFilter
+# Hypothesis: 6-hour counter-trend strategy using weekly pivot levels with daily trend filter.
+# Fades from weekly R2/S2 when price is in daily uptrend/downtrend, targeting mean reversion within weekly range.
+# Works in bull markets (fades from weekly resistance in uptrend) and bear markets (fades from weekly support in downtrend).
+# Targets 15-30 trades/year to minimize fee drag. Uses weekly structure with daily trend filter.
+
+name = "6H_WeeklyPivot_CounterTrend_With1DTrendFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +18,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,77 +26,66 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for 3-month high/low calculation (12 weeks = 84 periods)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 84:  # Need 12 weeks of data
+    # Get weekly data for pivot calculation
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 1:
         return np.zeros(n)
     
-    # Calculate 3-month (84-period) rolling high and low on 12h
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Get daily data for trend filter
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 20:
+        return np.zeros(n)
     
-    # Use pandas rolling for efficiency with min_periods
-    high_3m = pd.Series(high_12h).rolling(window=84, min_periods=84).max().values
-    low_3m = pd.Series(low_12h).rolling(window=84, min_periods=84).min().values
+    # Calculate weekly pivot points (based on previous week's OHLC)
+    prev_weekly_high = df_weekly['high'].shift(1).values
+    prev_weekly_low = df_weekly['low'].shift(1).values
+    prev_weekly_close = df_weekly['close'].shift(1).values
     
-    # Calculate 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate weekly pivot and support/resistance levels
+    weekly_range = prev_weekly_high - prev_weekly_low
+    pp_weekly = (prev_weekly_high + prev_weekly_low + prev_weekly_close) / 3
+    r2_weekly = pp_weekly + weekly_range * 0.25  # Weekly R2
+    s2_weekly = pp_weekly - weekly_range * 0.25  # Weekly S2
     
-    # Align all 12h indicators to 4h timeframe
-    high_3m_aligned = align_htf_to_ltf(prices, df_12h, high_3m)
-    low_3m_aligned = align_htf_to_ltf(prices, df_12h, low_3m)
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate daily EMA20 for trend filter
+    ema_20_daily = pd.Series(prev_weekly_close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Volume filter: current volume > 1.5x average volume (30-period)
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    
-    # Volatility filter: avoid extremely low volatility (ATR > 0.3% of price)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    vol_filter = atr > 0.003 * close  # ATR > 0.3% of price
+    # Align weekly levels and daily EMA to 6h timeframe
+    r2_weekly_aligned = align_htf_to_ltf(prices, df_weekly, r2_weekly)
+    s2_weekly_aligned = align_htf_to_ltf(prices, df_weekly, s2_weekly)
+    pp_weekly_aligned = align_htf_to_ltf(prices, df_weekly, pp_weekly)
+    ema_20_daily_aligned = align_htf_to_ltf(prices, df_daily, ema_20_daily)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(84, 50, 30)  # Ensure we have all required data
+    start_idx = 20  # Ensure we have daily EMA data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(high_3m_aligned[i]) or np.isnan(low_3m_aligned[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0 or
-            np.isnan(vol_filter[i]) or not vol_filter[i]):
+        if (np.isnan(r2_weekly_aligned[i]) or np.isnan(s2_weekly_aligned[i]) or 
+            np.isnan(pp_weekly_aligned[i]) or np.isnan(ema_20_daily_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume filter: spike confirmation (1.5x average volume)
-        volume_filter = volume[i] > 1.5 * vol_ma[i]
-        
         if position == 0:
-            # Long: Price breaks above 3-month high + uptrend (price > 12h EMA50) + volume
-            if (close[i] > high_3m_aligned[i] and 
-                close[i] > ema_50_12h_aligned[i] and   # Uptrend filter
-                volume_filter):
+            # Long: Price rejects S2 support + daily uptrend (price > EMA20)
+            if (close[i] <= s2_weekly_aligned[i] * 1.002 and  # Within 0.2% of S2
+                close[i] > ema_20_daily_aligned[i]):          # Daily uptrend
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below 3-month low + downtrend (price < 12h EMA50) + volume
-            elif (close[i] < low_3m_aligned[i] and 
-                  close[i] < ema_50_12h_aligned[i] and   # Downtrend filter
-                  volume_filter):
+            # Short: Price rejects R2 resistance + daily downtrend (price < EMA20)
+            elif (close[i] >= r2_weekly_aligned[i] * 0.998 and  # Within 0.2% of R2
+                  close[i] < ema_20_daily_aligned[i]):         # Daily downtrend
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit conditions:
-            # 1. Price returns to opposite extreme (mean reversion)
-            # 2. Trend reversal (price crosses 12h EMA50 in opposite direction)
-            trend_reversal = (position == 1 and close[i] < ema_50_12h_aligned[i]) or \
-                           (position == -1 and close[i] > ema_50_12h_aligned[i])
+            # Exit: Price returns to weekly pivot (mean reversion target)
+            at_pivot = abs(close[i] - pp_weekly_aligned[i]) < (r2_weekly_aligned[i] - pp_weekly_aligned[i]) * 0.3  # Within 30% of range to pivot
             
-            if trend_reversal:
+            if at_pivot:
                 signals[i] = 0.0
                 position = 0
             else:
