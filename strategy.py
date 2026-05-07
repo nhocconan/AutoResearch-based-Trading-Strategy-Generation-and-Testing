@@ -3,12 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h trend (EMA21) and 1d volatility regime (ATR ratio) for direction,
-# with 1h RSI for entry timing. Long in uptrend + low volatility on RSI pullback,
-# Short in downtrend + low volatility on RSI bounce. Designed for 15-30 trades/year.
-# Works in bull/bear by following 4h trend and avoiding high volatility whipsaws.
-name = "1h_4hTrend_1dVolRegime_RSI"
-timeframe = "1h"
+# Hypothesis: 12h Triangular Moving Average (TMA) crossover with 1d volume confirmation and ADX trend filter.
+# Long when 12h fast TMA crosses above slow TMA, 1d volume > 1.5x 20 EMA, and 1d ADX > 25.
+# Short when fast TMA crosses below slow TMA, 1d volume > 1.5x 20 EMA, and 1d ADX > 25.
+# Uses volume for momentum confirmation and ADX to ensure trending markets, avoiding chop.
+# Designed for moderate trade frequency (target: 20-40/year) to balance signal quality and cost.
+# Works in both bull and bear markets by following 12h momentum with volatility filter.
+name = "12h_TMA_Crossover_Volume_ADX"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,93 +21,118 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Load 4h data for trend (EMA21)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    # 4h EMA21 for trend direction
-    ema_21_4h = pd.Series(df_4h['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
-    
-    # Load 1d data for volatility regime (ATR ratio)
+    # Load 1d data for volume and ADX
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d ATR(14) and ATR(50) for volatility regime
+    # 1d volume confirmation: current volume > 1.5 * 20-period EMA
+    vol_ema_20 = pd.Series(df_1d['volume']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_confirm = np.where(vol_ema_20 > 0, df_1d['volume'].values / vol_ema_20, 1.0) > 1.5
+    vol_confirm_aligned = align_htf_to_ltf(prices, df_1d, vol_confirm)
+    
+    # 1d ADX (14-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate True Range
-    tr = []
-    for i in range(len(close_1d)):
-        if i == 0:
-            tr.append(high_1d[0] - low_1d[0])
-        else:
-            tr.append(max(high_1d[i] - low_1d[i], abs(high_1d[i] - close_1d[i-1]), abs(low_1d[i] - close_1d[i-1])))
-    tr = np.array(tr)
+    # True Range
+    tr = np.zeros_like(high_1d)
+    tr[0] = high_1d[0] - low_1d[0]
+    for i in range(1, len(high_1d)):
+        tr[i] = max(high_1d[i] - low_1d[i], abs(high_1d[i] - close_1d[i-1]), abs(low_1d[i] - close_1d[i-1]))
     
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    # Directional Movement
+    up_move = np.zeros_like(high_1d)
+    down_move = np.zeros_like(high_1d)
+    up_move[0] = 0
+    down_move[0] = 0
+    for i in range(1, len(high_1d)):
+        up_move[i] = max(high_1d[i] - high_1d[i-1], 0)
+        down_move[i] = max(low_1d[i-1] - low_1d[i], 0)
     
-    # ATR ratio: short-term / long-term volatility
-    atr_ratio = np.where(atr_50 > 0, atr_14 / atr_50, 1.0)
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    # Smoothed values
+    def smooth_wilder(arr, period):
+        smoothed = np.zeros_like(arr)
+        smoothed[period-1] = np.mean(arr[:period])
+        for i in range(period, len(arr)):
+            smoothed[i] = (smoothed[i-1] * (period-1) + arr[i]) / period
+        return smoothed
     
-    # 1h RSI(14) for entry timing
-    rsi_period = 14
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    atr = smooth_wilder(tr, 14)
+    plus_dm = smooth_wilder(up_move, 14)
+    minus_dm = smooth_wilder(down_move, 14)
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Avoid division by zero
+    plus_di = np.where(atr > 0, 100 * plus_dm / atr, 0)
+    minus_di = np.where(atr > 0, 100 * minus_dm / atr, 0)
+    dx = np.where((plus_di + minus_di) > 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = smooth_wilder(dx, 14)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Load 12h data for TMA crossover
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
+    
+    close_12h = df_12h['close'].values
+    
+    # TMA = SMA of SMA
+    def sma(arr, window):
+        return pd.Series(arr).rolling(window=window, min_periods=window).mean().values
+    
+    sma_fast = sma(close_12h, 9)
+    sma_slow = sma(close_12h, 21)
+    tma_fast = sma(sma_fast, 9)
+    tma_slow = sma(sma_slow, 21)
+    
+    tma_fast_aligned = align_htf_to_ltf(prices, df_12h, tma_fast)
+    tma_slow_aligned = align_htf_to_ltf(prices, df_12h, tma_slow)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Sufficient warmup
+    start_idx = 50  # Sufficient warmup for calculations
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_21_4h_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or 
-            np.isnan(rsi[i])):
+        if (np.isnan(tma_fast_aligned[i]) or np.isnan(tma_slow_aligned[i]) or 
+            np.isnan(vol_confirm_aligned[i]) or np.isnan(adx_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine trend and volatility regime
-        uptrend = close[i] > ema_21_4h_aligned[i]
-        downtrend = close[i] < ema_21_4h_aligned[i]
-        low_volatility = atr_ratio_aligned[i] < 0.8  # Volatility contraction
-        
         if position == 0:
-            # Long: uptrend + low volatility + RSI oversold (<30)
-            if uptrend and low_volatility and rsi[i] < 30:
-                signals[i] = 0.20
+            # Long condition: TMA fast crosses above slow, volume confirmation, ADX > 25
+            tma_cross_up = tma_fast_aligned[i] > tma_slow_aligned[i] and tma_fast_aligned[i-1] <= tma_slow_aligned[i-1]
+            long_condition = tma_cross_up and vol_confirm_aligned[i] and (adx_aligned[i] > 25)
+            # Short condition: TMA fast crosses below slow, volume confirmation, ADX > 25
+            tma_cross_down = tma_fast_aligned[i] < tma_slow_aligned[i] and tma_fast_aligned[i-1] >= tma_slow_aligned[i-1]
+            short_condition = tma_cross_down and vol_confirm_aligned[i] and (adx_aligned[i] > 25)
+            
+            if long_condition:
+                signals[i] = 0.25
                 position = 1
-            # Short: downtrend + low volatility + RSI overbought (>70)
-            elif downtrend and low_volatility and rsi[i] > 70:
-                signals[i] = -0.20
+            elif short_condition:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: trend reversal or volatility expansion or RSI overbought
-            if (not uptrend) or (atr_ratio_aligned[i] > 1.2) or (rsi[i] > 70):
+            # Exit: TMA fast crosses below slow or ADX drops below 20 (trend weakening)
+            tma_cross_down = tma_fast_aligned[i] < tma_slow_aligned[i] and tma_fast_aligned[i-1] >= tma_slow_aligned[i-1]
+            if tma_cross_down or (adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: trend reversal or volatility expansion or RSI oversold
-            if (not downtrend) or (atr_ratio_aligned[i] > 1.2) or (rsi[i] < 30):
+            # Exit: TMA fast crosses above slow or ADX drops below 20 (trend weakening)
+            tma_cross_up = tma_fast_aligned[i] > tma_slow_aligned[i] and tma_fast_aligned[i-1] <= tma_slow_aligned[i-1]
+            if tma_cross_up or (adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
