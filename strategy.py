@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_4h1d_Confluence_Momentum"
-timeframe = "1h"
+name = "6h_Ichimoku_Cloud_Trend_1wFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,94 +17,119 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h data ONCE before loop for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Load 1w data ONCE for Ichimoku
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 26:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop for momentum filter
+    # Load 1d data ONCE for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # 4h EMA(50) for trend filter
-    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate Ichimoku on weekly data
+    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
+    high_9 = pd.Series(df_1w['high']).rolling(window=9, min_periods=9).max().values
+    low_9 = pd.Series(df_1w['low']).rolling(window=9, min_periods=9).min().values
+    tenkan = (high_9 + low_9) / 2
     
-    # 1d RSI(14) for momentum filter
-    delta = pd.Series(df_1d['close']).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_14_1d = (100 - (100 / (1 + rs))).values
-    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
+    # Kijun-sen (Base Line): (26-period high + low) / 2
+    high_26 = pd.Series(df_1w['high']).rolling(window=26, min_periods=26).max().values
+    low_26 = pd.Series(df_1w['low']).rolling(window=26, min_periods=26).min().values
+    kijun = (high_26 + low_26) / 2
     
-    # 1h RSI(14) for entry timing
-    delta_h = pd.Series(close).diff()
-    gain_h = delta_h.clip(lower=0)
-    loss_h = -delta_h.clip(upper=0)
-    avg_gain_h = gain_h.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss_h = loss_h.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs_h = avg_gain_h / avg_loss_h
-    rsi_14_1h = (100 - (100 / (1 + rs_h)))
-    rsi_14_1h_values = rsi_14_1h.values
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2
     
-    # Volume filter: 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Senkou Span B (Leading Span B): (52-period high + low) / 2
+    high_52 = pd.Series(df_1w['high']).rolling(window=52, min_periods=52).max().values
+    low_52 = pd.Series(df_1w['low']).rolling(window=52, min_periods=52).min().values
+    senkou_b = (high_52 + low_52) / 2
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    # Chikou Span (Lagging Span): close plotted 26 periods behind
+    chikou = df_1w['close'].values
+    
+    # Align Ichimoku components to 6h timeframe
+    tenkan_aligned = align_htf_to_ltf(prices, df_1w, tenkan)
+    kijun_aligned = align_htf_to_ltf(prices, df_1w, kijun)
+    senkou_a_aligned = align_htf_to_ltf(prices, df_1w, senkou_a)
+    senkou_b_aligned = align_htf_to_ltf(prices, df_1w, senkou_b)
+    chikou_aligned = align_htf_to_ltf(prices, df_1w, chikou)
+    
+    # Daily EMA(34) for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume spike detection: 4-period average (1 day of 6h bars)
+    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Wait for indicators
+    start_idx = max(52, 34, 4)  # Wait for Ichimoku, EMA and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(rsi_14_1d_aligned[i]) or 
-            np.isnan(rsi_14_1h_values[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
+            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_4[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
+        # Cloud top and bottom
+        cloud_top = max(senkou_a_aligned[i], senkou_b_aligned[i])
+        cloud_bottom = min(senkou_a_aligned[i], senkou_b_aligned[i])
         
         if position == 0:
-            # Long: 4h uptrend, 1d bullish momentum, 1h oversold bounce
-            if (ema_50_4h_aligned[i] > ema_50_4h_aligned[i-1] and 
-                rsi_14_1d_aligned[i] > 50 and 
-                rsi_14_1h_values[i] < 30 and 
-                volume[i] > vol_ma_20[i] * 1.5 and 
-                in_session):
-                signals[i] = 0.20
+            # Long: TK cross above cloud in uptrend with volume
+            tk_cross_up = tenkan_aligned[i] > kijun_aligned[i] and tenkan_aligned[i-1] <= kijun_aligned[i-1]
+            price_above_cloud = close[i] > cloud_top
+            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
+            vol_condition = volume[i] > vol_ma_4[i] * 1.8
+            
+            if tk_cross_up and price_above_cloud and uptrend and vol_condition:
+                signals[i] = 0.25
                 position = 1
-            # Short: 4h downtrend, 1d bearish momentum, 1h overbought bounce
-            elif (ema_50_4h_aligned[i] < ema_50_4h_aligned[i-1] and 
-                  rsi_14_1d_aligned[i] < 50 and 
-                  rsi_14_1h_values[i] > 70 and 
-                  volume[i] > vol_ma_20[i] * 1.5 and 
-                  in_session):
-                signals[i] = -0.20
-                position = -1
+            # Short: TK cross below cloud in downtrend with volume
+            elif tk_cross_down := (tenkan_aligned[i] < kijun_aligned[i] and tenkan_aligned[i-1] >= kijun_aligned[i-1]):
+                price_below_cloud = close[i] < cloud_bottom
+                downtrend = ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]
+                if price_below_cloud and downtrend and vol_condition:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Exit: 4h trend reversal or 1h overbought
-            if (ema_50_4h_aligned[i] < ema_50_4h_aligned[i-1] or 
-                rsi_14_1h_values[i] > 70):
+            # Exit: TK cross down or price falls into cloud
+            tk_cross_down = tenkan_aligned[i] < kijun_aligned[i] and tenkan_aligned[i-1] >= kijun_aligned[i-1]
+            price_in_cloud = close[i] <= cloud_top and close[i] >= cloud_bottom
+            
+            if tk_cross_down or price_in_cloud or volume[i] < vol_ma_4[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: 4h trend reversal or 1h oversold
-            if (ema_50_4h_aligned[i] > ema_50_4h_aligned[i-1] or 
-                rsi_14_1h_values[i] < 30):
+            # Exit: TK cross up or price rises into cloud
+            tk_cross_up = tenkan_aligned[i] > kijun_aligned[i] and tenkan_aligned[i-1] <= kijun_aligned[i-1]
+            price_in_cloud = close[i] <= cloud_top and close[i] >= cloud_bottom
+            
+            if tk_cross_up or price_in_cloud or volume[i] < vol_ma_4[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
+
+# Hypothesis: Ichimoku TK cross with cloud filter on weekly timeframe, 
+# combined with daily EMA trend and volume confirmation on 6h chart.
+# - Weekly Ichimoku provides multi-timeframe trend and support/resistance
+# - TK cross above/below cloud signals momentum shifts
+# - Daily EMA(34) ensures alignment with longer-term trend
+# - Volume spike confirms institutional participation
+# - Works in bull markets (buy TK cross above cloud in uptrend) 
+# - Works in bear markets (sell TK cross below cloud in downtrend)
+# - Cloud acts as dynamic support/resistance reducing whipsaws
+# - Position size 0.25 targets ~30-80 trades/year to avoid fee drag
+# - Novel combination: Weekly Ichimoku + daily trend + volume (not recently tried)
+# - Aims for 50-150 total trades over 4 years (12-37/year) within limits
