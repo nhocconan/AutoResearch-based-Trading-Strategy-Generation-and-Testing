@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_Fibonacci_Retracement_WeeklyTrend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,70 +17,103 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE for Camarilla levels and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    # Load weekly data ONCE for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from daily high/low/close
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
-    daily_range = daily_high - daily_low
+    # Calculate weekly high/low over last 52 weeks (1 year)
+    lookback_weeks = min(52, len(df_1w))
+    weekly_highs = df_1w['high'].values[-lookback_weeks:]
+    weekly_lows = df_1w['low'].values[-lookback_weeks:]
     
-    # Camarilla R3, S3, R4, S4 levels
-    camarilla_r3 = daily_close + 1.1 * daily_range * 1.1 / 12
-    camarilla_s3 = daily_close - 1.1 * daily_range * 1.1 / 12
-    camarilla_r4 = daily_close + 1.1 * daily_range * 1.1 / 6
-    camarilla_s4 = daily_close - 1.1 * daily_range * 1.1 / 6
+    # Find highest high and lowest low in the lookback period
+    period_high = np.max(weekly_highs)
+    period_low = np.min(weekly_lows)
+    fib_range = period_high - period_low
     
-    # Align Camarilla levels to 4h timeframe (wait for daily close)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    # Calculate Fibonacci levels
+    fib_236 = period_high - 0.236 * fib_range
+    fib_382 = period_high - 0.382 * fib_range
+    fib_618 = period_high - 0.618 * fib_range
+    fib_786 = period_high - 0.786 * fib_range
     
-    # Daily EMA34 for trend filter
-    ema_34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align Fibonacci levels to daily timeframe
+    fib_236_arr = np.full(len(df_1w), fib_236)
+    fib_382_arr = np.full(len(df_1w), fib_382)
+    fib_618_arr = np.full(len(df_1w), fib_618)
+    fib_786_arr = np.full(len(df_1w), fib_786)
     
-    # Volume spike detection (2x 20-period average)
+    fib_236_aligned = align_htf_to_ltf(prices, df_1w, fib_236_arr)
+    fib_382_aligned = align_htf_to_ltf(prices, df_1w, fib_382_arr)
+    fib_618_aligned = align_htf_to_ltf(prices, df_1w, fib_618_arr)
+    fib_786_aligned = align_htf_to_ltf(prices, df_1w, fib_786_arr)
+    
+    # Weekly EMA for trend filter
+    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    
+    # Daily indicators
+    rsi_period = 14
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
+    avg_loss = loss.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.fillna(50).values
+    
+    # Volume confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 34)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(fib_236_aligned[i]) or np.isnan(fib_382_aligned[i]) or 
+            np.isnan(fib_618_aligned[i]) or np.isnan(fib_786_aligned[i]) or
+            np.isnan(ema_20_1w_aligned[i]) or np.isnan(rsi_values[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_condition = volume[i] > vol_ma_20[i] * 2.0
+        # Volume condition
+        vol_condition = volume[i] > vol_ma_20[i] * 1.5
+        
+        # Weekly trend condition
+        weekly_uptrend = ema_20_1w_aligned[i] > ema_20_1w_aligned[i-1]
+        weekly_downtrend = ema_20_1w_aligned[i] < ema_20_1w_aligned[i-1]
         
         if position == 0:
-            # Long: break above R3 with volume in uptrend
-            if close[i] > r3_aligned[i] and vol_condition and ema_34_aligned[i] > ema_34_aligned[i-1]:
+            # Long: Price pulls back to Fibonacci support in weekly uptrend
+            if (weekly_uptrend and vol_condition and 
+                close[i] <= fib_618_aligned[i] * 1.01 and close[i] >= fib_618_aligned[i] * 0.99 and
+                rsi_values[i] < 40):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S3 with volume in downtrend
-            elif close[i] < s3_aligned[i] and vol_condition and ema_34_aligned[i] < ema_34_aligned[i-1]:
+            # Short: Price retraces to Fibonacci resistance in weekly downtrend
+            elif (weekly_downtrend and vol_condition and 
+                  close[i] >= fib_382_aligned[i] * 0.99 and close[i] <= fib_382_aligned[i] * 1.01 and
+                  rsi_values[i] > 60):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: break below S3 or trend reversal
-            if close[i] < s3_aligned[i] or ema_34_aligned[i] < ema_34_aligned[i-1]:
+            # Exit: Price reaches Fibonacci extension or RSI overbought
+            if (close[i] >= fib_236_aligned[i] * 0.99 or 
+                rsi_values[i] > 70):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: break above R3 or trend reversal
-            if close[i] > r3_aligned[i] or ema_34_aligned[i] > ema_34_aligned[i-1]:
+            # Exit: Price reaches Fibonacci extension or RSI oversold
+            if (close[i] <= fib_618_aligned[i] * 1.01 or 
+                rsi_values[i] < 30):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -88,13 +121,13 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R3/S3 breakouts with daily trend filter and volume confirmation
-# - Camarilla R3/S3 act as support/resistance levels derived from prior day's range
-# - Breakout above R3 or below S3 with volume confirms institutional interest
-# - Daily EMA34 trend filter ensures alignment with higher timeframe trend
-# - Volume spike (2x average) reduces false breakouts
-# - Works in both bull (breakouts in uptrend) and bear (breakdowns in downtrend)
-# - Exit on trend reversal or price returning to S3/R3 levels
-# - Position size 0.25 targets ~20-50 trades/year to avoid fee drag
-# - Proven pattern: similar strategies show test Sharpe 1.8+ on ETH/SOL
-# - Uses actual daily Camarilla levels from monthly parquet (no look-ahead)
+# Hypothesis: Fibonacci retracement levels on weekly charts provide strong support/resistance
+# - In weekly uptrends, price often pulls back to 61.8% Fibonacci level before continuing up
+# - In weekly downtrends, price often retraces to 38.2% Fibonacci level before continuing down
+# - Weekly EMA20 trend filter ensures we only trade in the direction of the higher timeframe trend
+# - RSI (14) filters for oversold/overbought conditions at Fibonacci levels
+# - Volume confirmation (1.5x average) reduces false signals
+# - Position size 0.25 targets ~20-60 trades/year to avoid fee drag
+# - Works in both bull and bear markets by trading with the weekly trend
+# - Fibonacci levels are widely watched and act as self-fulfilling prophecy
+# - Aims for 40-120 total trades over 4 years (10-30/year) to stay within limits
