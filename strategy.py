@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3S3_Breakout_1dTrend_Volume
+12h_Camarilla_R3S3_Breakout_1dTrend_Volume_v2
 Hypothesis: Use daily Camarilla R3/S3 levels for breakout entries, filtered by daily EMA34 trend and volume confirmation. Long when price breaks above R3 in daily uptrend with volume spike, short when breaks below S3 in daily downtrend with volume spike. Exit on opposite level touch. Designed for 12h to capture multi-day swings with low frequency (target 12-37 trades/year).
 """
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume_v2"
 timeframe = "12h"
 leverage = 1.0
 
@@ -78,13 +78,13 @@ def generate_signals(prices):
         if position == 0:
             # Long: price breaks above R3 with volume spike in daily uptrend
             if (close[i] > camarilla_r3_aligned[i] and
-                vol_ratio[i] > 2.0 and 
+                vol_ratio[i] > 2.5 and 
                 daily_trend_up):
                 signals[i] = 0.25
                 position = 1
             # Short: price breaks below S3 with volume spike in daily downtrend
             elif (close[i] < camarilla_s3_aligned[i] and 
-                  vol_ratio[i] > 2.0 and 
+                  vol_ratio[i] > 2.5 and 
                   daily_trend_down):
                 signals[i] = -0.25
                 position = -1
