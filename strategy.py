@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-4H_Donchian20_Breakout_Volume_Regime_v1
-Hypothesis: Use 4h Donchian(20) breakout with volume confirmation and 1d chop regime filter.
-Long when price breaks above Donchian(20) high with volume > 1.5x average and chop > 61.8 (range).
-Short when price breaks below Donchian(20) low with volume > 1.5x average and chop > 61.8.
-This targets mean-reversion in ranging markets while using volume to confirm breakout strength,
-working in both bull and bear markets by focusing on range-bound conditions.
+4H_Donchian_20_Trend_1D_EMA34_Volume_Ratio_v1
+Hypothesis: Use 4h Donchian(20) breakout with 1d EMA34 trend filter and volume ratio confirmation.
+Long when price breaks above 4h Donchian upper band, price > 1d EMA34, and volume > 1.8x 20-period average.
+Short when price breaks below 4h Donchian lower band, price < 1d EMA34, and volume > 1.8x 20-period average.
+This combines breakout momentum with trend filter and volume confirmation to reduce false signals in both bull and bear markets.
 """
-name = "4H_Donchian20_Breakout_Volume_Regime_v1"
+name = "4H_Donchian_20_Trend_1D_EMA34_Volume_Ratio_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -30,63 +29,40 @@ def generate_signals(prices):
     if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate 4h Donchian(20) channels
-    high_4h = df_4h['high']
-    low_4h = df_4h['low']
-    donchian_high = high_4h.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_4h.rolling(window=20, min_periods=20).min().values
+    # Calculate 4h Donchian channels (20-period)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
     donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
     
-    # Get 1d data for Chop index (range detection)
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d Chop index (14-period)
-    high_1d = df_1d['high']
-    low_1d = df_1d['low']
-    close_1d = df_1d['close']
+    # Calculate 1d EMA34
+    close_1d = df_1d['close'].values
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    atr_1d = []
-    tr_list = []
-    for i in range(len(close_1d)):
-        if i == 0:
-            tr = high_1d.iloc[i] - low_1d.iloc[i]
-        else:
-            tr = max(
-                high_1d.iloc[i] - low_1d.iloc[i],
-                abs(high_1d.iloc[i] - close_1d.iloc[i-1]),
-                abs(low_1d.iloc[i] - close_1d.iloc[i-1])
-            )
-        tr_list.append(tr)
-        if len(tr_list) < 14:
-            atr_1d.append(np.nan)
-        else:
-            atr_val = np.mean(tr_list[-14:])
-            atr_1d.append(atr_val)
-    
-    atr_1d = np.array(atr_1d)
-    sum_high_low_1d = (high_1d - low_1d).rolling(window=14, min_periods=14).sum().values
-    chop = 100 * np.log10(sum_high_low_1d / (atr_1d * 14)) / np.log10(14)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # Volume filter: current volume > 1.5 * 20-period average volume
+    # Volume filter: current volume > 1.8 * 20-period average volume
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_avg * 1.5)
+    volume_filter = volume > (vol_avg * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_exit = 0  # bars since last exit to prevent overtrading
     
-    start_idx = max(20, 14)  # Ensure sufficient warmup
+    start_idx = max(20, 34)  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
         bars_since_exit += 1
         
         # Skip if any data is not ready
         if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(chop_aligned[i]) or np.isnan(vol_avg[i])):
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -98,27 +74,27 @@ def generate_signals(prices):
             if bars_since_exit < 16:
                 continue
                 
-            # Long: price breaks above Donchian high with volume and chop > 61.8 (range)
-            if (close[i] > donchian_high_aligned[i] and 
-                volume_filter[i] and 
-                chop_aligned[i] > 61.8):
+            # Long: price breaks above Donchian high, price > 1d EMA34, volume filter
+            if (high[i] > donchian_high_aligned[i] and 
+                close[i] > ema_34_aligned[i] and 
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_exit = 0
-            # Short: price breaks below Donchian low with volume and chop > 61.8 (range)
-            elif (close[i] < donchian_low_aligned[i] and 
-                  volume_filter[i] and 
-                  chop_aligned[i] > 61.8):
+            # Short: price breaks below Donchian low, price < 1d EMA34, volume filter
+            elif (low[i] < donchian_low_aligned[i] and 
+                  close[i] < ema_34_aligned[i] and 
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_exit = 0
         elif position != 0:
             # Exit: price returns to opposite Donchian level
-            if position == 1 and close[i] < donchian_low_aligned[i]:
+            if position == 1 and low[i] < donchian_low_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_exit = 0
-            elif position == -1 and close[i] > donchian_high_aligned[i]:
+            elif position == -1 and high[i] > donchian_high_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_exit = 0
