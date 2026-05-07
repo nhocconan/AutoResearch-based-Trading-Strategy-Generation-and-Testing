@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_Breakout_12hTrend_VolumeS"
-timeframe = "4h"
+name = "1h_1dTrend_4hMomentum_Session"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -17,87 +17,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    # 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # Daily data for Camarilla pivot levels
+    # Load daily data for trend filter (1d)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Load 4h data for momentum signal
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
     
-    # Camarilla R3, S3 levels: H = high + (high-low)*1.1/2, L = low - (high-low)*1.1/2
-    # R3 = H + (high-low)*1.1/2, S3 = L - (high-low)*1.1/2
-    hl_range = high_1d - low_1d
-    camarilla_h = high_1d + hl_range * 1.1 / 2
-    camarilla_l = low_1d - hl_range * 1.1 / 2
-    camarilla_r3 = camarilla_h + hl_range * 1.1 / 2
-    camarilla_s3 = camarilla_l - hl_range * 1.1 / 2
+    # Daily EMA50 for trend filter (trend = price > EMA50)
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align Camarilla levels to 4h
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # 4h RSI for momentum
+    delta = pd.Series(df_4h['close']).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    rsi_14_4h = (100 - (100 / (1 + rs))).values
+    rsi_14_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_14_4h)
     
-    # Volume spike detection (2x 20-period average)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 1h EMA21 for entry timing
+    ema_21_1h = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    
+    # Pre-compute session hours (UTC 8-20)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)
+    start_idx = max(50, 21)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(rsi_14_4h_aligned[i]) or 
+            np.isnan(ema_21_1h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_condition = volume[i] > vol_ma_20[i] * 2.0
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
         
         if position == 0:
-            # Long: break above R3 in 12h uptrend with volume
-            if close[i] > camarilla_r3_aligned[i] and vol_condition and ema_50_12h_aligned[i] > ema_50_12h_aligned[i-1]:
-                signals[i] = 0.25
+            # Long: 1d uptrend (price > EMA50) + 4h RSI > 50 + price > EMA21
+            if in_session and close[i] > ema_50_1d_aligned[i] and rsi_14_4h_aligned[i] > 50 and close[i] > ema_21_1h[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short: break below S3 in 12h downtrend with volume
-            elif close[i] < camarilla_s3_aligned[i] and vol_condition and ema_50_12h_aligned[i] < ema_50_12h_aligned[i-1]:
-                signals[i] = -0.25
+            # Short: 1d downtrend (price < EMA50) + 4h RSI < 50 + price < EMA21
+            elif in_session and close[i] < ema_50_1d_aligned[i] and rsi_14_4h_aligned[i] < 50 and close[i] < ema_21_1h[i]:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit: price back below R3 or trend change
-            if close[i] < camarilla_r3_aligned[i] or ema_50_12h_aligned[i] < ema_50_12h_aligned[i-1]:
+            # Exit: 1d trend reversal or price < EMA21
+            if close[i] < ema_50_1d_aligned[i] or close[i] < ema_21_1h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit: price back above S3 or trend change
-            if close[i] > camarilla_s3_aligned[i] or ema_50_12h_aligned[i] > ema_50_12h_aligned[i-1]:
+            # Exit: 1d trend reversal or price > EMA21
+            if close[i] > ema_50_1d_aligned[i] or close[i] > ema_21_1h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume confirmation
-# - Camarilla R3/S3 levels derived from daily pivot provide institutional support/resistance
-# - Breakout above R3 or below S3 with volume signals institutional participation
-# - 12h EMA50 trend filter ensures alignment with higher timeframe trend (works in bull/bear)
-# - Volume confirmation (2x average) reduces false breakouts
-# - Symmetric long/short logic allows profit in both bull and bear markets
-# - Position size 0.25 targets ~20-50 trades/year to avoid fee drag
-# - Proven pattern: similar strategies achieved >1.8 test Sharpe on ETH/SOL with 243 trades
-# - Uses only 3 core conditions: price level, trend, volume (minimizes overfitting)
+# Hypothesis: 1h trend following with 1d EMA50 trend filter and 4h RSI momentum
+# - Uses 1d EMA50 to determine market trend (bullish if price > EMA50, bearish if price < EMA50)
+# - Uses 4h RSI(14) for momentum confirmation (>50 bullish, <50 bearish)
+# - Uses 1h EMA21 for entry timing and exit signals
+# - Session filter (08-20 UTC) to avoid low-volume Asian session noise
+# - Position size 0.20 to manage drawdown and reduce fee churn
+# - Works in both bull and bear markets by following the 1d trend
+# - Multi-timeframe alignment ensures no look-ahead bias
+# - Target: 15-30 trades/year to stay within fee limits
+# - Simple, robust logic with clear exit conditions
