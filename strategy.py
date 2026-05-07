@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-6H_WeeklyPivot_DailyTrend_Volume
-Hypothesis: 6h price breaks above/below weekly pivot with daily EMA50 trend confirmation and volume spike.
-Weekly pivot acts as institutional support/resistance. EMA50 filters trend direction.
-Volume spike validates breakout strength. Works in bull/bear markets by capturing strong moves
-while avoiding minor retracements. Targets 15-35 trades/year to minimize fee drag on 6h timeframe.
+12H_Camarilla_R1_S1_Breakout_1D_Trend_Volume_v2
+Hypothesis: 12h price breaks above/below 1D Camarilla R1/S1 levels with 1D EMA34 trend confirmation and volume spike.
+Works in bull/bear markets: R1/S1 breakouts capture strong moves while avoiding minor retracements.
+EMA34 filter ensures alignment with daily trend, volume validation confirms breakout strength.
+Targeting 15-35 trades/year to minimize fee drag on 12h timeframe.
 """
-name = "6H_WeeklyPivot_DailyTrend_Volume"
-timeframe = "6h"
+name = "12H_Camarilla_R1_S1_Breakout_1D_Trend_Volume_v2"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,44 +24,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 1:
+    # Get 1D data for Camarilla levels, EMA trend, and volume average
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate weekly pivot points (classic: (H+L+C)/3)
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    close_weekly = df_weekly['close'].values
-    weekly_pivot = (high_weekly + low_weekly + close_weekly) / 3
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_weekly, weekly_pivot)
+    # Calculate 1D Camarilla levels (R1, S1)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    r1 = pivot + (range_1d * 1.1 / 6)  # R1 level
+    s1 = pivot - (range_1d * 1.1 / 6)  # S1 level
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Get daily data for EMA50 trend and volume average
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 50:
-        return np.zeros(n)
+    # Calculate 1D EMA34 for trend direction
+    close_1d_series = pd.Series(df_1d['close'])
+    ema_34 = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Calculate daily EMA50 for trend direction
-    close_daily_series = pd.Series(df_daily['close'])
-    ema_50 = close_daily_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_daily, ema_50)
-    
-    # Volume filter: current 6h volume > 1.8 x 24-period average volume
-    vol_avg = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_filter = volume > (vol_avg * 1.8)
+    # Volume filter: current 12h volume > 2.0 x 20-period average volume (more selective)
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_avg * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_exit = 0  # bars since last exit to prevent overtrading
     
-    start_idx = max(50, 24)  # Ensure sufficient warmup
+    start_idx = max(34, 20)  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
         bars_since_exit += 1
         
         # Skip if any data is not ready
-        if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(ema_50_aligned[i]) or 
-            np.isnan(vol_avg[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,34 +68,34 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Minimum 72 bars between trades (18 days on 6h TF) to reduce frequency
-            if bars_since_exit < 72:
+            # Minimum 60 bars between trades (10 days on 12h TF) to reduce frequency
+            if bars_since_exit < 60:
                 continue
                 
-            # Long: price breaks above weekly pivot with daily EMA50 uptrend and volume spike
-            if (close[i] > weekly_pivot_aligned[i] and close[i-1] <= weekly_pivot_aligned[i-1] and 
-                close[i] > ema_50_aligned[i] and volume_filter[i]):
-                signals[i] = 0.25
+            # Long: price breaks above R1 with EMA34 uptrend and volume spike
+            if (close[i] > r1_aligned[i] and close[i-1] <= r1_aligned[i-1] and 
+                close[i] > ema_34_aligned[i] and volume_filter[i]):
+                signals[i] = 0.30
                 position = 1
                 bars_since_exit = 0
-            # Short: price breaks below weekly pivot with daily EMA50 downtrend and volume spike
-            elif (close[i] < weekly_pivot_aligned[i] and close[i-1] >= weekly_pivot_aligned[i-1] and 
-                  close[i] < ema_50_aligned[i] and volume_filter[i]):
-                signals[i] = -0.25
+            # Short: price breaks below S1 with EMA34 downtrend and volume spike
+            elif (close[i] < s1_aligned[i] and close[i-1] >= s1_aligned[i-1] and 
+                  close[i] < ema_34_aligned[i] and volume_filter[i]):
+                signals[i] = -0.30
                 position = -1
                 bars_since_exit = 0
         elif position != 0:
-            # Exit: price returns to opposite EMA50 side (trend reversal)
-            if position == 1 and close[i] < ema_50_aligned[i]:
+            # Exit: price returns to opposite EMA34 side (trend reversal)
+            if position == 1 and close[i] < ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_exit = 0
-            elif position == -1 and close[i] > ema_50_aligned[i]:
+            elif position == -1 and close[i] > ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_exit = 0
             else:
                 # Hold position
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.30 if position == 1 else -0.30
     
     return signals
