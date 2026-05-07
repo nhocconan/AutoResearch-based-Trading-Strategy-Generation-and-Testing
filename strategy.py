@@ -1,13 +1,14 @@
-# 1h_Camarilla_R3_S3_Breakout_1dTrend_Volume
-# Hypothesis: Camarilla pivot levels (R3/S3) on daily timeframe act as strong support/resistance.
-# Breakouts above R3 in a daily uptrend or below S3 in a daily downtrend, confirmed by volume,
-# provide high-probability trades. Uses 1h for entry timing and daily for trend direction.
-# Works in bull markets (breakouts in uptrend) and bear markets (breakdowns in downtrend).
-# Target: 60-150 total trades over 4 years = 15-37/year for 1h.
+# 6h Weekly Pivot Point Trend Continuation with Volume Confirmation
+# Weekly pivot points act as strong support/resistance levels. 
+# Price breaking above/below weekly pivot with trend and volume confirmation
+# indicates institutional participation and trend continuation.
+# Works in bull markets (break above pivot in uptrend) and bear markets 
+# (break below pivot in downtrend) by capturing institutional flow.
+# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
 
 #!/usr/bin/env python3
-name = "1h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "1h"
+name = "6h_WeeklyPivot_TrendContinuation_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,48 +25,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for pivot calculation
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 5:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    # Using previous day's high, low, close (as Camarilla uses)
-    phigh = df_1d['high'].shift(1).values  # Previous day high
-    plow = df_1d['low'].shift(1).values    # Previous day low
-    pclose = df_1d['close'].shift(1).values # Previous day close
+    # Calculate weekly pivot points (standard formula)
+    # P = (H + L + C) / 3
+    # R1 = 2*P - L, S1 = 2*P - H
+    # R2 = P + (H - L), S2 = P - (H - L)
+    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    # Camarilla R3 and S3 levels
-    camarilla_r3 = pclose + (phigh - plow) * 1.1 / 2
-    camarilla_s3 = pclose - (phigh - plow) * 1.1 / 2
+    pivot = (weekly_high + weekly_low + weekly_close) / 3
+    r1 = 2 * pivot - weekly_low
+    s1 = 2 * pivot - weekly_high
+    r2 = pivot + (weekly_high - weekly_low)
+    s2 = pivot - (weekly_high - weekly_low)
+    r3 = weekly_high + 2 * (pivot - weekly_low)
+    s3 = weekly_low - 2 * (weekly_high - pivot)
     
-    # Align Camarilla levels to 1h timeframe (wait for daily close)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Align weekly pivot levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_weekly, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_weekly, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_weekly, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_weekly, s3)
+    
+    # Get daily data for trend filter (EMA34)
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 34:
+        return np.zeros(n)
     
     # Daily EMA34 trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_34_daily = pd.Series(df_daily['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_daily_aligned = align_htf_to_ltf(prices, df_daily, ema_34_daily)
     
-    # Volume filter: current volume > 1.5x 24-period average (for 1h, ~1 day)
-    vol_ma_24 = np.full(n, np.nan)
-    for i in range(24, n):
-        vol_ma_24[i] = np.mean(volume[i-24:i])
-    vol_filter = volume > (1.5 * vol_ma_24)
+    # Volume filter: current volume > 1.8x 20-period average (for 6h)
+    vol_ma_20 = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma_20[i] = np.mean(volume[i-20:i])
+    vol_filter = volume > (1.8 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 6  # ~6 hours for 1h to reduce trades
+    cooldown_bars = 4  # ~1 day for 6h to reduce trades
     
-    start_idx = max(100, 24, 34)
+    start_idx = max(100, 20, 34)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(vol_ma_24[i])):
+        if (np.isnan(pivot_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_34_daily_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,45 +96,47 @@ def generate_signals(prices):
         bars_since_last_trade += 1
         
         # Determine daily trend direction
-        trend_up = close > ema_34_1d_aligned[i]
-        trend_down = close < ema_34_1d_aligned[i]
+        trend_up = close > ema_34_daily_aligned[i]
+        trend_down = close < ema_34_daily_aligned[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: Price breaks above Camarilla R3 with volume in uptrend
-            if (close[i] > camarilla_r3_aligned[i] and 
+            # Long: Price breaks above weekly R1 with volume in uptrend
+            if (close[i] > r1_aligned[i] and 
                 trend_up[i] and 
                 vol_filter[i]):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: Price breaks below Camarilla S3 with volume in downtrend
-            elif (close[i] < camarilla_s3_aligned[i] and 
+            # Short: Price breaks below weekly S1 with volume in downtrend
+            elif (close[i] < s1_aligned[i] and 
                   trend_down[i] and 
                   vol_filter[i]):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit: Price falls below Camarilla S3 or trend changes
-            if close[i] < camarilla_s3_aligned[i] or not trend_up[i]:
+            # Exit: Price falls back below weekly pivot or trend changes
+            if close[i] < pivot_aligned[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: Price rises above Camarilla R3 or trend changes
-            if close[i] > camarilla_r3_aligned[i] or not trend_down[i]:
+            # Exit: Price rises back above weekly pivot or trend changes
+            if close[i] > pivot_aligned[i] or not trend_down[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-# Hypothesis: Camarilla pivot levels (R3/S3) on daily timeframe act as strong support/resistance.
-# Breakouts above R3 in a daily uptrend or below S3 in a daily downtrend, confirmed by volume,
-# provide high-probability trades. Uses 1h for entry timing and daily for trend direction.
-# Works in bull markets (breakouts in uptrend) and bear markets (breakdowns in downtrend).
-# Target: 60-150 total trades over 4 years = 15-37/year for 1h.
+# Hypothesis: Weekly pivot points act as significant support/resistance levels where
+# institutional order flow accumulates. Price breaking above/below weekly R1/S1
+# levels with daily trend alignment and volume confirmation indicates strong
+# institutional participation and trend continuation. Works in bull markets (break
+# above pivot in uptrend) and bear markets (break below pivot in downtrend).
+# Uses 6h timeframe to balance trade frequency and capture meaningful trends.
+# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
