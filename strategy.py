@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_PivotBreakout_12hTrend_Volume_v1"
-timeframe = "4h"
+name = "1d_KAMA_RSI_Chop_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,74 +17,86 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE for Pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load weekly data ONCE before loop for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Load 12h data ONCE for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
-        return np.zeros(n)
+    # KAMA calculation (Kaufman Adaptive Moving Average)
+    # ER = Efficiency Ratio, SC = Smoothing Constant
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0)
+    # Correct volatility calculation: sum of absolute changes over period
+    volatility = pd.Series(close).rolling(window=10).apply(lambda x: np.sum(np.abs(np.diff(x))), raw=True).values
+    ER = np.where(volatility != 0, change / volatility, 0)
+    SC = (ER * (0.6667 - 0.0645) + 0.0645) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + SC[i] * (close[i] - kama[i-1])
     
-    # Calculate daily Pivot (standard) from previous day
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
+    # Choppiness Index (14)
+    atr = np.zeros_like(close)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = high[0] - low[0]
+    tr2[0] = np.abs(high[0] - close[0])
+    tr3[0] = np.abs(low[0] - close[0])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Pivot support/resistance levels
-    s1 = pivot - range_hl
-    r1 = pivot + range_hl
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    sum_atr = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
+    range_hl = highest_high - lowest_low
+    chop = np.where(range_hl != 0, 100 * np.log10(sum_atr / range_hl) / np.log10(14), 50)
     
-    # Align daily levels to 4h timeframe
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    
-    # 12h EMA(34) for trend filter
-    ema_34_12h = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
-    
-    # Volume spike detection: 6-period average (1.5 days of 4h bars)
-    vol_ma_6 = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
+    # Weekly EMA(34) for trend filter
+    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 6)  # Wait for EMA and volume MA
+    start_idx = 14  # Wait for chop and RSI
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(vol_ma_6[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or 
+            np.isnan(ema_34_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above S1 with volume and 12h uptrend
-            vol_condition = volume[i] > vol_ma_6[i] * 1.8
-            uptrend = ema_34_12h_aligned[i] > ema_34_12h_aligned[i-1]
-            
-            if close[i] > s1_aligned[i] and vol_condition and uptrend:
+            # Long: price above KAMA, RSI < 40, chop > 61.8 (range), weekly uptrend
+            if close[i] > kama[i] and rsi[i] < 40 and chop[i] > 61.8 and ema_34_1w_aligned[i] > ema_34_1w_aligned[i-1]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below R1 with volume and 12h downtrend
-            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
+            # Short: price below KAMA, RSI > 60, chop > 61.8 (range), weekly downtrend
+            elif close[i] < kama[i] and rsi[i] > 60 and chop[i] > 61.8 and ema_34_1w_aligned[i] < ema_34_1w_aligned[i-1]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below S1 or volume drops
-            if close[i] < s1_aligned[i] or volume[i] < vol_ma_6[i] * 1.2:
+            # Exit: price below KAMA or RSI > 60
+            if close[i] < kama[i] or rsi[i] > 60:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above R1 or volume drops
-            if close[i] > r1_aligned[i] or volume[i] < vol_ma_6[i] * 1.2:
+            # Exit: price above KAMA or RSI < 40
+            if close[i] > kama[i] or rsi[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -92,17 +104,14 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 4h Pivot S1/R1 breakout with 12h trend and volume confirmation
-# - Daily Pivot S1/R1 act as key support/resistance levels from prior session
-# - Breakout above S1 with volume in 12h uptrend = long opportunity
-# - Breakdown below R1 with volume in 12h downtrend = short opportunity
-# - Volume spike (1.8x average) confirms institutional participation
-# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
-# - Exit when price returns to S1/R1 or volume weakens
-# - Position size 0.25 targets ~20-50 trades/year, avoiding fee drag
-# - Uses actual daily Pivot levels (not weekly) for better responsiveness
-# - 12h trend filter reduces whipsaws vs using same timeframe
-# - Designed to work in BOTH bull and bear markets via trend filter
-# - Volume confirmation reduces false breakouts
-# - Novel combination: Pivot (1d) + trend (12h) + volume (4h) targeting 4h timeframe
-# - Aims for 50-150 total trades over 4 years (12-37/year) to stay within limits
+# Hypothesis: Daily KAMA with RSI and Choppiness filter for mean reversion in ranging markets
+# - KAMA adapts to market noise, providing dynamic support/resistance
+# - In choppy markets (CHOP > 61.8), price tends to revert to KAMA
+# - Long when price > KAMA, RSI < 40 (oversold), weekly uptrend
+# - Short when price < KAMA, RSI > 60 (overbought), weekly downtrend
+# - Exit when price crosses KAMA or RSI reaches opposite extreme
+# - Works in both bull and bear markets via weekly trend filter
+# - Choppiness filter ensures we only trade in ranging conditions
+# - Position size 0.25 targets ~15-30 trades/year, avoiding fee drag
+# - Weekly EMA(34) trend filter prevents counter-trend trades in strong trends
+# - Designed for low-frequency, high-probability mean reversion trades
