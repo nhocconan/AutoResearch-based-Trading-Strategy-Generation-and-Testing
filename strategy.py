@@ -1,11 +1,13 @@
-# 4H_Camarilla_R3_S3_1DTrend_VolumeSpike_MomentumExit
-# Hypothesis: Combines Camarilla R3/S3 breakout with 1-day EMA trend, volume spike, and momentum-based exit.
-# Uses MOMENTUM (10-period ROC) to exit early when momentum fades, reducing whipsaw in sideways markets.
-# Designed for 4h timeframe with low trade frequency (<50/year) and strong performance in both bull and bear regimes.
-# Target: 20-50 trades per year per symbol with clear entry/exit rules.
+#!/usr/bin/env python3
+# 12H_Price_Action_Reversal_V1
+# Hypothesis: Combines 12h price action reversals with 1d volume confirmation and 1d trend filter.
+# Uses rejection at daily support/resistance (engulfing patterns) to capture mean reversion in range-bound markets
+# and breakouts in trending markets. Designed for 12h timeframe with low trade frequency (15-25/year) to minimize
+# fee drag. Works in both bull and bear regimes by adapting to price action context rather than fixed indicators.
+# Target: 60-100 total trades over 4 years (15-25/year per symbol).
 
-name = "4H_Camarilla_R3_S3_1DTrend_VolumeSpike_MomentumExit"
-timeframe = "4h"
+name = "12H_Price_Action_Reversal_V1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -21,79 +23,67 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_price = prices['open'].values
     
-    # Get 1d data for Camarilla pivot calculation
+    # Get 1d data for trend and volume filters
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate daily OHLC for Camarilla pivots
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # 1-day EMA50 for trend filter
     close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Camarilla levels: R3 = close + (high - low) * 1.1/4, S3 = close - (high - low) * 1.1/4
-    rng = high_1d - low_1d
-    camarilla_r3 = close_1d + rng * 1.1 / 4
-    camarilla_s3 = close_1d - rng * 1.1 / 4
+    # 1-day volume average (20-period)
+    volume_1d = df_1d['volume'].values
+    vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # 1-day EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Align 1d indicators to 12h timeframe
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
-    # Align Camarilla levels and EMA to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Volume filter: current volume > 2.0x average volume (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Momentum filter: 10-period ROC for exit signal
-    roc_period = 10
-    roc = np.full_like(close, np.nan, dtype=np.float64)
-    for i in range(roc_period, n):
-        if close[i - roc_period] != 0:
-            roc[i] = (close[i] - close[i - roc_period]) / close[i - roc_period] * 100
+    # Price action signals: bullish/bearish engulfing patterns
+    bullish_engulf = (close > open_price) & (open_price > np.roll(close, 1)) & (close > np.roll(high, 1))
+    bearish_engulf = (close < open_price) & (open_price < np.roll(close, 1)) & (close < np.roll(low, 1))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, roc_period)  # Ensure we have volume MA and ROC data
+    start_idx = 20  # Ensure we have EMA and volume data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema34_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0 or
-            np.isnan(roc[i])):
+        if (np.isnan(ema50_aligned[i]) or np.isnan(vol_avg_aligned[i]) or vol_avg_aligned[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume filter: spike confirmation
-        volume_filter = volume[i] > 2.0 * vol_ma[i]
+        # Volume filter: current 12h volume > 1.5x average 1d volume
+        volume_filter = volume[i] > 1.5 * vol_avg_aligned[i]
         
         if position == 0:
-            # Long: Price breaks above R3 + Uptrend (price > EMA34) + volume spike
-            if (close[i] > r3_aligned[i] and 
-                close[i] > ema34_aligned[i] and
+            # Long: Bullish engulfing + above 1d EMA50 + volume confirmation
+            if (bullish_engulf[i] and 
+                close[i] > ema50_aligned[i] and
                 volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S3 + Downtrend (price < EMA34) + volume spike
-            elif (close[i] < s3_aligned[i] and 
-                  close[i] < ema34_aligned[i] and
+            # Short: Bearish engulfing + below 1d EMA50 + volume confirmation
+            elif (bearish_engulf[i] and 
+                  close[i] < ema50_aligned[i] and
                   volume_filter):
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit conditions:
-            # 1. Momentum reversal: ROC crosses zero against position
-            # 2. Price returns inside pivot range (reversion to mean)
-            momentum_exit = (position == 1 and roc[i] < 0) or (position == -1 and roc[i] > 0)
-            price_inside = (close[i] < r3_aligned[i] and close[i] > s3_aligned[i])
+            # Exit: Opposite engulfing pattern or price crosses 1d EMA50
+            exit_signal = False
+            if position == 1:
+                exit_signal = bearish_engulf[i] or close[i] < ema50_aligned[i]
+            else:  # position == -1
+                exit_signal = bullish_engulf[i] or close[i] > ema50_aligned[i]
             
-            if momentum_exit or price_inside:
+            if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
