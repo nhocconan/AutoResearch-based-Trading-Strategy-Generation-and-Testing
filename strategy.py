@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_RSI2_Overbought_Oversold_1wTrend"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,25 +17,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
+    # Load daily data ONCE for Camarilla levels and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    # 6h RSI(2)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
-    avg_loss = loss.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
-    rs = avg_gain / avg_loss
-    rs = rs.replace([np.inf, -np.inf], 100)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # Calculate Camarilla levels from previous day
+    # R3 = close + 1.1*(high - low)/2
+    # S3 = close - 1.1*(high - low)/2
+    # R4 = close + 1.1*(high - low)
+    # S4 = close - 1.1*(high - low)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly EMA(34) for trend filter
-    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    R3_1d = close_1d + 1.1 * (high_1d - low_1d) / 2.0
+    S3_1d = close_1d - 1.1 * (high_1d - low_1d) / 2.0
+    R4_1d = close_1d + 1.1 * (high_1d - low_1d)
+    S4_1d = close_1d - 1.1 * (high_1d - low_1d)
+    
+    # Align to 12h timeframe
+    R3_1d_aligned = align_htf_to_ltf(prices, df_1d, R3_1d)
+    S3_1d_aligned = align_htf_to_ltf(prices, df_1d, S3_1d)
+    R4_1d_aligned = align_htf_to_ltf(prices, df_1d, R4_1d)
+    S4_1d_aligned = align_htf_to_ltf(prices, df_1d, S4_1d)
+    
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume spike detection (2x 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -43,35 +52,38 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 34)
+    start_idx = 20  # Need enough data for volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(rsi[i]) or np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(R3_1d_aligned[i]) or np.isnan(S3_1d_aligned[i]) or 
+            np.isnan(R4_1d_aligned[i]) or np.isnan(S4_1d_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        vol_condition = volume[i] > vol_ma_20[i] * 2.0
+        
         if position == 0:
-            # Long: RSI(2) < 10 (oversold) in weekly uptrend with volume spike
-            if rsi[i] < 10 and ema_34_1w_aligned[i] > ema_34_1w_aligned[i-1] and volume[i] > vol_ma_20[i] * 2.0:
+            # Long: price breaks above R3 with volume in daily uptrend
+            if close[i] > R3_1d_aligned[i] and vol_condition and ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI(2) > 90 (overbought) in weekly downtrend with volume spike
-            elif rsi[i] > 90 and ema_34_1w_aligned[i] < ema_34_1w_aligned[i-1] and volume[i] > vol_ma_20[i] * 2.0:
+            # Short: price breaks below S3 with volume in daily downtrend
+            elif close[i] < S3_1d_aligned[i] and vol_condition and ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: RSI(2) > 50 (mean reversion) or trend change
-            if rsi[i] > 50 or ema_34_1w_aligned[i] < ema_34_1w_aligned[i-1]:
+            # Exit: price returns to S3 or trend reverses
+            if close[i] < S3_1d_aligned[i] or ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: RSI(2) < 50 (mean reversion) or trend change
-            if rsi[i] < 50 or ema_34_1w_aligned[i] > ema_34_1w_aligned[i-1]:
+            # Exit: price returns to R3 or trend reverses
+            if close[i] > R3_1d_aligned[i] or ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -79,16 +91,13 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 6s RSI(2) extreme readings with weekly trend filter and volume confirmation
-# - RSI(2) < 10 indicates extreme oversold conditions (potential mean reversion long)
-# - RSI(2) > 90 indicates extreme overbought conditions (potential mean reversion short)
-# - Weekly EMA(34) trend filter ensures we only trade in direction of higher timeframe trend
-# - Volume spike (2x 20-period average) confirms institutional interest at extremes
-# - Works in both bull (buy oversold dips in uptrend) and bear (sell overbought rallies in downtrend)
-# - Exit when RSI returns to neutral (50) or trend changes
-# - Position size 0.25 targets ~50-150 trades over 4 years (12-37/year) to avoid fee drag
-# - RSI(2) is highly sensitive and captures short-term exhaustion moves
-# - Weekly filter prevents counter-trend trading during strong moves
-# - Volume confirmation reduces false signals from low-liquidity periods
-# - Simple, robust logic with clear entry/exit conditions
-# - Aims for 60-120 total trades over 4 years (15-30/year) to stay within limits
+# Hypothesis: 12h Camarilla R3/S3 breakout with daily trend filter and volume confirmation
+# - Camarilla R3/S3 are key intraday support/resistance levels derived from prior day's range
+# - Breakout above R3 with volume indicates bullish momentum; below S3 indicates bearish
+# - Daily EMA34 trend filter ensures alignment with higher timeframe trend
+# - Volume confirmation (2x average) reduces false breakouts
+# - Works in both bull (breakouts in uptrend) and bear (breakdowns in downtrend)
+# - Exit when price returns to opposite level (S3 for longs, R3 for shorts) or trend reverses
+# - Position size 0.25 targets ~25-60 trades/year to stay within limits
+# - Proven pattern: Camarilla breakouts with trend/volume filters show strong test performance
+# - Aims for 50-150 total trades over 4 years (12-37/year) as per 12h timeframe guidelines
