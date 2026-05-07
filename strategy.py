@@ -1,16 +1,16 @@
+# The strategy leverages institutional price levels (Camarilla pivots) on 1d timeframe to identify key support/resistance levels. 
+# A breakout above R3 or below S3 with volume confirmation triggers a position, filtered by the 12h EMA50 trend direction to avoid counter-trend trades.
+# Exits occur when price crosses back below/above the 12h EMA50, ensuring trend-following behavior.
+# The 12h timeframe reduces trade frequency to minimize fee drag, while the 1d pivot levels provide structure that works in both bull and bear markets.
+# Position sizing is kept at 0.25 to balance return potential with drawdown control during extended bear markets like 2022.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Bollinger Band squeeze breakout with 1-day trend filter (EMA34) and volume confirmation.
-# Long when: Bollinger Band width < 20th percentile (squeeze) AND price breaks above upper band AND EMA34(1d) rising AND volume > 1.5 * EMA20(volume).
-# Short when: Bollinger Band width < 20th percentile (squeeze) AND price breaks below lower band AND EMA34(1d) falling AND volume > 1.5 * EMA20(volume).
-# Exit when price crosses back inside the Bollinger Bands.
-# Bollinger squeeze identifies low volatility periods preceding breakouts; EMA34 filters trend direction; volume confirms breakout strength.
-# Designed for low trade frequency (target: 20-40/year) to minimize fee drag and improve generalization in both bull and bear markets.
-name = "4h_BollingerSqueeze_1dEMA34_VolumeBreakout"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_1dEMA50_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,38 +23,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20, 2)
-    bb_period = 20
-    bb_std = 2
-    sma_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_band = sma_20 + bb_std * std_20
-    lower_band = sma_20 - bb_std * std_20
-    bb_width = upper_band - lower_band
-    
-    # Bollinger Band width percentile (20th percentile lookback)
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=20).quantile(0.20).values
-    squeeze_condition = bb_width < bb_width_percentile
-    
-    # EMA34 on 1d for trend filter
+    # Calculate Camarilla levels from previous day's range (using 1d data)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_rising = np.zeros_like(ema_34_1d, dtype=bool)
-    ema_34_falling = np.zeros_like(ema_34_1d, dtype=bool)
-    ema_34_rising[1:] = ema_34_1d[1:] > ema_34_1d[:-1]
-    ema_34_falling[1:] = ema_34_1d[1:] < ema_34_1d[:-1]
+    # Previous day's OHLC for Camarilla calculation
+    prev_day_high = df_1d['high'].values
+    prev_day_low = df_1d['low'].values
+    prev_day_close = df_1d['close'].values
     
-    ema_34_rising_aligned = align_htf_to_ltf(prices, df_1d, ema_34_rising)
-    ema_34_falling_aligned = align_htf_to_ltf(prices, df_1d, ema_34_falling)
+    # Camarilla R3 and S3 levels
+    camarilla_r3 = prev_day_close + 1.1 * (prev_day_high - prev_day_low) / 2
+    camarilla_s3 = prev_day_close - 1.1 * (prev_day_high - prev_day_low) / 2
     
-    # Volume confirmation: current volume > 1.5 * 20-period EMA of volume
+    # Align Camarilla levels to 12h timeframe (wait for 1d bar to close)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # EMA50 on 12h close for trend filter and exit condition
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Volume confirmation: current volume > 2.0 * 20-period EMA of volume
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ema_20)
+    volume_spike = volume > (2.0 * vol_ema_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -62,19 +54,18 @@ def generate_signals(prices):
     start_idx = 50  # Sufficient warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(sma_20[i]) or np.isnan(std_20[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
-            np.isnan(squeeze_condition[i]) or np.isnan(ema_34_rising_aligned[i]) or np.isnan(ema_34_falling_aligned[i]) or
-            np.isnan(vol_ema_20[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(ema_50[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: squeeze AND price breaks above upper band AND EMA34(1d) rising AND volume confirmation
-            long_condition = squeeze_condition[i] and (close[i] > upper_band[i]) and ema_34_rising_aligned[i] and volume_confirm[i]
-            # Short: squeeze AND price breaks below lower band AND EMA34(1d) falling AND volume confirmation
-            short_condition = squeeze_condition[i] and (close[i] < lower_band[i]) and ema_34_falling_aligned[i] and volume_confirm[i]
+            # Long: Close > Camarilla R3 AND EMA50 rising AND volume spike
+            long_condition = (close[i] > camarilla_r3_aligned[i]) and (ema_50[i] > ema_50[i-1]) and volume_spike[i]
+            # Short: Close < Camarilla S3 AND EMA50 falling AND volume spike
+            short_condition = (close[i] < camarilla_s3_aligned[i]) and (ema_50[i] < ema_50[i-1]) and volume_spike[i]
             
             if long_condition:
                 signals[i] = 0.25
@@ -83,15 +74,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price crosses back inside Bollinger Bands (below upper band)
-            if close[i] < upper_band[i]:
+            # Exit: Close < EMA50
+            if close[i] < ema_50[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price crosses back inside Bollinger Bands (above lower band)
-            if close[i] > lower_band[i]:
+            # Exit: Close > EMA50
+            if close[i] > ema_50[i]:
                 signals[i] = 0.0
                 position = 0
             else:
