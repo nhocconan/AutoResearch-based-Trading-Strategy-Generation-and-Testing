@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-name = "4h_Adaptive_Kelly_RSI2_1dTrend"
-timeframe = "4h"
+name = "1d_Camarilla_R3S3_Breakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from math import sqrt
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 35:  # Need at least 35 days for EMA34 and calculations
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,109 +17,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1-day data once for trend filter and RSI calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Load weekly data ONCE for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # 1-day EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Load daily data ONCE for Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # 4-hour RSI(2) for mean reversion signal
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Camarilla pivot levels from previous day (standard formula)
+    c_high = df_1d['high'].values
+    c_low = df_1d['low'].values
+    c_close = df_1d['close'].values
     
-    # Wilder's smoothing (equivalent to RMA)
-    alpha = 1.0 / 2
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[1] = gain[1]
-    avg_loss[1] = loss[1]
+    pivot = (c_high + c_low + c_close) / 3
+    range_val = c_high - c_low
+    r3 = pivot + (range_val * 1.1 / 4)
+    s3 = pivot - (range_val * 1.1 / 4)
     
-    for i in range(2, len(gain)):
-        avg_gain[i] = alpha * gain[i] + (1 - alpha) * avg_gain[i-1]
-        avg_loss[i] = alpha * loss[i] + (1 - alpha) * avg_loss[i-1]
+    # Align pivot levels to 1d timeframe (already aligned, but keep for consistency)
+    r3_1d = align_htf_to_ltf(prices, df_1d, r3)
+    s3_1d = align_htf_to_ltf(prices, df_1d, s3)
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Weekly EMA34 for trend filter
+    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Bollinger Bands width for volatility regime filter
-    bb_period = 20
-    bb_std = 2.0
-    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std_dev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper = sma + bb_std * std_dev
-    lower = sma - bb_std * std_dev
-    bb_width = (upper - lower) / sma
-    
-    # Volume filter: above 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume spike detection (2x 20-period average)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, bb_period, 20)
+    start_idx = max(34, 20)  # Wait for EMA34 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_4h[i]) or np.isnan(rsi[i]) or 
-            np.isnan(bb_width[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r3_1d[i]) or np.isnan(s3_1d[i]) or 
+            np.isnan(ema_34_1d[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_condition = volume[i] > vol_ma[i] * 1.5
-        bb_condition = bb_width[i] < 0.05  # Low volatility (squeeze)
-        trend_up = ema_50_4h[i] > ema_50_4h[i-1]
-        trend_down = ema_50_4h[i] < ema_50_4h[i-1]
-        
-        # Adaptive Kelly sizing based on RSI extremity
-        if rsi[i] < 10:  # Deep overshoot
-            kelly_fraction = 0.35
-        elif rsi[i] < 20:  # Oversold
-            kelly_fraction = 0.25
-        elif rsi[i] > 90:  # Deep overbought
-            kelly_fraction = -0.35
-        elif rsi[i] > 80:  # Overbought
-            kelly_fraction = -0.25
-        else:
-            kelly_fraction = 0.0
+        vol_condition = volume[i] > vol_ma_20[i] * 2.0
         
         if position == 0:
-            # Enter long in uptrend on RSI oversold with volume and low volatility
-            if kelly_fraction > 0 and trend_up and vol_condition and bb_condition:
-                signals[i] = kelly_fraction
+            # Long: break above R3 in weekly uptrend with volume
+            if close[i] > r3_1d[i] and ema_34_1d[i] > ema_34_1d[i-1] and vol_condition:
+                signals[i] = 0.25
                 position = 1
-            # Enter short in downtrend on RSI overbought with volume and low volatility
-            elif kelly_fraction < 0 and trend_down and vol_condition and bb_condition:
-                signals[i] = kelly_fraction
+            # Short: break below S3 in weekly downtrend with volume
+            elif close[i] < s3_1d[i] and ema_34_1d[i] < ema_34_1d[i-1] and vol_condition:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: RSI returns to neutral or trend breaks
-            if rsi[i] > 50 or not trend_up:
+            # Exit: price returns to pivot or trend reverses
+            pivot_1d = align_htf_to_ltf(prices, df_1d, pivot)
+            if close[i] < pivot_1d[i] or ema_34_1d[i] < ema_34_1d[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = kelly_fraction
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: RSI returns to neutral or trend breaks
-            if rsi[i] < 50 or not trend_down:
+            # Exit: price returns to pivot or trend reverses
+            pivot_1d = align_htf_to_ltf(prices, df_1d, pivot)
+            if close[i] > pivot_1d[i] or ema_34_1d[i] > ema_34_1d[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = kelly_fraction
+                signals[i] = -0.25
     
     return signals
 
-# Hypothesis: Adaptive Kelly RSI(2) mean reversion with 1d trend filter
-# - RSI(2) captures short-term mean reversion extremes (<10 oversold, >90 overbought)
-# - Kelly sizing scales position based on signal strength (0.25 for moderate, 0.35 for extreme)
-# - 1-day EMA50 ensures trades align with higher-timeframe trend
-# - Volume confirmation (>1.5x average) and Bollinger Band squeeze (<5% width) filter low-quality signals
-# - Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend)
-# - Adaptive sizing reduces risk during weak signals, increases during strong setups
-# - Target: 20-40 trades/year to minimize fee drag while capturing high-probability mean reversion
-# - Uses 1d timeframe for trend, 4h for execution - avoids look-ahead with proper alignment
+# Hypothesis: Camarilla R3/S3 breakouts with weekly trend filter and volume confirmation
+# - Camarilla R3/S3 represent strong support/resistance levels from previous day
+# - Breakout above R3 in weekly uptrend (EMA34 rising) signals bullish continuation
+# - Breakdown below S3 in weekly downtrend (EMA34 falling) signals bearish continuation
+# - Volume confirmation (2x average) reduces false breakouts
+# - Exit when price returns to pivot point or weekly trend reverses
+# - Position size 0.25 targets ~15-25 trades/year to avoid fee drag
+# - Works in both bull (breakouts in uptrend) and bear (breakdowns in downtrend)
+# - Uses 1d timeframe for structure and 1w for trend filter
+# - Focus on BTC/ETH as primary targets with proper filtering to avoid overtrading
