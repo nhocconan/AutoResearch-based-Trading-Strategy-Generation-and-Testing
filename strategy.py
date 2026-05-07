@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 4H_Camarilla_R3_S3_1DTrend_VolumeSpike_v7
-# Hypothesis: 4-hour Camarilla R3/S3 breakout with daily trend filter and volume spike.
-# Uses daily trend to avoid counter-trend trades in both bull and bear markets.
-# Volume spike ensures momentum confirmation. Targets 20-30 trades/year to minimize fee drag.
-# Uses discrete position sizing (0.25). Added hysteresis to reduce whipsaw.
-# Modified: Reduced frequency by increasing volume threshold to 2.5x and requiring price to close beyond level for confirmation.
+# 1H_Camarilla_R3S3_1DTrend_VolumeSpike_v1
+# Hypothesis: 1-hour strategy using 4-hour structure for direction (breakout above/below R3/S3) 
+# and 1-day trend filter to avoid counter-trend trades. Entry requires volume spike confirmation.
+# Exit when price returns to middle of prior 1-day range. Uses 1h only for entry timing precision.
+# Designed for low trade frequency (target: 15-37 trades/year) to minimize fee drag in both bull and bear markets.
 
-name = "4H_Camarilla_R3_S3_1DTrend_VolumeSpike_v7"
-timeframe = "4h"
+name = "1H_Camarilla_R3S3_1DTrend_VolumeSpike_v1"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -24,7 +23,12 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
+    # Get 4h data for structure (R3/S3 levels)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
+        return np.zeros(n)
+    
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -33,22 +37,22 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate previous day's high, low, close for Camarilla
-    prev_high = df_1d['high'].values
-    prev_low = df_1d['low'].values
-    prev_close = df_1d['close'].values
+    # Calculate previous 4h bar's high, low, close for Camarilla levels
+    prev_high = df_4h['high'].values
+    prev_low = df_4h['low'].values
+    prev_close = df_4h['close'].values
     
     # Calculate Camarilla levels: R3 and S3
     r3 = prev_close + 1.1 * (prev_high - prev_low) * 1.1 / 2
     s3 = prev_close - 1.1 * (prev_high - prev_low) * 1.1 / 2
     
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r3_aligned = align_htf_to_ltf(prices, df_4h, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_4h, s3)
     
-    # Volume filter: current volume > 2.5x average volume (20-period) - increased threshold
+    # Volume filter: current volume > 2.0x average volume (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Volatility filter: avoid low volatility periods (ATR < 0.3% of price)
+    # Volatility filter: avoid low volatility periods (ATR > 0.3% of price)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -71,29 +75,29 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Volume filter: spike confirmation (2.5x average volume) - increased threshold
-        volume_filter = volume[i] > 2.5 * vol_ma[i]
+        # Volume filter: spike confirmation (2.0x average volume)
+        volume_filter = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long: Price closes above R3 + daily uptrend + volume spike
+            # Long: Price breaks above R3 + daily uptrend + volume spike
             if (close[i] > r3_aligned[i] and 
                 close[i] > ema_34_1d_aligned[i] and   # Daily uptrend filter
                 volume_filter):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
-            # Short: Price closes below S3 + daily downtrend + volume spike
+            # Short: Price breaks below S3 + daily downtrend + volume spike
             elif (close[i] < s3_aligned[i] and 
                   close[i] < ema_34_1d_aligned[i] and   # Daily downtrend filter
                   volume_filter):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         elif position != 0:
-            # Exit: Price returns to the middle of the Camarilla range (H4/L4)
+            # Exit: Price returns to the middle of the prior 4h range (H4/L4)
             # H4 = close + 1.1*(high-low)*1.1/6, L4 = close - 1.1*(high-low)*1.1/6
             h4 = prev_close + 1.1 * (prev_high - prev_low) * 1.1 / 6
             l4 = prev_close - 1.1 * (prev_high - prev_low) * 1.1 / 6
-            h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-            l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+            h4_aligned = align_htf_to_ltf(prices, df_4h, h4)
+            l4_aligned = align_htf_to_ltf(prices, df_4h, l4)
             
             camarilla_mid = (h4_aligned[i] + l4_aligned[i]) / 2
             at_mid = abs(close[i] - camarilla_mid) < (h4_aligned[i] - l4_aligned[i]) * 0.25  # Within 25% of range
@@ -103,6 +107,6 @@ def generate_signals(prices):
                 position = 0
             else:
                 # Maintain position
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.20 if position == 1 else -0.20
     
     return signals
