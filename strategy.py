@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: 12h chart strategy using Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume confirmation. Designed for low trade frequency (12-37/year) to avoid fee drag, with trend filter to work in both bull and bear markets. Target: 50-150 total trades over 4 years.
+# 4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeS
+# Hypothesis: 4h chart strategy using Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume confirmation. Uses daily trend to filter trades, aiming for 20-40 trades/year to avoid fee drag. Works in bull/bear markets by aligning with long-term trend via EMA.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+timeframe = "4h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeS"
 leverage = 1.0
 
 import numpy as np
@@ -40,13 +40,13 @@ def generate_signals(prices):
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Volume spike detection: 2x average volume (2-period = 1 day on 12h chart)
-    vol_ma = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
+    # Volume spike detection: 2x average volume (6-period = 1 day on 4h chart)
+    vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(2, 34)  # Ensure we have volume MA and EMA data
+    start_idx = max(6, 34)  # Ensure we have volume MA and EMA data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
@@ -58,11 +58,11 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: close > R1 with volume spike and 1d uptrend
+            # Long: close > R1 with volume spike and daily uptrend
             if close[i] > camarilla_r1_aligned[i] and volume[i] > 2.0 * vol_ma[i] and close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: close < S1 with volume spike and 1d downtrend
+            # Short: close < S1 with volume spike and daily downtrend
             elif close[i] < camarilla_s1_aligned[i] and volume[i] > 2.0 * vol_ma[i] and close[i] < ema_34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
