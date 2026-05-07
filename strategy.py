@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R2_S2_Breakout_1dTrend_Volume
-# Hypothesis: 4-hour Camarilla R2/S2 breakouts with 1-day trend filter and volume spikes.
-# Uses tighter R2/S2 levels (less frequent than R1/S1) to reduce trade frequency while maintaining edge.
-# Long: price breaks above R2 with daily uptrend (price>EMA34) and volume spike (>2x 20-period avg).
-# Short: price breaks below S2 with daily downtrend (price<EMA34) and volume spike.
-# Exit: price returns to Pivot Point (PP). Designed for ~25-40 trades/year to avoid fee drag.
+# 12h_TRIX_VolumeSpike_1wTrend
+# Hypothesis: 12-hour TRIX momentum with weekly trend filter and volume spikes.
+# Long: TRIX crosses above zero with weekly uptrend (price > EMA50 weekly) and volume spike (>2x 20-period avg).
+# Short: TRIX crosses below zero with weekly downtrend (price < EMA50 weekly) and volume spike.
+# Exit: TRIX crosses back to zero. Designed for ~15-30 trades/year to avoid fee drag.
+# TRIX filters noise and catches sustained momentum; volume confirms strength; weekly trend avoids counter-trend trades.
 
-name = "4h_Camarilla_R2_S2_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_TRIX_VolumeSpike_1wTrend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -16,39 +16,29 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) == 0:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) == 0:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous day's OHLC
-    # Classic Camarilla: R2 = C + 1.1*(H-L)/6, S2 = C - 1.1*(H-L)/6
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate TRIX (12-period)
+    # TRIX = EMA(EMA(EMA(close, 12), 12), 12) - 1-period percent change
+    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
+    pct_change = (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1)
+    pct_change[0] = 0  # First value has no prior
+    trix = pct_change * 100  # Scale for readability
     
-    # Calculate pivot components
-    hl_range = high_1d - low_1d
-    r2_1d = close_1d + 1.1 * hl_range / 6
-    s2_1d = close_1d - 1.1 * hl_range / 6
-    pp_1d = (high_1d + low_1d + close_1d) / 3  # Pivot Point
-    
-    # Align Camarilla levels to 4h timeframe (use previous day's levels)
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
-    
-    # Calculate EMA34 for trend filter (daily)
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate weekly EMA50 for trend filter
+    ema50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     # Volume spike detection: 2.0x average volume (20-period for stability)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -56,12 +46,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34, 20)  # Ensure we have Camarilla, EMA34, and volume MA data
+    start_idx = max(36, 50, 20)  # Ensure we have TRIX (36), weekly EMA50 (50), and volume MA (20)
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(r2_1d_aligned[i]) or np.isnan(s2_1d_aligned[i]) or 
-            np.isnan(pp_1d_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or 
+        if (np.isnan(trix[i]) or np.isnan(trix[i-1]) or 
+            np.isnan(ema50_1w_aligned[i]) or 
             np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
@@ -69,28 +59,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R2, price above EMA34 (uptrend), volume spike
-            if (close[i] > r2_1d_aligned[i] and 
-                close[i] > ema34_1d_aligned[i] and 
+            # Long: TRIX crosses above zero, price above weekly EMA50 (uptrend), volume spike
+            if (trix[i] > 0 and trix[i-1] <= 0 and 
+                close[i] > ema50_1w_aligned[i] and 
                 volume[i] > 2.0 * vol_ma[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S2, price below EMA34 (downtrend), volume spike
-            elif (close[i] < s2_1d_aligned[i] and 
-                  close[i] < ema34_1d_aligned[i] and 
+            # Short: TRIX crosses below zero, price below weekly EMA50 (downtrend), volume spike
+            elif (trix[i] < 0 and trix[i-1] >= 0 and 
+                  close[i] < ema50_1w_aligned[i] and 
                   volume[i] > 2.0 * vol_ma[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price returns to or below Pivot Point (PP)
-            if close[i] <= pp_1d_aligned[i]:
+            # Exit: TRIX crosses back to zero (momentum fade)
+            if trix[i] < 0 and trix[i-1] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price returns to or above Pivot Point (PP)
-            if close[i] >= pp_1d_aligned[i]:
+            # Exit: TRIX crosses back to zero (momentum fade)
+            if trix[i] > 0 and trix[i-1] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
