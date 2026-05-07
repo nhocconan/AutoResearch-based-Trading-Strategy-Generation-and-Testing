@@ -1,14 +1,13 @@
-# #!/usr/bin/env python3
+#!/usr/bin/env python3
 """
-4h_R1S1_Breakout_1dEMA34_Trend_Filter
-Hypothesis: Uses daily CAMARILLA pivot levels (R1/S1) with 1d EMA34 trend filter and volume confirmation.
-Enters long when price breaks above R1 in uptrend with volume > 2x average, short when breaks below S1 in downtrend with volume > 2x average.
-Exits when price returns to the pivot point (PP). This design captures multi-day moves while maintaining low trade frequency
-(~20-40 trades/year) to avoid fee drag. The trend filter ensures alignment with higher timeframe direction, working in both
-bull and bear markets by only taking trades in the direction of the daily trend.
+4h_RSI_Regime_Donchian_Breakout
+Hypothesis: Use RSI(14) for momentum, Donchian(20) for breakout direction, and Choppiness Index for regime filtering.
+Enter long when price breaks above Donchian high, RSI > 50, and market is trending (CHOP < 38.2).
+Enter short when price breaks below Donchian low, RSI < 50, and market is trending (CHOP < 38.2).
+Exit when RSI crosses back to 50 or volatility spikes (ATR ratio > 2.5). Works in bull/bear via RSI and regime filters.
 """
 
-name = "4h_R1S1_Breakout_1dEMA34_Trend_Filter"
+name = "4h_RSI_Regime_Donchian_Breakout"
 timeframe = "4h"
 leverage = 1.0
 
@@ -26,33 +25,36 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for CAMARILLA pivot and EMA trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
-        return np.zeros(n)
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Previous day's OHLC for CAMARILLA calculation
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Donchian(20)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate CAMARILLA pivot levels
-    pp = (prev_high + prev_low + prev_close) / 3.0
-    r1 = pp + (prev_high - prev_low) * 1.1 / 12  # R1
-    s1 = pp - (prev_high - prev_low) * 1.1 / 12  # S1
+    # Choppiness Index (14) - uses high/low/close
+    atr1 = np.maximum(np.abs(high - low), np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    atr1[0] = np.abs(high[0] - low[0])
+    atr_sum = pd.Series(atr1).rolling(window=14, min_periods=14).sum().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = np.divide(100 * np.log10(atr_sum) / np.log10(14), 
+                     np.log10((highest_high - lowest_low)), 
+                     out=np.zeros_like(atr_sum), 
+                     where=(highest_high - lowest_low)!=0)
     
-    # Align CAMARILLA levels to 4h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Calculate daily EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
-    
-    # Daily close for trend determination (aligned)
-    daily_close_aligned = align_htf_to_ltf(prices, df_1d, df_1d['close'].values)
+    # ATR(20) for volatility filter
+    tr1 = np.maximum(np.abs(high - low), np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr1[0] = np.abs(high[0] - low[0])
+    atr = pd.Series(tr1).ewm(alpha=1/20, adjust=False, min_periods=20).mean().values
+    atr_ma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
+    atr_ratio = np.divide(atr, atr_ma, out=np.ones_like(atr), where=atr_ma!=0)
     
     # Volume confirmation: 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -61,44 +63,45 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 35  # Warmup for EMA34
+    start_idx = 20  # Warmup for Donchian
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema_34_aligned[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(pp_aligned[i]) or np.isnan(daily_close_aligned[i])):
+        if (np.isnan(rsi[i]) or np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
+            np.isnan(chop[i]) or np.isnan(atr_ratio[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Daily trend determination using EMA34
-        daily_trend_up = daily_close_aligned[i] > ema_34_aligned[i]
-        daily_trend_down = daily_close_aligned[i] < ema_34_aligned[i]
+        # Regime filter: trending market (CHOP < 38.2)
+        is_trending = chop[i] < 38.2
         
         if position == 0:
-            # Long: price breaks above R1 in uptrend with volume spike
-            if (close[i] > r1_aligned[i] and
-                vol_ratio[i] > 2.0 and 
-                daily_trend_up):
+            # Long: break above Donchian high, RSI > 50, trending market, volume spike
+            if (close[i] > donch_high[i] and
+                rsi[i] > 50 and
+                is_trending and
+                vol_ratio[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 in downtrend with volume spike
-            elif (close[i] < s1_aligned[i] and 
-                  vol_ratio[i] > 2.0 and 
-                  daily_trend_down):
+            # Short: break below Donchian low, RSI < 50, trending market, volume spike
+            elif (close[i] < donch_low[i] and
+                  rsi[i] < 50 and
+                  is_trending and
+                  vol_ratio[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to pivot point
-            if close[i] <= pp_aligned[i]:
+            # Exit long: RSI < 50 or volatility spike
+            if rsi[i] < 50 or atr_ratio[i] > 2.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to pivot point
-            if close[i] >= pp_aligned[i]:
+            # Exit short: RSI > 50 or volatility spike
+            if rsi[i] > 50 or atr_ratio[i] > 2.5:
                 signals[i] = 0.0
                 position = 0
             else:
