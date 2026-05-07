@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Weekly_Pivot_Donchian_Breakout_With_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Spike_v7"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -8,7 +8,7 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
-    n = len(prices)
+    n = len(prrices)
     if n < 50:
         return np.zeros(n)
     
@@ -17,90 +17,112 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 4h and 1d data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 10:
+    if len(df_4h) < 10 or len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate weekly pivot point and support/resistance levels
-    # Weekly Pivot Point = (weekly high + weekly low + weekly close) / 3
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    # 1d Camarilla levels: R3, S3 from previous day
+    prev_close_1d = df_1d['close'].shift(1).values
+    prev_high_1d = df_1d['high'].shift(1).values
+    prev_low_1d = df_1d['low'].shift(1).values
+    camarilla_r3_1d = prev_close_1d + (prev_high_1d - prev_low_1d) * 1.1 / 2
+    camarilla_s3_1d = prev_close_1d - (prev_high_1d - prev_low_1d) * 1.1 / 2
     
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
-    weekly_range = weekly_high - weekly_low
+    # Align 1d Camarilla levels to 4h timeframe
+    camarilla_r3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
+    camarilla_s3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
     
-    # Weekly support/resistance levels
-    weekly_r1 = 2 * weekly_pivot - weekly_low
-    weekly_s1 = 2 * weekly_pivot - weekly_high
-    weekly_r2 = weekly_pivot + weekly_range
-    weekly_s2 = weekly_pivot - weekly_range
-    weekly_r3 = weekly_high + 2 * (weekly_pivot - weekly_low)
-    weekly_s3 = weekly_low - 2 * (weekly_high - weekly_pivot)
+    # 1d ADX for trend filter (ADX > 25 indicates strong trend)
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
+        
+        for i in range(1, len(high)):
+            plus_dm[i] = max(0, high[i] - high[i-1])
+            minus_dm[i] = max(0, low[i-1] - low[i])
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        # Smooth using Wilder's smoothing (alpha = 1/period)
+        atr = np.zeros_like(tr)
+        plus_dm_smooth = np.zeros_like(plus_dm)
+        minus_dm_smooth = np.zeros_like(minus_dm)
+        
+        atr[period] = np.nansum(tr[1:period+1])
+        plus_dm_smooth[period] = np.nansum(plus_dm[1:period+1])
+        minus_dm_smooth[period] = np.nansum(plus_dm[1:period+1])
+        
+        for i in range(period+1, len(tr)):
+            atr[i] = atr[i-1] - (atr[i-1] / period) + tr[i]
+            plus_dm_smooth[i] = plus_dm_smooth[i-1] - (plus_dm_smooth[i-1] / period) + plus_dm[i]
+            minus_dm_smooth[i] = minus_dm_smooth[i-1] - (minus_dm_smooth[i-1] / period) + minus_dm[i]
+        
+        # Avoid division by zero
+        plus_di = np.where(atr != 0, 100 * plus_dm_smooth / atr, 0)
+        minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
+        dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+        
+        # Smooth DX to get ADX
+        adx = np.zeros_like(dx)
+        adx[2*period] = np.nansum(dx[period+1:2*period+1]) / period
+        for i in range(2*period+1, len(dx)):
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
     
-    # Align weekly levels to 6h timeframe
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
-    weekly_r2_aligned = align_htf_to_ltf(prices, df_1w, weekly_r2)
-    weekly_s2_aligned = align_htf_to_ltf(prices, df_1w, weekly_s2)
-    weekly_r3_aligned = align_htf_to_ltf(prices, df_1w, weekly_r3)
-    weekly_s3_aligned = align_htf_to_ltf(prices, df_1w, weekly_s3)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # 6h Donchian channel (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # 6h volume filter: > 1.5x 20-period average
-    vol_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > 1.5 * vol_ma_6h
+    # 4h volume spike: > 2.5x 20-period average
+    vol_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike_4h = volume > 2.5 * vol_ma_4h
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)  # Wait for Donchian and volume MA
+    start_idx = max(30, 34)  # Wait for ADX and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_r1_aligned[i]) or 
-            np.isnan(weekly_s1_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i])):
+        if (np.isnan(camarilla_r3_1d_aligned[i]) or np.isnan(camarilla_s3_1d_aligned[i]) or 
+            np.isnan(adx_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Break above weekly R1 with Donchian breakout and volume filter
-            if (close[i] > weekly_r1_aligned[i] and 
-                close[i] > donchian_high[i] and vol_filter[i]):
-                signals[i] = 0.25
+            # Long: Break above R3 with volume spike, strong trend (ADX > 25)
+            if (close[i] > camarilla_r3_1d_aligned[i] and vol_spike_4h[i] and 
+                adx_1d_aligned[i] > 25):
+                signals[i] = 0.30
                 position = 1
-            # Short: Break below weekly S1 with Donchian breakout and volume filter
-            elif (close[i] < weekly_s1_aligned[i] and 
-                  close[i] < donchian_low[i] and vol_filter[i]):
-                signals[i] = -0.25
+            # Short: Break below S3 with volume spike, strong trend (ADX > 25)
+            elif (close[i] < camarilla_s3_1d_aligned[i] and vol_spike_4h[i] and 
+                  adx_1d_aligned[i] > 25):
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit: Price below weekly pivot or Donchian breakdown
-            if close[i] < weekly_pivot_aligned[i] or close[i] < donchian_low[i]:
+            # Exit: Price below S3 or trend weakening (ADX < 20)
+            if close[i] < camarilla_s3_1d_aligned[i] or adx_1d_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit: Price above weekly pivot or Donchian breakout
-            if close[i] > weekly_pivot_aligned[i] or close[i] > donchian_high[i]:
+            # Exit: Price above R3 or trend weakening (ADX < 20)
+            if close[i] > camarilla_r3_1d_aligned[i] or adx_1d_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-# Hypothesis: Weekly pivot points act as strong support/resistance levels that 
-# institutional traders watch. Combining with Donchian breakouts and volume 
-# confirmation creates high-probability trades. Weekly timeframe provides 
-# structural bias that works in both bull and bear markets, while 6s timeframe 
-# allows timely execution. Target: 20-60 trades/year to minimize fee drag.
+# Hypothesis: Camarilla R3/S3 breakout on 4h timeframe with 1d trend filter (ADX > 25) and volume spike (2.5x avg volume).
+# Targets 20-30 trades per year to minimize fee drag. Works in bull/bear via trend filter and volatility-based position sizing.
