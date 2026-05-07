@@ -1,6 +1,9 @@
+# 1d_Camarilla_R3_S3_Breakout_1wTrend_VolumeSurge
+# Hypothesis: On 1d timeframe, price breaking above/below weekly Camarilla R3/S3 levels with volume surge confirmation and weekly trend filter captures institutional breakout momentum. Camarilla R3/S3 represent stronger support/resistance, reducing false breakouts. Weekly trend filter ensures alignment with higher timeframe momentum. Volume surge filter (2.0x 10-day average) confirms institutional participation. Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag. Works in bull markets (breakouts above R3 in weekly uptrend) and bear markets (breakdowns below S3 in weekly downtrend). Uses discrete position sizing (0.25) to balance risk and reward while reducing fee churn.
+
 #!/usr/bin/env python3
-name = "4h_PriceAction_Trend_Volume"
-timeframe = "4h"
+name = "1d_Camarilla_R3_S3_Breakout_1wTrend_VolumeSurge"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,49 +20,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data once before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Weekly trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    # Daily trend filter: EMA34
-    daily_close = df_1d['close'].values
-    ema_34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    trend_up = close > ema_34_1d_aligned
-    trend_down = close < ema_34_1d_aligned
+    weekly_close = df_1w['close'].values
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
     
-    # Daily range for support/resistance levels
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_range = daily_high - daily_low
+    # Weekly EMA34 trend
+    ema_34_1w = pd.Series(weekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    trend_up = close > ema_34_1w_aligned
+    trend_down = close < ema_34_1w_aligned
     
-    # Dynamic support/resistance: 50% of daily range from close
-    support_level = daily_close - 0.5 * daily_range
-    resistance_level = daily_close + 0.5 * daily_range
+    # Weekly OHLC for Camarilla R3/S3 levels
+    camarilla_r3 = weekly_close + (weekly_high - weekly_low) * 1.1 / 4
+    camarilla_s3 = weekly_close - (weekly_high - weekly_low) * 1.1 / 4
     
-    # Align levels to 4h timeframe
-    support_aligned = align_htf_to_ltf(prices, df_1d, support_level)
-    resistance_aligned = align_htf_to_ltf(prices, df_1d, resistance_level)
+    # Align Camarilla levels to 1d timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
     
-    # Volume confirmation: current volume > 1.5x 4-period average
-    vol_ma_4 = np.full(n, np.nan)
-    for i in range(4, n):
-        vol_ma_4[i] = np.mean(volume[i-4:i])
-    volume_filter = volume > (1.5 * vol_ma_4)
+    # Volume surge filter: current volume > 2.0x 10-period average (10-day average)
+    vol_ma_10 = np.full(n, np.nan)
+    for i in range(10, n):
+        vol_ma_10[i] = np.mean(volume[i-10:i])
+    vol_surge = volume > (2.0 * vol_ma_10)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 3  # ~1.5 days (3*4h) to prevent overtrading
+    cooldown_bars = 5  # ~1 week (5*1d) to prevent overtrading
     
-    start_idx = max(4, 34)  # Ensure enough data for volume MA and EMA
+    start_idx = max(10, 34)  # Ensure enough data for volume MA and EMA
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(support_aligned[i]) or 
-            np.isnan(resistance_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i])):
+        if (np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_34_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,31 +76,31 @@ def generate_signals(prices):
         trending_down = trend_down[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: Price breaks above resistance with volume in daily uptrend
-            if (close[i] > resistance_aligned[i] and 
+            # Long: Price breaks above Camarilla R3 with volume surge in weekly uptrend
+            if (close[i] > r3_aligned[i] and 
                 trending_up and 
-                volume_filter[i]):
+                vol_surge[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: Price breaks below support with volume in daily downtrend
-            elif (close[i] < support_aligned[i] and 
+            # Short: Price breaks below Camarilla S3 with volume surge in weekly downtrend
+            elif (close[i] < s3_aligned[i] and 
                   trending_down and 
-                  volume_filter[i]):
+                  vol_surge[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit: Price falls back below support or daily trend changes to down
-            if close[i] < support_aligned[i] or not trending_up:
+            # Exit: Price falls back below Camarilla S3 or weekly trend changes to down
+            if close[i] < s3_aligned[i] or not trending_up:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price rises back above resistance or daily trend changes to up
-            if close[i] > resistance_aligned[i] or not trending_down:
+            # Exit: Price rises back above Camarilla R3 or weekly trend changes to up
+            if close[i] > r3_aligned[i] or not trending_down:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
@@ -107,5 +108,3 @@ def generate_signals(prices):
                 signals[i] = -0.25
     
     return signals
-
-# Hypothesis: On 4h timeframe, price breaking above/below dynamic support/resistance levels (50% of daily range) with volume confirmation and daily EMA34 trend filter captures institutional breakout momentum. The support/resistance levels adapt to daily volatility, making them relevant in both ranging and trending markets. Volume filter ensures institutional participation. Cooldown period prevents overtrading. Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drift. Works in bull markets (breakouts above resistance in daily uptrend) and bear markets (breakdowns below support in daily downtrend). Uses discrete position sizing (0.25) to balance risk and reward while reducing fee churn. This strategy focuses on BTC and ETH as primary targets, avoiding SOL-only bias.
