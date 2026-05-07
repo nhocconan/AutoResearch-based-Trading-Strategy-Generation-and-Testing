@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-12H_Camarilla_R1_S1_Breakout_1D_Trend_Volume
-Hypothesis: 12h price breaks above/below 1D Camarilla R1/S1 levels with 1D EMA34 trend confirmation and volume spike.
+4H_Camarilla_R1_S1_Breakout_12hTrend_Volume
+Hypothesis: 4h price breaks above/below daily (1d) Camarilla R1/S1 levels with 12h EMA34 trend confirmation and volume spike.
 Works in bull/bear markets: R1/S1 breakouts capture strong moves while avoiding minor retracements.
-EMA34 filter ensures alignment with daily trend, volume confirmation validates breakout strength.
-Targets 12-37 trades/year to minimize fee drag on 12h timeframe.
+EMA34 filter ensures alignment with 12h trend, volume confirmation validates breakout strength.
+Targets 20-50 trades/year to minimize fee drag on 4h timeframe.
 """
-name = "12H_Camarilla_R1_S1_Breakout_1D_Trend_Volume"
-timeframe = "12h"
+name = "4H_Camarilla_R1_S1_Breakout_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,12 +24,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1D data for Camarilla levels, EMA trend, and volume average
+    # Get 1d data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    # Calculate 1D Camarilla levels (R1, S1)
+    # Calculate 1d Camarilla levels (R1, S1)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -40,12 +40,17 @@ def generate_signals(prices):
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Calculate 1D EMA34 for trend direction
-    close_1d_series = pd.Series(df_1d['close'])
-    ema_34 = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # Get 12h data for EMA34 trend
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 34:
+        return np.zeros(n)
     
-    # Volume filter: current 12h volume > 1.5 x 20-period average volume
+    # Calculate 12h EMA34 for trend direction
+    close_12h_series = pd.Series(df_12h['close'])
+    ema_34 = close_12h_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_12h, ema_34)
+    
+    # Volume filter: current 4h volume > 1.5 x 20-period average volume
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_avg * 1.5)
     
@@ -68,7 +73,7 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Minimum 48 bars between trades (8 days on 12h TF) to reduce frequency
+            # Minimum 48 bars between trades (8 days on 4h TF) to reduce frequency
             if bars_since_exit < 48:
                 continue
                 
