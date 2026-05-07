@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-6h_IK_CloudBreakout_1wTrend
-Hypothesis: Ichimoku cloud breakouts with weekly trend filter capture major momentum moves. 
-In bull markets: price breaks above cloud with weekly uptrend = long. 
-In bear markets: price breaks below cloud with weekly downtrend = short. 
-The cloud acts as dynamic support/resistance, reducing false breakouts. 
-Weekly trend filter ensures we only trade in the direction of higher timeframe momentum.
-Low frequency via 6h timeframe and strict entry criteria (cloud breakout + weekly trend + volume).
+6h_Keltner_Breakout_WTrend_Volume
+Hypothesis: Keltner Channel breakouts with weekly trend filter and volume confirmation capture momentum with reduced false signals. 
+In bull markets: price breaks above upper Keltner band with weekly uptrend = long. 
+In bear markets: price breaks below lower Keltner band with weekly downtrend = short. 
+The Keltner Channel (ATR-based) adapts to volatility, providing dynamic support/resistance. 
+Weekly trend filter ensures alignment with higher timeframe momentum. 
+Volume confirmation adds conviction. 
+Low frequency via 6h timeframe and strict entry criteria (Keltner breakout + weekly trend + volume).
 Target: 50-150 total trades over 4 years.
 """
-name = "6h_IK_CloudBreakout_1wTrend"
+name = "6h_Keltner_Breakout_WTrend_Volume"
 timeframe = "6h"
 leverage = 1.0
 
@@ -27,24 +28,21 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Ichimoku components (9, 26, 52 periods)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan = (high_9 + low_9) / 2
+    # Keltner Channel (20, 2.0)
+    # Middle line: 20-period EMA of close
+    close_s = pd.Series(close)
+    middle = close_s.ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun = (high_26 + low_26) / 2
+    # Average True Range (ATR) for band width
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2)
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    high_52 = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    low_52 = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = ((high_52 + low_52) / 2)
+    # Upper and lower bands
+    upper = middle + (2.0 * atr)
+    lower = middle - (2.0 * atr)
     
     # Get 1w data for trend filter
     df_1w = get_htf_data(prices, '1w')
@@ -62,40 +60,36 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 52 + 26)  # Need enough data for Ichimoku
+    start_idx = 40  # Need enough data for EMA and ATR
     
     for i in range(start_idx, n):
         # Skip if any data is not ready
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or np.isnan(senkou_a[i]) or 
-            np.isnan(senkou_b[i]) or np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(middle[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine cloud boundaries (Senkou Span A and B)
-        upper_cloud = np.maximum(senkou_a[i], senkou_b[i])
-        lower_cloud = np.minimum(senkou_a[i], senkou_b[i])
-        
         if position == 0:
-            # Long: price breaks above cloud + weekly uptrend + volume
-            if close[i] > upper_cloud and close[i] > ema_50_1w_aligned[i] and volume_filter[i]:
+            # Long: price breaks above upper band + weekly uptrend + volume
+            if close[i] > upper[i] and close[i] > ema_50_1w_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below cloud + weekly downtrend + volume
-            elif close[i] < lower_cloud and close[i] < ema_50_1w_aligned[i] and volume_filter[i]:
+            # Short: price breaks below lower band + weekly downtrend + volume
+            elif close[i] < lower[i] and close[i] < ema_50_1w_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: price returns to Kijun-sen (mean reversion to baseline)
+            # Exit: price returns to middle line (mean reversion to average)
             if position == 1:
-                if close[i] <= kijun[i]:
+                if close[i] <= middle[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] >= kijun[i]:
+                if close[i] >= middle[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
