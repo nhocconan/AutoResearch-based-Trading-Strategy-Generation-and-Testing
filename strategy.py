@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-name = "1d_Weekly_Pivot_Crossover_Volume"
-timeframe = "1d"
+name = "6h_Pivot_R3S3_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_htf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -17,72 +17,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Weekly high, low, close for pivot calculation
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    # 1d High, Low, Close for pivot calculation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot points (standard formula)
+    # Calculate Camarilla pivot levels for each 1d bar
     # Pivot = (H + L + C) / 3
-    # R1 = 2*P - L
-    # S1 = 2*P - H
-    # R2 = P + (H - L)
-    # S2 = P - (H - L)
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    weekly_r1 = 2 * weekly_pivot - weekly_low
-    weekly_s1 = 2 * weekly_pivot - weekly_high
-    weekly_r2 = weekly_pivot + (weekly_high - weekly_low)
-    weekly_s2 = weekly_pivot - (weekly_high - weekly_low)
+    # R3 = C + (H - L) * 1.1 / 2
+    # S3 = C - (H - L) * 1.1 / 2
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    r3_1d = close_1d + (high_1d - low_1d) * 1.1 / 2.0
+    s3_1d = close_1d - (high_1d - low_1d) * 1.1 / 2.0
     
-    # Align weekly pivot levels to daily timeframe
-    pivot_aligned = align_ltf_to_htf(prices, df_1w, weekly_pivot)
-    r1_aligned = align_ltf_to_htf(prices, df_1w, weekly_r1)
-    s1_aligned = align_ltf_to_htf(prices, df_1w, weekly_s1)
-    r2_aligned = align_ltf_to_htf(prices, df_1w, weekly_r2)
-    s2_aligned = align_ltf_to_htf(prices, df_1w, weekly_s2)
+    # Align 1d pivot levels to 6h timeframe
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
-    # Daily volume filter: > 1.5x 20-day average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > 1.5 * vol_ma
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # 6h volume filter: > 1.5x 24-period average (48h)
+    vol_ma_6h = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_filter = volume > 1.5 * vol_ma_6h
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Wait for volume MA
+    start_idx = max(34, 24)  # Wait for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(r2_aligned[i]) or 
-            np.isnan(s2_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or 
+            np.isnan(s3_1d_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(vol_ma_6h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price crosses above S1 with volume (bullish bounce from support)
-            if close[i] > s1_aligned[i] and close[i-1] <= s1_aligned[i-1] and vol_filter[i]:
+            # Long: Break above R3 with uptrend (price > EMA34) and volume
+            if (close[i] > r3_1d_aligned[i] and close[i] > ema34_1d_aligned[i] and vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price crosses below R1 with volume (bearish rejection from resistance)
-            elif close[i] < r1_aligned[i] and close[i-1] >= r1_aligned[i-1] and vol_filter[i]:
+            # Short: Break below S3 with downtrend (price < EMA34) and volume
+            elif (close[i] < s3_1d_aligned[i] and close[i] < ema34_1d_aligned[i] and vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Price crosses below S2 (strong support break) or above R2 (overbought)
-            if close[i] < s2_aligned[i] or close[i] > r2_aligned[i]:
+            # Exit: Price < EMA34 (trend change) or re-enter R3 range
+            if close[i] < ema34_1d_aligned[i] or close[i] < r3_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price crosses above R2 (strong resistance break) or below S2 (oversold)
-            if close[i] > r2_aligned[i] or close[i] < s2_aligned[i]:
+            # Exit: Price > EMA34 (trend change) or re-enter S3 range
+            if close[i] > ema34_1d_aligned[i] or close[i] > s3_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -90,11 +88,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Weekly pivot points provide significant support/resistance levels
-# that work in both bull and bear markets. Price respecting these levels
-# with volume confirmation creates high-probability entries. The strategy
-# buys near weekly support (S1) and sells near weekly resistance (R1),
-# with exits at stronger levels (S2/R2) to capture meaningful moves.
-# Using weekly pivots on daily timeframe reduces noise and avoids overtrading.
-# Position size 0.25 limits risk while allowing meaningful returns. 
-# Target: 15-25 trades/year to minimize fee drag in choppy 2025 market.
+# Hypothesis: Camarilla R3/S3 levels act as significant support/resistance.
+# Breakouts above R3 in uptrend (price > EMA34) or below S3 in downtrend (price < EMA34)
+# with volume confirmation capture institutional flow.
+# Works in bull (buy R3 breakouts) and bear (sell S3 breakdowns) regimes.
+# Uses 1d pivots for structure, 6s for entry, and volume to filter false breakouts.
+# Target: 20-40 trades/year to minimize fee drag. Position size 0.25 limits risk.
