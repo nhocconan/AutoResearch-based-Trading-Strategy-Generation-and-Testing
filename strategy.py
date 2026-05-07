@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 1h_Volume_Regime_Trend
-# Hypothesis: 1h strategy using 4h EMA trend filter, 1d volume regime filter, and 1h RSI mean reversion.
-# Long when 4h EMA20 uptrend, 1d volume above average (liquidity), and 1h RSI < 40 (oversold).
-# Short when 4h EMA20 downtrend, 1d volume above average, and 1h RSI > 60 (overbought).
-# Uses 08-20 UTC session filter to avoid low-liquidity periods. Target: 15-30 trades/year per symbol.
+# 12h_Alligator_Jaw_Teeth_Lips_1dTrend_Volume
+# Hypothesis: 12h chart strategy using Williams Alligator indicator with 1d EMA trend filter and volume confirmation.
+# Alligator uses 3 SMAs (Jaw=13, Teeth=8, Lips=5) to identify trend and avoid sideways markets.
+# Long when Lips > Teeth > Jaw (bullish alignment) with volume spike and price above 1d EMA50.
+# Short when Lips < Teeth < Jaw (bearish alignment) with volume spike and price below 1d EMA50.
+# Designed for low trade frequency (12-37/year) to avoid fee drag in bear markets.
 
-name = "1h_Volume_Regime_Trend"
-timeframe = "1h"
+name = "12h_Alligator_Jaw_Teeth_Lips_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,87 +24,79 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = prices.index.hour
-    session_mask = (hours >= 8) & (hours <= 20)
-    
-    # Get 4h data for EMA trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) == 0:
-        return np.zeros(n)
-    
-    # Calculate EMA20 on 4h closes for trend filter
-    ema_20_4h = pd.Series(df_4h['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
-    
-    # Get 1d data for volume regime filter
+    # Get 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) == 0:
         return np.zeros(n)
     
-    # Calculate 20-day average volume on 1d
-    vol_avg_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    # Calculate EMA50 on 1d closes for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 1h RSI (14-period)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.fillna(100).values  # Fill NaN with 100 (no loss case)
+    # Get 12h data for Williams Alligator calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) == 0:
+        return np.zeros(n)
+    
+    # Calculate Williams Alligator on 12h data
+    # Jaw: 13-period SMMA, Teeth: 8-period SMMA, Lips: 5-period SMMA
+    # Using SMA as approximation for SMMA (Smoothed Moving Average)
+    jaw_12h = pd.Series(df_12h['close'].values).rolling(window=13, min_periods=13).mean().values
+    teeth_12h = pd.Series(df_12h['close'].values).rolling(window=8, min_periods=8).mean().values
+    lips_12h = pd.Series(df_12h['close'].values).rolling(window=5, min_periods=5).mean().values
+    
+    # Align Alligator components to lower timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw_12h)
+    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth_12h)
+    lips_aligned = align_htf_to_ltf(prices, df_12h, lips_12h)
+    
+    # Volume spike detection: 2x average volume (2-period = 1 day on 12h chart)
+    vol_ma = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20, 14)  # Ensure we have EMA, volume, and RSI data
+    start_idx = max(50, 13, 2)  # Ensure we have EMA, Jaw, and volume MA data
     
     for i in range(start_idx, n):
-        # Skip if outside trading session
-        if not session_mask[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
         # Skip if any critical value is NaN
-        if (np.isnan(ema_20_4h_aligned[i]) or np.isnan(vol_avg_1d_aligned[i]) or 
-            np.isnan(rsi_values[i]) or vol_avg_1d_aligned[i] == 0):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(jaw_aligned[i]) or 
+            np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or 
+            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: 4h EMA uptrend, high volume regime, RSI oversold
-            if (close[i] > ema_20_4h_aligned[i] and 
-                volume[i] > vol_avg_1d_aligned[i] and 
-                rsi_values[i] < 40):
-                signals[i] = 0.20
+            # Bullish Alligator alignment: Lips > Teeth > Jaw
+            bullish_alignment = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]
+            # Bearish Alligator alignment: Lips < Teeth < Jaw
+            bearish_alignment = lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaw_aligned[i]
+            
+            # Long: bullish alignment + volume spike + price above 1d EMA50
+            if bullish_alignment and volume[i] > 2.0 * vol_ma[i] and close[i] > ema_50_1d_aligned[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: 4h EMA downtrend, high volume regime, RSI overbought
-            elif (close[i] < ema_20_4h_aligned[i] and 
-                  volume[i] > vol_avg_1d_aligned[i] and 
-                  rsi_values[i] > 60):
-                signals[i] = -0.20
+            # Short: bearish alignment + volume spike + price below 1d EMA50
+            elif bearish_alignment and volume[i] > 2.0 * vol_ma[i] and close[i] < ema_50_1d_aligned[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: trend failure or RSI overbought
-            if (close[i] < ema_20_4h_aligned[i] or 
-                rsi_values[i] > 70):
+            # Exit: Alligator alignment turns bearish or price crosses below EMA50
+            bearish_alignment = lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaw_aligned[i]
+            if bearish_alignment or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: trend failure or RSI oversold
-            if (close[i] > ema_20_4h_aligned[i] or 
-                rsi_values[i] < 30):
+            # Exit: Alligator alignment turns bullish or price crosses above EMA50
+            bullish_alignment = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]
+            if bullish_alignment or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
