@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla R3/S3 breakout with volume spike and 1w trend filter.
-# Uses 1w EMA for trend direction and daily volume for confirmation.
-# Designed to work in both bull and bear markets by following weekly trend.
-# Target: 20-30 trades/year per symbol to avoid fee drag (total 80-120 over 4 years).
-name = "1d_Camarilla_R3_S3_Breakout_1wTrend_Volume"
-timeframe = "1d"
+# Hypothesis: 4h Bollinger Band breakout with 1d trend filter and volume confirmation.
+# Uses 1d trend (EMA34) to filter direction, 4h Bollinger Bands (20,2) for entry,
+# and volume spike (>1.5x EMA34 volume) for confirmation. Designed to work in both bull and bear markets.
+# Target: 20-50 trades/year per symbol to avoid fee drag.
+name = "4h_BollingerBreakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,61 +21,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
-        return np.zeros(n)
-    
-    # 1w trend filter: 21-period EMA on close
-    ema_21_1w = pd.Series(df_1w['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
-    
-    # Load 1d data for daily OHLC (needed for Camarilla calculation)
+    # Load 1d data ONCE for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
-    prev_range = prev_high - prev_low
+    # 1d trend filter: 34-period EMA on close (more stable than EMA20)
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Camarilla levels for current day (based on previous day)
-    # R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
-    camarilla_r3 = prev_close + prev_range * 1.1 / 4
-    camarilla_s3 = prev_close - prev_range * 1.1 / 4
+    # 4h Bollinger Bands: 20-period SMA +- 2*std
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_band = sma_20 + 2 * std_20
+    lower_band = sma_20 - 2 * std_20
     
-    # Align Camarilla levels to 1d timeframe (no additional delay needed)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Daily volume spike: current volume > 2.0x 20-period SMA
-    vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = np.where(vol_sma_20 > 0, volume / vol_sma_20, 1.0) > 2.0
+    # 4h volume average for spike detection
+    vol_ema_4h = pd.Series(volume).ewm(span=34, adjust=False, min_periods=34).mean().values
+    vol_spike = np.where(vol_ema_4h > 0, volume / vol_ema_4h, 1.0) > 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Sufficient warmup for 20-period SMA
+    start_idx = 100  # Sufficient warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_21_1w_aligned[i]) or np.isnan(vol_spike[i])):
+        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(vol_spike[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: price above/below 1w EMA21
-        uptrend = close[i] > ema_21_1w_aligned[i]
-        downtrend = close[i] < ema_21_1w_aligned[i]
+        # Trend filter: price above/below 1d EMA34
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Long breakout: price > R3 with volume spike in uptrend
-            long_condition = (close[i] > r3_aligned[i]) and vol_spike[i] and uptrend
-            # Short breakdown: price < S3 with volume spike in downtrend
-            short_condition = (close[i] < s3_aligned[i]) and vol_spike[i] and downtrend
+            # Long breakout: price > upper band with volume spike in uptrend
+            long_condition = (close[i] > upper_band[i]) and vol_spike[i] and uptrend
+            # Short breakdown: price < lower band with volume spike in downtrend
+            short_condition = (close[i] < lower_band[i]) and vol_spike[i] and downtrend
             
             if long_condition:
                 signals[i] = 0.25
@@ -84,15 +69,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price re-enters below R3 or trend turns down
-            if (close[i] < r3_aligned[i]) or (not uptrend):
+            # Exit: price re-enters below middle band or trend turns down
+            if (close[i] < sma_20[i]) or (not uptrend):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price re-enters above S3 or trend turns up
-            if (close[i] > s3_aligned[i]) or (not downtrend):
+            # Exit: price re-enters above middle band or trend turns up
+            if (close[i] > sma_20[i]) or (not downtrend):
                 signals[i] = 0.0
                 position = 0
             else:
