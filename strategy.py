@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Donchian20_1dTrend_VolumeBreak"
-timeframe = "12h"
+name = "6h_FibPivot_1dTrend_VolumeBreak"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -22,63 +22,87 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Donchian channel (20-period) on 12h
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate weekly Fibonacci pivots from daily data
+    # Using weekly high/low/close from daily data (5 trading days)
+    weekly_high = pd.Series(high).rolling(window=5*24//6, min_periods=5*24//6).max().values
+    weekly_low = pd.Series(low).rolling(window=5*24//6, min_periods=5*24//6).min().values
+    weekly_close = pd.Series(close).rolling(window=5*24//6, min_periods=5*24//6).mean().values
+    
+    # Pivot point and Fibonacci levels
+    pp = (weekly_high + weekly_low + weekly_close) / 3
+    diff = weekly_high - weekly_low
+    r1 = pp + 0.382 * diff
+    r2 = pp + 0.618 * diff
+    r3 = pp + 1.000 * diff
+    s1 = pp - 0.382 * diff
+    s2 = pp - 0.618 * diff
+    s3 = pp - 1.000 * diff
+    
+    # Align weekly Fibonacci pivot levels to 6h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp.values)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2.values)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2.values)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3.values)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3.values)
     
     # Daily trend filter: EMA(34) on daily close
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume spike detection: 8-period average (4 days of 12h bars)
-    vol_ma_8 = pd.Series(volume).rolling(window=8, min_periods=8).mean().values
+    # Volume spike detection: 24-period average (4 days of 6h bars)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34, 8)
+    start_idx = max(34, 24, 5*24//6)  # Wait for all indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(vol_ma_8[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(pp_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(vol_ma_24[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian high with volume and daily uptrend
-            vol_condition = volume[i] > vol_ma_8[i] * 2.0
+            # Long: price above S1 with volume and daily uptrend
+            vol_condition = volume[i] > vol_ma_24[i] * 2.0
             uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
             
-            if close[i] > donchian_high[i] and vol_condition and uptrend:
-                signals[i] = 0.30
+            if close[i] > s1_aligned[i] and vol_condition and uptrend:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low with volume and daily downtrend
-            elif close[i] < donchian_low[i] and vol_condition and not uptrend:
-                signals[i] = -0.30
+            # Short: price below R1 with volume and daily downtrend
+            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below Donchian low or volume drops
-            if close[i] < donchian_low[i] or volume[i] < vol_ma_8[i] * 1.5:
+            # Exit: price back below pivot or volume drops
+            if close[i] < pp_aligned[i] or volume[i] < vol_ma_24[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above Donchian high or volume drops
-            if close[i] > donchian_high[i] or volume[i] < vol_ma_8[i] * 1.5:
+            # Exit: price back above pivot or volume drops
+            if close[i] > pp_aligned[i] or volume[i] < vol_ma_24[i] * 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-# Hypothesis: Donchian(20) breakout with daily trend and volume confirmation on 12h
-# - Donchian breakout captures momentum in both bull and bear markets
-# - Daily EMA(34) ensures we trade with the higher timeframe trend
+# Hypothesis: 6h Fibonacci weekly pivot breakout with daily trend and volume confirmation
+# - Fibonacci ratios (0.382, 0.618) provide more precise support/resistance than standard pivots
+# - Breakout above S1 with volume in daily uptrend = long opportunity
+# - Breakdown below R1 with volume in daily downtrend = short opportunity
 # - Volume spike (2x average) confirms institutional participation
-# - Exit when price reverses to opposite Donchian band or volume weakens
-# - Position size 0.30 targets ~25-40 trades/year, avoiding fee drag
-# - Works in bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend)
+# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
+# - Exit when price returns to weekly pivot (PP) or volume weakens
+# - Position size 0.25 targets 20-40 trades/year, avoiding fee drag
+# - Weekly Fibonacci pivot provides structure that adapts to volatility regimes
