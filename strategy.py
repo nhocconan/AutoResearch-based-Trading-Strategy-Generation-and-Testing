@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: 4h chart strategy using Camarilla R1/S1 breakouts filtered by daily trend (EMA34) and volume confirmation.
-# Long when price breaks above Camarilla R1 with volume > 1.5x average and price > daily EMA34.
-# Short when price breaks below Camarilla S1 with volume > 1.5x average and price < daily EMA34.
-# Exit on opposite Camarilla level touch (S1 for long, R1 for short).
-# Camarilla levels provide institutional support/resistance, EMA34 filters trend direction,
-# volume reduces false breakouts. Target: 20-40 trades/year per symbol.
+# 6h_River_Pullback_200EMA_RSI
+# Hypothesis: Buy dips in uptrends (price > 200EMA) when RSI pulls back from oversold (RSI < 30) on 6h chart.
+# Sell bounces in downtrends (price < 200EMA) when RSI pulls back from overbought (RSI > 70) on 6h chart.
+# Trend filter uses 12h 200EMA for higher timeframe confirmation to avoid counter-trend trades.
+# Volume confirmation requires 1.2x average volume to ensure participation.
+# Designed for low trade frequency (~20-40/year) to minimize fee drag while capturing meaningful swings.
 
-timeframe = "4h"
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "6h"
+name = "6h_River_Pullback_200EMA_RSI"
 leverage = 1.0
 
 import numpy as np
@@ -25,63 +24,71 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend and Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) == 0:
+    # Get 12h data for higher timeframe trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) == 0:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # Calculate 12h 200EMA for trend filter
+    close_12h = df_12h['close'].values
+    ema_200_12h = pd.Series(close_12h).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_200_12h)
     
-    # Calculate Camarilla levels from previous day's OHLC
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    camarilla_r1 = close_1d + (df_1d['high'].values - df_1d['low'].values) * 1.1 / 12.0
-    camarilla_s1 = close_1d - (df_1d['high'].values - df_1d['low'].values) * 1.1 / 12.0
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Calculate 6h 200EMA for trend definition
+    ema_200_6h = pd.Series(close).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Volume spike detection: 1.5x average volume (6-period = 1.5 days on 4h chart)
-    vol_ma = pd.Series(volume).ewm(span=6, adjust=False, min_periods=6).mean().values
+    # Calculate RSI(14) on 6h
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
+    
+    # Volume confirmation: 1.2x average volume (4-period = 1 day on 6h chart)
+    vol_ma = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 6)  # Ensure we have EMA and volume EMA data
+    start_idx = max(200, 14, 4)  # Ensure we have EMA, RSI, and volume MA data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(ema_200_6h[i]) or np.isnan(rsi[i]) or 
+            np.isnan(ema_200_12h_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above Camarilla R1 with volume, and price > daily EMA34 (uptrend)
-            if (high[i] > camarilla_r1_aligned[i] and 
-                volume[i] > 1.5 * vol_ma[i] and 
-                close[i] > ema_34_aligned[i]):
+            # Long: uptrend (price > 200EMA on both timeframes) + RSI pullback from oversold + volume
+            if (close[i] > ema_200_6h[i] and 
+                close[i] > ema_200_12h_aligned[i] and 
+                rsi[i] < 30 and 
+                volume[i] > 1.2 * vol_ma[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Camarilla S1 with volume, and price < daily EMA34 (downtrend)
-            elif (low[i] < camarilla_s1_aligned[i] and 
-                  volume[i] > 1.5 * vol_ma[i] and 
-                  close[i] < ema_34_aligned[i]):
+            # Short: downtrend (price < 200EMA on both timeframes) + RSI pullback from overbought + volume
+            elif (close[i] < ema_200_6h[i] and 
+                  close[i] < ema_200_12h_aligned[i] and 
+                  rsi[i] > 70 and 
+                  volume[i] > 1.2 * vol_ma[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price touches Camarilla S1 (opposite level)
-            if low[i] <= camarilla_s1_aligned[i]:
+            # Exit: trend break or RSI overextension
+            if (close[i] < ema_200_6h[i] or rsi[i] > 70):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price touches Camarilla R1 (opposite level)
-            if high[i] >= camarilla_r1_aligned[i]:
+            # Exit: trend break or RSI overextension
+            if (close[i] > ema_200_6h[i] or rsi[i] < 30):
                 signals[i] = 0.0
                 position = 0
             else:
