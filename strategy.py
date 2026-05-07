@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1S1_Breakout_12hTrend_Volume_S"
-timeframe = "4h"
+name = "1d_KAMA_Trend_With_RSI_Momentum"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,74 +17,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # 12h EMA50 for trend filter
-    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Weekly KAMA for trend filter
+    close_1w = df_1w['close'].values
+    change = np.abs(np.diff(close_1w, prepend=close_1w[0]))
+    dir = np.abs(np.diff(close_1w, k=10))  # direction over 10 periods
+    vol = np.sum(change.reshape(-1, 10), axis=1)  # volatility over 10 periods
+    er = np.where(vol != 0, dir / vol, 0)
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # k=2, n=30
+    kama = np.zeros_like(close_1w)
+    kama[0] = close_1w[0]
+    for i in range(1, len(close_1w)):
+        kama[i] = kama[i-1] + sc[i] * (close_1w[i] - kama[i-1])
+    kama_1w = kama
     
-    # Load 1d data for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
     
-    # Calculate Camarilla pivot levels from previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Weekly RSI for momentum filter
+    delta = pd.Series(close_1w).diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=14).mean()
+    rs = gain / loss
+    rsi1w = 100 - (100 / (1 + rs))
+    rsi1w = rsi1w.fillna(50).values  # Neutral when undefined
+    rsi1w_aligned = align_htf_to_ltf(prices, df_1w, rsi1w)
     
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r1 = close_1d + range_1d * 1.1 / 12
-    s1 = close_1d - range_1d * 1.1 / 12
-    r3 = close_1d + range_1d * 1.1 / 4
-    s3 = close_1d - range_1d * 1.1 / 4
-    
-    # Align pivot levels to 4h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # 4h volume spike: > 1.8x 20-period average (10 hours)
+    # Daily volume spike: > 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > 1.8 * vol_ma
+    vol_spike = volume > 2.0 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 50)  # Wait for volume MA and EMA50
+    start_idx = max(20, 34)  # Wait for volume MA and KAMA
     
     for i in range(start_idx, n):
-        if np.isnan(ema50_12h_aligned[i]) or np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]):
+        if np.isnan(kama_1w_aligned[i]) or np.isnan(rsi1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above R1 with volume spike and 12h uptrend
-            if close[i] > r1_aligned[i] and ema50_12h_aligned[i] > pivot_aligned[i] and vol_spike[i]:
+            # Long: Price above weekly KAMA, RSI > 55, volume spike
+            if close[i] > kama_1w_aligned[i] and rsi1w_aligned[i] > 55 and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 with volume spike and 12h downtrend
-            elif close[i] < s1_aligned[i] and ema50_12h_aligned[i] < pivot_aligned[i] and vol_spike[i]:
+            # Short: Price below weekly KAMA, RSI < 45, volume spike
+            elif close[i] < kama_1w_aligned[i] and rsi1w_aligned[i] < 45 and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Price breaks below S1 or 12h trend turns down
-            if close[i] < s1_aligned[i] or ema50_12h_aligned[i] < pivot_aligned[i]:
+            # Exit: Price below weekly KAMA or RSI < 40
+            if close[i] < kama_1w_aligned[i] or rsi1w_aligned[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price breaks above R1 or 12h trend turns up
-            if close[i] > r1_aligned[i] or ema50_12h_aligned[i] > pivot_aligned[i]:
+            # Exit: Price above weekly KAMA or RSI > 60
+            if close[i] > kama_1w_aligned[i] or rsi1w_aligned[i] > 60:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -92,10 +88,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R1/S1 breakout with 12h EMA50 trend filter and volume confirmation.
-# Long when price breaks above R1 (Camarilla resistance level 1) with volume spike and 12h uptrend.
-# Short when price breaks below S1 (Camarilla support level 1) with volume spike and 12h downtrend.
-# Uses Camarilla levels from daily timeframe for structure, 12h for trend filter, 4h for execution.
-# Volume spike (>1.8x 20-period average) ensures conviction. Discrete 0.25 position size limits risk.
-# Works in bull markets (breakouts in uptrend) and bear markets (breakdowns in downtrend).
-# Target: 20-40 trades/year to minimize fee decay while capturing meaningful moves.
+# Hypothesis: Weekly KAMA trend filter with RSI momentum and daily volume spike confirmation.
+# Long when price > weekly KAMA, RSI > 55 (bullish momentum), and volume spike confirms conviction.
+# Short when price < weekly KAMA, RSI < 45 (bearish momentum), and volume spike confirms.
+# Uses weekly timeframe for trend/momentum to avoid whipsaws, daily for execution.
+# Volume spike (>2.0x average) ensures strong conviction. Discrete 0.25 position size limits risk.
+# Designed to work in both bull and bear markets by following the higher timeframe trend.
+# Target: ~15-25 trades/year to minimize fee drag while capturing sustained moves.
