@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -95,4 +95,5 @@ def generate_signals(prices):
 # - Position size 0.30 targets ~30-50 trades/year to avoid fee drag
 # - Works in both bull (breakouts in uptrend) and bear (breakdowns in downtrend)
 # - Uses 1d timeframe for structure and trend, 4h for execution timing
-# - Proven pattern: similar variants show strong test performance (Sharpe >1.8) with proper filtering
+# - Refined version with stricter entry to reduce trade frequency and improve edge
+# - Focus on BTC/ETH as primary targets, avoids overtrading pitfalls of similar strategies
