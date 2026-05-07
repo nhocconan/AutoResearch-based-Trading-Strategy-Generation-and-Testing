@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+name = "4h_PivotBreakout_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,12 +17,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for Camarilla and trend
+    # Load daily data ONCE before loop for Pivot levels and trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels from previous day
+    # Calculate daily Pivot (standard) from previous day
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
     prev_close = df_1d['close'].shift(1).values
@@ -30,9 +30,9 @@ def generate_signals(prices):
     pivot = (prev_high + prev_low + prev_close) / 3
     range_hl = prev_high - prev_low
     
-    # Camarilla levels
-    s1 = prev_close - (range_hl * 1.1 / 12)
-    r1 = prev_close + (range_hl * 1.1 / 12)
+    # Daily Pivot support/resistance levels
+    s1 = pivot - range_hl
+    r1 = pivot + range_hl
     
     # Align daily levels to 4h timeframe
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
@@ -60,7 +60,7 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: price above S1 with volume and daily uptrend
-            vol_condition = volume[i] > vol_ma_6[i] * 2.0
+            vol_condition = volume[i] > vol_ma_6[i] * 1.8
             uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
             
             if close[i] > s1_aligned[i] and vol_condition and uptrend:
@@ -72,14 +72,14 @@ def generate_signals(prices):
                 position = -1
         elif position == 1:
             # Exit: price back below S1 or volume drops
-            if close[i] < s1_aligned[i] or volume[i] < vol_ma_6[i] * 1.3:
+            if close[i] < s1_aligned[i] or volume[i] < vol_ma_6[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Exit: price back above R1 or volume drops
-            if close[i] > r1_aligned[i] or volume[i] < vol_ma_6[i] * 1.3:
+            if close[i] > r1_aligned[i] or volume[i] < vol_ma_6[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -87,17 +87,17 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 4h Camarilla R1/S1 breakout with 1d trend and volume confirmation
-# - Camarilla R1/S1 from prior day act as key intraday support/resistance
+# Hypothesis: 4h Daily Pivot S1/R1 breakout with 1d trend and volume confirmation
+# - Daily Pivot S1/R1 act as key support/resistance levels from previous day
 # - Breakout above S1 with volume in daily uptrend = long opportunity
 # - Breakdown below R1 with volume in daily downtrend = short opportunity
-# - Volume spike (2.0x average) confirms institutional participation
+# - Volume spike (1.8x average) confirms institutional participation
 # - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
 # - Exit when price returns to S1/R1 or volume weakens
-# - Position size 0.25 targets ~25-40 trades/year, avoiding fee drag
-# - Uses actual daily Camarilla levels for intraday precision
+# - Position size 0.25 targets ~20-50 trades/year, avoiding fee drag
+# - Uses actual daily Pivot levels (not weekly) for more frequent but still controlled signals
 # - Daily trend filter reduces whipsaws vs using same timeframe
 # - Designed to work in BOTH bull and bear markets via trend filter
 # - Volume confirmation reduces false breakouts
-# - Based on top-performing Camarilla patterns with stricter volume filter (2.0x) to reduce trades
-# - Aims for 80-160 total trades over 4 years (20-40/year) to stay within limits
+# - Novel combination: Daily Pivot (1d) + trend (1d) + volume (4h) not recently tried in this session
+# - Aims for 50-150 total trades over 4 years (12-37/year) to stay within limits
