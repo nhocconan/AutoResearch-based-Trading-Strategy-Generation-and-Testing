@@ -1,16 +1,12 @@
 #!/usr/bin/env python3
 
-# 6h_ElderRay_ZoneRecovery_v1
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with zone recovery logic. 
-# In strong trends (ADX>25), price often pulls back to EMA13 before resuming.
-# Long when Bear Power crosses above zero (bulls taking control) in uptrend.
-# Short when Bull Power crosses below zero (bears taking control) in downtrend.
-# Uses 1d EMA50 for trend filter and 1d volume spike for confirmation.
-# Designed to capture trend resumption moves with low frequency and high win rate.
-# Target: 50-150 total trades over 4 years (12-37/year).
+# 12h_Camarilla_R3S3_Breakout_1dTrend_Volume_spike_v3
+# Hypothesis: 12h breakout of Camarilla R3/S3 levels confirmed by 1d trend (EMA34) and volume spike (>2x 20-period average).
+# Designed for low-frequency, high-conviction trades in both bull and bear markets.
+# Target: 20-40 trades/year per symbol to avoid fee drag.
 
-name = "6h_ElderRay_ZoneRecovery_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume_spike_v3"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -32,47 +28,61 @@ def generate_signals(prices):
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 6-day EMA for Elder Ray (13-period EMA on 6h closes)
-    ema13 = np.full(n, np.nan)
-    if n >= 13:
-        ema13[12] = np.mean(close[:13])
-        for i in range(13, n):
-            ema13[i] = (close[i] * 2 / (13 + 1)) + (ema13[i-1] * (11 / (13 + 1)))
+    # Calculate 12h Camarilla levels (R3, S3, R2, S2) using previous 12h candle
+    camarilla_R3 = np.full(n, np.nan)
+    camarilla_S3 = np.full(n, np.nan)
+    camarilla_R2 = np.full(n, np.nan)
+    camarilla_S2 = np.full(n, np.nan)
     
-    # Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high - ema13
-    bear_power = low - ema13
+    for i in range(1, n):
+        # Previous period's OHLC
+        ph = high[i-1]
+        pl = low[i-1]
+        pc = close[i-1]
+        
+        # Camarilla calculations
+        range_val = ph - pl
+        camarilla_R3[i] = pc + (range_val * 1.1000 / 4)
+        camarilla_S3[i] = pc - (range_val * 1.1000 / 4)
+        camarilla_R2[i] = pc + (range_val * 1.1000 / 6)
+        camarilla_S2[i] = pc - (range_val * 1.1000 / 6)
     
-    # 1d EMA50 for trend filter
+    # 1d EMA34 for trend filter
     close_1d = df_1d['close'].values
-    ema50_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema50_1d[49] = np.mean(close_1d[:50])
-        for i in range(50, len(close_1d)):
-            ema50_1d[i] = (close_1d[i] * 2 / (50 + 1)) + (ema50_1d[i-1] * (49 / (50 + 1)))
+    ema_34_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 34:
+        ema_34_1d[33] = np.mean(close_1d[:34])
+        for i in range(34, len(close_1d)):
+            ema_34_1d[i] = (close_1d[i] * 2 / 35) + (ema_34_1d[i-1] * 33 / 35)
     
-    # 1d volume spike: current volume > 1.5x 20-period average
+    # 1d volume average (20-period)
     vol_1d = df_1d['volume'].values
-    vol_ma20_1d = np.full(len(vol_1d), np.nan)
+    vol_ma_20_1d = np.full_like(vol_1d, np.nan)
     for i in range(20, len(vol_1d)):
-        vol_ma20_1d[i] = np.mean(vol_1d[i-20:i])
-    vol_spike_1d = vol_1d > (1.5 * vol_ma20_1d)
+        vol_ma_20_1d[i] = np.mean(vol_1d[i-20:i])
     
-    # Align 1d indicators to 6h
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
+    # Align 1d indicators to 12h
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
+    
+    # Volume spike condition: current 1d volume > 2x 20-day average
+    vol_spike = vol_1d > (2 * vol_ma_20_1d)
+    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_last_trade = 0
-    cooldown_bars = 6  # Prevent overtrading (approx 1 day)
+    cooldown_bars = 8  # Prevent overtrading (approx 4 days)
     
-    start_idx = max(20, 50)  # Warmup
+    start_idx = max(20, 34)  # Warmup for EMA34 and volume MA
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_spike_1d_aligned[i])):
+        if (np.isnan(camarilla_R3[i]) or np.isnan(camarilla_S3[i]) or 
+            np.isnan(camarilla_R2[i]) or np.isnan(camarilla_S2[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]) or 
+            np.isnan(close_1d_aligned[i]) or np.isnan(vol_spike_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -83,36 +93,36 @@ def generate_signals(prices):
         
         bars_since_last_trade += 1
         
-        # Determine 1d trend: price vs EMA50
-        trend_1d_up = close[i] > ema50_1d_aligned[i]
-        trend_1d_down = close[i] < ema50_1d_aligned[i]
+        # Determine 1d trend direction using EMA34
+        trend_1d_up = close_1d_aligned[i] > ema_34_1d_aligned[i]
+        trend_1d_down = close_1d_aligned[i] < ema_34_1d_aligned[i]
         
         if position == 0 and bars_since_last_trade >= cooldown_bars:
-            # Long: Bear Power crosses above zero (bulls taking control) in uptrend with volume spike
-            if (bear_power[i] > 0 and bear_power[i-1] <= 0 and 
+            # Long: Camarilla R3 breakout in 1d uptrend with volume spike
+            if (close[i] > camarilla_R3[i] and 
                 trend_1d_up and 
-                vol_spike_1d_aligned[i]):
+                vol_spike_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_last_trade = 0
-            # Short: Bull Power crosses below zero (bears taking control) in downtrend with volume spike
-            elif (bull_power[i] < 0 and bull_power[i-1] >= 0 and 
+            # Short: Camarilla S3 breakdown in 1d downtrend with volume spike
+            elif (close[i] < camarilla_S3[i] and 
                   trend_1d_down and 
-                  vol_spike_1d_aligned[i]):
+                  vol_spike_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 bars_since_last_trade = 0
         elif position == 1:
-            # Exit long: Bull Power crosses below zero (loss of bullish momentum)
-            if bull_power[i] < 0:
+            # Exit long: price crosses below camarilla S2
+            if close[i] < camarilla_S2[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Bear Power crosses above zero (loss of bearish momentum)
-            if bear_power[i] > 0:
+            # Exit short: price crosses above camarilla R2
+            if close[i] > camarilla_R2[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_last_trade = 0
