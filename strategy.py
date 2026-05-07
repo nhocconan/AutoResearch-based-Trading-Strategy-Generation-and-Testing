@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Ichimoku_TK_Cross_1wTrend_1dVolume"
-timeframe = "6h"
+name = "12h_Donchian20_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,91 +17,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE for Ichimoku
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 52:  # Need 52 weeks for Ichimoku
-        return np.zeros(n)
-    
-    # Load daily data ONCE for volume filter
+    # Load daily data ONCE before loop for trend filter and Donchian
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate Ichimoku components on weekly data
-    high_9 = df_1w['high'].rolling(window=9, min_periods=9).max().values
-    low_9 = df_1w['low'].rolling(window=9, min_periods=9).min().values
-    high_26 = df_1w['high'].rolling(window=26, min_periods=26).max().values
-    low_26 = df_1w['low'].rolling(window=26, min_periods=26).min().values
-    high_52 = df_1w['high'].rolling(window=52, min_periods=52).max().values
-    low_52 = df_1w['low'].rolling(window=52, min_periods=52).min().values
+    # Daily Donchian(20) channels
+    donchian_high = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    tenkan = (high_9 + low_9) / 2
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    kijun = (high_26 + low_26) / 2
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2
-    senkou_a = (tenkan + kijun) / 2
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2
-    senkou_b = (high_52 + low_52) / 2
+    # Daily EMA(34) for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align Ichimoku components to 6h timeframe
-    tenkan_aligned = align_htf_to_ltf(prices, df_1w, tenkan)
-    kijun_aligned = align_htf_to_ltf(prices, df_1w, kijun)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_1w, senkou_a)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_1w, senkou_b)
+    # Align daily indicators to 12h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Daily volume MA for confirmation
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume spike detection: 2-period average (1 day of 12h bars)
+    vol_ma_2 = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(52, 20)  # Wait for Ichimoku and volume MA
+    start_idx = max(34, 20)  # Wait for EMA and Donchian
     
     for i in range(start_idx, n):
-        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
-            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_2[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Ichimoku cloud: Senkou A and B form the cloud
-        # Cloud top is max(Senkou A, Senkou B), bottom is min(Senkou A, Senkou B)
-        cloud_top = np.maximum(senkou_a_aligned[i], senkou_b_aligned[i])
-        cloud_bottom = np.minimum(senkou_a_aligned[i], senkou_b_aligned[i])
-        
         if position == 0:
-            # Long: TK cross above cloud with volume confirmation
-            tk_cross_bullish = tenkan_aligned[i] > kijun_aligned[i] and tenkan_aligned[i-1] <= kijun_aligned[i-1]
-            price_above_cloud = close[i] > cloud_top
-            vol_condition = volume[i] > vol_ma_20[i] * 1.5
+            # Long: break above Donchian high with volume and daily uptrend
+            vol_condition = volume[i] > vol_ma_2[i] * 2.0
+            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
             
-            if tk_cross_bullish and price_above_cloud and vol_condition:
+            if close[i] > donchian_high_aligned[i] and vol_condition and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: TK cross below cloud with volume confirmation
-            elif tk_cross_bullish == False and tenkan_aligned[i] < kijun_aligned[i] and tenkan_aligned[i-1] >= kijun_aligned[i-1]:
-                tk_cross_bearish = True
-                price_below_cloud = close[i] < cloud_bottom
-                if tk_cross_bearish and price_below_cloud and vol_condition:
-                    signals[i] = -0.25
-                    position = -1
+            # Short: break below Donchian low with volume and daily downtrend
+            elif close[i] < donchian_low_aligned[i] and vol_condition and not uptrend:
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Exit: TK cross below cloud or price enters cloud
-            tk_cross_bearish = tenkan_aligned[i] < kijun_aligned[i] and tenkan_aligned[i-1] >= kijun_aligned[i-1]
-            price_in_or_below_cloud = close[i] <= cloud_top
-            if tk_cross_bearish or price_in_or_below_cloud:
+            # Exit: price back below Donchian low or volume drops
+            if close[i] < donchian_low_aligned[i] or volume[i] < vol_ma_2[i] * 1.3:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: TK cross above cloud or price enters cloud
-            tk_cross_bullish = tenkan_aligned[i] > kijun_aligned[i] and tenkan_aligned[i-1] <= kijun_aligned[i-1]
-            price_in_or_above_cloud = close[i] >= cloud_bottom
-            if tk_cross_bullish or price_in_or_above_cloud:
+            # Exit: price back above Donchian high or volume drops
+            if close[i] > donchian_high_aligned[i] or volume[i] < vol_ma_2[i] * 1.3:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -109,18 +79,15 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 6s Ichimoku TK Cross with cloud filter and volume confirmation
-# - Weekly Ichimoku provides multi-dimensional support/resistance (cloud) and momentum (TK cross)
-# - TK cross above/below cloud with volume confirms strong momentum in direction of trend
-# - Cloud acts as dynamic support/resistance - avoids whipsaws in ranging markets
-# - Volume confirmation (1.5x average) filters false signals
-# - Works in both bull (buy TK cross above cloud in uptrend) and bear (sell TK cross below cloud in downtrend)
-# - Exit when TK reverses or price re-enters cloud
-# - Position size 0.25 targets ~15-35 trades/year, well within limits
-# - Uses weekly Ichimoku for stability and major trend identification
-# - Novel for 6h timeframe - combines Ichimoku's predictive power with volume confirmation
-# - Aims for 60-140 total trades over 4 years (15-35/year) to avoid fee drag
-# - Ichimoku cloud filters out false breaks during consolidation periods
-# - TK cross provides timely entry signals with trend confirmation from weekly timeframe
-# - Volume requirement ensures institutional participation in breakouts
-# - Designed to capture major trend changes while avoiding false signals in choppy markets
+# Hypothesis: 12h Donchian(20) breakout with 1d trend and volume confirmation
+# - Donchian(20) breakouts capture strong momentum moves
+# - Daily EMA(34) trend filter ensures alignment with higher timeframe trend
+# - Volume spike (2.0x average) confirms institutional participation
+# - Works in both bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend)
+# - Exit when price returns to opposite Donchian band or volume weakens
+# - Position size 0.25 targets ~20-50 trades/year, avoiding fee drag
+# - Uses daily Donchian levels for stability and breakout significance
+# - Daily trend filter reduces whipsaws vs using same timeframe
+# - Designed to work in BOTH bull and bear markets via trend filter
+# - Volume confirmation reduces false breakouts
+# - Aims for 50-150 total trades over 4 years (12-37/year) to stay within limits
