@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_TRIX_ZeroCross_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Donchian20_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,65 +17,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for TRIX and trend
+    # Load daily data ONCE before loop for trend filter and Donchian
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # TRIX (15-period triple EMA) on daily closes
-    close_1d = pd.Series(df_1d['close'])
-    ema1 = close_1d.ewm(span=15, adjust=False, min_periods=15).mean()
-    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
-    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
-    trix_raw = ((ema3 - ema3.shift(1)) / ema3.shift(1)) * 100
-    trix = trix_raw.values
+    # Calculate daily Donchian channels (20-day)
+    donchian_high = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
+    
+    # Align Donchian levels to 12h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
     # Daily EMA(34) for trend filter
-    ema_34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Volume spike detection: 4-period average (1 day of 6h bars)
-    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
-    
-    # Align TRIX and EMA to 6h timeframe
-    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume spike detection: 2-period average (1 day of 12h bars)
+    vol_ma_2 = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 4)  # Wait for EMA and volume MA
+    start_idx = max(34, 20, 2)  # Wait for EMA, Donchian, and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(trix_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(vol_ma_4[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or np.isnan(vol_ma_2[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: TRIX crosses above zero with volume and daily uptrend
-            trix_cross_up = trix_aligned[i] > 0 and trix_aligned[i-1] <= 0
-            vol_condition = volume[i] > vol_ma_4[i] * 1.8
+            # Long: price breaks above Donchian high with volume and daily uptrend
+            vol_condition = volume[i] > vol_ma_2[i] * 2.0
             uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
             
-            if trix_cross_up and vol_condition and uptrend:
+            if close[i] > donchian_high_aligned[i] and vol_condition and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX crosses below zero with volume and daily downtrend
-            elif trix_aligned[i] < 0 and trix_aligned[i-1] >= 0 and vol_condition and not uptrend:
+            # Short: price breaks below Donchian low with volume and daily downtrend
+            elif close[i] < donchian_low_aligned[i] and vol_condition and not uptrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: TRIX crosses below zero or volume drops
-            if trix_aligned[i] < 0 or volume[i] < vol_ma_4[i] * 1.2:
+            # Exit: price returns to Donchian low or volume drops
+            if close[i] < donchian_low_aligned[i] or volume[i] < vol_ma_2[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: TRIX crosses above zero or volume drops
-            if trix_aligned[i] > 0 or volume[i] < vol_ma_4[i] * 1.2:
+            # Exit: price returns to Donchian high or volume drops
+            if close[i] > donchian_high_aligned[i] or volume[i] < vol_ma_2[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -83,13 +79,17 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: TRIX zero-cross on daily with volume and trend filter
-# - TRIX (triple EMA momentum) identifies momentum shifts via zero cross
-# - Daily TRIX zero-cross + volume spike confirms institutional participation
-# - Daily EMA(34) trend filter ensures trades align with higher timeframe trend
-# - Works in both bull (buy zero-cross in uptrend) and bear (sell zero-cross in downtrend)
-# - Volume confirmation (1.8x average) reduces false signals
-# - Exit on TRIX reversal or volume decline prevents overstaying
+# Hypothesis: 12h Donchian(20) breakout with 1d trend and volume confirmation
+# - Daily Donchian channels (20-period) provide robust support/resistance levels
+# - Breakout above Donchian high with volume in daily uptrend = long opportunity
+# - Breakdown below Donchian low with volume in daily downtrend = short opportunity
+# - Volume spike (2.0x average) confirms institutional participation
+# - Works in both bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend)
+# - Exit when price returns to opposite Donchian level or volume weakens
 # - Position size 0.25 targets ~20-50 trades/year, avoiding fee drag
-# - Novel combination: TRIX momentum (1d) + volume (6h) + trend (1d) not recently tried
+# - Uses daily Donchian levels for better stability vs intraday channels
+# - Daily trend filter reduces whipsaws vs using same timeframe
+# - Designed to work in BOTH bull and bear markets via trend filter
+# - Volume confirmation reduces false breakouts
+# - Novel combination: Donchian (1d) + trend (1d) + volume (12h) not recently tried
 # - Aims for 50-150 total trades over 4 years (12-37/year) to stay within limits
