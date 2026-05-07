@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume_1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_25"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -35,7 +35,7 @@ def generate_signals(prices):
     r3 = prev_close + 1.1 * (prev_high - prev_low)
     s3 = prev_close - 1.1 * (prev_high - prev_low)
     
-    # Align Camarilla levels to 12h
+    # Align Camarilla levels to 4h
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
@@ -81,7 +81,7 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA(34) trend filter and volume confirmation.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA(34) trend filter and volume confirmation.
 # Camarilla levels identify key support/resistance from prior day. Breaking R3/S3 indicates strong momentum.
 # Daily EMA filter ensures alignment with higher timeframe trend. Volume confirms institutional participation.
-# Target: 12-37 trades/year to minimize fee drift. Position size 0.25 limits drawdown in volatile markets.
+# Target: 25-35 trades/year to minimize fee drift. Position size 0.25 limits drawdown in volatile markets.
