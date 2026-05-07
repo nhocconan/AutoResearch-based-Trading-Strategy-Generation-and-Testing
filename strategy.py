@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_RSI_Divergence_Momentum"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_Spike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,78 +17,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and momentum
+    # Get 1d data for trend filter (EMA34) and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d RSI(14) for momentum filter
+    # Calculate 1d EMA34 for trend filter
     close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 6h RSI(14) for divergence detection
-    delta_6h = np.diff(close, prepend=close[0])
-    gain_6h = np.where(delta_6h > 0, delta_6h, 0)
-    loss_6h = np.where(delta_6h < 0, -delta_6h, 0)
-    avg_gain_6h = pd.Series(gain_6h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss_6h = pd.Series(loss_6h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs_6h = avg_gain_6h / (avg_loss_6h + 1e-10)
-    rsi_6h = 100 - (100 / (1 + rs_6h))
+    # Calculate Camarilla levels from previous 1d candle
+    # R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_shifted = np.roll(close_1d, 1)
+    high_1d_shifted = np.roll(high_1d, 1)
+    low_1d_shifted = np.roll(low_1d, 1)
     
-    # Calculate 6h EMA(50) for trend filter
-    ema_50_6h = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    camarilla_width = (high_1d_shifted - low_1d_shifted) * 1.1 / 4
+    r3 = close_1d_shifted + camarilla_width
+    s3 = close_1d_shifted - camarilla_width
+    
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Volume spike: current volume > 2.5 * 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma20 * 2.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Ensure sufficient warmup
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any data is not ready
-        if (np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(rsi_6h[i]) or 
-            np.isnan(ema_50_6h[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Bullish divergence: price makes lower low, RSI makes higher low
-            if (i >= 2 and 
-                close[i] < close[i-2] and 
-                rsi_6h[i] > rsi_6h[i-2] and
-                rsi_1d_aligned[i] > 50 and  # 1d momentum bullish
-                close[i] > ema_50_6h[i]):    # 6h trend filter
+            # Long: price breaks above R3, uptrend, volume spike
+            if (close[i] > r3_aligned[i] and 
+                close[i] > ema_34_1d_aligned[i] and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Bearish divergence: price makes higher high, RSI makes lower high
-            elif (i >= 2 and 
-                  close[i] > close[i-2] and 
-                  rsi_6h[i] < rsi_6h[i-2] and
-                  rsi_1d_aligned[i] < 50 and  # 1d momentum bearish
-                  close[i] < ema_50_6h[i]):    # 6h trend filter
+            # Short: price breaks below S3, downtrend, volume spike
+            elif (close[i] < s3_aligned[i] and 
+                  close[i] < ema_34_1d_aligned[i] and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: RSI overbought or trend breaks down
-            if (rsi_6h[i] > 70 or 
-                close[i] < ema_50_6h[i]):
+            # Exit long: price breaks below S3 (reversal signal)
+            if close[i] < s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: RSI oversold or trend breaks up
-            if (rsi_6h[i] < 30 or 
-                close[i] > ema_50_6h[i]):
+            # Exit short: price breaks above R3 (reversal signal)
+            if close[i] > r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
