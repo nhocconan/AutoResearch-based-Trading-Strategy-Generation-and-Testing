@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_Camarilla_R3S3_Breakout_4hTrend_Volume"
-timeframe = "1h"
+name = "6h_WeeklyPivot_DailyTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,97 +17,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Load weekly data ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 5:
         return np.zeros(n)
     
-    # Calculate 4h EMA(34) for trend filter
-    ema_4h = pd.Series(df_4h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Calculate weekly pivot points (using previous week's OHLC)
+    prev_weekly_high = df_weekly['high'].shift(1).values
+    prev_weekly_low = df_weekly['low'].shift(1).values
+    prev_weekly_close = df_weekly['close'].shift(1).values
+    pivot = (prev_weekly_high + prev_weekly_low + prev_weekly_close) / 3
+    r1 = 2 * pivot - prev_weekly_low
+    s1 = 2 * pivot - prev_weekly_high
     
-    # Load 1d data for Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Align weekly pivot to 6h
+    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1)
+    
+    # Load daily data for trend filter
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 20:
         return np.zeros(n)
     
-    # Use previous day's OHLC for Camarilla calculation (no look-ahead)
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Daily EMA(20) for trend filter
+    ema_daily = pd.Series(df_daily['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_daily_aligned = align_htf_to_ltf(prices, df_daily, ema_daily)
     
-    # Camarilla R3 and S3 levels
-    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
-    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
-    
-    # Align Camarilla levels to 1h
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Volume spike detection (20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Session filter: 08-20 UTC (precomputed)
-    hours = prices.index.hour
+    # Volume spike detection (24-period average for 6h)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Wait for volume MA
+    start_idx = 24  # Wait for volume MA
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_4h_aligned[i]) or np.isnan(vol_ma[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Session filter: only trade 08-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
+        if np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema_daily_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R3 with volume spike and 4h uptrend
-            if (close[i] > r3_aligned[i] and 
-                volume[i] > vol_ma[i] * 1.5 and 
-                close[i] > ema_4h_aligned[i]):
-                signals[i] = 0.20
+            # Long: price above weekly pivot with daily uptrend and volume spike
+            if (close[i] > pivot_aligned[i] and 
+                close[i] > ema_daily_aligned[i] and 
+                volume[i] > vol_ma[i] * 1.5):
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 with volume spike and 4h downtrend
-            elif (close[i] < s3_aligned[i] and 
-                  volume[i] > vol_ma[i] * 1.5 and 
-                  close[i] < ema_4h_aligned[i]):
-                signals[i] = -0.20
+            # Short: price below weekly pivot with daily downtrend and volume spike
+            elif (close[i] < pivot_aligned[i] and 
+                  close[i] < ema_daily_aligned[i] and 
+                  volume[i] > vol_ma[i] * 1.5):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price falls back below R3 or trend changes
-            if (close[i] < r3_aligned[i] or 
-                close[i] < ema_4h_aligned[i]):
+            # Exit: price falls below weekly pivot or trend changes
+            if (close[i] < pivot_aligned[i] or 
+                close[i] < ema_daily_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: price rises back above S3 or trend changes
-            if (close[i] > s3_aligned[i] or 
-                close[i] > ema_4h_aligned[i]):
+            # Exit: price rises above weekly pivot or trend changes
+            if (close[i] > pivot_aligned[i] or 
+                close[i] > ema_daily_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA(34) trend filter and volume confirmation.
-# Camarilla R3 and S3 represent strong intraday support/resistance levels.
-# Breakouts above R3 with volume indicate bullish momentum; breakdowns below S3 indicate bearish momentum.
-# The 4h EMA(34) filter ensures we only trade in the direction of the higher timeframe trend,
-# reducing whipsaws during sideways markets. Volume confirmation adds validity to breakouts.
-# Session filter (08-20 UTC) avoids low-volume Asian session noise.
-# Position size 0.20 balances risk and return while keeping trade frequency ~20-40/year.
+# Hypothesis: 6s weekly pivot + daily EMA(20) trend + volume confirmation.
+# Weekly pivot provides institutional support/resistance from prior week's action.
+# Trading in direction of daily EMA(20) ensures alignment with intermediate trend.
+# Volume spike confirms institutional participation in the move.
+# Works in bull markets (buying above pivot in uptrend) and bear markets (selling below pivot in downtrend).
+# Position size 0.25 limits risk while allowing meaningful participation.
