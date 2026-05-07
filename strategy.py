@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Donchian20_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Keltner_Channel_Trend_1dVWAP"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,54 +19,57 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Daily EMA(34) for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Keltner Channel (20, 2) on 4h timeframe
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    atr = pd.Series(high - low).rolling(window=20, min_periods=20).mean().values
+    upper_keltner = ema_20 + 2 * atr
+    lower_keltner = ema_20 - 2 * atr
     
-    # Donchian(20) on 12h price
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Daily VWAP (volume-weighted average price)
+    vwap_1d = (df_1d['close'] * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
+    vwap_1d_values = vwap_1d.values
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d_values)
     
-    # Volume spike detection: 8-period average (4 days of 12h bars)
-    vol_ma_8 = pd.Series(volume).rolling(window=8, min_periods=8).mean().values
+    # Trend filter: 4h EMA(50) slope
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_slope = ema_50 - np.roll(ema_50, 1)
+    ema_50_slope[0] = 0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20, 8)
+    start_idx = max(20, 50)
     
     for i in range(start_idx, n):
-        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(vol_ma_8[i]):
+        if (np.isnan(ema_20[i]) or np.isnan(atr[i]) or 
+            np.isnan(vwap_1d_aligned[i]) or np.isnan(ema_50_slope[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above Donchian high with volume and daily uptrend
-            vol_condition = volume[i] > vol_ma_8[i] * 2.0
-            uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
-            
-            if close[i] > high_20[i] and vol_condition and uptrend:
+            # Long: price above upper Keltner + price > daily VWAP + upward EMA slope
+            if close[i] > upper_keltner[i] and close[i] > vwap_1d_aligned[i] and ema_50_slope[i] > 0:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below Donchian low with volume and daily downtrend
-            elif close[i] < low_20[i] and vol_condition and not uptrend:
+            # Short: price below lower Keltner + price < daily VWAP + downward EMA slope
+            elif close[i] < lower_keltner[i] and close[i] < vwap_1d_aligned[i] and ema_50_slope[i] < 0:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below Donchian low or volume drops
-            if close[i] < low_20[i] or volume[i] < vol_ma_8[i] * 1.5:
+            # Exit: price back below lower Keltner or below daily VWAP
+            if close[i] < lower_keltner[i] or close[i] < vwap_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above Donchian high or volume drops
-            if close[i] > high_20[i] or volume[i] < vol_ma_8[i] * 1.5:
+            # Exit: price back above upper Keltner or above daily VWAP
+            if close[i] > upper_keltner[i] or close[i] > vwap_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -74,13 +77,12 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 12h Donchian(20) breakout with daily trend and volume confirmation
-# - Breakout above 20-period high with volume in daily uptrend = long opportunity
-# - Breakdown below 20-period low with volume in daily downtrend = short opportunity
-# - Volume spike (2x average) confirms institutional participation
-# - Works in both bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend)
-# - Exit when price returns to opposite Donchian band or volume weakens
-# - Position size 0.25 targets ~15-25 trades/year, avoiding fee drag
-# - Daily EMA(34) filter ensures alignment with higher timeframe trend
-# - Donchian channels provide robust structure that adapts to volatility
-# - Simple 3-condition entry reduces overtrading and improves generalization
+# Hypothesis: 4h Keltner Channel breakout with daily VWAP filter and trend confirmation
+# - Keltner Channel (20,2) defines dynamic volatility-based support/resistance
+# - Breakout above upper band with price above daily VWAP in uptrend = long signal
+# - Breakdown below lower band with price below daily VWAP in downtrend = short signal
+# - Daily VWAP acts as institutional reference point, effective in both bull/bear markets
+# - EMA(50) slope ensures trades align with intermediate-term trend
+# - Exit when price returns to lower/upper Keltner or crosses daily VWAP
+# - Position size 0.25 targets ~30-50 trades/year, minimizing fee drag
+# - Combines volatility breakout, volume-weighted price, and trend for robustness
