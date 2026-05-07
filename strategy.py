@@ -3,120 +3,93 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-hour mean reversion with 4h trend and 1d volatility filter.
-# Long when: RSI(14) < 30 AND 4h price > 4h VWAP AND 1d ATR(14) < 1d ATR(50) (low vol)
-# Short when: RSI(14) > 70 AND 4h price < 4h VWAP AND 1d ATR(14) < 1d ATR(50) (low vol)
-# Exit when RSI crosses back to 50.
-# Designed for 1h timeframe with low trade frequency (target: 15-30/year) to avoid fee drag.
-# Uses 4h VWAP for trend alignment and 1d volatility regime to avoid choppy markets.
-# Works in bull markets via mean reversion in uptrend (RSI < 30 + price > VWAP),
-# and in bear markets via mean reversion in downtrend (RSI > 70 + price < VWAP).
-# Volatility filter (ATR14 < ATR50) avoids high-noise periods and whipsaws.
-name = "1h_RSI_4hVWAP_1dATR_VolRegime"
-timeframe = "1h"
+# Hypothesis: 6h Elder Ray Index (Bull/Bear Power) with 1d EMA34 trend filter and volume confirmation.
+# Bull Power = High - EMA13, Bear Power = EMA13 - Low. 
+# Long when Bull Power > 0 AND Bear Power < 0 AND EMA13 rising AND price > 1d EMA34 (uptrend) AND volume > 1.5x 20-period average.
+# Short when Bear Power > 0 AND Bull Power < 0 AND EMA13 falling AND price < 1d EMA34 (downtrend) AND volume > 1.5x 20-period average.
+# Exit when EMA13 flips direction or volume drops below average.
+# Designed for 6h timeframe with moderate trade frequency (target: 15-30/year) to avoid fee drag.
+# Uses 1d EMA34 for trend filter to avoid counter-trend trades in strong trends.
+# Volume filter ensures participation and avoids low-conviction moves.
+name = "6h_ElderRay_1dEMA34_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
-    n = len(prrices)
-    if n < 100:
+    n = len(prices)
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # EMA13 for Elder Ray and trend
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # 4h VWAP for trend alignment
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 10:
-        return np.zeros(n)
+    # Bull Power = High - EMA13, Bear Power = EMA13 - Low
+    bull_power = high - ema13
+    bear_power = ema13 - low
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
+    # EMA13 direction
+    ema13_rising = np.zeros_like(ema13, dtype=bool)
+    ema13_falling = np.zeros_like(ema13, dtype=bool)
+    ema13_rising[1:] = ema13[1:] > ema13[:-1]
+    ema13_falling[1:] = ema13[1:] < ema13[:-1]
     
-    typical_price_4h = (high_4h + low_4h + close_4h) / 3.0
-    vwap_num = np.cumsum(typical_price_4h * volume_4h)
-    vwap_den = np.cumsum(volume_4h)
-    vwap_4h = vwap_num / (vwap_den + 1e-10)
-    
-    price_above_vwap = close_4h > vwap_4h
-    price_below_vwap = close_4h < vwap_4h
-    
-    price_above_vwap_aligned = align_htf_to_ltf(prices, df_4h, price_above_vwap)
-    price_below_vwap_aligned = align_htf_to_ltf(prices, df_4h, price_below_vwap)
-    
-    # 1d ATR(14) and ATR(50) for volatility regime
+    # 1d EMA34 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    atr_14 = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_50 = pd.Series(tr).ewm(alpha=1/50, adjust=False, min_periods=50).mean().values
-    low_vol_regime = atr_14 < atr_50  # low volatility regime
-    
-    low_vol_aligned = align_htf_to_ltf(prices, df_1d, low_vol_regime)
+    # Volume filter: current volume > 1.5x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Sufficient warmup for indicators
+    start_idx = 34  # Sufficient warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(rsi[i]) or np.isnan(price_above_vwap_aligned[i]) or np.isnan(price_below_vwap_aligned[i]) or 
-            np.isnan(low_vol_aligned[i])):
+        if (np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(ema13_rising[i]) or np.isnan(ema13_falling[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: RSI < 30 AND 4h price > VWAP AND low vol regime
-            long_condition = (rsi[i] < 30) and price_above_vwap_aligned[i] and low_vol_aligned[i]
-            # Short: RSI > 70 AND 4h price < VWAP AND low vol regime
-            short_condition = (rsi[i] > 70) and price_below_vwap_aligned[i] and low_vol_aligned[i]
+            # Long conditions: Bull Power > 0, Bear Power < 0, EMA13 rising, price > 1d EMA34, volume filter
+            long_cond = (bull_power[i] > 0) and (bear_power[i] < 0) and ema13_rising[i] and (close[i] > ema34_1d_aligned[i]) and volume_filter[i]
+            # Short conditions: Bear Power > 0, Bull Power < 0, EMA13 falling, price < 1d EMA34, volume filter
+            short_cond = (bear_power[i] > 0) and (bull_power[i] < 0) and ema13_falling[i] and (close[i] < ema34_1d_aligned[i]) and volume_filter[i]
             
-            if long_condition:
-                signals[i] = 0.20
+            if long_cond:
+                signals[i] = 0.25
                 position = 1
-            elif short_condition:
-                signals[i] = -0.20
+            elif short_cond:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: RSI > 50
-            if rsi[i] > 50:
+            # Long exit: EMA13 falling OR volume filter fails
+            if ema13_falling[i] or not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: RSI < 50
-            if rsi[i] < 50:
+            # Short exit: EMA13 rising OR volume filter fails
+            if ema13_rising[i] or not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
