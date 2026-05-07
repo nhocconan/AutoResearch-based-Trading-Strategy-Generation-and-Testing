@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_Weekly_Trend_Following_With_Volume"
-timeframe = "1d"
+name = "6h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 150:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,30 +17,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Load daily data ONCE for Camarilla pivot and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Weekly EMA10 for trend filter
-    ema_10_1w = pd.Series(df_1w['close'].values).ewm(span=10, adjust=False, min_periods=10).mean().values
-    ema_10_1d = align_htf_to_ltf(prices, df_1w, ema_10_1w)
+    # Camarilla pivot levels from previous day (standard formula)
+    c_high = df_1d['high'].values
+    c_low = df_1d['low'].values
+    c_close = df_1d['close'].values
     
-    # Daily Donchian breakout (20-period)
-    donchian_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    pivot = (c_high + c_low + c_close) / 3
+    range_val = c_high - c_low
+    r3 = pivot + (range_val * 1.1 / 4)
+    s3 = pivot - (range_val * 1.1 / 4)
     
-    # Volume confirmation (2x 20-day average)
+    # Align pivot levels to 6h timeframe
+    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(c_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_6h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume spike detection (2x 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_10_1d[i]) or np.isnan(donchian_high_20[i]) or 
-            np.isnan(donchian_low_20[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or 
+            np.isnan(ema_34_6h[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -49,24 +59,26 @@ def generate_signals(prices):
         vol_condition = volume[i] > vol_ma_20[i] * 2.0
         
         if position == 0:
-            # Long: break above 20-day high in weekly uptrend with volume
-            if close[i] > donchian_high_20[i] and ema_10_1d[i] > ema_10_1d[i-1] and vol_condition:
+            # Long: break above R3 in daily uptrend with volume
+            if close[i] > r3_6h[i] and ema_34_6h[i] > ema_34_6h[i-1] and vol_condition:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below 20-day low in weekly downtrend with volume
-            elif close[i] < donchian_low_20[i] and ema_10_1d[i] < ema_10_1d[i-1] and vol_condition:
+            # Short: break below S3 in daily downtrend with volume
+            elif close[i] < s3_6h[i] and ema_34_6h[i] < ema_34_6h[i-1] and vol_condition:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price returns to 20-day low or weekly trend reverses
-            if close[i] < donchian_low_20[i] or ema_10_1d[i] < ema_10_1d[i-1]:
+            # Exit: price returns to pivot or trend reverses
+            pivot_6h = align_htf_to_ltf(prices, df_1d, pivot)
+            if close[i] < pivot_6h[i] or ema_34_6h[i] < ema_34_6h[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price returns to 20-day high or weekly trend reverses
-            if close[i] > donchian_high_20[i] or ema_10_1d[i] > ema_10_1d[i-1]:
+            # Exit: price returns to pivot or trend reverses
+            pivot_6h = align_htf_to_ltf(prices, df_1d, pivot)
+            if close[i] > pivot_6h[i] or ema_34_6h[i] > ema_34_6h[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -74,12 +86,13 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Weekly trend following with daily Donchian breakouts and volume confirmation
-# - Weekly EMA10 determines the trend direction (bullish when rising, bearish when falling)
-# - Daily Donchian(20) breakouts provide entry signals in the direction of weekly trend
+# Hypothesis: Camarilla R3/S3 breakouts with daily trend filter and volume confirmation on 6h timeframe
+# - Camarilla R3/S3 represent strong support/resistance levels from previous day
+# - Breakout above R3 in daily uptrend (EMA34 rising) signals bullish continuation
+# - Breakdown below S3 in daily downtrend (EMA34 falling) signals bearish continuation
 # - Volume confirmation (2x average) reduces false breakouts
-# - Exit when price reverses to opposite Donchian band or weekly trend changes
-# - Position size 0.25 balances risk and return while limiting trades
-# - Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend)
-# - Uses weekly timeframe for trend and daily for execution, avoiding overtrading
-# - Target: 20-50 trades/year to minimize fee drag and improve generalization
+# - Exit when price returns to pivot point or daily trend reverses
+# - Position size 0.25 targets ~15-30 trades/year to avoid fee drag
+# - Works in both bull (breakouts in uptrend) and bear (breakdowns in downtrend)
+# - Uses 1d timeframe for structure and trend, 6h for execution timing
+# - Modified from 4h version to 6h to reduce trade frequency and improve robustness
