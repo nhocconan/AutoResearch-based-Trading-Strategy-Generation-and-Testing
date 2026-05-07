@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeS"
-timeframe = "4h"
+name = "6h_Liquidity_Trap_Reversal"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,87 +17,94 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE for pivot and trend
+    # Load daily data ONCE for liquidity trap detection
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Daily close for EMA34 trend
-    daily_close = df_1d['close'].values
-    ema_34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Daily ATR for volatility filter
+    atr_14_1d = pd.Series(df_1d['close']).rolling(window=14, min_periods=14).apply(
+        lambda x: np.sqrt(np.mean((np.diff(x) ** 2))), raw=True
+    ).values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Camarilla pivot levels from previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    range_1d = high_1d - low_1d
+    # Weekly trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Calculate Camarilla levels (R3, S3, R4, S4)
-    r3 = close_1d + range_1d * 1.1 / 4
-    s3 = close_1d - range_1d * 1.1 / 4
-    r4 = close_1d + range_1d * 1.1 / 2
-    s4 = close_1d - range_1d * 1.1 / 2
+    # Liquidity trap detection: price tests recent high/low but fails to break
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # Align pivot levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # Volume spike detection (2x 20-period average)
+    # Volume filter
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough history for indicators
+    start_idx = max(100, lookback)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(s4_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(atr_14_1d_aligned[i]) or np.isnan(ema_20_1w_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_condition = volume[i] > vol_ma_20[i] * 2.0
+        # Avoid trading when volatility is too low
+        if atr_14_1d_aligned[i] < np.mean(atr_14_1d_aligned[max(0, i-50):i]) * 0.5:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Liquidity trap long: price tests recent low but closes above it with volume
+        trap_long = (low[i] <= lowest_low[i] * 1.001) and (close[i] > lowest_low[i]) and (volume[i] > vol_ma_20[i] * 1.5)
+        
+        # Liquidity trap short: price tests recent high but closes below it with volume
+        trap_short = (high[i] >= highest_high[i] * 0.999) and (close[i] < highest_high[i]) and (volume[i] > vol_ma_20[i] * 1.5)
         
         if position == 0:
-            # Long: break above R3 with volume in uptrend (price > daily EMA34)
-            if close[i] > r3_aligned[i] and vol_condition and close[i] > ema_34_1d_aligned[i]:
-                signals[i] = 0.30
+            # Long trap: expect reversal up
+            if trap_long and ema_20_1w_aligned[i] > ema_20_1w_aligned[i-1]:
+                signals[i] = 0.25
                 position = 1
-            # Short: break below S3 with volume in downtrend (price < daily EMA34)
-            elif close[i] < s3_aligned[i] and vol_condition and close[i] < ema_34_1d_aligned[i]:
-                signals[i] = -0.30
+            # Short trap: expect reversal down
+            elif trap_short and ema_20_1w_aligned[i] < ema_20_1w_aligned[i-1]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: break below S3 or volume fails
-            if close[i] < s3_aligned[i] or not vol_condition:
+            # Exit: price breaks above recent high or trap fails
+            if close[i] > highest_high[i] or not trap_long:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: break above R3 or volume fails
-            if close[i] > r3_aligned[i] or not vol_condition:
+            # Exit: price breaks below recent low or trap fails
+            if close[i] < lowest_low[i] or not trap_short:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-# Hypothesis: Camarilla R3/S3 breakouts with daily trend filter and volume confirmation
-# - R3 and S3 are key reversal levels in Camarilla equation
-# - Breakout above R3 (with volume) in uptrend = long signal
-# - Breakdown below S3 (with volume) in downtrend = short signal
-# - Daily EMA34 trend filter ensures alignment with higher timeframe trend
-# - Volume confirmation (2x average) reduces false breakouts
-# - Symmetric exits at opposite levels provide clear risk management
-# - Position size 0.30 balances return potential with drawdown control
-# - Target: 20-50 trades/year to stay within frequency limits and minimize fee drag
-# - Works in both bull (longs in uptrend) and bear (shorts in downtrend) markets
-# - Proven pattern: similar variants show strong test performance (Sharpe >1.8)
+# Hypothesis: 6h Liquidity Trap Reversal
+# - Identifies when price tests recent swing highs/lows but fails to break (liquidity grab)
+# - Uses daily ATR for volatility filter to avoid choppy markets
+# - Weekly EMA20 trend filter ensures alignment with higher timeframe trend
+# - Entry: price tests liquidity level and reverses with volume confirmation
+# - Exit: price breaks through the liquidity level or trap condition fails
+# - Works in both bull (traps at support in uptrend) and bear (traps at resistance in downtrend)
+# - Volume confirmation (1.5x average) reduces false signals
+# - Position size 0.25 targets ~50-150 trades over 4 years (12-37/year)
+# - Novel approach: focuses on failed breakouts rather than breakouts themselves
+# - Effective in ranging markets where liquidity hunts are common
+# - Weekly trend filter prevents counter-trend traps in strong trends
