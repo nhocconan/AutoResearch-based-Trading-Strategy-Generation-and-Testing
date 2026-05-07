@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_Camarilla_R3_S3_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "6h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,23 +17,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE for trend and volume context
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Load daily data ONCE for Camarilla levels
+    # Load 1d data ONCE for trend and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Weekly trend filter: 20-period EMA on close
-    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # 1d trend filter: 20-period EMA on close
+    ema_20_1d = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
-    # Weekly volume average for spike detection
-    vol_avg_1w = pd.Series(df_1w['volume']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_avg_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_avg_1w)
+    # 1d volume average for spike detection
+    vol_avg_1d = pd.Series(df_1d['volume']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
     # Previous day's OHLC for Camarilla calculation
     prev_high = df_1d['high'].shift(1).values
@@ -46,13 +41,13 @@ def generate_signals(prices):
     camarilla_r3 = prev_close + prev_range * 1.1 / 4
     camarilla_s3 = prev_close - prev_range * 1.1 / 4
     
-    # Align Camarilla levels to daily timeframe
+    # Align Camarilla levels to 6h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Daily volume spike: current volume > 1.5x 20-period EMA
-    vol_ema_1d = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike = np.where(vol_ema_1d > 0, volume / vol_ema_1d, 1.0) > 1.5
+    # 6h volume spike: current volume > 1.5x 20-period EMA
+    vol_ema_6h = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_spike = np.where(vol_ema_6h > 0, volume / vol_ema_6h, 1.0) > 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -61,15 +56,15 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_spike[i])):
+            np.isnan(ema_20_1d_aligned[i]) or np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: price above/below 1w EMA20
-        uptrend = close[i] > ema_20_1w_aligned[i]
-        downtrend = close[i] < ema_20_1w_aligned[i]
+        # Trend filter: price above/below 1d EMA20
+        uptrend = close[i] > ema_20_1d_aligned[i]
+        downtrend = close[i] < ema_20_1d_aligned[i]
         
         if position == 0:
             # Long breakout: price > R3 with volume spike in uptrend
