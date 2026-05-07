@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """
-12h_KAMA_Direction_1dTrend_Filter
-Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market noise, providing a reliable trend signal.
-In trending markets (price above/below 1-day EMA34), take KAMA direction with volume confirmation.
-In ranging markets, avoid trades to reduce whipsaw. Uses 12-hour timeframe for execution with 1d trend filter.
-Target: 15-25 trades per year (~60-100 over 4 years) with position size 0.25.
+1d_Weekly_Pivot_Breakout_Trend_Filter_v2
+Hypothesis: Weekly pivot points provide strong support/resistance levels. 
+In bull markets (price above weekly pivot), buy breakouts above R1 with volume confirmation.
+In bear markets (price below weekly pivot), sell breakdowns below S1 with volume confirmation.
+Weekly pivot calculated from prior week's OHLC. Uses daily timeframe for execution with 1w trend filter.
+Target: 10-25 trades per year (~40-100 over 4 years) with position size 0.25.
+Designed to avoid overtrading by using daily timeframe and requiring weekly structure.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_KAMA_Direction_1dTrend_Filter"
-timeframe = "12h"
+name = "1d_Weekly_Pivot_Breakout_Trend_Filter_v2"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,40 +27,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Load weekly data ONCE for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # KAMA parameters
-    er_length = 10
-    fast_sc = 2 / (2 + 1)  # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
+    # Load daily data ONCE for weekly pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 10:
+        return np.zeros(n)
     
-    # Calculate Efficiency Ratio (ER)
-    change = np.abs(np.diff(close, n=er_length))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)
-    # Use pandas for rolling sum to handle NaNs properly
-    volatility_series = pd.Series(np.abs(np.diff(close))).rolling(window=er_length, min_periods=1).sum().values
-    # Prepend zeros for the first er_length elements
-    volatility = np.concatenate([np.full(er_length, np.nan), volatility_series])
-    er = np.where(volatility > 0, change / volatility, 0)
+    # Calculate weekly pivot from prior week's OHLC
+    # Weekly high = max of high over last 7 days
+    # Weekly low = min of low over last 7 days
+    # Weekly close = close of 7 days ago (Friday's close)
+    weekly_high = pd.Series(df_1d['high']).rolling(window=7, min_periods=7).max().shift(1).values
+    weekly_low = pd.Series(df_1d['low']).rolling(window=7, min_periods=7).min().shift(1).values
+    weekly_close = df_1d['close'].shift(7).values
     
-    # Calculate Smoothing Constant (SC)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Weekly pivot point = (H + L + C) / 3
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
     
-    # Calculate KAMA
-    kama = np.full(n, np.nan)
-    kama[er_length] = close[er_length]  # Initialize
-    for i in range(er_length + 1, n):
-        if np.isnan(sc[i]) or np.isnan(kama[i-1]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Weekly R1 = (2 * P) - L
+    weekly_r1 = (2 * weekly_pivot) - weekly_low
+    # Weekly S1 = (2 * P) - H
+    weekly_s1 = (2 * weekly_pivot) - weekly_high
     
-    # 1-day EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align weekly levels to daily timeframe
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1d, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1d, weekly_s1)
+    
+    # 1-week EMA20 for trend filter
+    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
     # Volume ratio: current volume / 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -67,29 +69,29 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, er_length + 10)  # Ensure sufficient warmup
+    start_idx = 50  # Need sufficient warmup for calculations
     
     for i in range(start_idx, n):
-        if (np.isnan(kama[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+        if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_r1_aligned[i]) or 
+            np.isnan(weekly_s1_aligned[i]) or np.isnan(ema_20_1w_aligned[i]) or 
             np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine market regime from 1-day EMA34
-        uptrend_regime = close[i] > ema_34_1d_aligned[i]
-        downtrend_regime = close[i] < ema_34_1d_aligned[i]
-        ranging_regime = not (uptrend_regime or downtrend_regime)
+        # Determine market regime from 1-week EMA20
+        uptrend_regime = close[i] > ema_20_1w_aligned[i]
+        downtrend_regime = close[i] < ema_20_1w_aligned[i]
         
-        # Volume confirmation: volume > 1.5x average
+        # Volume confirmation: volume > 1.5x average (stricter for daily)
         volume_confirm = vol_ratio[i] > 1.5
         
-        if position == 0 and not ranging_regime:
-            # Long: price above KAMA in uptrend + volume
-            long_entry = (close[i] > kama[i]) and uptrend_regime and volume_confirm
-            # Short: price below KAMA in downtrend + volume
-            short_entry = (close[i] < kama[i]) and downtrend_regime and volume_confirm
+        if position == 0:
+            # Long: price breaks above weekly R1 in uptrend regime + volume
+            long_entry = (close[i] > weekly_r1_aligned[i]) and uptrend_regime and volume_confirm
+            # Short: price breaks below weekly S1 in downtrend regime + volume
+            short_entry = (close[i] < weekly_s1_aligned[i]) and downtrend_regime and volume_confirm
             
             if long_entry:
                 signals[i] = 0.25
@@ -98,15 +100,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price crosses below KAMA or regime changes to ranging/downtrend
-            if (close[i] < kama[i]) or (not uptrend_regime):
+            # Exit: price crosses below weekly pivot or regime changes to downtrend
+            if (close[i] < weekly_pivot_aligned[i]) or (not uptrend_regime):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price crosses above KAMA or regime changes to ranging/uptrend
-            if (close[i] > kama[i]) or (not downtrend_regime):
+            # Exit: price crosses above weekly pivot or regime changes to uptrend
+            if (close[i] > weekly_pivot_aligned[i]) or (not downtrend_regime):
                 signals[i] = 0.0
                 position = 0
             else:
