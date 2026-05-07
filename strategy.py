@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_WKLY_KAMA_RSI_TrendFilter_v1"
-timeframe = "1d"
+name = "12h_Camarilla_R3S3_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,77 +9,89 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for KAMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for Camarilla pivot and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 40:
         return np.zeros(n)
     
-    # Calculate KAMA on weekly close
-    close_1w = df_1w['close'].values
-    change = np.abs(np.diff(close_1w, prepend=close_1w[0]))
-    volatility = np.abs(np.diff(close_1w))
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (0.6667 - 0.0645) + 0.0645) ** 2
-    kama = np.zeros_like(close_1w)
-    kama[0] = close_1w[0]
-    for i in range(1, len(close_1w)):
-        kama[i] = kama[i-1] + sc[i] * (close_1w[i] - kama[i-1])
-    kama_1w = kama
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Align KAMA to daily
-    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
+    # Calculate Camarilla pivot levels from previous 1d bar
+    prev_high = df_1d['high'].values
+    prev_low = df_1d['low'].values
+    prev_close = df_1d['close'].values
     
-    # RSI(14) on daily
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    pivot = (prev_high + prev_low + prev_close) / 3
+    r3 = prev_close + 1.1 * (prev_high - prev_low) / 2
+    s3 = prev_close - 1.1 * (prev_high - prev_low) / 2
     
-    # Volume filter: 20-day average
+    # Align pivot levels
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Volume filter: 20-period average for spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Volatility filter: ATR > 0.3% of price
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    vol_filter = atr > 0.003 * close
+    
+    # Session filter: 08:00 - 20:00 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure RSI and volume MA data
+    start_idx = max(20, 34)  # Ensure volume MA and EMA data
     
     for i in range(start_idx, n):
         # Skip if any critical value is NaN or invalid
-        if (np.isnan(kama_1w_aligned[i]) or np.isnan(rsi[i]) or
-            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(vol_ma[i]) or vol_ma[i] == 0 or
+            np.isnan(vol_filter[i]) or not vol_filter[i] or not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume filter: require volume > 0.8x 20-day average to avoid low-volume chop
-        volume_ok = volume[i] > 0.8 * vol_ma[i]
+        # Volume spike: current volume > 1.8 x 20-period average
+        volume_spike = volume[i] > 1.8 * vol_ma[i]
         
         if position == 0:
-            # Long: Price above weekly KAMA (uptrend) AND RSI < 40 (pullback in uptrend)
-            if (close[i] > kama_1w_aligned[i] and 
-                rsi[i] < 40 and 
-                volume_ok):
+            # Long: Price breaks above R3, above 1d EMA34 (uptrend), with volume spike
+            buffer = 0.0005 * close[i]  # 0.05% buffer to avoid whipsaws
+            if (close[i] > r3_aligned[i] + buffer and 
+                close[i] > ema_34_1d_aligned[i] + buffer and   # 1d uptrend
+                volume_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price below weekly KAMA (downtrend) AND RSI > 60 (bounce in downtrend)
-            elif (close[i] < kama_1w_aligned[i] and 
-                  rsi[i] > 60 and 
-                  volume_ok):
+            # Short: Price breaks below S3, below 1d EMA34 (downtrend), with volume spike
+            elif (close[i] < s3_aligned[i] - buffer and 
+                  close[i] < ema_34_1d_aligned[i] - buffer and   # 1d downtrend
+                  volume_spike):
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
-            # Exit: RSI returns to neutral zone (40-60) indicating trend exhaustion
-            if 40 <= rsi[i] <= 60:
+            # Exit: Price returns to pivot level (approximated as midpoint)
+            pivot_approx = (r3_aligned[i] + s3_aligned[i]) / 2
+            at_pivot = abs(close[i] - pivot_approx) < 0.001 * close[i]  # Within 0.1% of pivot
+            
+            if at_pivot:
                 signals[i] = 0.0
                 position = 0
             else:
