@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dTrend_Volume_v7
-Hypothesis: Trade breakouts of daily Camarilla R1/S1 levels only when aligned with daily trend (EMA200) and confirmed by volume spike, with tighter volume threshold and exit on trend reversal to reduce trade frequency and improve performance in both bull and bear markets.
+4h_TRIX_VolumeSpike_TrendFilter_v1
+Hypothesis: Use TRIX momentum on 1d timeframe combined with volume spike and price position relative to TRIX signal line to capture trend reversals in both bull and bear markets. Entry when TRIX crosses above/below signal line with volume confirmation, exit on opposite cross. Designed for fewer trades (<50/year) with strong edge in ranging and trending conditions.
 """
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_v7"
+name = "4h_TRIX_VolumeSpike_TrendFilter_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,27 +22,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculation and trend filter
+    # Get daily data for TRIX calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot points (using prior day's OHLC)
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
     daily_close = df_1d['close'].values
     
-    camarilla_range = daily_high - daily_low
-    r1 = daily_close + (camarilla_range * 1.1 / 12)
-    s1 = daily_close - (camarilla_range * 1.1 / 12)
+    # Calculate TRIX: triple EMA of ROC
+    # ROC = (close - close.shift(1)) / close.shift(1)
+    roc = np.diff(daily_close, prepend=daily_close[0]) / np.where(daily_close == 0, 1e-10, daily_close)
+    roc[0] = 0  # first ROC is zero
     
-    # Align Camarilla levels to 4h timeframe (with 1-day delay for completed bar)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1, additional_delay_bars=1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1, additional_delay_bars=1)
+    # Triple EMA of ROC
+    ema1 = pd.Series(roc).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
+    trix = ema3 * 100  # scale for readability
     
-    # Get daily trend filter (EMA200)
-    ema_200_1d = pd.Series(daily_close).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Signal line: EMA of TRIX
+    signal_line = pd.Series(trix).ewm(span=9, adjust=False, min_periods=9).mean().values
+    
+    # Align TRIX and signal line to 4h timeframe (with 1-day delay for completed bar)
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix, additional_delay_bars=1)
+    signal_aligned = align_htf_to_ltf(prices, df_1d, signal_line, additional_delay_bars=1)
     
     # Get 4h volume for confirmation
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,53 +54,41 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # Warmup
+    start_idx = 50  # Warmup
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_200_1d_aligned[i]) or 
+        if (np.isnan(trix_aligned[i]) or 
+            np.isnan(signal_aligned[i]) or 
             np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine daily trend
-        close_1d_aligned = align_htf_to_ltf(prices, df_1d, daily_close)
-        if np.isnan(close_1d_aligned[i]):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-            
-        trend_up = close_1d_aligned[i] > ema_200_1d_aligned[i]
-        trend_down = close_1d_aligned[i] < ema_200_1d_aligned[i]
-        
         if position == 0:
-            # Long breakout: price breaks above R1 with upward trend and volume spike
-            if (close[i] > r1_aligned[i] and 
-                trend_up and 
-                vol_ratio[i] > 4.0):  # Increased threshold to reduce trades
+            # Long entry: TRIX crosses above signal line with volume spike
+            if (trix_aligned[i] > signal_aligned[i] and 
+                trix_aligned[i-1] <= signal_aligned[i-1] and 
+                vol_ratio[i] > 3.0):  # Volume spike threshold
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: price breaks below S1 with downward trend and volume spike
-            elif (close[i] < s1_aligned[i] and 
-                  trend_down and 
-                  vol_ratio[i] > 4.0):  # Increased threshold to reduce trades
+            # Short entry: TRIX crosses below signal line with volume spike
+            elif (trix_aligned[i] < signal_aligned[i] and 
+                  trix_aligned[i-1] >= signal_aligned[i-1] and 
+                  vol_ratio[i] > 3.0):  # Volume spike threshold
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to daily close or trend turns down
-            if close[i] < close_1d_aligned[i] or not trend_up:
+            # Exit long: TRIX crosses below signal line
+            if trix_aligned[i] < signal_aligned[i] and trix_aligned[i-1] >= signal_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to daily close or trend turns up
-            if close[i] > close_1d_aligned[i] or not trend_down:
+            # Exit short: TRIX crosses above signal line
+            if trix_aligned[i] > signal_aligned[i] and trix_aligned[i-1] <= signal_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
