@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
-# Long when price breaks above Donchian upper band AND price > 1d EMA34 AND volume > 1.5x 20-period average.
-# Short when price breaks below Donchian lower band AND price < 1d EMA34 AND volume > 1.5x 20-period average.
-# Exit when price crosses back through Donchian middle band or volume drops below average.
-# Designed for 4h timeframe with moderate trade frequency (target: 20-50/year) to avoid fee drag.
-# Uses 1d EMA34 for trend filter to avoid counter-trend trades in strong trends.
+# Hypothesis: 6h Williams Fractal Breakout with 1d trend filter and volume confirmation.
+# Bullish fractal: lowest low with two higher lows on each side.
+# Bearish fractal: highest high with two lower highs on each side.
+# Long when price breaks above bearish fractal (resistance) AND 1d EMA50 up trending AND volume > 1.5x 20-period average.
+# Short when price breaks below bullish fractal (support) AND 1d EMA50 down trending AND volume > 1.5x 20-period average.
+# Exit when price returns inside the fractal level or volume drops below average.
+# Designed for 6h timeframe with moderate trade frequency (target: 15-30/year) to avoid fee drag.
+# Uses 1d EMA50 for trend filter to avoid counter-trend trades in strong trends.
 # Volume filter ensures participation and avoids low-conviction moves.
-
-name = "4h_Donchian_20_1dEMA34_VolumeFilter"
-timeframe = "4h"
+name = "6h_WilliamsFractal_Breakout_1dEMA50_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,19 +26,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian(20)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    mid_20 = (high_20 + low_20) / 2
+    # Williams Fractals: need 5-point window (2 left, center, 2 right)
+    # Bearish fractal: highest high with two lower highs on each side
+    # Bullish fractal: lowest low with two higher lows on each side
+    n_fractal = 5
+    half = n_fractal // 2  # 2
     
-    # 1d EMA34 for trend filter
+    bearish_fractal = np.full(n, np.nan)
+    bullish_fractal = np.full(n, np.nan)
+    
+    # Start from index 2 to n-3 to have 2 left and 2 right
+    for i in range(half, n - half):
+        # Check for bearish fractal: current high is highest in window
+        window_high = high[i - half:i + half + 1]
+        if high[i] == np.max(window_high):
+            # Ensure it's strictly higher than neighbors (not equal)
+            if high[i] > high[i - 2] and high[i] > high[i - 1] and \
+               high[i] > high[i + 1] and high[i] > high[i + 2]:
+                bearish_fractal[i] = high[i]
+        
+        # Check for bullish fractal: current low is lowest in window
+        window_low = low[i - half:i + half + 1]
+        if low[i] == np.min(window_low):
+            # Ensure it's strictly lower than neighbors
+            if low[i] < low[i - 2] and low[i] < low[i - 1] and \
+               low[i] < low[i + 1] and low[i] < low[i + 2]:
+                bullish_fractal[i] = low[i]
+    
+    # 1d EMA50 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # EMA50 direction (trend)
+    ema50_rising = np.zeros_like(ema50_1d_aligned, dtype=bool)
+    ema50_falling = np.zeros_like(ema50_1d_aligned, dtype=bool)
+    ema50_rising[1:] = ema50_1d_aligned[1:] > ema50_1d_aligned[:-1]
+    ema50_falling[1:] = ema50_1d_aligned[1:] < ema50_1d_aligned[:-1]
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -46,21 +75,22 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Sufficient warmup for indicators
+    start_idx = 50  # Sufficient warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(mid_20[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(bearish_fractal[i]) or np.isnan(bullish_fractal[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(ema50_rising[i]) or 
+            np.isnan(ema50_falling[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: break above upper band, price > 1d EMA34, volume filter
-            long_cond = (close[i] > high_20[i]) and (close[i] > ema34_1d_aligned[i]) and volume_filter[i]
-            # Short conditions: break below lower band, price < 1d EMA34, volume filter
-            short_cond = (close[i] < low_20[i]) and (close[i] < ema34_1d_aligned[i]) and volume_filter[i]
+            # Long conditions: price breaks above bearish fractal (resistance), EMA50 rising, volume filter
+            long_cond = (close[i] > bearish_fractal[i]) and ema50_rising[i] and volume_filter[i]
+            # Short conditions: price breaks below bullish fractal (support), EMA50 falling, volume filter
+            short_cond = (close[i] < bullish_fractal[i]) and ema50_falling[i] and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -69,15 +99,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below mid band OR volume filter fails
-            if close[i] < mid_20[i] or not volume_filter[i]:
+            # Long exit: price returns below bearish fractal OR EMA50 falls OR volume filter fails
+            if (close[i] < bearish_fractal[i]) or (not ema50_rising[i]) or (not volume_filter[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above mid band OR volume filter fails
-            if close[i] > mid_20[i] or not volume_filter[i]:
+            # Short exit: price returns above bullish fractal OR EMA50 rises OR volume filter fails
+            if (close[i] > bullish_fractal[i]) or (not ema50_falling[i]) or (not volume_filter[i]):
                 signals[i] = 0.0
                 position = 0
             else:
