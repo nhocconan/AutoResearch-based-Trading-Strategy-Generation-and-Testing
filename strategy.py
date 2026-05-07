@@ -1,104 +1,100 @@
 #!/usr/bin/env python3
 """
-4h_Williams_Alligator_DMI_Trend_Filter
-Hypothesis: Williams Alligator defines the trend (teeth above/below lips), DMI (ADX>25) confirms strength.
-Long when green alignment (jaws<teeth<lips) + ADX>25, short when red alignment (jaws>teeth>lips) + ADX>25.
-Uses 13/8/5 SMAs with proper alignment. Works in both bull (strong uptrend) and bear (strong downtrend).
-Target: 20-30 trades per year (~80-120 over 4 years) with position size 0.25.
+1d_Weekly_Donchian_Breakout_Trend_Filter
+Hypothesis: Weekly Donchian channel breakout with daily trend filter and volume confirmation.
+In bull markets (price > daily EMA50), long on weekly upper band breakout with volume.
+In bear markets (price < daily EMA50), short on weekly lower band breakout with volume.
+Uses weekly Donchian channels for structure and daily EMA for trend filter to avoid counter-trend trades.
+Target: 15-25 trades per year (~60-100 over 4 years) with position size 0.25.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Williams_Alligator_DMI_Trend_Filter"
-timeframe = "4h"
+name = "1d_Weekly_Donchian_Breakout_Trend_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Williams Alligator: 13/8/5 period SMAs
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().values  # 13-period
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().values   # 8-period
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().values    # 5-period
+    # Load weekly data ONCE for Donchian channels
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 20:
+        return np.zeros(n)
     
-    # DMI (ADX) calculation
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Weekly Donchian channels: 20-period high/low
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
     
-    # Directional Movement
-    up_move = high - np.roll(high, 1)
-    down_move = np.roll(low, 1) - low
-    up_move[0] = 0
-    down_move[0] = 0
+    # Calculate weekly Donchian channels
+    upper_channel = np.full_like(weekly_high, np.nan, dtype=np.float64)
+    lower_channel = np.full_like(weekly_low, np.nan, dtype=np.float64)
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    for i in range(20, len(weekly_high)):
+        upper_channel[i] = np.max(weekly_high[i-20:i])
+        lower_channel[i] = np.min(weekly_low[i-20:i])
     
-    # Smoothed values
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    plus_dm_sum = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
-    minus_dm_sum = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
+    # Align weekly channels to daily timeframe
+    upper_channel_aligned = align_htf_to_ltf(prices, df_weekly, upper_channel)
+    lower_channel_aligned = align_htf_to_ltf(prices, df_weekly, lower_channel)
     
-    # Directional Indicators
-    plus_di = 100 * plus_dm_sum / tr_sum
-    minus_di = 100 * minus_dm_sum / tr_sum
+    # Daily EMA50 for trend filter
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # DX and ADX
-    dx = np.where(tr_sum > 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    # Volume ratio: current volume / 20-day average volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = np.where(vol_ma > 0, volume / vol_ma, 1.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 28  # Need 14*2 for ADX smoothing
+    start_idx = 50  # Need 50 periods for EMA50 and sufficient warmup
     
     for i in range(start_idx, n):
-        if np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or np.isnan(adx[i]):
+        if np.isnan(ema_50[i]) or np.isnan(upper_channel_aligned[i]) or np.isnan(lower_channel_aligned[i]) or np.isnan(vol_ratio[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Alligator alignments
-        green_alignment = (jaws[i] < teeth[i]) and (teeth[i] < lips[i])   # Bullish: jaws<teeth<lips
-        red_alignment = (jaws[i] > teeth[i]) and (teeth[i] > lips[i])    # Bearish: jaws>teeth>lips
+        # Determine market regime from daily EMA50
+        uptrend_regime = close[i] > ema_50[i]
+        downtrend_regime = close[i] < ema_50[i]
         
-        # ADX filter: trend strength
-        strong_trend = adx[i] > 25
+        # Volume confirmation: volume > 1.5x average
+        volume_confirm = vol_ratio[i] > 1.5
         
         if position == 0:
-            # Long: green alignment + strong trend
-            if green_alignment and strong_trend:
+            # Long: close breaks above weekly upper channel in uptrend regime + volume
+            long_entry = (close[i] > upper_channel_aligned[i]) and uptrend_regime and volume_confirm
+            # Short: close breaks below weekly lower channel in downtrend regime + volume
+            short_entry = (close[i] < lower_channel_aligned[i]) and downtrend_regime and volume_confirm
+            
+            if long_entry:
                 signals[i] = 0.25
                 position = 1
-            # Short: red alignment + strong trend
-            elif red_alignment and strong_trend:
+            elif short_entry:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: alignment breaks or trend weakens
-            if not green_alignment or not strong_trend:
+            # Exit: close crosses below weekly lower channel or regime changes to downtrend
+            if (close[i] < lower_channel_aligned[i]) or (not uptrend_regime):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: alignment breaks or trend weakens
-            if not red_alignment or not strong_trend:
+            # Exit: close crosses above weekly upper channel or regime changes to uptrend
+            if (close[i] > upper_channel_aligned[i]) or (not downtrend_regime):
                 signals[i] = 0.0
                 position = 0
             else:
