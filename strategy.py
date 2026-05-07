@@ -1,93 +1,111 @@
 #!/usr/bin/env python3
-# 1h_VolatilityRegime_CamarillaBreakout_4hTrend
-# Hypothesis: Use 4h trend (close vs EMA34) for direction, 1h for entry timing. 
-# Entry when price breaks 1d Camarilla R1/S1 with volume spike, only in high volatility regime (ATR ratio > 1.2).
-# Volatility regime filter reduces whipsaws in ranging markets. Target 15-30 trades/year.
+# 6h_WilliamsAlligator_ElderRay_Signal
+# Hypothesis: Combines Williams Alligator (trend) with Elder Ray (bull/bear power) on 6h timeframe.
+# Alligator uses SMAs (13,8,5) with 8,5,3 period shifts to identify trend direction and strength.
+# Elder Ray calculates Bull Power (high - EMA13) and Bear Power (low - EMA13) to measure buying/selling pressure.
+# Long when: Bull Power > 0, price above Alligator Jaw (13-period SMMA shifted 8), and Bear Power rising.
+# Short when: Bear Power < 0, price below Alligator Jaw, and Bull Power falling.
+# Uses 1-week trend filter to avoid counter-trend trades in strong weekly trends.
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
 
-name = "1h_VolatilityRegime_CamarillaBreakout_4hTrend"
-timeframe = "1h"
+name = "6h_WilliamsAlligator_ElderRay_Signal"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def smma(source, length):
+    """Smoothed Moving Average (SMMA) - also called Wilder's Moving Average"""
+    if length < 1:
+        return source
+    smma = np.full_like(source, np.nan, dtype=float)
+    smma[length-1] = np.mean(source[:length])
+    for i in range(length, len(source)):
+        smma[i] = (smma[i-1] * (length-1) + source[i]) / length
+    return smma
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 35:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
-    close_4h = df_4h['close'].values
-    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
     
-    # 1d data for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    camarilla_range = high_1d - low_1d
-    r1 = close_1d + 1.1 * camarilla_range / 12
-    s1 = close_1d - 1.1 * camarilla_range / 12
-    r1_1h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_1h = align_htf_to_ltf(prices, df_1d, s1)
+    close_1w = df_1w['close'].values
     
-    # 1h volatility regime: ATR ratio (current ATR / 50-period ATR)
-    tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
-    tr1[0] = high[0] - low[0]
-    atr_14 = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
-    atr_50 = pd.Series(tr1).rolling(window=50, min_periods=50).mean().values
-    atr_ratio = atr_14 / atr_50
-    high_vol = atr_ratio > 1.2  # volatile regime
+    # Calculate 1w EMA50 for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Volume spike (20-period average)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)
+    # Williams Alligator components (using SMMA)
+    jaw = smma(close, 13)  # Blue line
+    teeth = smma(close, 8)   # Red line
+    lips = smma(close, 5)    # Green line
+    
+    # Shift the lines as per Alligator definition
+    jaw_shifted = np.roll(jaw, 8)
+    teeth_shifted = np.roll(teeth, 5)
+    lips_shifted = np.roll(lips, 3)
+    
+    # Elder Ray components
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):
-        if (np.isnan(ema_34_4h_aligned[i]) or np.isnan(r1_1h[i]) or np.isnan(s1_1h[i]) or
-            np.isnan(volume_spike[i]) or np.isnan(high_vol[i])):
+    for i in range(50, n):
+        # Skip if any critical value is NaN
+        if (np.isnan(jaw_shifted[i]) or np.isnan(teeth_shifted[i]) or 
+            np.isnan(lips_shifted[i]) or np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or np.isnan(ema_50_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Determine trend from 1w EMA50
+        uptrend_1w = close[i] > ema_50_1w_aligned[i]
+        downtrend_1w = close[i] < ema_50_1w_aligned[i]
+        
         if position == 0:
-            # Long: price > R1, above 4h EMA34 trend, volume spike, high volatility
-            if close[i] > r1_1h[i] and close[i] > ema_34_4h_aligned[i] and volume_spike[i] and high_vol[i]:
-                signals[i] = 0.20
+            # Long conditions: Bull Power > 0, price above Jaw, Bull Power rising (vs previous)
+            if (bull_power[i] > 0 and 
+                close[i] > jaw_shifted[i] and 
+                i > 0 and bull_power[i] > bull_power[i-1] and
+                uptrend_1w):  # Only long in 1w uptrend
+                signals[i] = 0.25
                 position = 1
-            # Short: price < S1, below 4h EMA34 trend, volume spike, high volatility
-            elif close[i] < s1_1h[i] and close[i] < ema_34_4h_aligned[i] and volume_spike[i] and high_vol[i]:
-                signals[i] = -0.20
+            # Short conditions: Bear Power < 0, price below Jaw, Bear Power falling (vs previous)
+            elif (bear_power[i] < 0 and 
+                  close[i] < jaw_shifted[i] and 
+                  i > 0 and bear_power[i] < bear_power[i-1] and
+                  downtrend_1w):  # Only short in 1w downtrend
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price < R1 or below 4h EMA34 trend
-            if close[i] < r1_1h[i] or close[i] < ema_34_4h_aligned[i]:
+            # Exit long: Bull Power <= 0 or price crosses below Teeth
+            if bull_power[i] <= 0 or close[i] < teeth_shifted[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: price > S1 or above 4h EMA34 trend
-            if close[i] > s1_1h[i] or close[i] > ema_34_4h_aligned[i]:
+            # Exit short: Bear Power >= 0 or price crosses above Teeth
+            if bear_power[i] >= 0 or close[i] > teeth_shifted[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
