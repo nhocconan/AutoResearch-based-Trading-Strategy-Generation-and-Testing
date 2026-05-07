@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Donchian20_Trend_Filter"
-timeframe = "12h"
+name = "4h_ThreeLineStrike_1dVWAP_Momentum"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,53 +22,64 @@ def generate_signals(prices):
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 1d Donchian upper and lower bands (20-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # 1d VWAP
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    vwap = (typical_price * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
+    vwap_values = vwap.values
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_values)
     
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # 12h volume spike: > 1.3x 20-period average (~10 days)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > 1.3 * vol_ma
-    
+    # 4h Three Line Strike pattern detection
+    # Bullish 3LS: 3 consecutive down closes, then 4th bar closes above 1st bar open
+    # Bearish 3LS: 3 consecutive up closes, then 4th bar closes below 1st bar open
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)  # Wait for Donchian and EMA34
+    # Wait for enough history to detect pattern
+    start_idx = 4
     
     for i in range(start_idx, n):
-        if np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or np.isnan(ema34_1d_aligned[i]):
+        # Check if we have enough data for pattern detection
+        if i < 3:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Bullish 3LS pattern
+        bullish_3ls = (
+            close[i-3] < close[i-2] and  # bar 1 down
+            close[i-2] < close[i-1] and  # bar 2 down
+            close[i-1] < close[i-3] and  # bar 3 down (continuing downtrend)
+            close[i] > close[i-3]        # bar 4 closes above bar 1 open (approximated by close)
+        )
+        
+        # Bearish 3LS pattern
+        bearish_3ls = (
+            close[i-3] > close[i-2] and  # bar 1 up
+            close[i-2] > close[i-1] and  # bar 2 up
+            close[i-1] > close[i-3] and  # bar 3 up (continuing uptrend)
+            close[i] < close[i-3]        # bar 4 closes below bar 1 open
+        )
+        
         if position == 0:
-            # Long: Price breaks above Donchian high, above EMA34 trend, volume spike
-            if close[i] > donchian_high_aligned[i] and close[i] > ema34_1d_aligned[i] and vol_spike[i]:
+            # Enter long on bullish 3LS if price above 1d VWAP
+            if bullish_3ls and close[i] > vwap_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian low, below EMA34 trend, volume spike
-            elif close[i] < donchian_low_aligned[i] and close[i] < ema34_1d_aligned[i] and vol_spike[i]:
+            # Enter short on bearish 3LS if price below 1d VWAP
+            elif bearish_3ls and close[i] < vwap_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Price below Donchian low or below EMA34
-            if close[i] < donchian_low_aligned[i] or close[i] < ema34_1d_aligned[i]:
+            # Exit long on bearish 3LS or price below VWAP
+            if bearish_3ls or close[i] < vwap_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price above Donchian high or above EMA34
-            if close[i] > donchian_high_aligned[i] or close[i] > ema34_1d_aligned[i]:
+            # Exit short on bullish 3LS or price above VWAP
+            if bullish_3ls or close[i] > vwap_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -76,10 +87,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 12h Donchian breakout with 1d EMA34 trend filter and volume confirmation.
-# Long when price breaks above 1d Donchian high, stays above 1d EMA34 trend, and volume spike confirms.
-# Short when price breaks below 1d Donchian low, stays below 1d EMA34 trend, and volume spike confirms.
-# Uses 1d timeframe for structure and trend to avoid whipsaws, 12h for entry timing.
-# Volume spike (>1.3x average) ensures conviction. Discrete 0.25 position size limits risk.
-# Works in bull markets (breakouts + trend) and bear markets (reverse breakdowns).
-# Target: ~25-35 trades/year to minimize fee drag while capturing sustained moves.
+# Hypothesis: 4h Three Line Strike reversal pattern with 1d VWAP trend filter.
+# Bullish 3LS: 3 down bars followed by 4th bar closing above first bar's open = potential bullish reversal.
+# Bearish 3LS: 3 up bars followed by 4th bar closing below first bar's open = potential bearish reversal.
+# Entry confirmed when price is on favorable side of 1d VWAP (above for longs, below for shorts).
+# Works in both bull and bear markets as it captures mean-reversion from exhaustion moves.
+# VWAP filter ensures we trade with the higher timeframe trend/value area.
+# Target: ~30-60 trades/year to balance opportunity with cost control.
