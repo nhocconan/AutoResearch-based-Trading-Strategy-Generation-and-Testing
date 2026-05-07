@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
-1d_1w_Camarilla_R3_S3_Breakout_Trend_Volume
-Hypothesis: Daily Camarilla R3/S3 breakouts with 1-week trend filter and volume confirmation.
-The 1-week trend filter ensures alignment with the major trend, reducing false signals in both bull and bear markets.
-Volume confirmation ensures institutional participation. Target: 20-50 trades per year (~80-200 over 4 years) with position size 0.25.
+6h_ElderRay_BullBearPower_1dTrend_Volume
+Hypothesis: Elder Ray index (Bull Power = High - EMA13, Bear Power = Low - EMA13) combined with 1-day trend filter and volume confirmation.
+In bull markets (price > 1-day EMA50), we take long signals when Bull Power turns positive with volume.
+In bear markets (price < 1-day EMA50), we take short signals when Bear Power turns negative with volume.
+This captures institutional buying/selling pressure while avoiding counter-trend trades.
+Target: 20-50 trades per year (~80-200 over 4 years) with position size 0.25.
+Works in both bull (captures strength) and bear (captures weakness) via regime filter.
 """
 
-name = "1d_1w_Camarilla_R3_S3_Breakout_Trend_Volume"
-timeframe = "1d"
+name = "6h_ElderRay_BullBearPower_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +19,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,86 +27,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1-week data ONCE for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # 1-week EMA20 for trend filter
-    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    
-    # Calculate Camarilla levels from previous day (using 1d data)
+    # Load 1-day data ONCE for trend filter and EMA13
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    prev_high_1d = df_1d['high'].values
-    prev_low_1d = df_1d['low'].values
-    prev_close_1d = df_1d['close'].values
+    # 1-day EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Roll to get previous day values
-    prev_high = np.roll(prev_high_1d, 1)
-    prev_low = np.roll(prev_low_1d, 1)
-    prev_close = np.roll(prev_close_1d, 1)
-    # Fill first values
-    prev_high[0] = prev_high_1d[0]
-    prev_low[0] = prev_low_1d[0]
-    prev_close[0] = prev_close_1d[0]
+    # 1-day EMA13 for Elder Ray calculation
+    ema_13_1d = pd.Series(df_1d['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
     
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_val = prev_high - prev_low
+    # Calculate Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high - ema_13_1d_aligned
+    bear_power = low - ema_13_1d_aligned
     
-    # Camarilla R3 and S3 levels
-    R3 = close + (range_val * 1.1 / 4)
-    S3 = close - (range_val * 1.1 / 4)
-    
-    # Volume ratio: current volume / 30-period average volume
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Volume ratio: current volume / 20-period average volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.where(vol_ma > 0, volume / vol_ma, 1.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Need 30 periods for volume MA
+    start_idx = 50  # Need 50 periods for EMA50
     
     for i in range(start_idx, n):
-        if np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(R3[i]) or np.isnan(S3[i]):
+        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(vol_ratio[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Breakout conditions: price breaks above R3 or below S3
-        breakout_up = close[i] > R3[i-1]  # Use previous bar's level to avoid look-ahead
-        breakout_down = close[i] < S3[i-1]  # Use previous bar's level
+        # Determine market regime from 1-day EMA50
+        uptrend_regime = close[i] > ema_50_1d_aligned[i]
+        downtrend_regime = close[i] < ema_50_1d_aligned[i]
         
-        # Volume confirmation: volume > 1.8x average
-        volume_confirm = vol_ratio[i] > 1.8
-        
-        # Trend filter from 1-week EMA20
-        uptrend = close[i] > ema_20_1w_aligned[i]
-        downtrend = close[i] < ema_20_1w_aligned[i]
+        # Volume confirmation: volume > 1.5x average
+        volume_confirm = vol_ratio[i] > 1.5
         
         if position == 0:
-            # Long: upward breakout + volume + uptrend
-            if breakout_up and volume_confirm and uptrend:
+            # Long: bull power turning positive in uptrend regime + volume
+            long_entry = (bull_power[i] > 0) and (bull_power[i-1] <= 0) and uptrend_regime and volume_confirm
+            # Short: bear power turning negative in downtrend regime + volume
+            short_entry = (bear_power[i] < 0) and (bear_power[i-1] >= 0) and downtrend_regime and volume_confirm
+            
+            if long_entry:
                 signals[i] = 0.25
                 position = 1
-            # Short: downward breakout + volume + downtrend
-            elif breakout_down and volume_confirm and downtrend:
+            elif short_entry:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price breaks back below S3 or trend reversal
-            if close[i] < S3[i] or not uptrend:
+            # Exit: bull power turns negative or regime changes to downtrend
+            if (bull_power[i] < 0) or (not uptrend_regime):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price breaks back above R3 or trend reversal
-            if close[i] > R3[i] or not downtrend:
+            # Exit: bear power turns positive or regime changes to uptrend
+            if (bear_power[i] > 0) or (not downtrend_regime):
                 signals[i] = 0.0
                 position = 0
             else:
