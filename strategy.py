@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dTrend_Volume_v2
-Hypothesis: Price breaking above/below daily Camarilla R1/S1 with 1d EMA34 trend filter and volume spike (2x average) captures institutional breakouts. Tightened volume filter (2.0x) and added ATR(14) volatility filter to reduce false signals and lower trade frequency. Works in bull/bear by following higher timeframe trend. Target: 50-100 total trades over 4 years (12-25/year) to avoid fee drag.
+1d_Camarilla_R1S1_Breakout_1wTrend_Volume
+Hypothesis: Price breaking above/below weekly Camarilla R1/S1 with weekly EMA34 trend filter and volume spike (2x average) captures institutional breakouts on daily timeframe. Weekly trend filter ensures alignment with higher timeframe momentum, reducing false signals in choppy markets. Target: 30-100 total trades over 4 years (7-25/year) to avoid fee drag. Works in bull/bear by following weekly trend.
 """
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_v2"
-timeframe = "4h"
+name = "1d_Camarilla_R1S1_Breakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -21,15 +21,15 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for Camarilla pivot calculation and trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels (R1, S1) from previous day
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Calculate weekly Camarilla pivot levels (R1, S1) from previous week
+    prev_high = df_1w['high'].shift(1).values
+    prev_low = df_1w['low'].shift(1).values
+    prev_close = df_1w['close'].shift(1).values
     
     # Pivot point
     pivot = (prev_high + prev_low + prev_close) / 3
@@ -37,47 +37,39 @@ def generate_signals(prices):
     r1 = pivot + 1.1 * (prev_high - prev_low) / 12
     s1 = pivot - 1.1 * (prev_high - prev_low) / 12
     
-    # Align to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Align to daily timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
     
-    # 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Weekly EMA34 for trend filter
+    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Volume filter: current volume > 2.0 * 24-period average (stricter)
-    vol_avg = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume filter: current volume > 2.0 * 20-period average (daily)
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_avg * 2.0)
-    
-    # ATR(14) filter: only trade when volatility is elevated
-    tr1 = np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1]))
-    tr2 = np.maximum(tr1, np.abs(low[1:] - close[:-1]))
-    tr = np.concatenate([[tr1[0]], tr2])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    vol_filter = atr > (pd.Series(atr).rolling(window=50, min_periods=50).mean().values * 0.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need sufficient warmup for ATR and averages
+    start_idx = 50  # Need sufficient warmup for averages
     
     for i in range(start_idx, n):
         # Skip if any data is not ready
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_avg[i]) or 
-            np.isnan(atr[i]) or np.isnan(vol_filter[i])):
+            np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R1 + 1d uptrend + volume spike + vol filter
-            if close[i] > r1_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_filter[i] and vol_filter[i]:
+            # Long: price breaks above R1 + weekly uptrend + volume spike
+            if close[i] > r1_aligned[i] and close[i] > ema_34_1w_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + 1d downtrend + volume spike + vol filter
-            elif close[i] < s1_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_filter[i] and vol_filter[i]:
+            # Short: price breaks below S1 + weekly downtrend + volume spike
+            elif close[i] < s1_aligned[i] and close[i] < ema_34_1w_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position != 0:
