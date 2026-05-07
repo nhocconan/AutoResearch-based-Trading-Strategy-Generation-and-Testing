@@ -1,14 +1,6 @@
-# 12h_1w_1d_Camarilla_S1R1_Breakout_Trend
-# Hypothesis: 12h timeframe with weekly and daily timeframe confluence. 
-# Uses weekly Camarilla S1/R1 levels from 1d data for structure and 1w trend filter.
-# Entry: Price breaks S1/R1 with volume confirmation in direction of 1w trend.
-# Exit: Price returns to S1/R1 or volume drops below average.
-# Designed for fewer trades (target 12-37/year) to avoid fee drag on 12h timeframe.
-# Works in both bull and bear markets via 1w trend filter.
-
 #!/usr/bin/env python3
-name = "12h_1w_1d_Camarilla_S1R1_Breakout_Trend"
-timeframe = "12h"
+name = "4h_1d_Triple_Confirmation_Breakout"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,76 +17,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for Camarilla levels
+    # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels from previous day
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Calculate daily ATR for volatility filter
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_10 = tr.rolling(window=10, min_periods=10).mean().values
     
-    # Avoid division by zero in range calculation
-    range_hl = prev_high - prev_low
-    valid_range = range_hl > 0
+    # Daily Donchian channels (20-period)
+    donch_high_20 = df_1d['high'].rolling(window=20, min_periods=20).max().values
+    donch_low_20 = df_1d['low'].rolling(window=20, min_periods=20).min().values
     
-    pivot = np.where(valid_range, (prev_high + prev_low + prev_close) / 3, prev_close)
-    s1 = np.where(valid_range, prev_close - (range_hl * 1.08 / 2), prev_close)
-    r1 = np.where(valid_range, prev_close + (range_hl * 1.08 / 2), prev_close)
+    # Daily EMA(50) for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align daily levels to 12h timeframe
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    # Align daily indicators to 4h timeframe
+    donch_high_20_aligned = align_htf_to_ltf(prices, df_1d, donch_high_20)
+    donch_low_20_aligned = align_htf_to_ltf(prices, df_1d, donch_low_20)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    atr_10_aligned = align_htf_to_ltf(prices, df_1d, atr_10)
     
-    # Load weekly data ONCE before loop for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
-    # Weekly trend filter: EMA(8) on weekly close
-    ema_8_1w = pd.Series(df_1w['close']).ewm(span=8, adjust=False, min_periods=8).mean().values
-    ema_8_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_8_1w)
-    
-    # Volume spike detection: 4-period average (2 days of 12h bars)
-    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    # 4h volume confirmation: volume spike detection
+    vol_ma_10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(8, 4)  # Wait for weekly EMA and volume MA
+    start_idx = max(50, 20, 10)  # Wait for EMA50, Donchian20, VolMA10
     
     for i in range(start_idx, n):
-        # Skip if any critical values are invalid
-        if (np.isnan(ema_8_1w_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(vol_ma_4[i])):
+        # Skip if any required data is NaN
+        if (np.isnan(donch_high_20_aligned[i]) or np.isnan(donch_low_20_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_10_aligned[i]) or
+            np.isnan(vol_ma_10[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above S1 with volume and weekly uptrend
-            vol_condition = volume[i] > vol_ma_4[i] * 2.0
-            uptrend = ema_8_1w_aligned[i] > ema_8_1w_aligned[i-1]
+            # Long: Price breaks above Donchian high + above EMA50 + volume spike + ATR filter
+            vol_condition = volume[i] > vol_ma_10[i] * 2.0
+            above_ema = close[i] > ema_50_1d_aligned[i]
+            atr_filter = atr_10_aligned[i] > 0  # Ensure volatility exists
             
-            if close[i] > s1_aligned[i] and vol_condition and uptrend:
+            if (close[i] > donch_high_20_aligned[i] and 
+                above_ema and 
+                vol_condition and 
+                atr_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below R1 with volume and weekly downtrend
-            elif close[i] < r1_aligned[i] and vol_condition and not uptrend:
+            # Short: Price breaks below Donchian low + below EMA50 + volume spike + ATR filter
+            elif (close[i] < donch_low_20_aligned[i] and 
+                  not above_ema and 
+                  vol_condition and 
+                  atr_filter):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price back below S1 or volume drops
-            if close[i] < s1_aligned[i] or volume[i] < vol_ma_4[i] * 0.8:
+            # Exit: Price closes below Donchian low or volume drops significantly
+            if close[i] < donch_low_20_aligned[i] or volume[i] < vol_ma_10[i] * 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price back above R1 or volume drops
-            if close[i] > r1_aligned[i] or volume[i] < vol_ma_4[i] * 0.8:
+            # Exit: Price closes above Donchian high or volume drops significantly
+            if close[i] > donch_high_20_aligned[i] or volume[i] < vol_ma_10[i] * 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,14 +96,12 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 12h Camarilla S1/R1 breakout with weekly trend and volume confirmation
-# - Daily Camarilla S1/R1 act as strong support/resistance levels
-# - Breakout above S1 with volume in weekly uptrend = long opportunity
-# - Breakdown below R1 with volume in weekly downtrend = short opportunity
-# - Volume spike (2.0x average) confirms institutional participation
-# - Weekly EMA(8) filter ensures alignment with higher timeframe trend
-# - Works in both bull (buy S1 breaks in uptrend) and bear (sell R1 breaks in downtrend)
-# - Exit when price returns to S1/R1 or volume weakens
-# - Position size 0.25 targets ~15-25 trades/year, avoiding fee drag on 12h
-# - Uses 1w trend filter for better reliability in choppy markets
-# - Designed for 12h timeframe to reduce trade frequency and increase edge reliability
+# Hypothesis: 4h Donchian breakout with daily trend and volume confirmation
+# - Uses daily Donchian channels (20-period) as dynamic support/resistance
+# - Requires price to be above/below daily EMA(50) for trend alignment
+# - Volume spike (2x 10-period average) confirms institutional participation
+# - ATR filter ensures sufficient volatility for meaningful moves
+# - Works in both bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend)
+# - Position size 0.25 targets ~25-40 trades/year, minimizing fee drag
+# - Simple 3-condition entry reduces overfitting and improves robustness
+# - Exit on reverse Donchian break or volume collapse prevents whipsaws
