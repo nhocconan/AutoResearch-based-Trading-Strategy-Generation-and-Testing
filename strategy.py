@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Bollinger Band breakout with 1d RSI filter and volume confirmation.
-# Long when price breaks above upper BB(20,2) and 1d RSI > 55 and volume > 1.5x average.
-# Short when price breaks below lower BB(20,2) and 1d RSI < 45 and volume > 1.5x average.
-# Exit when price crosses the 20-period SMA or RSI reverts to neutral zone (45-55).
-# Uses 1d RSI as a higher timeframe filter to avoid counter-trend trades.
-# Volume confirmation ensures breakouts have conviction.
-# Designed to work in both bull (breakouts continue) and bear (mean reversion in range) markets.
-# Target: 20-50 trades per year to minimize fee drag.
+# Hypothesis: 1d Williams Fractal + Volume Spike + Weekly Trend Filter
+# Uses Williams Fractals (5-bar) for swing point detection, volume spike for confirmation,
+# and weekly EMA for trend filter. Long on bullish fractal breakout above resistance with volume spike in uptrend.
+# Short on bearish fractal breakdown below support with volume spike in downtrend.
+# Exit on opposite fractal signal or trend reversal.
+# Target: 30-100 trades over 4 years (7-25/year) to minimize fee drag.
+# Works in bull (trend follow breakouts) and bear (mean reversion via fractal reversals in range).
 
-name = "4h_BB_Breakout_1dRSI_Volume"
-timeframe = "4h"
+name = "1d_WilliamsFractal_VolumeSpike_Trend"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,77 +25,107 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20,2)
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
-    
-    # Volume average (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Get 1d data for RSI filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 1w data for higher timeframe trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
     
-    # RSI(14) on 1d
-    delta = np.diff(close_1d)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = np.zeros_like(close_1d)
-    avg_loss = np.zeros_like(close_1d)
-    avg_gain[14] = np.mean(gain[:14])
-    avg_loss[14] = np.mean(loss[:14])
-    for i in range(15, len(close_1d)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d = np.concatenate([[np.nan], rsi_1d])
+    # Williams Fractals (5-bar: 2 left, 2 right)
+    # Bearish fractal: high[n-2] < high[n] > high[n+2] and high[n-1] < high[n] > high[n+1]
+    # Bullish fractal: low[n-2] > low[n] < low[n+2] and low[n-1] > low[n] < low[n+1]
+    bearish_fractal = np.zeros(n, dtype=bool)
+    bullish_fractal = np.zeros(n, dtype=bool)
     
-    # Align 1d RSI to 4h
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    for i in range(2, n-2):
+        if (high[i-2] < high[i] and high[i-1] < high[i] and 
+            high[i+1] < high[i] and high[i+2] < high[i]):
+            bearish_fractal[i] = True
+        if (low[i-2] > low[i] and low[i-1] > low[i] and 
+            low[i+1] > low[i] and low[i+2] > low[i]):
+            bullish_fractal[i] = True
+    
+    # Volume spike: volume > 1.5 * 20-period average volume
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma20)
+    
+    # Weekly EMA(21) for trend filter
+    close_1w_series = pd.Series(close_1w)
+    ema_21_1w = close_1w_series.ewm(span=21, adjust=False, min_periods=21).mean().values
+    trend_1w_up = ema_21_1w[1:] > ema_21_1w[:-1]
+    trend_1w_up = np.concatenate([[False], trend_21_1w])
+    
+    # Align 1w trend to 1d
+    trend_1w_up_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_up.astype(float))
+    
+    # Resistance and support levels from recent fractals
+    # Resistance: highest bearish fractal high in last 20 periods
+    # Support: lowest bullish fractal low in last 20 periods
+    resistance = np.full(n, np.nan)
+    support = np.full(n, np.nan)
+    
+    for i in range(20, n):
+        # Look back 20 periods for fractals
+        lookback_high = high[max(0, i-20):i]
+        lookback_low = low[max(0, i-20):i]
+        bearish_in_lookback = bearish_fractal[max(0, i-20):i]
+        bullish_in_lookback = bullish_fractal[max(0, i-20):i]
+        
+        if np.any(bearish_in_lookback):
+            # Get highest high where bearish fractal occurred
+            idx = np.where(bearish_in_lookback)[0]
+            resistance[i] = np.max(lookback_high[idx])
+        if np.any(bullish_in_lookback):
+            # Get lowest low where bullish fractal occurred
+            idx = np.where(bullish_in_lookback)[0]
+            support[i] = np.min(lookback_low[idx])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure enough data for indicators
+    start_idx = 25  # Ensure enough data for calculations
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(sma_20[i]) or np.isnan(std_20[i]) or np.isnan(vol_ma[i]) or
-            np.isnan(rsi_1d_aligned[i])):
+        if (np.isnan(resistance[i]) or np.isnan(support[i]) or 
+            np.isnan(trend_1w_up_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long breakout: price > upper BB, RSI > 55, volume > 1.5x average
-            if (close[i] > upper_bb[i] and 
-                rsi_1d_aligned[i] > 55 and 
-                volume[i] > 1.5 * vol_ma[i]):
+            # Long entry: bullish fractal breakout above resistance with volume spike in uptrend
+            if (bullish_fractal[i] and 
+                close[i] > resistance[i] and 
+                volume_spike[i] and 
+                trend_1w_up_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short breakout: price < lower BB, RSI < 45, volume > 1.5x average
-            elif (close[i] < lower_bb[i] and 
-                  rsi_1d_aligned[i] < 45 and 
-                  volume[i] > 1.5 * vol_ma[i]):
+            # Short entry: bearish fractal breakdown below support with volume spike in downtrend
+            elif (bearish_fractal[i] and 
+                  close[i] < support[i] and 
+                  volume_spike[i] and 
+                  not trend_1w_up_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below SMA or RSI returns to neutral
-            if close[i] < sma_20[i] or (rsi_1d_aligned[i] >= 45 and rsi_1d_aligned[i] <= 55):
+            # Long exit: bearish fractal breakdown or trend reversal
+            if bearish_fractal[i] and close[i] < support[i]:
+                signals[i] = 0.0
+                position = 0
+            elif not trend_1w_up_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above SMA or RSI returns to neutral
-            if close[i] > sma_20[i] or (rsi_1d_aligned[i] >= 45 and rsi_1d_aligned[i] <= 55):
+            # Short exit: bullish fractal breakout or trend reversal
+            if bullish_fractal[i] and close[i] > resistance[i]:
+                signals[i] = 0.0
+                position = 0
+            elif trend_1w_up_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
