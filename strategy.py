@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian Breakout with 1d Trend and Volume Confirmation
-# - Uses Donchian channel (20-period high/low) to identify breakouts
-# - Filters by 1d EMA trend to avoid counter-trend trades
-# - Requires volume spike for confirmation
-# - Works in both bull and bear markets by aligning with higher timeframe trend
+# Hypothesis: 4h Donchian Breakout with 1d Trend Filter and Volume Confirmation
+# - Donchian(20) breakouts capture trend continuation
+# - 1d EMA50 filter ensures alignment with higher timeframe trend
+# - Volume spike (>2x 20-bar avg) confirms breakout strength
+# - Works in bull/bear by using 1d trend filter to avoid counter-trend trades
 # - Target: 20-40 trades/year to minimize fee drag on 4h timeframe
 
 name = "4h_DonchianBreakout_1dTrend_Volume"
@@ -26,16 +26,16 @@ def generate_signals(prices):
     
     # 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Donchian channel (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Donchian channels (20-period)
+    high_max20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume spike: current volume > 2.0x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -44,12 +44,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = 50  # Need enough data for Donchian and EMA
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(high_max20[i]) or np.isnan(low_min20[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -57,13 +57,13 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: price breaks above Donchian high + 1d uptrend + volume spike
-            long_cond = (close[i] > donchian_high[i] and 
-                        ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and
+            long_cond = (close[i] > high_max20[i] and 
+                        ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1] and
                         volume_spike[i])
             
             # Short: price breaks below Donchian low + 1d downtrend + volume spike
-            short_cond = (close[i] < donchian_low[i] and 
-                         ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and
+            short_cond = (close[i] < low_min20[i] and 
+                         ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1] and
                          volume_spike[i])
             
             if long_cond:
@@ -74,14 +74,14 @@ def generate_signals(prices):
                 position = -1
         elif position == 1:
             # Long exit: price breaks below Donchian low
-            if close[i] < donchian_low[i]:
+            if close[i] < low_min20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short exit: price breaks above Donchian high
-            if close[i] > donchian_high[i]:
+            if close[i] > high_max20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
