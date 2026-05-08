@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using weekly ADX for trend strength and daily pivot points for mean reversion entries.
-# Uses 1w ADX > 25 to identify trending markets and 1d pivot points (support/resistance) for entries.
-# Long when price touches 1d support (S1) in uptrend (ADX > 25 and price > 200 EMA).
-# Short when price touches 1d resistance (R1) in downtrend (ADX > 25 and price < 200 EMA).
-# Exit when price crosses the 1d pivot point (PP) or ADX falls below 20.
-# Designed for low trade frequency (12-25/year) to avoid fee drag. Works in both trending and ranging markets.
+# Hypothesis: 4h strategy using 1-day Williams %R with 1-week SMA trend filter and volume confirmation.
+# Williams %R identifies overbought/oversold conditions; trend filter ensures trades align with higher timeframe direction.
+# Long when Williams %R < -80 (oversold) and price > 1w SMA (uptrend) with volume confirmation.
+# Short when Williams %R > -20 (overbought) and price < 1w SMA (downtrend) with volume confirmation.
+# Exit when Williams %R crosses back to -50 (mean reversion) or trend changes.
+# Designed for low trade frequency (20-30/year) to avoid fee decay. Works in both trending and ranging markets via trend filter.
 
-name = "12h_1wADX_1dPivot_Pullback"
-timeframe = "12h"
+name = "4h_1dWilliamsR_1wSMA_TrendFilter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,136 +22,88 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1w data for ADX
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate 1w ADX (14-period)
-    def calculate_adx(high, low, close, period=14):
-        # True Range
-        tr1 = high[1:] - low[1:]
-        tr2 = np.abs(high[1:] - close[:-1])
-        tr3 = np.abs(low[1:] - close[:-1])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr = np.concatenate([[np.nan], tr])
-        
-        # Directional Movement
-        up_move = high[1:] - high[:-1]
-        down_move = low[:-1] - low[1:]
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-        plus_dm = np.concatenate([[0], plus_dm])
-        minus_dm = np.concatenate([[0], minus_dm])
-        
-        # Smoothed values
-        atr = np.zeros_like(close)
-        plus_dm_sm = np.zeros_like(close)
-        minus_dm_sm = np.zeros_like(close)
-        
-        # Initial values
-        atr[period] = np.nanmean(tr[1:period+1])
-        plus_dm_sm[period] = np.nanmean(plus_dm[1:period+1])
-        minus_dm_sm[period] = np.nanmean(minus_dm[1:period+1])
-        
-        # Wilder's smoothing
-        for i in range(period+1, len(close)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-            plus_dm_sm[i] = (plus_dm_sm[i-1] * (period-1) + plus_dm[i]) / period
-            minus_dm_sm[i] = (minus_dm_sm[i-1] * (period-1) + minus_dm[i]) / period
-        
-        # Directional Indicators
-        plus_di = 100 * plus_dm_sm / atr
-        minus_di = 100 * minus_dm_sm / atr
-        
-        # DX and ADX
-        dx = np.zeros_like(close)
-        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-        adx = np.zeros_like(close)
-        
-        # ADX smoothing
-        adx[2*period] = np.nanmean(dx[period:2*period+1])
-        for i in range(2*period+1, len(close)):
-            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx
-    
-    adx_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
-    adx_1w[:27] = np.nan  # Not enough data for ADX
-    
-    # Get 1d data for pivot points
+    # Get 1d data for Williams %R
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d pivot points (standard)
-    pp_1d = (high_1d + low_1d + close_1d) / 3
-    r1_1d = 2 * pp_1d - low_1d
-    s1_1d = 2 * pp_1d - high_1d
-    r2_1d = pp_1d + (high_1d - low_1d)
-    s2_1d = pp_1d - (high_1d - low_1d)
+    # Calculate 1-day Williams %R (14-period)
+    highest_high = np.maximum.accumulate(high_1d)
+    lowest_low = np.minimum.accumulate(low_1d)
+    # For true rolling window, we need to look back 14 periods
+    hh_14 = np.full_like(high_1d, np.nan)
+    ll_14 = np.full_like(low_1d, np.nan)
     
-    # Align 1w ADX to 12h timeframe
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    for i in range(13, len(high_1d)):
+        hh_14[i] = np.max(high_1d[i-13:i+1])
+        ll_14[i] = np.min(low_1d[i-13:i+1])
     
-    # Align 1d pivot points to 12h timeframe
-    pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    williams_r = -100 * (hh_14 - close_1d) / (hh_14 - ll_14)
+    williams_r[:13] = np.nan  # Not enough data
     
-    # Calculate 12h EMA 200 for trend filter
-    close_s = pd.Series(close)
-    ema_200 = close_s.ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Get 1w data for SMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    # Calculate 1-week SMA (9-period)
+    sma_9 = np.convolve(close_1w, np.ones(9)/9, mode='same')
+    for i in range(len(close_1w)):
+        if i < 4 or i >= len(close_1w) - 4:
+            sma_9[i] = np.nan
+    
+    # Align indicators to 4h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    sma_9_aligned = align_htf_to_ltf(prices, df_1w, sma_9)
+    
+    # Volume confirmation: 4h volume > 1.3x 20-period EMA
+    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ema * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # Ensure enough data for EMA 200
+    start_idx = 30  # Ensure enough data for Williams %R and SMA
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(adx_1w_aligned[i]) or 
-            np.isnan(pp_1d_aligned[i]) or 
-            np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or
-            np.isnan(ema_200[i])):
+        if (np.isnan(williams_r_aligned[i]) or 
+            np.isnan(sma_9_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: ADX > 25 (trending), price > EMA200 (uptrend), and price at S1 support
-            if (adx_1w_aligned[i] > 25 and 
-                close[i] > ema_200[i] and 
-                abs((close[i] - s1_1d_aligned[i]) / s1_1d_aligned[i]) < 0.005):  # Within 0.5% of S1
+            # Enter long: Williams %R < -80 (oversold) and price > 1w SMA (uptrend) with volume confirmation
+            if (williams_r_aligned[i] < -80 and 
+                close[i] > sma_9_aligned[i] and 
+                vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: ADX > 25 (trending), price < EMA200 (downtrend), and price at R1 resistance
-            elif (adx_1w_aligned[i] > 25 and 
-                  close[i] < ema_200[i] and 
-                  abs((close[i] - r1_1d_aligned[i]) / r1_1d_aligned[i]) < 0.005):  # Within 0.5% of R1
+            # Enter short: Williams %R > -20 (overbought) and price < 1w SMA (downtrend) with volume confirmation
+            elif (williams_r_aligned[i] > -20 and 
+                  close[i] < sma_9_aligned[i] and 
+                  vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses above pivot point or ADX falls below 20
-            if close[i] > pp_1d_aligned[i] or adx_1w_aligned[i] < 20:
+            # Exit long: Williams %R crosses above -50 or trend turns down
+            if williams_r_aligned[i] > -50 or close[i] < sma_9_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses below pivot point or ADX falls below 20
-            if close[i] < pp_1d_aligned[i] or adx_1w_aligned[i] < 20:
+            # Exit short: Williams %R crosses below -50 or trend turns up
+            if williams_r_aligned[i] < -50 or close[i] > sma_9_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
