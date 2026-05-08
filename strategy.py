@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_R3S3_Breakout_Trend_Volume"
-timeframe = "12h"
+name = "4h_TripleMA_Crossover_Volume_Trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,32 +17,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot and trend
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Daily close for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate EMAs on 4h timeframe
+    close_series = pd.Series(close)
+    ema_fast = close_series.ewm(span=9, adjust=False, min_periods=9).values
+    ema_medium = close_series.ewm(span=21, adjust=False, min_periods=21).values
+    ema_slow = close_series.ewm(span=55, adjust=False, min_periods=55).values
+    
+    # Daily EMA for trend filter
+    close_1d = pd.Series(df_1d['close'].values)
+    ema_34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Calculate daily Camarilla levels (R3, S3)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Pivot = (H + L + C) / 3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    # Range = H - L
-    range_1d = high_1d - low_1d
-    # Camarilla levels
-    r3_1d = close_1d + range_1d * 1.1 / 4
-    s3_1d = close_1d - range_1d * 1.1 / 4
-    
-    # Align Camarilla levels to 12h timeframe
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
     # Volume confirmation - 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -52,39 +41,38 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 50
+    start_idx = 55  # Wait for slow EMA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or 
-            np.isnan(s3_1d_aligned[i]) or np.isnan(vol_ratio[i])):
+        if np.isnan(ema_fast[i]) or np.isnan(ema_medium[i]) or np.isnan(ema_slow[i]) or np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ratio[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R3 + above daily EMA34 + volume confirmation
-            if (close[i] > r3_1d_aligned[i] and 
+            # Bullish crossover: fast > medium > slow AND above daily EMA + volume
+            if (ema_fast[i] > ema_medium[i] > ema_slow[i] and 
                 close[i] > ema_34_1d_aligned[i] and
-                vol_ratio[i] > 1.5):
+                vol_ratio[i] > 1.3):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 + below daily EMA34 + volume confirmation
-            elif (close[i] < s3_1d_aligned[i] and 
+            # Bearish crossover: fast < medium < slow AND below daily EMA + volume
+            elif (ema_fast[i] < ema_medium[i] < ema_slow[i] and 
                   close[i] < ema_34_1d_aligned[i] and
-                  vol_ratio[i] > 1.5):
+                  vol_ratio[i] > 1.3):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price below EMA34
-            if close[i] < ema_34_1d_aligned[i]:
+            # Exit long: bearish crossover OR below daily EMA
+            if (ema_fast[i] < ema_medium[i] or close[i] < ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price above EMA34
-            if close[i] > ema_34_1d_aligned[i]:
+            # Exit short: bullish crossover OR above daily EMA
+            if (ema_fast[i] > ema_medium[i] or close[i] > ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
