@@ -1,18 +1,18 @@
-#137156
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d volume confirmation and ADX(14) > 25 trend filter.
+# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and ADX trend filter.
 # Long when price breaks above Donchian(20) high AND 1d volume > 1.3x 20-period average AND ADX(14) > 25.
 # Short when price breaks below Donchian(20) low AND 1d volume > 1.3x 20-period average AND ADX(14) > 25.
 # Exit when price crosses back inside the Donchian channel.
-# Uses 12h timeframe as specified, with 1d volume and ADX for higher timeframe context.
-# Target: 50-150 total trades over 4 years (12-37/year) with controlled frequency to avoid fee drag.
+# Uses 4h timeframe with 1d volume and ADX for higher timeframe context.
+# Target: 75-200 total trades over 4 years (19-50/year) with controlled frequency to avoid fee drag.
+# This variant uses 4h timeframe as requested in experiment #137157.
 
-name = "12h_Donchian_20_1dVolume_ADX"
-timeframe = "12h"
+name = "4h_Donchian_20_1dVolume_ADX_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,7 +29,7 @@ def generate_signals(prices):
     if len(df_d) < 2:
         return np.zeros(n)
     
-    # Donchian(20) on 12h data
+    # Donchian(20) on 4h data
     donchian_period = 20
     upper_dc = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
     lower_dc = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
@@ -74,7 +74,7 @@ def generate_signals(prices):
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     adx[np.isnan(adx)] = 0
     
-    # Align ADX to 12h timeframe
+    # Align ADX to 4h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_d, adx)
     
     # Trend filter: ADX > 25
