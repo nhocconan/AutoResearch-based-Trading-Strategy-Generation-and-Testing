@@ -3,19 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using daily volatility breakout with volume confirmation and trend filter.
-# Combines daily ATR breakout (buy when price breaks above close + ATR, sell when breaks below close - ATR)
-# with volume spike confirmation and 12h EMA(50) trend filter. Uses daily timeframe for volatility
-# measurement to avoid noise, 12h for execution to reduce frequency. Designed for low trade frequency
-# (15-25/year) to minimize fee drag while capturing volatility expansion moves in both bull and bear markets.
+# Hypothesis: 4h strategy using 1w Ichimoku Cloud for trend filter + 1d Donchian breakout + volume confirmation.
+# Ichimoku provides multi-dimensional trend, support/resistance, and momentum in one system.
+# Long when price breaks above weekly Donchian high with price above Kumo and volume confirmation.
+# Short when price breaks below weekly Donchian low with price below Kumo and volume confirmation.
+# Exit when price re-enters Kumo or opposite Donchian breakout occurs.
+# Designed for low trade frequency (20-40/year) to minimize fee decay while capturing major trends.
 
-name = "12h_DailyATR_Breakout_Volume_TrendFilter"
-timeframe = "12h"
+name = "4h_IchimokuTrend_DonchianBreakout_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,74 +24,112 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ATR calculation
+    # Get weekly data for Ichimoku
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 52:  # Need at least 1 year of weekly data
+        return np.zeros(n)
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Ichimoku components (standard periods: 9, 26, 52)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    high_9 = pd.Series(high_1w).rolling(window=9, min_periods=9).max().values
+    low_9 = pd.Series(low_1w).rolling(window=9, min_periods=9).min().values
+    tenkan = (high_9 + low_9) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    high_26 = pd.Series(high_1w).rolling(window=26, min_periods=26).max().values
+    low_26 = pd.Series(low_1w).rolling(window=26, min_periods=26).min().values
+    kijun = (high_26 + low_26) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = ((tenkan + kijun) / 2)
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    high_52 = pd.Series(high_1w).rolling(window=52, min_periods=52).max().values
+    low_52 = pd.Series(low_1w).rolling(window=52, min_periods=52).min().values
+    senkou_b = ((high_52 + low_52) / 2)
+    
+    # Chikou Span (Lagging Span): current close plotted 26 periods back
+    # For trend filter, we'll use current price vs Kumo (cloud)
+    
+    # Kumo (Cloud): between Senkou Span A and Senkou Span B
+    # Kumo top = max(Senkou A, Senkou B), Kumo bottom = min(Senkou A, Senkou B)
+    # Since Senkou spans are plotted 26 periods ahead, we need to shift them back
+    # For current Kumo, we use Senkou A and B from 26 periods ago
+    # But for simplicity in filtering, we'll use current Senkou values with proper alignment
+    
+    # Align Ichimoku components to 4h timeframe
+    tenkan_aligned = align_htf_to_ltf(prices, df_1w, tenkan)
+    kijun_aligned = align_htf_to_ltf(prices, df_1w, kijun)
+    senkou_a_aligned = align_htf_to_ltf(prices, df_1w, senkou_a)
+    senkou_b_aligned = align_htf_to_ltf(prices, df_1w, senkou_b)
+    
+    # Get daily data for Donchian channels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 15:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate ATR(14) on daily timeframe
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = np.zeros(len(close_1d))
-    atr_14[14] = np.mean(tr[:14])
-    for i in range(15, len(close_1d)):
-        atr_14[i] = (atr_14[i-1] * 13 + tr[i-1]) / 14
+    # Donchian(20) channels from daily data
+    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Calculate upper and lower bands: close ± ATR
-    upper_band = close_1d + atr_14
-    lower_band = close_1d - atr_14
+    # Align Donchian levels to 4h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, low_20)
     
-    # Align bands to 12h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
-    
-    # 12h EMA(50) for trend filter
-    close_series = pd.Series(close)
-    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Volume confirmation: 12h volume > 2.0x 20-period EMA
+    # Volume confirmation: 4h volume > 1.3x 20-period EMA
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ema * 2.0)
+    vol_confirm = volume > (vol_ema * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for EMA(50)
+    start_idx = 100  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or
-            np.isnan(ema_50[i])):
+        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
+            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or
+            np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(vol_ema[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Kumo (cloud) boundaries
+        kumotop = max(senkou_a_aligned[i], senkou_b_aligned[i])
+        kumobottom = min(senkou_a_aligned[i], senkou_b_aligned[i])
+        
         if position == 0:
-            # Long entry: price breaks above upper band with volume confirmation and uptrend
-            if close[i] > upper_aligned[i] and vol_confirm[i] and close[i] > ema_50[i]:
+            # Long entry: price breaks above weekly Donchian high, above Kumo, with volume
+            if (close[i] > donchian_high_aligned[i] and 
+                close[i] > kumotop and 
+                vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below lower band with volume confirmation and downtrend
-            elif close[i] < lower_aligned[i] and vol_confirm[i] and close[i] < ema_50[i]:
+            # Short entry: price breaks below weekly Donchian low, below Kumo, with volume
+            elif (close[i] < donchian_low_aligned[i] and 
+                  close[i] < kumobottom and 
+                  vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price closes below EMA50 or reverses below lower band
-            if close[i] < ema_50[i] or close[i] < lower_aligned[i]:
+            # Long exit: price re-enters Kumo or breaks below weekly Donchian low
+            if close[i] < kumotop or close[i] < donchian_low_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price closes above EMA50 or reverses above upper band
-            if close[i] > ema_50[i] or close[i] > upper_aligned[i]:
+            # Short exit: price re-enters Kumo or breaks above weekly Donchian high
+            if close[i] > kumobottom or close[i] > donchian_high_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
