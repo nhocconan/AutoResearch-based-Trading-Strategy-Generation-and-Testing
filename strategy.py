@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h Donchian breakout (trend direction) with 1d volume spike and 1h RSI filter for entry timing.
-# Uses 4h for trend direction (Donchian breakout), 1d for volume confirmation (2x 20-day EMA volume), and 1h RSI (14) to avoid overextended entries.
-# Restricts to 08:00-20:00 UTC session to avoid low-liquidity periods. Position size fixed at 0.20 to manage risk.
-# Designed for low trade frequency (~20-50/year) to minimize fee drag. Works in bull/bear by following 4h trend with strict 1h entry filters.
+# Hypothesis: 6h strategy using weekly volume-weighted average price (VWAP) deviation with 1d trend filter.
+# Goes long when price deviates significantly below weekly VWAP in an uptrend, short when above in downtrend.
+# Uses weekly structure for mean reversion zones and daily trend to avoid counter-trend trades.
+# Designed for low trade frequency (15-30/year) to avoid fee drag in ranging/bear markets.
 
-name = "1h_4hDonchian_1dVolume_1hRSI_Session"
-timeframe = "1h"
+name = "6h_WeeklyVWAP_Deviation_TrendFilter"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,120 +22,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Donchian channel (trend direction)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Get weekly data for VWAP calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # 4h Donchian channel (20-period)
-    def rolling_max(arr, window):
-        res = np.full_like(arr, np.nan)
-        for i in range(window - 1, len(arr)):
-            res[i] = np.max(arr[i - window + 1:i + 1])
-        return res
+    # Calculate typical price and VWAP components
+    typical_price_1w = (high_1w + low_1w + close_1w) / 3.0
+    pv_1w = typical_price_1w * volume_1w
     
-    def rolling_min(arr, window):
-        res = np.full_like(arr, np.nan)
-        for i in range(window - 1, len(arr)):
-            res[i] = np.min(arr[i - window + 1:i + 1])
-        return res
+    # Cumulative sums for VWAP
+    cum_pv = np.cumsum(pv_1w)
+    cum_vol = np.cumsum(volume_1w)
     
-    donchian_high_4h = rolling_max(high_4h, 20)
-    donchian_low_4h = rolling_min(low_4h, 20)
+    # Avoid division by zero
+    vwap_1w = np.divide(cum_pv, cum_vol, out=np.full_like(cum_pv, np.nan), where=cum_vol!=0)
     
-    # Align 4h Donchian levels to 1h timeframe
-    donchian_high_4h_aligned = align_htf_to_ltf(prices, df_4h, donchian_high_4h)
-    donchian_low_4h_aligned = align_htf_to_ltf(prices, df_4h, donchian_low_4h)
+    # Align weekly VWAP to 6h timeframe
+    vwap_1w_aligned = align_htf_to_ltf(prices, df_1w, vwap_1w)
     
-    # Get 1d data for volume spike (momentum confirmation)
+    # Get daily data for trend filter (EMA 34)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 40:
         return np.zeros(n)
     
-    volume_1d = df_1d['volume'].values
-    
-    # Volume spike: 2x 20-day EMA
-    vol_ema = pd.Series(volume_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike_1d = volume_1d > (vol_ema * 2.0)
-    
-    # Align 1d volume spike to 1h timeframe
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
-    
-    # Get 1h RSI for entry timing (avoid overextended entries)
-    def calculate_rsi(prices, period=14):
-        delta = np.diff(prices, prepend=prices[0])
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = np.zeros_like(gain)
-        avg_loss = np.zeros_like(loss)
-        if len(gain) > period:
-            avg_gain[period] = np.mean(gain[1:period+1])
-            avg_loss[period] = np.mean(loss[1:period+1])
-        
-        for i in range(period + 1, len(gain)):
-            avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i]) / period
-        
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
-    
-    rsi_1h = calculate_rsi(close, 14)
-    
-    # Session filter: 08:00-20:00 UTC
-    hours = prices.index.hour
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Ensure enough data for indicators
+    start_idx = 50  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donchian_high_4h_aligned[i]) or 
-            np.isnan(donchian_low_4h_aligned[i]) or 
-            np.isnan(vol_spike_1d_aligned[i]) or 
-            np.isnan(rsi_1h[i])):
+        if (np.isnan(vwap_1w_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Session filter: only trade between 08:00-20:00 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
+        # Calculate deviation from weekly VWAP as percentage
+        vwap_dev_pct = (close[i] - vwap_1w_aligned[i]) / vwap_1w_aligned[i] * 100
         
         if position == 0:
-            # Enter long: price breaks above 4h Donchian high + volume spike + RSI not overbought
-            if close[i] > donchian_high_4h_aligned[i] and vol_spike_1d_aligned[i] and rsi_1h[i] < 70:
-                signals[i] = 0.20
+            # Enter long: price significantly below weekly VWAP AND daily uptrend (price > EMA34)
+            if vwap_dev_pct < -1.5 and close[i] > ema_34_1d_aligned[i]:
+                signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below 4h Donchian low + volume spike + RSI not oversold
-            elif (i > 0 and close[i] < donchian_low_4h_aligned[i] and 
-                  vol_spike_1d_aligned[i] and rsi_1h[i] > 30):
-                signals[i] = -0.20
+            # Enter short: price significantly above weekly VWAP AND daily downtrend (price < EMA34)
+            elif vwap_dev_pct > 1.5 and close[i] < ema_34_1d_aligned[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below 4h Donchian low or RSI overbought
-            if close[i] < donchian_low_4h_aligned[i] or rsi_1h[i] > 70:
+            # Exit long: price returns to weekly VWAP or trend breaks
+            if vwap_dev_pct > -0.5 or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above 4h Donchian high or RSI oversold
-            if close[i] > donchian_high_4h_aligned[i] or rsi_1h[i] < 30:
+            # Exit short: price returns to weekly VWAP or trend breaks
+            if vwap_dev_pct < 0.5 or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
