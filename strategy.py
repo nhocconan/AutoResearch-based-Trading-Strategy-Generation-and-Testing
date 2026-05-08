@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_WeeklyPivot_Trend_Volume_Confirm_v1"
-timeframe = "4h"
+name = "1d_WeeklyPivot_Trend_Volume_Confirm_v5"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
+    # Get daily data for indicators
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 100:
         return np.zeros(n)
@@ -48,7 +48,7 @@ def generate_signals(prices):
     # Resistance 2 = Pivot + (High - Low)
     r2_1w = pivot_1w + (high_1w - low_1w)
     
-    # Align weekly pivots to 4h timeframe
+    # Align weekly pivots to daily timeframe
     pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
     r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
     r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
@@ -79,18 +79,18 @@ def generate_signals(prices):
             # Long: price above weekly pivot + above daily EMA34 + volume confirmation
             if (close[i] > pivot_1w_aligned[i] and 
                 close[i] > ema_34_1d_aligned[i] and
-                vol_ratio[i] > 1.5):
+                vol_ratio[i] > 1.8):
                 # Avoid extreme extension beyond R2
                 if close[i] <= r2_1w_aligned[i] * 1.03:
-                    signals[i] = 0.25
+                    signals[i] = 0.30
                     position = 1
             # Short: price below weekly pivot + below daily EMA34 + volume confirmation
             elif (close[i] < pivot_1w_aligned[i] and 
                   close[i] < ema_34_1d_aligned[i] and
-                  vol_ratio[i] > 1.5):
+                  vol_ratio[i] > 1.8):
                 # Avoid extreme extension beyond S2
                 if close[i] >= s2_1w_aligned[i] * 0.97:
-                    signals[i] = -0.25
+                    signals[i] = -0.30
                     position = -1
         elif position == 1:
             # Exit long: price below weekly pivot OR below daily EMA34
@@ -98,13 +98,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
             # Exit short: price above weekly pivot OR above daily EMA34
             if close[i] > pivot_1w_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
