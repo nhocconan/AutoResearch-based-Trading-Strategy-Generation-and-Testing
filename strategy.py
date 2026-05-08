@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1-day pivot points with volume confirmation and trend filter.
-# Pivot points (S1, R1) act as strong support/resistance in trending markets.
-# Long when price bounces from S1 in uptrend with volume confirmation.
-# Short when price rejects R1 in downtrend with volume confirmation.
-# Uses 1-day trend filter to ensure alignment with higher timeframe momentum.
-# Designed for low trade frequency (12-37/year) to minimize fee drag and capture high-probability reversals.
+# Hypothesis: 4H strategy using 1-day Keltner Channel breakout with volume confirmation and trend filter.
+# Keltner Channel (ATR-based envelope) adapts to volatility and provides dynamic support/resistance.
+# Long when price breaks above upper Keltner band with volume confirmation in uptrend.
+# Short when price breaks below lower Keltner band with volume confirmation in downtrend.
+# Uses 4-hour trend filter (EMA50) to avoid counter-trend trades.
+# Designed for low trade frequency (15-25/year) to minimize fee drag and capture high-probability breakouts.
 
-name = "12h_Pivot_Bounce_TrendFilter_Volume"
-timeframe = "12h"
+name = "4H_KeltnerBreakout_Volume_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,90 +24,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot point calculation
+    # Get daily data for ATR calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate pivot points and support/resistance levels from prior day
-    pivot = np.zeros_like(close_1d)
-    s1 = np.zeros_like(close_1d)  # Support 1
-    r1 = np.zeros_like(close_1d)  # Resistance 1
+    # Calculate True Range and ATR(10) for Keltner Channel
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr = np.concatenate([[0], tr])  # First TR = 0
     
-    for i in range(1, len(close_1d)):
-        # Prior day's high, low, close
-        ph = high_1d[i-1]
-        pl = low_1d[i-1]
-        pc = close_1d[i-1]
-        
-        # Pivot point calculation
-        pivot[i] = (ph + pl + pc) / 3.0
-        
-        # Support and resistance levels
-        s1[i] = 2 * pivot[i] - ph
-        r1[i] = 2 * pivot[i] - pl
+    atr = np.zeros_like(close_1d)
+    for i in range(10, len(tr)):
+        atr[i] = np.mean(tr[i-9:i+1])  # Simple moving average of TR
     
-    # First day has no prior data
-    pivot[0] = s1[0] = r1[0] = np.nan
+    # Keltner Channel: EMA(20) ± 2*ATR(10)
+    ema_20 = np.zeros_like(close_1d)
+    for i in range(20, len(close_1d)):
+        ema_20[i] = np.mean(close_1d[i-19:i+1])
     
-    # Align pivot levels to 12h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    upper_keltner = ema_20 + 2 * atr
+    lower_keltner = ema_20 - 2 * atr
     
-    # Get daily trend filter using EMA(34)
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    daily_trend_up = ema_34_1d[1:] > ema_34_1d[:-1]  # Rising daily EMA
-    daily_trend_up = np.concatenate([[False], daily_trend_up])  # Align with daily index
-    daily_trend_aligned = align_htf_to_ltf(prices, df_1d, daily_trend_up.astype(float))
+    # Align Keltner Channel to 4h timeframe
+    upper_keltner_aligned = align_htf_to_ltf(prices, df_1d, upper_keltner)
+    lower_keltner_aligned = align_htf_to_ltf(prices, df_1d, lower_keltner)
     
-    # Volume confirmation: current volume > 2.0x 24-period EMA
-    vol_ema = pd.Series(volume).ewm(span=24, adjust=False, min_periods=24).mean().values
+    # 4h EMA(50) for trend filter
+    close_series = pd.Series(close)
+    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_up = close > ema_50
+    
+    # Volume confirmation: current volume > 2.0x 20-period EMA
+    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     vol_confirm = volume > (vol_ema * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for EMA(34)
+    start_idx = 50  # Ensure enough data for EMA(50)
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(s1_aligned[i]) or np.isnan(r1_aligned[i]) or
-            np.isnan(daily_trend_aligned[i])):
+        if (np.isnan(upper_keltner_aligned[i]) or np.isnan(lower_keltner_aligned[i]) or
+            np.isnan(ema_50[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long setup: bounce from S1 in uptrend with volume confirmation
-            if (daily_trend_aligned[i] > 0.5 and  # Daily uptrend
-                close[i] >= s1_aligned[i] * 0.995 and  # At or above S1 (allow 0.5% slack)
-                close[i] <= s1_aligned[i] * 1.005 and
+            # Long setup: break above upper Keltner band in uptrend with volume
+            if (trend_up[i] and
+                close[i] > upper_keltner_aligned[i] and
                 vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short setup: rejection at R1 in downtrend with volume confirmation
-            elif (daily_trend_aligned[i] <= 0.5 and  # Daily downtrend
-                  close[i] <= r1_aligned[i] * 1.005 and  # At or below R1
-                  close[i] >= r1_aligned[i] * 0.995 and
+            # Short setup: break below lower Keltner band in downtrend with volume
+            elif ((not trend_up[i]) and
+                  close[i] < lower_keltner_aligned[i] and
                   vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: break below S1 or trend turns down
-            if close[i] < s1_aligned[i] * 0.995 or daily_trend_aligned[i] <= 0.5:
+            # Long exit: price re-enters Keltner Channel or trend turns down
+            if close[i] < ema_50[i] or close[i] < upper_keltner_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: break above R1 or trend turns up
-            if close[i] > r1_aligned[i] * 1.005 or daily_trend_aligned[i] > 0.5:
+            # Short exit: price re-enters Keltner Channel or trend turns up
+            if close[i] > ema_50[i] or close[i] > lower_keltner_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
