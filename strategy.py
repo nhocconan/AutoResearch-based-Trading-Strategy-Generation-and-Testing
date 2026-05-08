@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 40:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -33,21 +33,23 @@ def generate_signals(prices):
     close_1d_prev = df_1d['close'].values
     
     # Calculate Camarilla levels: R1, S1 (based on previous day)
+    # R1 = close + 1.1*(high-low)/12
+    # S1 = close - 1.1*(high-low)/12
     camarilla_r1 = close_1d_prev + 1.1 * (high_1d - low_1d) / 12
     camarilla_s1 = close_1d_prev - 1.1 * (high_1d - low_1d) / 12
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Volume spike: current volume > 2.0 * 20-period average
+    # Volume spike: current volume > 1.8 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_spike = volume > (1.8 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # warmup for calculations
+    start_idx = 40  # warmup for calculations
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
