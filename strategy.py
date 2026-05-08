@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume_Confirm"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_TrendFilter_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,7 +26,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 12h EMA50 for trend filter
+    # 4h trend: EMA50 for trend filter
     ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # ATR(14) for stop loss
@@ -68,12 +68,12 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: break above R3 + uptrend (price > 1d EMA34 AND price > 12h EMA50) + volume spike
+            # Long: break above R3 + uptrend (price > 1d EMA34 AND price > 4h EMA50) + volume spike
             long_cond = (close[i] > r3_aligned[i]) and \
                         (close[i] > ema_34_1d_aligned[i]) and \
                         (close[i] > ema_50[i]) and \
                         volume_spike[i]
-            # Short: break below S3 + downtrend (price < 1d EMA34 AND price < 12h EMA50) + volume spike
+            # Short: break below S3 + downtrend (price < 1d EMA34 AND price < 4h EMA50) + volume spike
             short_cond = (close[i] < s3_aligned[i]) and \
                          (close[i] < ema_34_1d_aligned[i]) and \
                          (close[i] < ema_50[i]) and \
