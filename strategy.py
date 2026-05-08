@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -31,10 +31,8 @@ def generate_signals(prices):
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate Camarilla levels from previous day
-    R3 = np.zeros(n)
-    S3 = np.zeros(n)
-    R4 = np.zeros(n)
-    S4 = np.zeros(n)
+    R3 = np.zeros(len(close_1d))
+    S3 = np.zeros(len(close_1d))
     
     for i in range(1, len(close_1d)):
         high_prev = high_1d[i-1]
@@ -45,14 +43,10 @@ def generate_signals(prices):
         C = close_prev + (range_val * 1.1 / 6)
         R3[i] = C + (range_val * 1.1 / 2)
         S3[i] = C - (range_val * 1.1 / 2)
-        R4[i] = C + (range_val * 1.1)
-        S4[i] = C - (range_val * 1.1)
     
     # Align Camarilla levels to 4h timeframe
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
     
     # Volume spike: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
