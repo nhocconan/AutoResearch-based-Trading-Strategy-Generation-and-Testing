@@ -1,103 +1,98 @@
-# USO 4h_TrendFollowing_ADX14_PlusDI_MinusDI
-# Trend-following strategy using ADX and directional indicators to capture trends with proper risk management.
-# Works in both bull and bear markets by going long when +DI > -DI and ADX > 25, short when -DI > +DI and ADX > 25.
-# Uses 4h timeframe to target 20-50 trades/year, avoiding excessive frequency and fee drag.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_TrendFollowing_ADX14_PlusDI_MinusDI"
-timeframe = "4h"
+# Hypothesis: 6-hour price position within daily Bollinger Bands combined with weekly trend filter
+# We go long when price is in the lower 20% of daily Bollinger Bands (oversold) with weekly EMA(50) uptrend
+# We go short when price is in the upper 20% of daily Bollinger Bands (overbought) with weekly EMA(50) downtrend
+# Uses mean reversion in ranging markets and trend following in trending markets via weekly filter
+# Targets 12-37 trades per year on 6H timeframe to avoid excessive trading
+# Bollinger Bands provide dynamic support/resistance that adapts to volatility
+# Weekly trend filter ensures we trade with higher timeframe momentum
+
+name = "6h_BollingerPosition_WeeklyTrend"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Calculate ADX and directional indicators
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    # Get weekly data once for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Directional Movement
-    up_move = high - np.roll(high, 1)
-    down_move = np.roll(low, 1) - low
+    # Calculate weekly EMA(50) for trend filter
+    weekly_close = df_1w['close'].values
+    ema50_1w = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Get daily data for Bollinger Bands
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Smoothed values
-    def smooth_wilder(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nansum(arr[1:period+1])  # Skip first element (index 0)
-        # Subsequent values using Wilder's smoothing
-        for i in range(period, len(arr)):
-            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
-        return result
+    # Calculate daily Bollinger Bands (20, 2)
+    daily_close = df_1d['close'].values
+    sma20 = pd.Series(daily_close).rolling(window=20, min_periods=20).mean().values
+    std20 = pd.Series(daily_close).rolling(window=20, min_periods=20).std().values
+    upper_band = sma20 + (2 * std20)
+    lower_band = sma20 - (2 * std20)
     
-    # Smooth TR, +DM, -DM
-    atr = smooth_wilder(tr, 14)
-    plus_di_smooth = smooth_wilder(plus_dm, 14)
-    minus_di_smooth = smooth_wilder(minus_dm, 14)
-    
-    # Calculate +DI and -DI
-    plus_di = np.where(atr != 0, (plus_di_smooth / atr) * 100, 0)
-    minus_di = np.where(atr != 0, (minus_di_smooth / atr) * 100, 0)
-    
-    # Calculate DX and ADX
-    dx = np.where((plus_di + minus_di) != 0, np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100, 0)
-    adx = smooth_wilder(dx, 14)
+    # Align Bollinger Bands to 6H timeframe
+    upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
+    lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
+    sma20_aligned = align_htf_to_ltf(prices, df_1d, sma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Warmup for calculations
+    start_idx = 100  # warmup for calculations
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(adx[i]) or np.isnan(plus_di[i]) or np.isnan(minus_di[i])):
+        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(upper_band_aligned[i]) or 
+            np.isnan(lower_band_aligned[i]) or np.isnan(sma20_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        adx_val = adx[i]
-        plus_di_val = plus_di[i]
-        minus_di_val = minus_di[i]
+        ema50_1w_val = ema50_1w_aligned[i]
+        upper_band_val = upper_band_aligned[i]
+        lower_band_val = lower_band_aligned[i]
+        sma20_val = sma20_aligned[i]
+        close_val = close[i]
         
         if position == 0:
-            # Enter long: +DI > -DI and ADX > 25 (strong uptrend)
-            if plus_di_val > minus_di_val and adx_val > 25:
-                signals[i] = 0.25
-                position = 1
-            # Enter short: -DI > +DI and ADX > 25 (strong downtrend)
-            elif minus_di_val > plus_di_val and adx_val > 25:
+            # Enter long: price in lower 20% of Bollinger Bands + weekly uptrend
+            band_width = upper_band_val - lower_band_val
+            if band_width > 0:  # avoid division by zero
+                position_in_bands = (close_val - lower_band_val) / band_width
+                if position_in_bands < 0.2 and close_val > ema50_1w_val:
+                    signals[i] = 0.25
+                    position = 1
+            # Enter short: price in upper 20% of Bollinger Bands + weekly downtrend
+            elif position_in_bands > 0.8 and close_val < ema50_1w_val:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: ADX falls below 20 OR -DI crosses above +DI (trend weakening or reversal)
-            if adx_val < 20 or minus_di_val > plus_di_val:
+            # Exit long: price crosses above SMA(20) or weekly trend turns down
+            if close_val > sma20_val or close_val < ema50_1w_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: ADX falls below 20 OR +DI crosses above -DI (trend weakening or reversal)
-            if adx_val < 20 or plus_di_val > minus_di_val:
+            # Exit short: price crosses below SMA(20) or weekly trend turns up
+            if close_val < sma20_val or close_val > ema50_1w_val:
                 signals[i] = 0.0
                 position = 0
             else:
