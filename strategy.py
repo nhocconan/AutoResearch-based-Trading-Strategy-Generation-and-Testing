@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_Camarilla_R1S1_Breakout_Trend_Filter_v2"
-timeframe = "1d"
+name = "12h_1d_Camarilla_R1S1_Breakout_Trend_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,25 +17,10 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data once for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
-    
-    # Get 1d data once for Camarilla pivot levels
+    # Get 1d data once for Camarilla pivot levels and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
-    
-    # Previous week's OHLC for weekly trend (Monday open, Friday close)
-    prev_week_open = np.roll(df_1w['open'].values, 1)
-    prev_week_close = np.roll(df_1w['close'].values, 1)
-    prev_week_open[0] = df_1w['open'].values[0]
-    prev_week_close[0] = df_1w['close'].values[0]
-    weekly_trend = prev_week_close > prev_week_open  # True for uptrend, False for downtrend
-    
-    # Align weekly trend to daily timeframe
-    weekly_trend_1d = align_htf_to_ltf(prices, df_1w, weekly_trend.astype(float))
     
     # Previous day's OHLC for Camarilla calculation
     prev_high = np.roll(df_1d['high'].values, 1)
@@ -51,9 +36,15 @@ def generate_signals(prices):
     r1 = pivot + (range_val * 1.1 / 6)
     s1 = pivot - (range_val * 1.1 / 6)
     
-    # Align Camarilla levels to daily timeframe
-    r1_1d = align_htf_to_ltf(prices, df_1d, r1)
-    s1_1d = align_htf_to_ltf(prices, df_1d, s1)
+    # Align Camarilla levels to 12h timeframe
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Daily trend filter: EMA34 > EMA89 for uptrend, EMA34 < EMA89 for downtrend
+    ema34 = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema89 = pd.Series(df_1d['close'].values).ewm(span=89, adjust=False, min_periods=89).mean().values
+    daily_trend = np.where(ema34 > ema89, 1.0, -1.0)  # 1.0 for uptrend, -1.0 for downtrend
+    daily_trend_12h = align_htf_to_ltf(prices, df_1d, daily_trend)
     
     # Volume spike detection: current volume > 2.0 * 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -66,18 +57,18 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r1_1d[i]) or np.isnan(s1_1d[i]) or np.isnan(weekly_trend_1d[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or np.isnan(daily_trend_12h[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: price breaks above R1 with volume spike and weekly uptrend
-            long_cond = (close[i] > r1_1d[i] and vol_spike[i] and weekly_trend_1d[i] > 0.5)
+            # Long entry: price breaks above R1 with volume spike and daily uptrend
+            long_cond = (close[i] > r1_12h[i] and vol_spike[i] and daily_trend_12h[i] > 0.5)
             
-            # Short entry: price breaks below S1 with volume spike and weekly downtrend
-            short_cond = (close[i] < s1_1d[i] and vol_spike[i] and weekly_trend_1d[i] < 0.5)
+            # Short entry: price breaks below S1 with volume spike and daily downtrend
+            short_cond = (close[i] < s1_12h[i] and vol_spike[i] and daily_trend_12h[i] < -0.5)
             
             if long_cond:
                 signals[i] = 0.25
@@ -87,14 +78,14 @@ def generate_signals(prices):
                 position = -1
         elif position == 1:
             # Long exit: price breaks below S1 (reversal signal)
-            if close[i] < s1_1d[i]:
+            if close[i] < s1_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short exit: price reverses back above R1 (reversal signal)
-            if close[i] > r1_1d[i]:
+            if close[i] > r1_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,10 +93,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R1/S1 breakout strategy with volume spike confirmation and weekly trend filter on 1d timeframe.
-# Enters long when price breaks above R1 with volume spike and weekly uptrend (weekly close > weekly open).
-# Enters short when price breaks below S1 with volume spike and weekly downtrend (weekly close < weekly open).
+# Hypothesis: Camarilla R1/S1 breakout strategy with volume spike confirmation and daily trend filter on 12h timeframe.
+# Enters long when price breaks above R1 with volume spike and daily uptrend (EMA34 > EMA89).
+# Enters short when price breaks below S1 with volume spike and daily downtrend (EMA34 < EMA89).
 # Exits when price reverses back through S1/R1 respectively.
-# Uses discrete sizing (0.25) to minimize churn. Targets 15-25 trades/year on 1d timeframe.
-# Weekly trend filter ensures we only trade with the higher timeframe trend, reducing whipsaw in sideways markets.
+# Uses discrete sizing (0.25) to minimize churn. Targets 20-40 trades/year on 12h timeframe.
+# Daily trend filter ensures we only trade with the higher timeframe trend, reducing whipsaw in sideways markets.
 # Works in bull markets (trend-following breakouts) and bear markets (reversal breakouts from overextended levels).
