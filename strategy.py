@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Ichimoku_Cloud_TK_Cross_1dTrend_Filter"
-timeframe = "6h"
+name = "4h_Donchian_Breakout_VolumeTrend_1dFilter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,88 +17,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data once for Ichimoku
+    # Get daily data once
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:
+    if len(df_1d) < 100:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Donchian Channel (20-period) on 4h
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    for i in range(19, n):
+        highest_high[i] = np.max(high[i-19:i+1])
+        lowest_low[i] = np.min(low[i-19:i+1])
+    
+    # ATR (20-period) for volatility filter
+    tr = np.maximum(high[1:] - low[1:], 
+                    np.maximum(np.abs(high[1:] - close[:-1]), 
+                               np.abs(low[1:] - close[:-1])))
+    tr = np.concatenate([[np.nan], tr])
+    atr = np.full(n, np.nan)
+    for i in range(20, n):
+        atr[i] = np.mean(tr[i-19:i+1])
+    
+    # Volume MA (20-period) for volume confirmation
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i+1])
+    
+    # Daily trend filter: EMA(50) on 1d close
     close_1d = df_1d['close'].values
-    
-    # Ichimoku Cloud components (standard periods)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (period9_high + period9_low) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (period26_high + period26_low) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
-    senkou_span_a = (tenkan_sen + kijun_sen) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_span_b = (period52_high + period52_low) / 2
-    
-    # Chikou Span (Lagging Span): current close plotted 26 periods back
-    # For signal generation, we don't need Chikou Span directly
-    
-    # Align Ichimoku components to 6h timeframe
-    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # warmup for Ichimoku (52 periods)
+    start_idx = 100  # warmup for all indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
-            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(atr[i]) or np.isnan(vol_ma[i]) or np.isnan(ema50_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine cloud top and bottom
-        cloud_top = max(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
-        cloud_bottom = min(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
-        
-        # TK Cross signals
-        tk_cross_bullish = tenkan_sen_aligned[i] > kijun_sen_aligned[i]
-        tk_cross_bearish = tenkan_sen_aligned[i] < kijun_sen_aligned[i]
-        
-        # Price relative to cloud
-        price_above_cloud = close[i] > cloud_top
-        price_below_cloud = close[i] < cloud_bottom
-        
+        # Entry conditions
         if position == 0:
-            # Long entry: TK bullish cross AND price above cloud
-            if tk_cross_bullish and price_above_cloud:
+            # Long: breakout above upper band + volume + uptrend
+            if (close[i] > highest_high[i] and 
+                volume[i] > vol_ma[i] and 
+                close[i] > ema50_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: TK bearish cross AND price below cloud
-            elif tk_cross_bearish and price_below_cloud:
+            # Short: breakout below lower band + volume + downtrend
+            elif (close[i] < lowest_low[i] and 
+                  volume[i] > vol_ma[i] and 
+                  close[i] < ema50_aligned[i]):
                 signals[i] = -0.25
                 position = -1
+        
+        # Exit conditions
         elif position == 1:
-            # Exit long: TK bearish cross OR price drops below cloud bottom
-            if tk_cross_bearish or close[i] < cloud_bottom:
+            # Exit long: close below midpoint OR ATR-based stop
+            midpoint = (highest_high[i] + lowest_low[i]) / 2
+            if close[i] < midpoint or close[i] < prices['high'][:i+1].max() - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: TK bullish cross OR price rises above cloud top
-            if tk_cross_bullish or close[i] > cloud_top:
+            # Exit short: close above midpoint OR ATR-based stop
+            midpoint = (highest_high[i] + lowest_low[i]) / 2
+            if close[i] > midpoint or close[i] > prices['low'][:i+1].min() + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,11 +97,8 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Ichimoku Cloud provides a comprehensive trend-following system.
-# - Tenkan/Kijun cross (TK Cross) signals momentum shifts
-# - Price position relative to cloud confirms trend strength
-# - Cloud acts as dynamic support/resistance
-# - Works in both bull and bear markets as it adapts to trend conditions
-# - Uses 6h timeframe for balance between signal frequency and cost control
-# - Target: 50-150 total trades over 4 years = 12-37/year to minimize fee drag
-# - Avoids whipsaw by requiring both momentum (TK Cross) and trend (cloud) alignment
+# Hypothesis: Donchian breakouts capture trends, volume confirms conviction,
+# and daily EMA50 filter ensures alignment with higher-timeframe trend.
+# Works in bull markets (captures uptrends) and bear markets (captures downtrends).
+# 4h timeframe balances responsiveness with low frequency to minimize fee drag.
+# Target: 75-200 trades over 4 years (19-50/year) to stay within profitable range.
