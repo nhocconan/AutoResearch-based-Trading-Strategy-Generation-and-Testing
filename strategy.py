@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Donchian_Breakout_WeeklyTrend_Volume"
-timeframe = "4h"
+name = "12h_Donchian_Breakout_WeeklyTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -91,9 +91,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Donchian(20) breakout on daily timeframe with volume confirmation and weekly trend filter on 4H timeframe.
+# Hypothesis: Donchian(20) breakout on daily timeframe with volume confirmation and weekly trend filter on 12H timeframe.
 # Works in bull markets (breakouts continue) and bear markets (mean reversion at opposite band).
 # Weekly EMA34 ensures alignment with longer-term trend, reducing counter-trend trades.
 # Volume spike filter (1.8x 20-day average) ensures momentum confirmation.
-# Target: 15-25 trades/year to minimize fee decay while capturing significant moves.
-# Uses 4H timeframe for execution with daily/weekly HTF filters to avoid overtrading.
+# Target: 12-30 trades/year to minimize fee decay while capturing significant moves.
+# Uses 12H timeframe for execution with daily/weekly HTF filters to avoid overtrading.
