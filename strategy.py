@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Camarilla pivot breakout with daily trend filter and volume confirmation
-# We go long when price breaks above R3 with daily EMA(34) uptrend and volume spike.
-# We go short when price breaks below S3 with daily EMA(34) downtrend and volume spike.
-# Uses 6h timeframe to target 12-37 trades/year, avoiding excessive frequency.
-# Camarilla pivots provide mathematically derived support/resistance levels.
-# Daily trend filter ensures we trade with the higher timeframe momentum.
+# Hypothesis: 12-hour Bollinger Band breakout with weekly trend filter and volume confirmation
+# We go long when price breaks above upper Bollinger Band with weekly EMA(34) uptrend and volume spike.
+# We go short when price breaks below lower Bollinger Band with weekly EMA(34) downtrend and volume spike.
+# Uses 12h timeframe to target 12-37 trades/year, avoiding excessive frequency.
+# Bollinger Bands capture volatility and mean reversion, breaking out signals strong momentum.
+# Weekly trend filter ensures we trade with the higher timeframe momentum.
 # Volume spike confirms institutional participation in the breakout.
 
-name = "6h_Camarilla_R3S3_Breakout_DailyTrend_Volume"
-timeframe = "6h"
+name = "12h_BollingerBreakout_WeeklyTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,31 +25,24 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data once for Camarilla pivots and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get weekly data once for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate daily EMA(34) for trend filter
-    daily_close = df_1d['close'].values
-    ema34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate weekly EMA(34) for trend filter
+    weekly_close = df_1w['close'].values
+    ema34_1w = pd.Series(weekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Calculate Camarilla pivot levels from daily data
-    # R3 = close + 1.1*(high - low)/2
-    # S3 = close - 1.1*(high - low)/2
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close_vals = df_1d['close'].values
+    # Calculate Bollinger Bands on 12h data (20-period, 2 std)
+    close_series = pd.Series(close)
+    bb_middle = close_series.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_series.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2 * bb_std
+    bb_lower = bb_middle - 2 * bb_std
     
-    camarilla_r3 = daily_close_vals + 1.1 * (daily_high - daily_low) / 2
-    camarilla_s3 = daily_close_vals - 1.1 * (daily_high - daily_low) / 2
-    
-    # Align Camarilla levels to 6h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Volume spike: current volume > 2.0 * 20-period average on 6h
+    # Volume spike: current volume > 2.0 * 20-period average on 12h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
@@ -60,39 +53,40 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
+            np.isnan(bb_middle[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema34_1d_val = ema34_1d_aligned[i]
-        r3_level = camarilla_r3_aligned[i]
-        s3_level = camarilla_s3_aligned[i]
+        ema34_1w_val = ema34_1w_aligned[i]
+        upper_band = bb_upper[i]
+        lower_band = bb_lower[i]
+        middle_band = bb_middle[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: price breaks above R3 + daily uptrend + volume spike
-            if (not np.isnan(r3_level) and close[i] > r3_level and 
-                close[i] > ema34_1d_val and vol_spike):
+            # Enter long: price breaks above upper BB + weekly uptrend + volume spike
+            if (not np.isnan(upper_band) and close[i] > upper_band and 
+                close[i] > ema34_1w_val and vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S3 + daily downtrend + volume spike
-            elif (not np.isnan(s3_level) and close[i] < s3_level and 
-                  close[i] < ema34_1d_val and vol_spike):
+            # Enter short: price breaks below lower BB + weekly downtrend + volume spike
+            elif (not np.isnan(lower_band) and close[i] < lower_band and 
+                  close[i] < ema34_1w_val and vol_spike):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below S3 OR daily trend turns down
-            if (not np.isnan(s3_level) and close[i] < s3_level) or close[i] < ema34_1d_val:
+            # Exit long: price breaks below middle BB OR weekly trend turns down
+            if (not np.isnan(middle_band) and close[i] < middle_band) or close[i] < ema34_1w_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above R3 OR daily trend turns up
-            if (not np.isnan(r3_level) and close[i] > r3_level) or close[i] > ema34_1d_val:
+            # Exit short: price breaks above middle BB OR weekly trend turns up
+            if (not np.isnan(middle_band) and close[i] > middle_band) or close[i] > ema34_1w_val:
                 signals[i] = 0.0
                 position = 0
             else:
