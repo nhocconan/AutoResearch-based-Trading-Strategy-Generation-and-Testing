@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,9 +21,9 @@ def generate_signals(prices):
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma20)
     
-    # 12h data for trend filter (HTF)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # 4h data for trend filter (HTF)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
     # 1d data for Camarilla pivot calculation
@@ -31,8 +31,8 @@ def generate_signals(prices):
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 4h EMA20 for trend filter
+    ema_20_4h = pd.Series(df_4h['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     # Daily high, low, close for Camarilla pivot calculation
     high_1d = df_1d['high'].values
@@ -46,31 +46,23 @@ def generate_signals(prices):
     range_1d = high_1d - low_1d
     # Resistance levels
     r1_1d = close_1d + (range_1d * 1.1 / 12)
-    r2_1d = close_1d + (range_1d * 1.1 / 6)
-    r3_1d = close_1d + (range_1d * 1.1 / 4)
     # Support levels
     s1_1d = close_1d - (range_1d * 1.1 / 12)
-    s2_1d = close_1d - (range_1d * 1.1 / 6)
-    s3_1d = close_1d - (range_1d * 1.1 / 4)
     
-    # Align 12h EMA50 and 1d Camarilla levels to 4h timeframe
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Align 4h EMA20 and 1d Camarilla levels to 1h timeframe
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Sufficient warmup for EMA50
+    start_idx = 50  # Sufficient warmup for EMA20
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(pivot_1d_aligned[i]) or 
+        if (np.isnan(ema_20_4h_aligned[i]) or np.isnan(pivot_1d_aligned[i]) or 
             np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
             np.isnan(volume_filter[i])):
             if position != 0:
@@ -79,16 +71,16 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: price above R1, above 12h EMA50, volume filter
-            long_cond = (close[i] > r1_1d_aligned[i]) and (close[i] > ema_50_12h_aligned[i]) and volume_filter[i]
-            # Short conditions: price below S1, below 12h EMA50, volume filter
-            short_cond = (close[i] < s1_1d_aligned[i]) and (close[i] < ema_50_12h_aligned[i]) and volume_filter[i]
+            # Long conditions: price above R1, above 4h EMA20, volume filter
+            long_cond = (close[i] > r1_1d_aligned[i]) and (close[i] > ema_20_4h_aligned[i]) and volume_filter[i]
+            # Short conditions: price below S1, below 4h EMA20, volume filter
+            short_cond = (close[i] < s1_1d_aligned[i]) and (close[i] < ema_20_4h_aligned[i]) and volume_filter[i]
             
             if long_cond:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             elif short_cond:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
             # Long exit: price crosses below pivot
@@ -96,13 +88,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
             # Short exit: price crosses above pivot
             if close[i] > pivot_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
