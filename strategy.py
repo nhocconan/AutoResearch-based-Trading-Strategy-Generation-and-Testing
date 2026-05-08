@@ -3,17 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with volume confirmation and 1d trend filter.
-# Uses 4h Donchian channels for breakout detection, 1d EMA50 for trend direction,
-# and volume spike (>2x average) for confirmation.
-# Long when price breaks above upper Donchian band + 1d trend up + volume spike.
-# Short when price breaks below lower Donchian band + 1d trend down + volume spike.
-# Exit on opposite Donchian band touch or trend reversal.
-# Designed to work in bull markets (breakouts) and bear markets (breakdowns).
-# Target: 20-50 trades per year to minimize fee drag.
+# Hypothesis: 6h Donchian(20) breakout with 12h trend filter and volume confirmation.
+# Uses 12h EMA50 for trend direction (aligned to 6h), Donchian breakout for entry,
+# and volume > 1.5x average for confirmation. Short when price breaks below lower band.
+# Trend filter ensures we only trade in the direction of higher timeframe momentum.
+# Works in bull (follow breakouts up) and bear (follow breakouts down).
+# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and fee drag.
 
-name = "4h_Donchian_Breakout_Volume_Trend"
-timeframe = "4h"
+name = "6h_DonchianBreakout_12hTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,38 +24,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data (same timeframe, but needed for calculations)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # 12h EMA(50) for trend
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_12h_up = ema_50_12h > np.roll(ema_50_12h, 1)
+    trend_12h_up = np.where(np.isnan(trend_12h_up), False, trend_12h_up)
     
-    close_1d = df_1d['close'].values
+    # Align 12h trend to 6h
+    trend_12h_up_aligned = align_htf_to_ltf(prices, df_12h, trend_12h_up.astype(float))
     
-    # 4h Donchian channels (20-period)
-    donchian_period = 20
-    upper = np.full_like(high_4h, np.nan)
-    lower = np.full_like(low_4h, np.nan)
+    # Donchian channels (20-period)
+    def rolling_max(arr, window):
+        res = np.full_like(arr, np.nan)
+        for i in range(window-1, len(arr)):
+            res[i] = np.max(arr[i-window+1:i+1])
+        return res
     
-    for i in range(donchian_period - 1, len(high_4h)):
-        upper[i] = np.max(high_4h[i - donchian_period + 1:i + 1])
-        lower[i] = np.min(low_4h[i - donchian_period + 1:i + 1])
+    def rolling_min(arr, window):
+        res = np.full_like(arr, np.nan)
+        for i in range(window-1, len(arr)):
+            res[i] = np.min(arr[i-window+1:i+1])
+        return res
     
-    # 1d EMA(50) for trend
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_1d_up = ema_50_1d > np.roll(ema_50_1d, 1)
-    trend_1d_up = np.where(np.isnan(trend_1d_up), False, trend_1d_up)
-    
-    # Align 1d trend to 4h
-    trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
+    upper_channel = rolling_max(high, 20)
+    lower_channel = rolling_min(low, 20)
     
     # Volume average (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -66,36 +62,36 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, donchian_period - 1)  # Ensure enough data
+    start_idx = 20  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or
-            np.isnan(trend_1d_up_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(trend_12h_up_aligned[i]) or np.isnan(upper_channel[i]) or
+            np.isnan(lower_channel[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above upper Donchian + 1d trend up + volume spike
-            if (close[i] > upper[i] and trend_1d_up_aligned[i] and vol_ratio[i] > 2.0):
+            # Long: price breaks above upper channel, 12h trend up, volume spike
+            if (close[i] > upper_channel[i] and trend_12h_up_aligned[i] and vol_ratio[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Donchian + 1d trend down + volume spike
-            elif (close[i] < lower[i] and not trend_1d_up_aligned[i] and vol_ratio[i] > 2.0):
+            # Short: price breaks below lower channel, 12h trend down, volume spike
+            elif (close[i] < lower_channel[i] and not trend_12h_up_aligned[i] and vol_ratio[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price touches lower Donchian or 1d trend turns down
-            if (close[i] < lower[i] or not trend_1d_up_aligned[i]):
+            # Long exit: price breaks below lower channel or trend breaks
+            if (close[i] < lower_channel[i] or not trend_12h_up_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price touches upper Donchian or 1d trend turns up
-            if (close[i] > upper[i] or trend_1d_up_aligned[i]):
+            # Short exit: price breaks above upper channel or trend breaks
+            if (close[i] > upper_channel[i] or trend_12h_up_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
