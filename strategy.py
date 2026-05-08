@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy combining 1d Williams %R for overbought/oversold conditions,
-# 4h EMA(21) for trend direction, and volume confirmation to filter false signals.
-# Long when: 1d Williams %R < -80 (oversold), price > 4h EMA(21), volume > 1.5x average.
-# Short when: 1d Williams %R > -20 (overbought), price < 4h EMA(21), volume > 1.5x average.
-# Uses 1d Williams %R as a contrarian signal with trend filter to avoid counter-trend trades.
-# Designed to work in both bull (buy dips in uptrend) and bear (sell rallies in downtrend) markets.
-# Target: 20-50 trades per year to minimize fee drag while capturing meaningful moves.
+# Hypothesis: 12h strategy using 1d Williams %R(14) as momentum filter, 12h Donchian(20) breakout, and volume confirmation.
+# Long when 1d Williams %R > -50, price breaks above 12h Donchian upper band, volume > 1.8x average.
+# Short when 1d Williams %R < -50, price breaks below 12h Donchian lower band, volume > 1.8x average.
+# Williams %R provides clearer momentum signals than RSI in trending markets.
+# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and fee drag.
+# Works in bull (trend follow) and bear (trend still exists in downtrends).
 
-name = "4h_1dWilliamsR_EMA21_Volume"
-timeframe = "4h"
+name = "12h_1dWilliamsR_12hDonchian_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,7 +24,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams %R
+    # Get 1d data for Williams %R momentum filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 14:
         return np.zeros(n)
@@ -34,28 +33,29 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Get 4h data for EMA
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 21:
+    # Get 12h data for Donchian bands
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # 1d Williams %R (14-period)
+    # 1d Williams %R(14): (Highest High - Close) / (Highest High - Lowest Low) * -100
     highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
     lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    wr = -100 * (highest_high - close_1d) / (highest_high - lowest_low + 1e-10)
-    wr_oversold = wr < -80
-    wr_overbought = wr > -20
+    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low + 1e-10)
+    williams_above_50 = williams_r > -50  # Above -50 = bullish momentum
     
-    # 4h EMA(21)
-    ema_21 = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # 12h Donchian(20) bands
+    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # Align 1d Williams %R to 4h
-    wr_oversold_aligned = align_htf_to_ltf(prices, df_1d, wr_oversold.astype(float))
-    wr_overbought_aligned = align_htf_to_ltf(prices, df_1d, wr_overbought.astype(float))
-    # Align 4h EMA to 4h
-    ema_21_aligned = align_htf_to_ltf(prices, df_4h, ema_21)
+    # Align 1d Williams %R to 12h
+    williams_above_50_aligned = align_htf_to_ltf(prices, df_1d, williams_above_50.astype(float))
+    # Align 12h Donchian bands to 12h
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
     
     # Volume average (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -65,46 +65,46 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_bar = 0
     
-    start_idx = 40  # Ensure enough data for indicators
+    start_idx = 34  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(wr_oversold_aligned[i]) or np.isnan(wr_overbought_aligned[i]) or
-            np.isnan(ema_21_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(williams_above_50_aligned[i]) or np.isnan(donchian_high_aligned[i]) or
+            np.isnan(donchian_low_aligned[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: 1d Williams %R oversold, price > 4h EMA(21), volume spike
-            if (wr_oversold_aligned[i] and
-                close[i] > ema_21_aligned[i] and
-                vol_ratio[i] > 1.5):
+            # Long: Williams %R > -50, price breaks above 12h Donchian upper band, volume spike
+            if (williams_above_50_aligned[i] and
+                close[i] > donchian_high_aligned[i] and
+                vol_ratio[i] > 1.8):
                 signals[i] = 0.25
                 position = 1
                 entry_bar = i
-            # Short: 1d Williams %R overbought, price < 4h EMA(21), volume spike
-            elif (wr_overbought_aligned[i] and
-                  close[i] < ema_21_aligned[i] and
-                  vol_ratio[i] > 1.5):
+            # Short: Williams %R < -50, price breaks below 12h Donchian lower band, volume spike
+            elif (not williams_above_50_aligned[i] and
+                  close[i] < donchian_low_aligned[i] and
+                  vol_ratio[i] > 1.8):
                 signals[i] = -0.25
                 position = -1
                 entry_bar = i
         elif position == 1:
-            # Long exit: Williams %R overbought, price < EMA, or max 20 bars held
-            if (wr_overbought_aligned[i] or 
-                close[i] < ema_21_aligned[i] or
-                i - entry_bar >= 20):
+            # Long exit: Williams %R flip, price breaks below Donchian lower band, or max 25 bars held
+            if (not williams_above_50_aligned[i] or 
+                close[i] < donchian_low_aligned[i] or
+                i - entry_bar >= 25):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Williams %R oversold, price > EMA, or max 20 bars held
-            if (wr_oversold_aligned[i] or 
-                close[i] > ema_21_aligned[i] or
-                i - entry_bar >= 20):
+            # Short exit: Williams %R flip, price breaks above Donchian upper band, or max 25 bars held
+            if (williams_above_50_aligned[i] or 
+                close[i] > donchian_high_aligned[i] or
+                i - entry_bar >= 25):
                 signals[i] = 0.0
                 position = 0
             else:
