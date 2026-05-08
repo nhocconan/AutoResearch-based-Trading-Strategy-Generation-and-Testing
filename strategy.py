@@ -4,11 +4,11 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Donchian(20) breakout with 1d volume spike and 1d ADX trend filter
-# Donchian channels identify breakouts from price ranges. Breakouts above upper band
-# or below lower band indicate strong momentum. Volume spike confirms institutional
-# participation. 1d ADX > 25 ensures we only trade in strong trends, avoiding whipsaws
-# in ranges. This combination works in both bull and bear markets by filtering for
-# strong trends only. Targets 20-50 trades per year (~80-200 total over 4 years).
+# Donchian channels identify breakouts from price ranges. Volume spike confirms
+# institutional participation. 1d ADX > 25 ensures we only trade in strong trends,
+# avoiding whipsaws in ranges. This combination works in both bull and bear markets
+# by filtering for strong trends only. Targets 20-40 trades per year (~80-160 total
+# over 4 years) to minimize fee drag.
 
 name = "4h_Donchian20_1dVolume_1dADX"
 timeframe = "4h"
@@ -16,7 +16,7 @@ leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,42 +24,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian(20) on 4h
-    def rolling_max(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(len(arr)):
-            if i < window - 1:
-                result[i] = np.nan
-            else:
-                result[i] = np.max(arr[i-window+1:i+1])
-        return result
-    
-    def rolling_min(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(len(arr)):
-            if i < window - 1:
-                result[i] = np.nan
-            else:
-                result[i] = np.min(arr[i-window+1:i+1])
-        return result
-    
-    upper = rolling_max(high, 20)
-    lower = rolling_min(low, 20)
+    # Calculate Donchian channels (20-period)
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max()
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min()
+    upper = high_roll.values
+    lower = low_roll.values
     
     # Get 1d data for volume and ADX
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Volume spike detection on 1d (20-day average)
-    vol_1d = df_1d['volume'].values
-    vol_ma = np.full_like(vol_1d, np.nan)
-    for i in range(len(vol_1d)):
-        if i < 19:
-            vol_ma[i] = np.nan
-        else:
-            vol_ma[i] = np.mean(vol_1d[i-19:i+1])
-    vol_spike = vol_1d > (vol_ma * 2.0)
+    # Volume spike detection on 1d
+    vol_ma = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean()
+    vol_spike_1d = df_1d['volume'].values > (vol_ma.values * 2.0)
+    vol_spike_4h = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
     
     # ADX trend filter on 1d
     high_1d = df_1d['high'].values
@@ -105,9 +84,6 @@ def generate_signals(prices):
     
     adx_strong = adx > 25
     adx_weak = adx < 20
-    
-    # Align 1d indicators to 4h
-    vol_spike_4h = align_htf_to_ltf(prices, df_1d, vol_spike)
     adx_strong_4h = align_htf_to_ltf(prices, df_1d, adx_strong)
     adx_weak_4h = align_htf_to_ltf(prices, df_1d, adx_weak)
     
@@ -118,8 +94,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(vol_spike_4h[i]) or 
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(vol_spike_4h[i]) or 
             np.isnan(adx_strong_4h[i]) or np.isnan(adx_weak_4h[i])):
             if position != 0:
                 signals[i] = 0.0
