@@ -1,85 +1,104 @@
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
-from mtr_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d CCI(20) mean reversion with weekly trend filter
-# Long when CCI crosses above -100 (oversold recovery) and weekly EMA50 is rising
-# Short when CCI crosses below +100 (overbought rejection) and weekly EMA50 is falling
-# Exit when CCI crosses zero (mean reversion complete) or trend changes
-# Targets 20-40 trades per year to minimize fee drag while capturing mean reversion in ranging markets
-# CCI identifies overextended moves, weekly EMA50 filters counter-trend noise in both bull/bear markets
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 12h EMA21 trend filter
+# Long when price breaks above upper Donchian band with volume > 1.5x 20-period avg and 12h EMA21 upward
+# Short when price breaks below lower Donchian band with volume > 1.5x 20-period avg and 12h EMA21 downward
+# Exit when price crosses opposite Donchian band or trend reverses
+# Uses 12h timeframe for trend filter (more robust than 1d for 4h trading) and volume confirmation
+# Targets 20-40 trades per year for optimal fee drag (< 160 total over 4 years)
+# Donchian provides clear structure, volume confirms momentum, 12h EMA21 filters counter-trend noise
 
-name = "1d_CCI20_WeeklyEMA50_Trend"
-timeframe = "1d"
+name = "4h_Donchian20_Volume_12hEMA21_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # CCI(20) calculation
-    typical_price = (high + low + close) / 3.0
-    tp_ma = pd.Series(typical_price).rolling(window=20, min_periods=20).mean().values
-    tp_std = pd.Series(typical_price).rolling(window=20, min_periods=20).std().values
-    # Avoid division by zero
-    tp_std = np.where(tp_std == 0, 1e-10, tp_std)
-    cci = (typical_price - tp_ma) / (0.015 * tp_std)
+    # Donchian channels (20-period)
+    def rolling_max(arr, window):
+        result = np.full_like(arr, np.nan, dtype=float)
+        for i in range(window - 1, len(arr)):
+            result[i] = np.max(arr[i - window + 1:i + 1])
+        return result
     
-    # Get weekly data for trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 10:
+    def rolling_min(arr, window):
+        result = np.full_like(arr, np.nan, dtype=float)
+        for i in range(window - 1, len(arr)):
+            result[i] = np.min(arr[i - window + 1:i + 1])
+        return result
+    
+    upper_donchian = rolling_max(high, 20)
+    lower_donchian = rolling_min(low, 20)
+    
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Calculate EMA50 on weekly close for trend filter
-    close_weekly = df_weekly['close'].values
-    ema50_weekly = pd.Series(close_weekly).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_weekly_slope = ema50_weekly[1:] - ema50_weekly[:-1]  # slope: positive = uptrend
-    ema50_weekly_slope = np.concatenate([[0], ema50_weekly_slope])  # align length
-    ema50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema50_weekly)
-    ema50_weekly_slope_aligned = align_htf_to_ltf(prices, df_weekly, ema50_weekly_slope)
+    # Calculate EMA21 on 12h close for trend filter
+    close_12h = df_12h['close'].values
+    ema21_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema21_12h_slope = ema21_12h[1:] - ema21_12h[:-1]  # slope: positive = uptrend
+    ema21_12h_slope = np.concatenate([[0], ema21_12h_slope])  # align length
+    ema21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema21_12h)
+    ema21_12h_slope_aligned = align_htf_to_ltf(prices, df_12h, ema21_12h_slope)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_conf = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need enough data for CCI
+    start_idx = 60  # Need enough data for Donchian and EMA
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(cci[i]) or np.isnan(ema50_weekly_aligned[i]) or 
-            np.isnan(ema50_weekly_slope_aligned[i])):
+        if (np.isnan(upper_donchian[i]) or np.isnan(lower_donchian[i]) or 
+            np.isnan(ema21_12h_aligned[i]) or np.isnan(ema21_12h_slope_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        cci_val = cci[i]
-        ema50_slope = ema50_weekly_slope_aligned[i]
+        close_val = close[i]
+        upper_val = upper_donchian[i]
+        lower_val = lower_donchian[i]
+        ema21_val = ema21_12h_aligned[i]
+        ema21_slope = ema21_12h_slope_aligned[i]
+        vol_conf_val = vol_conf[i]
         
         if position == 0:
-            # Enter long: CCI crosses above -100 from below (oversold recovery) with weekly uptrend
-            if cci_val > -100 and cci[i-1] <= -100 and ema50_slope > 0:
+            # Enter long: break above upper Donchian, volume confirmation, 12h uptrend (positive slope)
+            if close_val > upper_val and vol_conf_val and ema21_slope > 0:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: CCI crosses below +100 from above (overbought rejection) with weekly downtrend
-            elif cci_val < 100 and cci[i-1] >= 100 and ema50_slope < 0:
+            # Enter short: break below lower Donchian, volume confirmation, 12h downtrend (negative slope)
+            elif close_val < lower_val and vol_conf_val and ema21_slope < 0:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: CCI crosses above zero (mean reversion) or weekly trend turns down
-            if cci_val > 0 and cci[i-1] <= 0 or ema50_slope < 0:
+            # Exit long: break below lower Donchian or 12h trend turns down
+            if close_val < lower_val or ema21_slope < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: CCI crosses below zero (mean reversion) or weekly trend turns up
-            if cci_val < 0 and cci[i-1] >= 0 or ema50_slope > 0:
+            # Exit short: break above upper Donchian or 12h trend turns up
+            if close_val > upper_val or ema21_slope > 0:
                 signals[i] = 0.0
                 position = 0
             else:
