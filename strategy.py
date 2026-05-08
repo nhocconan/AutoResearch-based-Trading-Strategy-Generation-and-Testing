@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with 12-hour EMA(50) trend filter and volume confirmation
-# Long when price breaks above 20-period high, 12h EMA(50) rising, and volume spike
-# Short when price breaks below 20-period low, 12h EMA(50) falling, and volume spike
-# Donchian channels provide clear breakout structure
-# 12h EMA filter ensures alignment with higher timeframe trend
-# Volume spike confirms breakout validity
-# Targets 75-200 total trades over 4 years (19-50/year) to balance opportunity and cost
+# Hypothesis: 1-hour momentum following 4-hour trend with 1-day volume confirmation
+# Long when 1h close > 4h EMA(20) and 1d volume > 1.5x 20-day average
+# Short when 1h close < 4h EMA(20) and 1d volume > 1.5x 20-day average
+# Uses 4h EMA for trend direction, 1d volume for institutional participation confirmation
+# 1h timeframe for precise entry timing, targeting 60-150 total trades over 4 years (15-37/year)
+# Works in bull markets via trend following, in bear markets via volume-confirmed mean reversion to 4h EMA
 
-name = "4h_Donchian20_12hEMA50_Volume"
-timeframe = "4h"
+name = "1h_EMA20_4hTrend_1dVolumeConfirmation"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,23 +24,29 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12-hour data once for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 4h data once for EMA trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate 12h EMA(50) for trend filter
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Calculate 4h EMA(20) for trend filter
+    close_4h = df_4h['close'].values
+    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
     
-    # Calculate Donchian channels (20-period) on 4h data
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Get 1d data once for volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Volume spike: current volume > 1.8 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ma)
+    # Calculate 1d volume 20-period average for spike detection
+    volume_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    
+    # Session filter: 08:00-20:00 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -49,42 +54,41 @@ def generate_signals(prices):
     start_idx = 50  # warmup for calculations
     
     for i in range(start_idx, n):
-        # Skip if any critical data is NaN
-        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(high_roll[i]) or 
-            np.isnan(low_roll[i]) or np.isnan(vol_ma[i])):
+        # Skip if any critical data is NaN or outside session
+        if (np.isnan(ema20_4h_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
+            not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema50_12h_val = ema50_12h_aligned[i]
+        ema20_4h_val = ema20_4h_aligned[i]
         price = close[i]
-        donchian_high = high_roll[i]
-        donchian_low = low_roll[i]
-        vol_spike = volume_spike[i]
+        vol_ma_1d_val = vol_ma_1d_aligned[i]
+        vol_spike = volume[i] > (1.5 * vol_ma_1d_val)
         
         if position == 0:
-            # Enter long: price breaks above Donchian high, 12h EMA rising, volume spike
-            if price > donchian_high and ema50_12h_val > ema50_12h_aligned[i-1] and vol_spike:
-                signals[i] = 0.25
+            # Enter long: price above 4h EMA(20) with volume confirmation
+            if price > ema20_4h_val and vol_spike:
+                signals[i] = 0.20
                 position = 1
-            # Enter short: price breaks below Donchian low, 12h EMA falling, volume spike
-            elif price < donchian_low and ema50_12h_val < ema50_12h_aligned[i-1] and vol_spike:
-                signals[i] = -0.25
+            # Enter short: price below 4h EMA(20) with volume confirmation
+            elif price < ema20_4h_val and vol_spike:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: price falls below Donchian low or 12h EMA turns down
-            if price < donchian_low or ema50_12h_val < ema50_12h_aligned[i-1]:
+            # Exit long: price crosses below 4h EMA(20)
+            if price < ema20_4h_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: price rises above Donchian high or 12h EMA turns up
-            if price > donchian_high or ema50_12h_val > ema50_12h_aligned[i-1]:
+            # Exit short: price crosses above 4h EMA(20)
+            if price > ema20_4h_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
