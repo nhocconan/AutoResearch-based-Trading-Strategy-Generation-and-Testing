@@ -1,16 +1,10 @@
-# 6h_Camarilla_R4_S4_Breakout_1dTrend_Volume
-# Breakout at Camarilla R4/S4 levels with 1d trend filter and volume confirmation
-# R4/S4 levels indicate stronger breakouts, reducing false signals
-# Works in bull/bear by following 1d trend direction with volume confirmation
-# Target: 50-150 trades over 4 years (12-37/year)
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Camarilla_R4_S4_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R4_S4_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
