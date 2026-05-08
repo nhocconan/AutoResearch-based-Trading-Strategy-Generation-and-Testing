@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Volume"
-timeframe = "1h"
+name = "6h_Donchian20_WeeklyTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,97 +17,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data once for trend filter and volume
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 10:
+    # Get weekly data once for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Get daily data once for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
-        return np.zeros(n)
+    # Weekly EMA20 for trend filter
+    close_1w = df_1w['close'].values
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    trend_1w = (close_1w > ema20_1w).astype(float)
+    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
     
-    # Calculate Camarilla levels from previous day's range
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    prev_close = np.roll(close_1d, 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close[0] = close_1d[0]
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
+    # Weekly volume spike: current volume > 2.0 * 10-week average
+    volume_1w = df_1w['volume'].values
+    vol_ma10w = pd.Series(volume_1w).rolling(window=10, min_periods=10).mean().values
+    vol_spike_1w = volume_1w > (vol_ma10w * 2.0)
+    vol_spike_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_spike_1w)
     
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    R1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    S1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    # 6h Donchian(20) breakout levels
+    lookback = 20
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
     
-    # Align Camarilla levels to 1h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    
-    # 4h trend filter: EMA21
-    close_4h = df_4h['close'].values
-    ema21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    trend_4h = (close_4h > ema21_4h).astype(float)
-    trend_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_21)
-    
-    # 4h volume spike: current volume > 1.5 * 20-period average
-    volume_4h = df_4h['volume'].values
-    vol_ma20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_4h > (vol_ma20 * 1.5)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_4h, vol_spike)
-    
-    # Session filter: 08-20 UTC (already datetime64[ms] in index)
-    hours = prices.index.hour
-    session = (hours >= 8) & (hours <= 20)
+    for i in range(lookback - 1, n):
+        highest_high[i] = np.max(high[i - lookback + 1:i + 1])
+        lowest_low[i] = np.min(low[i - lookback + 1:i + 1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for all indicators
+    start_idx = max(50, lookback - 1)  # warmup
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(trend_4h_aligned[i]) or np.isnan(vol_spike_aligned[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        if not session[i]:
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(trend_1w_aligned[i]) or np.isnan(vol_spike_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: price breaks above R1 with volume spike and 4h uptrend
-            long_cond = (close[i] > R1_aligned[i] and vol_spike_aligned[i] and trend_4h_aligned[i] > 0.5)
+            # Long entry: price breaks above Donchian high with weekly uptrend and volume spike
+            long_cond = (close[i] > highest_high[i] and trend_1w_aligned[i] > 0.5 and vol_spike_1w_aligned[i])
             
-            # Short entry: price breaks below S1 with volume spike and 4h downtrend
-            short_cond = (close[i] < S1_aligned[i] and vol_spike_aligned[i] and trend_4h_aligned[i] < 0.5)
+            # Short entry: price breaks below Donchian low with weekly downtrend and volume spike
+            short_cond = (close[i] < lowest_low[i] and trend_1w_aligned[i] < 0.5 and vol_spike_1w_aligned[i])
             
             if long_cond:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
             elif short_cond:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price closes below S1 (mean reversion to support)
-            if close[i] < S1_aligned[i]:
+            # Long exit: price closes below Donchian low (mean reversion)
+            if close[i] < lowest_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price closes above R1 (mean reversion to resistance)
-            if close[i] > R1_aligned[i]:
+            # Short exit: price closes above Donchian high (mean reversion)
+            if close[i] > highest_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
+
+# Hypothesis: 6h Donchian(20) breakout with weekly trend filter and volume spike.
+# Weekly EMA20 ensures alignment with longer-term trend, reducing counter-trend trades.
+# Weekly volume spike (2.0x 10-week average) confirms institutional participation.
+# Exit on opposite Donchian break for mean reversion in ranging markets.
+# Works in bull markets (breakouts continue) and bear markets (mean reversion at opposite level).
+# Target: 50-150 total trades over 4 years to minimize fee decay while capturing significant moves.
