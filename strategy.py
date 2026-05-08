@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with 1d EMA34 trend filter and volume confirmation.
+# Hypothesis: 4h Donchian breakout with 1d EMA34 trend filter and volume confirmation.
 # Long when price breaks above 20-period Donchian high and EMA34 rising, with volume spike.
 # Short when price breaks below 20-period Donchian low and EMA34 falling, with volume spike.
 # Exit when price crosses opposite Donchian band or EMA34 direction changes.
-# Uses 12h for Donchian channels and volume, 1d for EMA34 trend.
+# Uses 4h for Donchian channels and volume, 1d for EMA34 trend.
 # Designed to capture trends with controlled frequency to avoid fee drag.
 # Target: 20-40 trades/year to stay within profitable range.
 
-name = "12h_Donchian_Breakout_1dEMA34_Volume"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_1dEMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,19 +25,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Donchian channels and volume (primary timeframe)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 4h data for Donchian channels and volume (primary timeframe)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate 12h Donchian channels (20-period)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # Calculate 4h Donchian channels (20-period)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 12h 20-period average volume for volume filter
-    vol_ma_20 = pd.Series(df_12h['volume'].values).rolling(window=20, min_periods=20).mean().values
+    # Calculate 4h 20-period average volume for volume filter
+    vol_ma_20 = pd.Series(df_4h['volume'].values).rolling(window=20, min_periods=20).mean().values
     
     # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -52,10 +52,10 @@ def generate_signals(prices):
     ema_34_rising = ema_34 > ema_34_prev
     ema_34_falling = ema_34 < ema_34_prev
     
-    # Align all indicators to 12h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20)
+    # Align all indicators to 4h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20)
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     ema_34_rising_aligned = align_htf_to_ltf(prices, df_1d, ema_34_rising)
     ema_34_falling_aligned = align_htf_to_ltf(prices, df_1d, ema_34_falling)
@@ -86,18 +86,18 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Volume filter: current 12h volume > 1.5x 20-period average
+        # Volume filter: current 4h volume > 1.5x 20-period average
         vol_filter = False
         if not np.isnan(vol_ma_20_aligned[i]):
-            # Find current 12h bar's volume
-            idx_12h = 0
-            while idx_12h < len(df_12h) and df_12h.iloc[idx_12h]['open_time'] <= prices.iloc[i]['open_time']:
-                idx_12h += 1
-            idx_12h -= 1  # last completed 12h bar
+            # Find current 4h bar's volume
+            idx_4h = 0
+            while idx_4h < len(df_4h) and df_4h.iloc[idx_4h]['open_time'] <= prices.iloc[i]['open_time']:
+                idx_4h += 1
+            idx_4h -= 1  # last completed 4h bar
             
-            if idx_12h >= 0:
-                vol_12h_current = df_12h.iloc[idx_12h]['volume']
-                vol_filter = vol_12h_current > 1.5 * vol_ma_20_aligned[i]
+            if idx_4h >= 0:
+                vol_4h_current = df_4h.iloc[idx_4h]['volume']
+                vol_filter = vol_4h_current > 1.5 * vol_ma_20_aligned[i]
         
         if position == 0:
             # Look for entry: Donchian breakout + trend + volume
