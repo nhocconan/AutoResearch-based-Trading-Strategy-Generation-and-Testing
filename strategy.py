@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_WeeklyDonchian_Breakout_WeeklyTrend"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,41 +17,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for weekly Donchian and weekly trend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 40:
+    # Get daily data for Camarilla levels and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly Donchian channel (20-period)
-    # Upper = highest high of last 20 weekly bars
-    # Lower = lowest low of last 20 weekly bars
-    high_roll = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # Camarilla R3 and S3 from previous day
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close[0] = close_1d[0]  # first day
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
     
-    # Weekly trend: EMA(34)
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate Camarilla levels
+    R3 = prev_close + 1.1 * (prev_high - prev_low) / 6
+    S3 = prev_close - 1.1 * (prev_high - prev_low) / 6
     
-    # Align weekly indicators to 12h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_1w, high_roll)
-    lower_aligned = align_htf_to_ltf(prices, df_1w, low_roll)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Align to 4h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
-    # Volume confirmation: 50-period average on 12h
-    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    # 1d trend filter: EMA(34)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume confirmation: 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Ensure enough data for indicators
+    start_idx = 50  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
             np.isnan(ema_34_aligned[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -59,29 +65,29 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above weekly Donchian upper + above weekly EMA34 + volume confirmation
-            if (close[i] > upper_aligned[i] and
+            # Long: Break above R3 + price > EMA34 + volume
+            if (close[i] > R3_aligned[i] and
                 close[i] > ema_34_aligned[i] and
-                vol_ratio[i] > 1.8):
+                vol_ratio[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below weekly Donchian lower + below weekly EMA34 + volume confirmation
-            elif (close[i] < lower_aligned[i] and
+            # Short: Break below S3 + price < EMA34 + volume
+            elif (close[i] < S3_aligned[i] and
                   close[i] < ema_34_aligned[i] and
-                  vol_ratio[i] > 1.8):
+                  vol_ratio[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Price breaks below weekly Donchian lower OR below weekly EMA34
-            if (close[i] < lower_aligned[i] or
+            # Long exit: Price breaks below S3 or below EMA34
+            if (close[i] < S3_aligned[i] or
                 close[i] < ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price breaks above weekly Donchian upper OR above weekly EMA34
-            if (close[i] > upper_aligned[i] or
+            # Short exit: Price breaks above R3 or above EMA34
+            if (close[i] > R3_aligned[i] or
                 close[i] > ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
