@@ -1,17 +1,10 @@
-# 12h_1w_Pivot_R1_S1_Trend_Filter
-# Hypothesis: 12h price crossing above/below weekly R1/S1 with volume confirmation
-# and 1-week trend filter. Uses institutional weekly pivot levels for structure.
-# Works in bull markets via breakout continuation and bear markets via mean reversion
-# at pivot levels when price rejects weekly resistance/support.
-# Targets 20-50 trades/year to minimize fee drag. Uses discrete sizing (0.25).
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_Pivot_R1_S1_Trend_Filter"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,96 +17,98 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data once
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get 1d data once
+    df_1d = get_htf_data(prices, '1d')
+    
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === Weekly high/low/close for pivot calculation ===
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # === 1d Previous day's pivot points ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Previous week's values (shift by 1)
-    prev_high_1w = np.roll(high_1w, 1)
-    prev_low_1w = np.roll(low_1w, 1)
-    prev_close_1w = np.roll(close_1w, 1)
-    # First value: use current week's values to avoid look-ahead
-    prev_high_1w[0] = high_1w[0]
-    prev_low_1w[0] = low_1w[0]
-    prev_close_1w[0] = close_1w[0]
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d[0] = high_1d[0]
+    prev_low_1d[0] = low_1d[0]
+    prev_close_1d[0] = close_1d[0]
     
-    # Weekly pivot point (standard calculation)
-    pivot_1w = (prev_high_1w + prev_low_1w + prev_close_1w) / 3.0
-    range_1w = prev_high_1w - prev_low_1w
+    pivot = (prev_high_1d + prev_low_1d + prev_close_1d) / 3.0
+    range_1d = prev_high_1d - prev_low_1d
     
-    # R1 and S1 levels (most significant)
-    r1_1w = pivot_1w + (range_1w * 1.1 / 12)  # Standard R1
-    s1_1w = pivot_1w - (range_1w * 1.1 / 12)  # Standard S1
+    # Pivot support/resistance levels
+    r1 = pivot + (range_1d * 1.1 / 12)
+    s1 = pivot - (range_1d * 1.1 / 12)
+    r2 = pivot + (range_1d * 1.1 / 6)
+    s2 = pivot - (range_1d * 1.1 / 6)
     
-    # Align to 12h timeframe
-    r1_12h = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_12h = align_htf_to_ltf(prices, df_1w, s1_1w)
+    # Align pivot levels to 4h timeframe
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    r2_4h = align_htf_to_ltf(prices, df_1d, r2)
+    s2_4h = align_htf_to_ltf(prices, df_1d, s2)
     
-    # === 1-week EMA50 for trend filter ===
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # === 1d EMA34 for trend filter ===
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # === Volume confirmation: current volume > 20-period average ===
+    # === 4h Volume filter: current volume > 20-period average ===
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup for EMA50
-    start_idx = 50
+    start_idx = 34  # warmup for EMA34
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or 
-            np.isnan(ema50_12h[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or np.isnan(r2_4h[i]) or np.isnan(s2_4h[i]) or
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Determine trend: above/below weekly EMA50
-            uptrend = close[i] > ema50_12h[i]
-            downtrend = close[i] < ema50_12h[i]
+            # Trend filter: price above/below 1d EMA34
+            uptrend = close[i] > ema34_1d_aligned[i]
+            downtrend = close[i] < ema34_1d_aligned[i]
             
             if uptrend:
-                # Uptrend: look for breakout above R1 with volume
-                long_cond = (close[i] > r1_12h[i] and 
-                            volume[i] > vol_ma20[i])
+                # Uptrend: breakout above R1
+                long_cond = (close[i] > r1_4h[i] and volume[i] > vol_ma20[i])
                 if long_cond:
-                    signals[i] = 0.25
+                    signals[i] = 0.30
                     position = 1
             elif downtrend:
-                # Downtrend: look for breakdown below S1 with volume
-                short_cond = (close[i] < s1_12h[i] and 
-                             volume[i] > vol_ma20[i])
+                # Downtrend: breakdown below S1
+                short_cond = (close[i] < s1_4h[i] and volume[i] > vol_ma20[i])
                 if short_cond:
-                    signals[i] = -0.25
+                    signals[i] = -0.30
                     position = -1
-            # No action in transition or without volume
         elif position == 1:
-            # Long exit: price breaks below S1 or trend reverses
-            exit_cond = (close[i] < s1_12h[i] or 
-                        close[i] < ema50_12h[i])
-            if exit_cond:
+            # Long exit: trend reversal or breakdown below S1
+            if close[i] < ema34_1d_aligned[i] or close[i] < s1_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Short exit: price breaks above R1 or trend reverses
-            exit_cond = (close[i] > r1_12h[i] or 
-                        close[i] > ema50_12h[i])
-            if exit_cond:
+            # Short exit: trend reversal or breakout above R1
+            if close[i] > ema34_1d_aligned[i] or close[i] > r1_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
+
+# Hypothesis: Camarilla pivot breakout strategy on 4h timeframe.
+# Uses 1d EMA34 for trend filter and 1d Camarilla R1/S1 levels for entries.
+# In uptrends (price > 1d EMA34): buy breakouts above R1 with volume confirmation.
+# In downtrends (price < 1d EMA34): sell breakdowns below S1 with volume confirmation.
+# Exits on trend reversal (price crosses 1d EMA34) or price returns to S1/R1.
+# Designed to work in both bull (trend following breaks) and bear (trend following breaks down).
+# Targets 75-200 trades over 4 years to minimize fee drag. Uses discrete sizing (0.30).
