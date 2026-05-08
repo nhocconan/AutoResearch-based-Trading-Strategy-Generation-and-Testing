@@ -1,15 +1,22 @@
+# 4h_Camarilla_R1S1_With_Volume_Spike_and_Chop_Filter
+# Hypothesis: Camarilla pivot levels (R1/S1) from daily chart act as strong support/resistance.
+# In ranging markets (Chop > 61.8), price tends to reverse at these levels.
+# In trending markets (Chop < 38.2), breakouts through R1/S1 continue the trend.
+# Volume spike confirms institutional participation. Works in both bull/bear via regime filter.
+# Target: 20-40 trades/year per symbol (~80-160 over 4 years).
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_Camarilla_R1_S1_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "4h_Camarilla_R1S1_With_Volume_Spike_and_Chop_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,84 +24,96 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Get daily data for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels from weekly data
-    pivot = (high_1w + low_1w + close_1w) / 3
-    range_1w = high_1w - low_1w
+    # Calculate Camarilla levels from previous day
+    # H, L, C = previous day's high, low, close
+    H = np.concatenate([[np.nan], high_1d[:-1]])  # shift by 1
+    L = np.concatenate([[np.nan], low_1d[:-1]])
+    C = np.concatenate([[np.nan], close_1d[:-1]])
     
-    # Camarilla levels: R1, R2, R3, S1, S2, S3
-    R1 = pivot + (range_1w * 1.0833 / 12)
-    R2 = pivot + (range_1w * 1.0833 / 6)
-    R3 = pivot + (range_1w * 1.0833 / 4)
-    S1 = pivot - (range_1w * 1.0833 / 12)
-    S2 = pivot - (range_1w * 1.0833 / 6)
-    S3 = pivot - (range_1w * 1.0833 / 4)
+    # Camarilla R1, S1
+    R1 = C + (H - L) * 1.1 / 12
+    S1 = C - (H - L) * 1.1 / 12
     
-    # Align Camarilla levels to daily timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    R1_aligned = align_htf_to_ltf(prices, df_1w, R1)
-    R2_aligned = align_htf_to_ltf(prices, df_1w, R2)
-    R3_aligned = align_htf_to_ltf(prices, df_1w, R3)
-    S1_aligned = align_htf_to_ltf(prices, df_1w, S1)
-    S2_aligned = align_htf_to_ltf(prices, df_1w, S2)
-    S3_aligned = align_htf_to_ltf(prices, df_1w, S3)
+    # Align to 4h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # Weekly trend filter: EMA(21)
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    # Chopiness Index (14-period) for regime filter
+    def true_range(high, low, close):
+        tr1 = high - low
+        tr2 = np.abs(high - np.concatenate([[np.nan], close[:-1]]))
+        tr3 = np.abs(low - np.concatenate([[np.nan], close[:-1]]))
+        return np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Volume confirmation: 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / vol_ma
+    tr = true_range(high, low, close)
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate Chop: log(sum(TR14) / (max(high14) - min(low14))) * 100 / log(14)
+    tr14_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    max_high14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_low14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = np.where(
+        (max_high14 - min_low14) > 0,
+        np.log10(tr14_sum / (max_high14 - min_low14)) * 100 / np.log10(14),
+        50  # default if range is zero
+    )
+    
+    # Volume spike: 2x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume / vol_ma20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Ensure enough data for indicators
+    start_idx = 50  # Ensure enough data
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(pivot_aligned[i]) or np.isnan(R1_aligned[i]) or np.isnan(R2_aligned[i]) or 
-            np.isnan(R3_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(S2_aligned[i]) or 
-            np.isnan(S3_aligned[i]) or np.isnan(ema_21_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+            np.isnan(chop[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Close breaks above R1 + weekly uptrend + volume confirmation
-            if (close[i] > R1_aligned[i] and
-                close[i] > ema_21_aligned[i] and
-                vol_ratio[i] > 1.5):
+            # Long conditions:
+            # 1. Price crosses above S1 (support) from below
+            # 2. Volume spike > 2.0
+            # 3. Chop > 61.8 (ranging market) for mean reversion
+            if (close[i] > S1_aligned[i] and close[i-1] <= S1_aligned[i-1] and
+                volume_spike[i] > 2.0 and chop[i] > 61.8):
                 signals[i] = 0.25
                 position = 1
-            # Short: Close breaks below S1 + weekly downtrend + volume confirmation
-            elif (close[i] < S1_aligned[i] and
-                  close[i] < ema_21_aligned[i] and
-                  vol_ratio[i] > 1.5):
+            # Short conditions:
+            # 1. Price crosses below R1 (resistance) from above
+            # 2. Volume spike > 2.0
+            # 3. Chop > 61.8 (ranging market) for mean reversion
+            elif (close[i] < R1_aligned[i] and close[i-1] >= R1_aligned[i-1] and
+                  volume_spike[i] > 2.0 and chop[i] > 61.8):
                 signals[i] = -0.25
                 position = -1
+        
         elif position == 1:
-            # Long exit: Close below pivot or weekly downtrend
-            if (close[i] < pivot_aligned[i] or
-                close[i] < ema_21_aligned[i]):
+            # Long exit: price reaches R1 or chop drops below 38.2 (trending) or volume drops
+            if (close[i] >= R1_aligned[i] or chop[i] < 38.2 or volume_spike[i] < 1.0):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
+        
         elif position == -1:
-            # Short exit: Close above pivot or weekly uptrend
-            if (close[i] > pivot_aligned[i] or
-                close[i] > ema_21_aligned[i]):
+            # Short exit: price reaches S1 or chop drops below 38.2 or volume drops
+            if (close[i] <= S1_aligned[i] or chop[i] < 38.2 or volume_spike[i] < 1.0):
                 signals[i] = 0.0
                 position = 0
             else:
