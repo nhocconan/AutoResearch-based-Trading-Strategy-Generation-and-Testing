@@ -3,16 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with 1d Trend Filter and Volume Confirmation
-# - Williams Alligator (13,8,5 SMAs) on 12h to identify trend direction
-# - 1d EMA50 as trend filter to ensure alignment with higher timeframe trend
-# - Volume spike (>2x 20-period average) to confirm momentum
-# - Designed for 12h timeframe to target 50-150 total trades over 4 years
-# - Works in bull/bear by requiring trend alignment across timeframes
-# - Entry: Price crosses above/below Alligator jaws with trend and volume confirmation
-# - Exit: Price crosses back across Alligator teeth or trend reversal
+# Hypothesis: 12h Camarilla Pivot Breakout with 1d Trend and Volume Spike
+# - Uses Camarilla levels from daily timeframe (S1/S2 for long, R1/R2 for short)
+# - Breakout above S1 with 1d uptrend or below R1 with 1d downtrend
+# - Volume spike confirms breakout strength
+# - Works in bull/bear by using 1d trend filter to avoid counter-trend trades
+# - Target: 15-30 trades/year to minimize fee drag on 12h timeframe
 
-name = "12h_WilliamsAlligator_1dTrend_Volume"
+name = "12h_CamarillaBreakout_1dTrend_Volume"
 timeframe = "12h"
 leverage = 1.0
 
@@ -26,35 +24,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h data for Williams Alligator
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 60:
-        return np.zeros(n)
-    
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # Williams Alligator: Jaws (13), Teeth (8), Lips (5) SMAs
-    # Using typical price (H+L+C)/3 for better representation
-    typical_price_12h = (high_12h + low_12h + close_12h) / 3.0
-    
-    jaws_12h = pd.Series(typical_price_12h).rolling(window=13, min_periods=13).mean().values
-    teeth_12h = pd.Series(typical_price_12h).rolling(window=8, min_periods=8).mean().values
-    lips_12h = pd.Series(typical_price_12h).rolling(window=5, min_periods=5).mean().values
-    
-    # Align Alligator lines to 12h timeframe (no additional delay needed for SMAs)
-    jaws_12h_aligned = align_htf_to_ltf(prices, df_12h, jaws_12h)
-    teeth_12h_aligned = align_htf_to_ltf(prices, df_12h, teeth_12h)
-    lips_12h_aligned = align_htf_to_ltf(prices, df_12h, lips_12h)
-    
-    # 1d data for trend filter
+    # 1d data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 5:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # 1d EMA50 for trend filter
+    
+    # Calculate Camarilla levels using previous day's data
+    # S1 = C - (H-L)*1.08, S2 = C - (H-L)*1.16, R1 = C + (H-L)*1.08, R2 = C + (H-L)*1.16
+    n1d = len(close_1d)
+    camarilla_S1 = np.full(n1d, np.nan)
+    camarilla_S2 = np.full(n1d, np.nan)
+    camarilla_R1 = np.full(n1d, np.nan)
+    camarilla_R2 = np.full(n1d, np.nan)
+    
+    for i in range(1, n1d):
+        H = high_1d[i-1]
+        L = low_1d[i-1]
+        C = close_1d[i-1]
+        range_val = H - L
+        camarilla_S1[i] = C - range_val * 1.08
+        camarilla_S2[i] = C - range_val * 1.16
+        camarilla_R1[i] = C + range_val * 1.08
+        camarilla_R2[i] = C + range_val * 1.16
+    
+    # Align Camarilla levels to 12h timeframe
+    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
+    camarilla_S2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S2)
+    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
+    camarilla_R2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R2)
+    
+    # 1d data for trend filter (EMA50)
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
@@ -69,29 +72,22 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(jaws_12h_aligned[i]) or np.isnan(teeth_12h_aligned[i]) or 
-            np.isnan(lips_12h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(camarilla_S1_aligned[i]) or np.isnan(camarilla_S2_aligned[i]) or 
+            np.isnan(camarilla_R1_aligned[i]) or np.isnan(camarilla_R2_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price crosses above jaws with lips > teeth (bullish alignment) 
-            #        + 1d uptrend + volume spike
-            bullish_alignment = lips_12h_aligned[i] > teeth_12h_aligned[i]
-            bearish_alignment = lips_12h_aligned[i] < teeth_12h_aligned[i]
-            
-            long_cond = (close[i] > jaws_12h_aligned[i] and 
-                        bullish_alignment and
+            # Long: price breaks above S1 (support) with 1d uptrend + volume spike
+            long_cond = (close[i] > camarilla_S1_aligned[i] and 
                         ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1] and
                         volume_spike[i])
             
-            # Short: price crosses below jaws with lips < teeth (bearish alignment)
-            #        + 1d downtrend + volume spike
-            short_cond = (close[i] < jaws_12h_aligned[i] and 
-                         bearish_alignment and
+            # Short: price breaks below R1 (resistance) with 1d downtrend + volume spike
+            short_cond = (close[i] < camarilla_R1_aligned[i] and 
                          ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1] and
                          volume_spike[i])
             
@@ -102,17 +98,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below teeth or bearish alignment
-            if (close[i] < teeth_12h_aligned[i] or 
-                lips_12h_aligned[i] < teeth_12h_aligned[i]):
+            # Long exit: price breaks below S2 (strong support break)
+            if close[i] < camarilla_S2_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above teeth or bullish alignment
-            if (close[i] > teeth_12h_aligned[i] or 
-                lips_12h_aligned[i] > teeth_12h_aligned[i]):
+            # Short exit: price breaks above R2 (strong resistance break)
+            if close[i] > camarilla_R2_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
