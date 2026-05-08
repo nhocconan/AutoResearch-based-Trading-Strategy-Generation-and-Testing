@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_4hDonchian20_1dTrend_VolumeFilter"
-timeframe = "4h"
+name = "1d_WeeklyDonchian20_Breakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,52 +17,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h Donchian channel (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_high = high_roll
-    donchian_low = low_roll
-    
-    # 1d data for trend filter and volatility
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Weekly Donchian channels (20-period) for trend filter
+    donch_high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    donch_low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    donch_high_20_aligned = align_htf_to_ltf(prices, df_1w, donch_high_20)
+    donch_low_20_aligned = align_htf_to_ltf(prices, df_1w, donch_low_20)
     
-    # Volume filter: 4h volume > 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Weekly ATR for volatility filter (14-period)
+    tr_w = np.maximum(high_1w - low_1w, 
+                      np.maximum(np.abs(high_1w - np.roll(close_1w, 1)), 
+                                 np.abs(low_1w - np.roll(close_1w, 1))))
+    tr_w[0] = high_1w[0] - low_1w[0]
+    atr14_1w = pd.Series(tr_w).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr14_1w_aligned = align_htf_to_ltf(prices, df_1w, atr14_1w)
+    
+    # Daily Donchian breakout (20-period) for entry signal
+    donch_high_20d = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low_20d = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume filter: daily volume > 20-day average
+    vol_ma20d = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # warmup for EMA50
+    start_idx = 200  # warmup for weekly indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(donch_high_20_aligned[i]) or np.isnan(donch_low_20_aligned[i]) or 
+            np.isnan(atr14_1w_aligned[i]) or np.isnan(vol_ma20d[i]) or
+            np.isnan(donch_high_20d[i]) or np.isnan(donch_low_20d[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above Donchian high, price above 1d EMA50, volume above average
-            long_cond = (close[i] > donchian_high[i] and 
-                        close[i] > ema50_1d_aligned[i] and
-                        volume[i] > vol_ma20[i])
+            # Long: Daily price breaks above weekly Donchian high, price above weekly Donchian low, volume above average
+            long_cond = (close[i] > donch_high_20_aligned[i] and 
+                        close[i] > donch_low_20_aligned[i] and
+                        volume[i] > vol_ma20d[i])
             
-            # Short: Price breaks below Donchian low, price below 1d EMA50, volume above average
-            short_cond = (close[i] < donchian_low[i] and 
-                         close[i] < ema50_1d_aligned[i] and
-                         volume[i] > vol_ma20[i])
+            # Short: Daily price breaks below weekly Donchian low, price below weekly Donchian high, volume above average
+            short_cond = (close[i] < donch_low_20_aligned[i] and 
+                         close[i] < donch_high_20_aligned[i] and
+                         volume[i] > vol_ma20d[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -71,15 +80,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Price closes below Donchian low OR price crosses below 1d EMA50
-            if close[i] < donchian_low[i] or close[i] < ema50_1d_aligned[i]:
+            # Long exit: Price closes below weekly Donchian low OR weekly ATR contraction (low volatility)
+            if close[i] < donch_low_20_aligned[i] or atr14_1w_aligned[i] < atr14_1w_aligned[i-1] * 0.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price closes above Donchian high OR price crosses above 1d EMA50
-            if close[i] > donchian_high[i] or close[i] > ema50_1d_aligned[i]:
+            # Short exit: Price closes above weekly Donchian high OR weekly ATR contraction
+            if close[i] > donch_high_20_aligned[i] or atr14_1w_aligned[i] < atr14_1w_aligned[i-1] * 0.8:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -87,7 +96,8 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
-# Works in bull markets via breakout continuation, in bear via mean reversion at Donchian lows/highs.
-# 4h timeframe targets 20-50 trades/year to avoid fee drag. Volume filter ensures participation.
-# Discrete sizing (0.25) minimizes churn. Works on BTC/ETH/SOL via institutional price channels.
+# Hypothesis: Weekly Donchian breakout with volatility filter and volume confirmation.
+# Uses weekly trend context (Donchian channels) for directional bias on daily timeframe.
+# Volatility filter avoids whipsaws in ranging markets. Volume ensures participation.
+# Targets 15-25 trades/year to minimize fee drag. Works in bull (breakout continuation) 
+# and bear (mean reversion at band edges) via volatility-based exits. Discrete sizing (0.25) reduces churn.
