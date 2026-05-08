@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_WeeklyPivot_6hDonchian_Volume_v1"
-timeframe = "6h"
+name = "12h_WeeklyPivot_12hDonchian_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,23 +19,22 @@ def generate_signals(prices):
     
     # Get daily data for weekly pivot points
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 7:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Get 6h data for Donchian bands
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 20:
+    # Get 12h data for Donchian bands
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
     # Calculate weekly pivot points from daily data (weekly high/low/close)
-    # Use the last available daily data to compute weekly pivot
     weekly_high = np.maximum.accumulate(high_1d)
     weekly_low = np.minimum.accumulate(low_1d)
     weekly_close = close_1d.copy()
@@ -52,16 +51,16 @@ def generate_signals(prices):
     r3 = weekly_high + 2 * (pivot - weekly_low)
     s3 = weekly_low - 2 * (weekly_high - pivot)
     
-    # Align weekly pivot levels to 6h timeframe
+    # Align weekly pivot levels to 12h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # 6-hour Donchian(20) bands
-    donchian_high = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_6h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_6h, donchian_low)
+    # 12-hour Donchian(20) bands
+    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
     
     # Volume average (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -71,7 +70,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_bar = 0
     
-    start_idx = 50  # Ensure enough data for indicators
+    start_idx = 60  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
@@ -83,17 +82,17 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price above S3 weekly pivot and breaks above 6h Donchian upper band with volume
+            # Long: price above S3 weekly pivot and breaks above 12h Donchian upper band with volume
             if (close[i] > s3_aligned[i] and
                 close[i] > donchian_high_aligned[i] and
-                vol_ratio[i] > 1.8):
+                vol_ratio[i] > 2.0):
                 signals[i] = 0.25
                 position = 1
                 entry_bar = i
-            # Short: price below R3 weekly pivot and breaks below 6h Donchian lower band with volume
+            # Short: price below R3 weekly pivot and breaks below 12h Donchian lower band with volume
             elif (close[i] < r3_aligned[i] and
                   close[i] < donchian_low_aligned[i] and
-                  vol_ratio[i] > 1.8):
+                  vol_ratio[i] > 2.0):
                 signals[i] = -0.25
                 position = -1
                 entry_bar = i
