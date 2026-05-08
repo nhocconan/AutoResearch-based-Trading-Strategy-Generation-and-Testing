@@ -3,15 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h 4-period RSI + 4h Bollinger Bands mean reversion + 1d trend filter + session filter (08-20 UTC)
-# Mean reversion in range-bound markets: buy when RSI < 30 and price touches lower Bollinger Band (4h) in uptrend (1d)
-# Sell when RSI > 70 and price touches upper Bollinger Band (4h) in downtrend (1d)
-# Uses 4h for signal direction (BBands + trend), 1h only for entry timing (RSI)
-# Session filter reduces noise trades outside active hours
-# Target: 15-35 trades/year (~60-140 total over 4 years) to minimize fee drag
+# Hypothesis: 6h Elder Ray + 1w ADX trend filter + volume confirmation
+# Elder Ray (Bull/Bear Power) measures bullish/bearish pressure relative to EMA.
+# Strong trends show sustained Bull/Bear Power with ADX > 25.
+# We enter when Bull Power > 0 and rising (for long) or Bear Power < 0 and falling (for short),
+# confirmed by 1w ADX > 25 and volume spike (>2x 20-period average).
+# Exits occur when power weakens or ADX falls below 20.
+# This captures sustained momentum while avoiding whipsaws in low-volatility environments.
+# Targets 12-30 trades per year (~48-120 total over 4 years) to minimize fee drag.
 
-name = "1h_RSI4_BBands4h_1dTrend_Session"
-timeframe = "1h"
+name = "6h_ElderRay_1wADX_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,90 +25,122 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time']
     
-    # Pre-compute hour for session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(open_time).hour
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    # RSI(4) on 1h close
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/4, adjust=False, min_periods=4).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/4, adjust=False, min_periods=4).mean()
-    rs = avg_gain / avg_loss.replace(0, np.finfo(float).eps)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
-    
-    # Get 4h data for Bollinger Bands
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get 1w data for ADX trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    bb_middle = pd.Series(close_4h).rolling(window=20, min_periods=20).mean().values
-    bb_std = pd.Series(close_4h).rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
+    # Calculate ADX on 1w data
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Align Bollinger Bands to 1h
-    bb_upper_aligned = align_htf_to_ltf(prices, df_4h, bb_upper)
-    bb_lower_aligned = align_htf_to_ltf(prices, df_4h, bb_lower)
+    # True Range
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period has no previous close
     
-    # Get 1d data for trend filter (EMA50 slope)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # Directional Movement
+    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w),
+                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)),
+                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_slope = ema50_1d[1:] - ema50_1d[:-1]
-    ema50_1d_slope = np.concatenate([[0], ema50_1d_slope])
-    ema50_1d_slope_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d_slope)
+    # Smooth TR, DM+, DM- with Wilder's smoothing (alpha = 1/period)
+    def wilder_smooth(arr, period):
+        result = np.zeros_like(arr)
+        result[period-1] = np.nansum(arr[:period])  # First value: simple average
+        for i in range(period, len(arr)):
+            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
+        return result
+    
+    period = 14
+    atr_1w = wilder_smooth(tr, period)
+    dm_plus_smooth = wilder_smooth(dm_plus, period)
+    dm_minus_smooth = wilder_smooth(dm_minus, period)
+    
+    # DI+ and DI-
+    di_plus = np.where(atr_1w > 0, 100 * dm_plus_smooth / atr_1w, 0)
+    di_minus = np.where(atr_1w > 0, 100 * dm_minus_smooth / atr_1w, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilder_smooth(dx, period)
+    
+    # Align 1w ADX to 6h
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    
+    # Volume confirmation: current volume > 2.0x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_conf = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for RSI and indicators
+    start_idx = max(50, 20)  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(rsi[i]) or np.isnan(bb_upper_aligned[i]) or np.isnan(bb_lower_aligned[i]) or 
-            np.isnan(ema50_1d_slope_aligned[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        rsi_val = rsi[i]
-        bb_upper_val = bb_upper_aligned[i]
-        bb_lower_val = bb_lower_aligned[i]
-        ema50_slope = ema50_1d_slope_aligned[i]
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)  # UTC 8-20
+        bull_val = bull_power[i]
+        bear_val = bear_power[i]
+        adx_val = adx_aligned[i]
+        vol_conf_val = vol_conf[i]
         
-        if position == 0 and in_session:
-            # Enter long: RSI < 30 (oversold) + price at or below lower BB + 1d uptrend
-            if rsi_val < 30 and close[i] <= bb_lower_val and ema50_slope > 0:
-                signals[i] = 0.20
+        if position == 0:
+            # Enter long: Bull Power > 0 and rising, ADX > 25 (strong trend), volume confirmation
+            if i > start_idx:
+                bull_rising = bull_val > bull_power[i-1]
+            else:
+                bull_rising = False
+            if bull_val > 0 and bull_rising and adx_val > 25 and vol_conf_val:
+                signals[i] = 0.25
                 position = 1
-            # Enter short: RSI > 70 (overbought) + price at or above upper BB + 1d downtrend
-            elif rsi_val > 70 and close[i] >= bb_upper_val and ema50_slope < 0:
-                signals[i] = -0.20
+            # Enter short: Bear Power < 0 and falling, ADX > 25 (strong trend), volume confirmation
+            elif i > start_idx:
+                bear_falling = bear_val < bear_power[i-1]
+            else:
+                bear_falling = False
+            if bear_val < 0 and bear_falling and adx_val > 25 and vol_conf_val:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: RSI > 50 (mean reversion) or 1d trend turns down
-            if rsi_val > 50 or ema50_slope < 0:
+            # Exit long: Bull Power <= 0 or not rising, or ADX < 20 (weakening trend)
+            if i > start_idx:
+                bull_rising = bull_val > bull_power[i-1]
+            else:
+                bull_rising = True  # Assume rising on first bar to avoid premature exit
+            if bull_val <= 0 or not bull_rising or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: RSI < 50 (mean reversion) or 1d trend turns up
-            if rsi_val < 50 or ema50_slope > 0:
+            # Exit short: Bear Power >= 0 or not falling, or ADX < 20 (weakening trend)
+            if i > start_idx:
+                bear_falling = bear_val < bear_power[i-1]
+            else:
+                bear_falling = True  # Assume falling on first bar to avoid premature exit
+            if bear_val >= 0 or not bear_falling or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
