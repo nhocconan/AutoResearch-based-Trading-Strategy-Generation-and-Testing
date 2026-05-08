@@ -3,6 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
+# Uses daily timeframe for trend and pivot levels, 4h for execution.
+# Designed to work in both bull and bear markets by aligning with daily trend.
+# Volume confirmation ensures momentum behind breakouts.
+# Target: 20-50 trades/year to avoid fee drag.
+
 name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_Tight"
 timeframe = "4h"
 leverage = 1.0
