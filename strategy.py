@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_RiverFlow_RiverBank_Trend_Filter"
-timeframe = "6h"
+name = "4h_R4_R5_S4_S5_Breakout_1dTrend_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,33 +17,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and volume
+    # Get daily data for indicators
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Get 12h data for river flow (momentum)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
-        return np.zeros(n)
-    
-    # River Bank: 1d EMA50 as dynamic support/resistance
+    # Daily EMA34 for trend filter
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # River Flow: 12h RSI(14) for momentum
-    close_12h = df_12h['close'].values
-    delta = np.diff(close_12h, prepend=close_12h[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_12h = 100 - (100 / (1 + rs))
-    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
+    # Calculate daily pivot points (R4, R5, S4, S5)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Volume confirmation: 6h volume > 1.5x 20-period average
+    # Pivot = (H + L + C) / 3
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # R1 = 2*P - L
+    r1_1d = (2 * pivot_1d) - low_1d
+    # S1 = 2*P - H
+    s1_1d = (2 * pivot_1d) - high_1d
+    # R2 = P + (H - L)
+    r2_1d = pivot_1d + (high_1d - low_1d)
+    # S2 = P - (H - L)
+    s2_1d = pivot_1d - (high_1d - low_1d)
+    # R3 = H + 2*(P - L)
+    r3_1d = high_1d + 2 * (pivot_1d - low_1d)
+    # S3 = L - 2*(H - P)
+    s3_1d = low_1d - 2 * (high_1d - pivot_1d)
+    # R4 = R3 + (H - L)
+    r4_1d = r3_1d + (high_1d - low_1d)
+    # S4 = S3 - (H - L)
+    s4_1d = s3_1d - (high_1d - low_1d)
+    # R5 = R4 + (H - L)
+    r5_1d = r4_1d + (high_1d - low_1d)
+    # S5 = S4 - (H - L)
+    s5_1d = s4_1d - (high_1d - low_1d)
+    
+    # Align daily pivots to 4h timeframe
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    r5_1d_aligned = align_htf_to_ltf(prices, df_1d, r5_1d)
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    s5_1d_aligned = align_htf_to_ltf(prices, df_1d, s5_1d)
+    
+    # Volume confirmation - 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1.0)
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
@@ -51,39 +69,44 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(rsi_12h_aligned[i]) or
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r4_1d_aligned[i]) or 
+            np.isnan(r5_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
+            np.isnan(s5_1d_aligned[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above river bank (EMA50) + river flow bullish (RSI>55) + volume
-            if (close[i] > ema_50_1d_aligned[i] and 
-                rsi_12h_aligned[i] > 55 and
+            # Long: price above R4 + above daily EMA34 + volume confirmation
+            if (close[i] > r4_1d_aligned[i] and 
+                close[i] > ema_34_1d_aligned[i] and
                 vol_ratio[i] > 1.5):
-                signals[i] = 0.25
-                position = 1
-            # Short: price below river bank + river flow bearish (RSI<45) + volume
-            elif (close[i] < ema_50_1d_aligned[i] and 
-                  rsi_12h_aligned[i] < 45 and
+                # Avoid extreme extension beyond R5
+                if close[i] <= r5_1d_aligned[i] * 1.02:
+                    signals[i] = 0.25
+                    position = 1
+            # Short: price below S4 + below daily EMA34 + volume confirmation
+            elif (close[i] < s4_1d_aligned[i] and 
+                  close[i] < ema_34_1d_aligned[i] and
                   vol_ratio[i] > 1.5):
-                signals[i] = -0.25
-                position = -1
+                # Avoid extreme extension beyond S5
+                if close[i] >= s5_1d_aligned[i] * 0.98:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Exit long: price below river bank OR river flow turns bearish
-            if close[i] < ema_50_1d_aligned[i] or rsi_12h_aligned[i] < 45:
+            # Exit long: price below R4 OR below daily EMA34
+            if close[i] < r4_1d_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price above river bank OR river flow turns bullish
-            if close[i] > ema_50_1d_aligned[i] or rsi_12h_aligned[i] > 55:
+            # Exit short: price above S4 OR above daily EMA34
+            if close[i] > s4_1d_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
