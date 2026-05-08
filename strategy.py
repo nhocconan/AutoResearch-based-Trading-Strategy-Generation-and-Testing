@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_WeeklyPivot_Donchian_Breakout_1dTrend"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,53 +17,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for trend filter and weekly pivot
+    # 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    
+    # 1w EMA34 for trend filter
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    
+    # 1d data for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Previous 1d bar's Camarilla pivot levels
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close[0] = close_1d[0]
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
     
-    # Weekly data for pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
+    # Camarilla levels: R3, S3 (stronger breakout levels)
+    R3 = prev_close + 1.1 * (prev_high - prev_low) / 4
+    S3 = prev_close - 1.1 * (prev_high - prev_low) / 4
     
-    # Previous week's high, low, close for pivot
-    prev_week_high = np.roll(df_1w['high'].values, 1)
-    prev_week_low = np.roll(df_1w['low'].values, 1)
-    prev_week_close = np.roll(df_1w['close'].values, 1)
-    prev_week_high[0] = df_1w['high'].values[0]
-    prev_week_low[0] = df_1w['low'].values[0]
-    prev_week_close[0] = df_1w['close'].values[0]
-    
-    # Weekly pivot points
-    pivot = (prev_week_high + prev_week_low + prev_week_close) / 3.0
-    r1 = 2 * pivot - prev_week_low
-    s1 = 2 * pivot - prev_week_high
-    r2 = pivot + (prev_week_high - prev_week_low)
-    s2 = pivot - (prev_week_high - prev_week_low)
-    r3 = prev_week_high + 2 * (pivot - prev_week_low)
-    s3 = prev_week_low - 2 * (prev_week_high - pivot)
-    
-    # Align weekly pivot levels to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
-    
-    # Donchian channel (20-period) on 6h
-    lookback = 20
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
-    
-    for i in range(lookback - 1, n):
-        highest_high[i] = np.max(high[i - lookback + 1:i + 1])
-        lowest_low[i] = np.min(low[i - lookback + 1:i + 1])
+    # Align Camarilla levels to 12h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
     # Volume spike: current volume > 2.0x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -72,29 +60,26 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 20)  # warmup period
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
+            np.isnan(ema34_1w_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above Donchian high, above weekly R3, above 1d EMA34, volume spike
-            long_cond = (close[i] > highest_high[i] and 
-                        close[i] > r3_aligned[i] and
-                        close[i] > ema34_1d_aligned[i] and
+            # Long: Price breaks above R3, price above 1w EMA34, volume spike
+            long_cond = (close[i] > R3_aligned[i] and 
+                        close[i] > ema34_1w_aligned[i] and
                         volume_spike[i])
             
-            # Short: Price breaks below Donchian low, below weekly S3, below 1d EMA34, volume spike
-            short_cond = (close[i] < lowest_low[i] and 
-                         close[i] < s3_aligned[i] and
-                         close[i] < ema34_1d_aligned[i] and
+            # Short: Price breaks below S3, price below 1w EMA34, volume spike
+            short_cond = (close[i] < S3_aligned[i] and 
+                         close[i] < ema34_1w_aligned[i] and
                          volume_spike[i])
             
             if long_cond:
@@ -104,15 +89,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Price breaks below Donchian low OR crosses below 1d EMA34
-            if close[i] < lowest_low[i] or close[i] < ema34_1d_aligned[i]:
+            # Long exit: Price breaks below S3 OR price crosses below 1w EMA34
+            if close[i] < S3_aligned[i] or close[i] < ema34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price breaks above Donchian high OR crosses above 1d EMA34
-            if close[i] > highest_high[i] or close[i] > ema34_1d_aligned[i]:
+            # Short exit: Price breaks above R3 OR price crosses above 1w EMA34
+            if close[i] > R3_aligned[i] or close[i] > ema34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
