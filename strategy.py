@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_Pivot_Reversion_1dTrend"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla pivots and trend filter
+    # Daily data for Camarilla levels and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -30,39 +30,33 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla pivot levels (S1, R1, S3, R3) from daily OHLC
-    def calculate_camarilla(high, low, close):
-        """Calculate Camarilla pivot levels: S1, R1, S3, R3"""
-        range_hl = high - low
-        # Camarilla formulas
-        S3 = close - (range_hl * 1.1 / 2)
-        S1 = close - (range_hl * 1.1 / 4)
-        R1 = close + (range_hl * 1.1 / 4)
-        R3 = close + (range_hl * 1.1 / 2)
-        return S1, R1, S3, R3
+    # Calculate Camarilla levels from previous day
+    R3 = np.zeros(n)
+    S3 = np.zeros(n)
+    R4 = np.zeros(n)
+    S4 = np.zeros(n)
     
-    # Calculate Camarilla levels for each day
-    camarilla_S1 = np.full(len(close_1d), np.nan)
-    camarilla_R1 = np.full(len(close_1d), np.nan)
-    camarilla_S3 = np.full(len(close_1d), np.nan)
-    camarilla_R3 = np.full(len(close_1d), np.nan)
+    for i in range(1, len(close_1d)):
+        high_prev = high_1d[i-1]
+        low_prev = low_1d[i-1]
+        close_prev = close_1d[i-1]
+        range_val = high_prev - low_prev
+        
+        C = close_prev + (range_val * 1.1 / 6)
+        R3[i] = C + (range_val * 1.1 / 2)
+        S3[i] = C - (range_val * 1.1 / 2)
+        R4[i] = C + (range_val * 1.1)
+        S4[i] = C - (range_val * 1.1)
     
-    for i in range(len(close_1d)):
-        S1, R1, S3, R3 = calculate_camarilla(high_1d[i], low_1d[i], close_1d[i])
-        camarilla_S1[i] = S1
-        camarilla_R1[i] = R1
-        camarilla_S3[i] = S3
-        camarilla_R3[i] = R3
+    # Align Camarilla levels to 4h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
+    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
     
-    # Align Camarilla levels to 4h timeframe (using previous day's levels)
-    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1, additional_delay_bars=1)
-    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1, additional_delay_bars=1)
-    camarilla_S3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S3, additional_delay_bars=1)
-    camarilla_R3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R3, additional_delay_bars=1)
-    
-    # Volume spike: current volume > 2.0x 20-period average
+    # Volume spike: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma20)
+    volume_spike = volume > (1.5 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -71,24 +65,21 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_S1_aligned[i]) or 
-            np.isnan(camarilla_R1_aligned[i]) or np.isnan(camarilla_S3_aligned[i]) or 
-            np.isnan(camarilla_R3_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(R3_aligned[i]) or 
+            np.isnan(S3_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price touches S3 and bounces, in daily uptrend, volume spike
-            long_cond = (close[i] <= camarilla_S3_aligned[i] * 1.001 and  # Allow small buffer
-                        close[i] > camarilla_S3_aligned[i] and
+            # Long: price breaks above R3, daily uptrend, volume spike
+            long_cond = (close[i] > R3_aligned[i] and 
                         ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and
                         volume_spike[i])
             
-            # Short: price touches R3 and reverses, in daily downtrend, volume spike
-            short_cond = (close[i] >= camarilla_R3_aligned[i] * 0.999 and  # Allow small buffer
-                         close[i] < camarilla_R3_aligned[i] and
+            # Short: price breaks below S3, daily downtrend, volume spike
+            short_cond = (close[i] < S3_aligned[i] and 
                          ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and
                          volume_spike[i])
             
@@ -99,17 +90,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price reaches S1 or trend changes
-            if (close[i] >= camarilla_S1_aligned[i] or 
-                ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]):
+            # Long exit: price crosses below S3
+            if close[i] < S3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price reaches R1 or trend changes
-            if (close[i] <= camarilla_R1_aligned[i] or 
-                ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]):
+            # Short exit: price crosses above R3
+            if close[i] > R3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
