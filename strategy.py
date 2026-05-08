@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Simple"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Spike"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,34 +17,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume filter: current volume > 1.5x 20-period average
+    # Volume spike filter: current volume > 2.0x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma20)
+    volume_spike = volume > (2.0 * vol_ma20)
     
-    # 1d data for trend filter and Camarilla pivot calculation
+    # 1d data for trend filter and pivot calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Daily high, low, close for Camarilla pivot calculation
+    # Daily high, low, close for trend and pivot
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
+    # 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
     # Calculate Camarilla pivot levels (based on previous day's OHLC)
-    # Pivot = (H + L + C) / 3
     pivot_1d = (high_1d + low_1d + close_1d) / 3
-    # Range = H - L
     range_1d = high_1d - low_1d
-    # Resistance levels
     r1_1d = close_1d + (range_1d * 1.1 / 12)
-    # Support levels
     s1_1d = close_1d - (range_1d * 1.1 / 12)
     
-    # Align 1d EMA50 and 1d Camarilla levels to 4h timeframe
+    # Align 1d EMA50 and pivot levels to 4h timeframe
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
@@ -59,17 +55,17 @@ def generate_signals(prices):
         # Skip if any critical data is NaN
         if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(pivot_1d_aligned[i]) or 
             np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
-            np.isnan(volume_filter[i])):
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price above R1, above 1d EMA50, volume filter
-            long_cond = (close[i] > r1_1d_aligned[i]) and (close[i] > ema_50_1d_aligned[i]) and volume_filter[i]
-            # Short conditions: price below S1, below 1d EMA50, volume filter
-            short_cond = (close[i] < s1_1d_aligned[i]) and (close[i] < ema_50_1d_aligned[i]) and volume_filter[i]
+            # Long conditions: price above R1, above 1d EMA50, volume spike
+            long_cond = (close[i] > r1_1d_aligned[i]) and (close[i] > ema_50_1d_aligned[i]) and volume_spike[i]
+            # Short conditions: price below S1, below 1d EMA50, volume spike
+            short_cond = (close[i] < s1_1d_aligned[i]) and (close[i] < ema_50_1d_aligned[i]) and volume_spike[i]
             
             if long_cond:
                 signals[i] = 0.25
