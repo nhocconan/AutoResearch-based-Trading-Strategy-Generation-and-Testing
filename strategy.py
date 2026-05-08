@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_WickReversal_VolumeTrend"
-timeframe = "12h"
+name = "1d_Choppiness_Index_Donchian_Breakout"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,40 +24,26 @@ def generate_signals(prices):
     
     close_1w = df_1w['close'].values
     
-    # Calculate 1-week EMA50 for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Weekly EMA20 for trend filter
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Daily data for Wick Reversal levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Daily ATR(14) for Donchian and chop
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Daily Donchian(20) channels
+    upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate daily Wick Reversal levels
-    n1d = len(close_1d)
-    wick_reversal_high = np.full(n1d, np.nan)
-    wick_reversal_low = np.full(n1d, np.nan)
-    
-    for i in range(1, n1d):
-        PH = high_1d[i-1]
-        PL = low_1d[i-1]
-        PC = close_1d[i-1]
-        
-        # Wick Reversal levels: previous day high/low + 50% of range
-        wick_reversal_high[i] = PH + 0.5 * (PH - PL)
-        wick_reversal_low[i] = PL - 0.5 * (PH - PL)
-    
-    # Align Wick Reversal levels to 12h timeframe
-    wick_reversal_high_aligned = align_htf_to_ltf(prices, df_1d, wick_reversal_high)
-    wick_reversal_low_aligned = align_htf_to_ltf(prices, df_1d, wick_reversal_low)
-    
-    # Volume confirmation: current volume > 1.5x 24-period average
-    vol_ma24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_confirmed = volume > (1.5 * vol_ma24)
+    # Choppiness Index(14) for regime detection
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -66,23 +52,23 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(wick_reversal_high_aligned[i]) or np.isnan(wick_reversal_low_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_confirmed[i])):
+        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(upper[i]) or 
+            np.isnan(lower[i]) or np.isnan(chop[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price closes below Wick Low with weekly uptrend + volume confirmation
-            long_cond = (close[i] < wick_reversal_low_aligned[i] and 
-                        ema_50_1w_aligned[i] > ema_50_1w_aligned[i-1] and
-                        volume_confirmed[i])
+            # Long: price breaks above Donchian upper + weekly uptrend + chop < 38.2 (trending)
+            long_cond = (close[i] > upper[i] and 
+                        ema_20_1w_aligned[i] > ema_20_1w_aligned[i-1] and
+                        chop[i] < 38.2)
             
-            # Short: price closes above Wick High with weekly downtrend + volume confirmation
-            short_cond = (close[i] > wick_reversal_high_aligned[i] and 
-                         ema_50_1w_aligned[i] < ema_50_1w_aligned[i-1] and
-                         volume_confirmed[i])
+            # Short: price breaks below Donchian lower + weekly downtrend + chop < 38.2 (trending)
+            short_cond = (close[i] < lower[i] and 
+                         ema_20_1w_aligned[i] < ema_20_1w_aligned[i-1] and
+                         chop[i] < 38.2)
             
             if long_cond:
                 signals[i] = 0.25
@@ -91,15 +77,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price closes above Wick High (mean reversion)
-            if close[i] > wick_reversal_high_aligned[i]:
+            # Long exit: price breaks below Donchian lower or chop > 61.8 (ranging)
+            if close[i] < lower[i] or chop[i] > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price closes below Wick Low (mean reversion)
-            if close[i] < wick_reversal_low_aligned[i]:
+            # Short exit: price breaks above Donchian upper or chop > 61.8 (ranging)
+            if close[i] > upper[i] or chop[i] > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
