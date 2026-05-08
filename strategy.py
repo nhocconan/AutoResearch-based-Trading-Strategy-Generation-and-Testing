@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,30 +27,28 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     
     # 1d EMA34 for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 12h data for Camarilla pivot levels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # 4h data for Camarilla pivot levels
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    close_4h = df_4h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # Camarilla pivot levels from previous 12h bar's OHLC
+    # Camarilla pivot levels from previous 4h bar's OHLC
     # R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
-    camarilla_r3 = close_12h + (high_12h - low_12h) * 1.1 / 2
-    camarilla_s3 = close_12h - (high_12h - low_12h) * 1.1 / 2
+    camarilla_r3 = close_4h + (high_4h - low_4h) * 1.1 / 2
+    camarilla_s3 = close_4h - (high_4h - low_4h) * 1.1 / 2
     
-    # Align 12h Camarilla levels to 12h timeframe (no shift needed as they are based on previous bar)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s3)
+    # Align 4h Camarilla levels to 4h timeframe (shift by one bar to avoid look-ahead)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
