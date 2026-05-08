@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_Camarilla_R1S1_Breakout_Trend_Filter_v4"
-timeframe = "1d"
+name = "6h_1d_ElderRay_Power_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,64 +17,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for current close (used in calculations)
+    # Get 1d data once for Elder Ray and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Get weekly data for trend filter and weekly high/low
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
+    # Elder Ray (Bull/Bear Power)
+    close_1d = df_1d['close'].values
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13_1d
+    bear_power = low - ema13_1d
     
-    # Weekly EMA20 trend filter
-    close_1w = df_1w['close'].values
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    trend_1w = (close_1w > ema20_1w).astype(float)
-    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
+    # Trend filter: EMA34 on 1d close
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_up = (close_1d > ema34_1d).astype(float)
+    trend_dn = (close_1d < ema34_1d).astype(float)
     
-    # Previous week's OHLC for weekly Camarilla calculation
-    prev_week_high = np.roll(df_1w['high'].values, 1)
-    prev_week_low = np.roll(df_1w['low'].values, 1)
-    prev_week_close = np.roll(df_1w['close'].values, 1)
-    prev_week_high[0] = df_1w['high'].values[0]
-    prev_week_low[0] = df_1w['low'].values[0]
-    prev_week_close[0] = df_1w['close'].values[0]
+    # Align to 6h
+    bull_power_6h = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_6h = align_htf_to_ltf(prices, df_1d, bear_power)
+    trend_up_6h = align_htf_to_ltf(prices, df_1d, trend_up)
+    trend_dn_6h = align_htf_to_ltf(prices, df_1d, trend_dn)
     
-    # Weekly Camarilla pivot levels
-    pivot_week = (prev_week_high + prev_week_low + prev_week_close) / 3.0
-    range_week = prev_week_high - prev_week_low
-    r1_week = pivot_week + (range_week * 1.1 / 6)
-    s1_week = pivot_week - (range_week * 1.1 / 6)
-    
-    # Align weekly Camarilla levels to daily timeframe
-    r1_week_aligned = align_htf_to_ltf(prices, df_1w, r1_week)
-    s1_week_aligned = align_htf_to_ltf(prices, df_1w, s1_week)
-    
-    # Volume spike detection: current volume > 2.0 * 20-day average
+    # Volume filter: volume > 1.5 * 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma20 * 2.0)
+    vol_filter = volume > (vol_ma20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # warmup for volume MA
+    start_idx = 34  # warmup for EMA34
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r1_week_aligned[i]) or np.isnan(s1_week_aligned[i]) or 
-            np.isnan(trend_1w_aligned[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(bull_power_6h[i]) or np.isnan(bear_power_6h[i]) or 
+            np.isnan(trend_up_6h[i]) or np.isnan(trend_dn_6h[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: price breaks above weekly R1 with volume spike and weekly uptrend
-            long_cond = (close[i] > r1_week_aligned[i] and vol_spike[i] and trend_1w_aligned[i] > 0.5)
+            # Long: Bull power positive, bear power negative, uptrend, volume filter
+            long_cond = (bull_power_6h[i] > 0 and bear_power_6h[i] < 0 and 
+                         trend_up_6h[i] > 0.5 and vol_filter[i])
             
-            # Short entry: price breaks below weekly S1 with volume spike and weekly downtrend
-            short_cond = (close[i] < s1_week_aligned[i] and vol_spike[i] and trend_1w_aligned[i] < 0.5)
+            # Short: Bear power negative, bull power negative, downtrend, volume filter
+            short_cond = (bear_power_6h[i] < 0 and bull_power_6h[i] < 0 and 
+                          trend_dn_6h[i] > 0.5 and vol_filter[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -83,15 +73,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below weekly S1 (reversal signal)
-            if close[i] < s1_week_aligned[i]:
+            # Long exit: Bear power turns positive (bulls losing control)
+            if bear_power_6h[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price reverses back above weekly R1 (reversal signal)
-            if close[i] > r1_week_aligned[i]:
+            # Short exit: Bull power turns positive (bears losing control)
+            if bull_power_6h[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -99,10 +89,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Weekly Camarilla R1/S1 breakout strategy with volume spike confirmation and weekly EMA20 trend filter on 1d timeframe.
-# Enters long when price breaks above weekly R1 with volume spike and weekly uptrend (close > EMA20).
-# Enters short when price breaks below weekly S1 with volume spike and weekly downtrend (close < EMA20).
-# Exits when price reverses back through weekly S1/R1 respectively.
-# Uses discrete sizing (0.25) to minimize churn. Targets 15-30 trades/year on 1d timeframe.
-# Weekly trend filter ensures we only trade with the higher timeframe trend, reducing whipsaw in sideways markets.
-# Works in bull markets (trend-following breakouts) and bear markets (reversal breakouts from overextended levels).
+# Hypothesis: Elder Ray (Bull/Bear Power) with 1d EMA34 trend filter on 6h timeframe.
+# Enters long when bull power > 0, bear power < 0 (bulls in control), 1d uptrend, and volume filter.
+# Enters short when bear power < 0, bull power < 0 (bears in control), 1d downtrend, and volume filter.
+# Exits when the opposing power turns positive (loss of control).
+# Uses volume filter to avoid low-conviction moves. Targets 15-25 trades/year on 6h.
+# Works in bull markets (follow bull power) and bear markets (follow bear power).
+# Elder Ray measures buying/selling pressure relative to EMA13, effective in trending markets.
