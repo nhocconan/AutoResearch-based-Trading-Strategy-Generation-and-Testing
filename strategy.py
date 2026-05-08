@@ -3,128 +3,138 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 4h volume spike + 12h ADX trend filter
-# Donchian breakouts capture momentum in trending markets. Volume spike confirms institutional participation.
-# 12h ADX > 25 ensures we only trade in strong trends, avoiding whipsaws in ranges.
-# Exits occur when price returns to the Donchian midpoint or trend weakens (ADX < 20).
-# Targets 20-50 trades per year (~80-200 total over 4 years) to minimize fee drift.
-# Works in both bull and bear markets by filtering for strong trends only.
+# Hypothesis: 6h Ichimoku Cloud breakout with 1d trend filter and volume confirmation
+# Uses Ichimoku (Tenkan/Kijun cross) on 6h for entry timing, filtered by 1d price vs Cloud (Kumo) for trend direction
+# Volume spike confirms institutional participation. Only trades in strong trends (price above/below cloud).
+# Works in bull/bear markets by requiring price to be on correct side of cloud.
+# Targets 15-25 trades/year (~60-100 total over 4 years) to minimize fee drag.
 
-name = "4h_Donchian20_4hVolume_12hADX"
-timeframe = "4h"
+name = "6h_Ichimoku_1dCloud_Filter_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels on 4h
-    lookback = 20
-    dc_high = np.full_like(high, np.nan)
-    dc_low = np.full_like(low, np.nan)
-    dc_mid = np.full_like(close, np.nan)
+    # Ichimoku components on 6h (9, 26, 52 periods)
+    tenkan_period = 9
+    kijun_period = 26
+    senkou_span_b_period = 52
     
-    for i in range(lookback, n):
-        dc_high[i] = np.max(high[i-lookback:i])
-        dc_low[i] = np.min(low[i-lookback:i])
-        dc_mid[i] = (dc_high[i] + dc_low[i]) / 2.0
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    tenkan_sen = np.full_like(high, np.nan)
+    for i in range(tenkan_period - 1, n):
+        tenkan_sen[i] = (np.max(high[i-tenkan_period+1:i+1]) + np.min(low[i-tenkan_period+1:i+1])) / 2
     
-    # Volume spike on 4h
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    vol_spike = volume > (vol_ma.values * 2.0)
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    kijun_sen = np.full_like(high, np.nan)
+    for i in range(kijun_period - 1, n):
+        kijun_sen[i] = (np.max(high[i-kijun_period+1:i+1]) + np.min(low[i-kijun_period+1:i+1])) / 2
     
-    # Get 12h data for ADX trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_span_a = np.full_like(high, np.nan)
+    for i in range(n):
+        if i + kijun_period < n and not np.isnan(tenkan_sen[i]) and not np.isnan(kijun_sen[i]):
+            senkou_span_a[i + kijun_period] = (tenkan_sen[i] + kijun_sen[i]) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    senkou_span_b = np.full_like(high, np.nan)
+    for i in range(senkou_span_b_period - 1, n):
+        if i + kijun_period < n:
+            senkou_span_b[i + kijun_period] = (np.max(high[i-senkou_span_b_period+1:i+1]) + np.min(low[i-senkou_span_b_period+1:i+1])) / 2
+    
+    # Get 1d data for Cloud (Kumo) filter and volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate ADX(14) on 12h
-    plus_dm = np.zeros_like(high_12h)
-    minus_dm = np.zeros_like(high_12h)
-    tr = np.zeros_like(high_12h)
+    # Calculate Ichimoku Cloud on 1d (same parameters)
+    tenkan_1d = np.full_like(high_1d, np.nan)
+    kijun_1d = np.full_like(high_1d, np.nan)
+    senkou_a_1d = np.full_like(high_1d, np.nan)
+    senkou_b_1d = np.full_like(high_1d, np.nan)
     
-    for i in range(1, len(high_12h)):
-        plus_dm[i] = max(high_12h[i] - high_12h[i-1], 0)
-        minus_dm[i] = max(low_12h[i-1] - low_12h[i], 0)
-        if plus_dm[i] == minus_dm[i]:
-            plus_dm[i] = 0
-            minus_dm[i] = 0
-        tr[i] = max(
-            high_12h[i] - low_12h[i],
-            abs(high_12h[i] - close_12h[i-1]),
-            abs(low_12h[i] - close_12h[i-1])
-        )
+    for i in range(tenkan_period - 1, len(high_1d)):
+        tenkan_1d[i] = (np.max(high_1d[i-tenkan_period+1:i+1]) + np.min(low_1d[i-tenkan_period+1:i+1])) / 2
+    for i in range(kijun_period - 1, len(high_1d)):
+        kijun_1d[i] = (np.max(high_1d[i-kijun_period+1:i+1]) + np.min(low_1d[i-kijun_period+1:i+1])) / 2
+    for i in range(len(high_1d)):
+        if i + kijun_period < len(high_1d) and not np.isnan(tenkan_1d[i]) and not np.isnan(kijun_1d[i]):
+            senkou_a_1d[i + kijun_period] = (tenkan_1d[i] + kijun_1d[i]) / 2
+    for i in range(senkou_span_b_period - 1, len(high_1d)):
+        if i + kijun_period < len(high_1d):
+            senkou_b_1d[i + kijun_period] = (np.max(high_1d[i-senkou_span_b_period+1:i+1]) + np.min(low_1d[i-senkou_span_b_period+1:i+1])) / 2
     
-    # Wilder smoothing
-    def wilder_smooth(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        result[period-1] = np.nansum(arr[:period])
-        for i in range(period, len(arr)):
-            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
-        return result
+    # Calculate 1d Cloud boundaries (Senkou Span A and B)
+    # Cloud top = max(Senkou A, Senkou B), Cloud bottom = min(Senkou A, Senkou B)
+    cloud_top_1d = np.full_like(close_1d, np.nan)
+    cloud_bottom_1d = np.full_like(close_1d, np.nan)
+    for i in range(len(high_1d)):
+        if not np.isnan(senkou_a_1d[i]) and not np.isnan(senkou_b_1d[i]):
+            cloud_top_1d[i] = max(senkou_a_1d[i], senkou_b_1d[i])
+            cloud_bottom_1d[i] = min(senkou_a_1d[i], senkou_b_1d[i])
     
-    tr14 = wilder_smooth(tr, 14)
-    plus_dm14 = wilder_smooth(plus_dm, 14)
-    minus_dm14 = wilder_smooth(minus_dm, 14)
+    # Volume confirmation: 1d volume spike (2x 20-period MA)
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean()
+    vol_spike_1d = volume_1d > (vol_ma_1d.values * 2.0)
     
-    plus_di14 = np.where(tr14 != 0, 100 * (plus_dm14 / tr14), 0)
-    minus_di14 = np.where(tr14 != 0, 100 * (minus_dm14 / tr14), 0)
-    
-    dx = np.where((plus_di14 + minus_di14) != 0, 
-                  100 * np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14), 0)
-    adx = wilder_smooth(dx, 14)
-    
-    adx_strong = adx > 25
-    adx_weak = adx < 20
-    adx_strong_aligned = align_htf_to_ltf(prices, df_12h, adx_strong)
-    adx_weak_aligned = align_htf_to_ltf(prices, df_12h, adx_weak)
+    # Align 1d indicators to 6s timeframe
+    cloud_top_aligned = align_htf_to_ltf(prices, df_1d, cloud_top_1d)
+    cloud_bottom_aligned = align_htf_to_ltf(prices, df_1d, cloud_bottom_1d)
+    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(lookback, 40)  # Ensure sufficient data
+    start_idx = max(tenkan_period, kijun_period, senkou_span_b_period) + kijun_period  # Ensure Ichimoku is calculated
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(dc_high[i]) or np.isnan(dc_low[i]) or np.isnan(dc_mid[i]) or 
-            np.isnan(vol_spike[i]) or np.isnan(adx_strong_aligned[i]) or 
-            np.isnan(adx_weak_aligned[i])):
+        if (np.isnan(tenkan_sen[i]) or np.isnan(kijun_sen[i]) or 
+            np.isnan(cloud_top_aligned[i]) or np.isnan(cloud_bottom_aligned[i]) or 
+            np.isnan(vol_spike_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above Donchian high, volume spike, strong trend
-            if close[i] > dc_high[i] and vol_spike[i] and adx_strong_aligned[i]:
+            # Enter long: Tenkan > Kijun (bullish cross) AND price above cloud AND volume spike
+            if (tenkan_sen[i] > kijun_sen[i] and 
+                close[i] > cloud_top_aligned[i] and 
+                vol_spike_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below Donchian low, volume spike, strong trend
-            elif close[i] < dc_low[i] and vol_spike[i] and adx_strong_aligned[i]:
+            # Enter short: Tenkan < Kijun (bearish cross) AND price below cloud AND volume spike
+            elif (tenkan_sen[i] < kijun_sen[i] and 
+                  close[i] < cloud_bottom_aligned[i] and 
+                  vol_spike_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to midpoint or trend weakens
-            if close[i] < dc_mid[i] or adx_weak_aligned[i]:
+            # Exit long: Tenkan < Kijun (bearish cross) OR price drops below cloud
+            if (tenkan_sen[i] < kijun_sen[i] or 
+                close[i] < cloud_top_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to midpoint or trend weakens
-            if close[i] > dc_mid[i] or adx_weak_aligned[i]:
+            # Exit short: Tenkan > Kijun (bullish cross) OR price rises above cloud
+            if (tenkan_sen[i] > kijun_sen[i] or 
+                close[i] > cloud_bottom_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
