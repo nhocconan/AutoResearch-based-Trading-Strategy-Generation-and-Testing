@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,16 +17,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Camarilla pivot levels once before loop
+    # Calculate 1w price for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    close_1w = df_1w['close'].values
+    ma_50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
+    ma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ma_50_1w)
+    
+    # Calculate 1d Camarilla pivot levels (R3, S3)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
-    
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels (R3, S3)
     H_prev = np.roll(high_1d, 1)
     L_prev = np.roll(low_1d, 1)
     C_prev = np.roll(close_1d, 1)
@@ -40,18 +46,14 @@ def generate_signals(prices):
     R3 = pivot + (range_hl * 1.1 / 4)
     S3 = pivot - (range_hl * 1.1 / 4)
     
-    # Align Camarilla levels to 6h timeframe (wait for daily bar close)
+    # Align Camarilla levels to 12h timeframe (wait for daily bar close)
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
-    # 1d trend: EMA34
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume spike: current volume > 2.0x 20-period average
+    # Volume spike: current volume > 2.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma20)
+    volume_spike = volume > (2.5 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -61,7 +63,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
         if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(pivot_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(ma_50_1w_aligned[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -69,13 +71,13 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: break above R3 + uptrend + volume spike
+            # Long: break above R3 + weekly uptrend + volume spike
             long_cond = (close[i] > R3_aligned[i]) and \
-                        (close[i] > ema_34_1d_aligned[i]) and \
+                        (close[i] > ma_50_1w_aligned[i]) and \
                         volume_spike[i]
-            # Short: break below S3 + downtrend + volume spike
+            # Short: break below S3 + weekly downtrend + volume spike
             short_cond = (close[i] < S3_aligned[i]) and \
-                         (close[i] < ema_34_1d_aligned[i]) and \
+                         (close[i] < ma_50_1w_aligned[i]) and \
                          volume_spike[i]
             
             if long_cond:
