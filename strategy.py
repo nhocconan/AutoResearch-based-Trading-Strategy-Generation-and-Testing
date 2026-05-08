@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h RSI mean reversion with 12h EMA trend filter and volume confirmation.
-# RSI(14) < 30 for long, > 70 for short in the direction of 12h EMA(50) trend.
+# Hypothesis: 4h Donchian breakout with 12h ADX trend filter and volume confirmation.
+# Long when price breaks above Donchian(20) high in 12h uptrend (ADX>25 and +DI>-DI).
+# Short when price breaks below Donchian(20) low in 12h downtrend (ADX>25 and +DI< -DI).
 # Volume > 1.5x 20-period average confirms participation. Works in both bull and bear markets
-# by taking mean reversions in the direction of the higher timeframe trend.
+# by taking breakouts in the direction of the higher timeframe trend.
 # Target: 25-40 trades/year with disciplined entries to minimize fee drag.
 
-name = "4h_RSI_MeanReversion_12hEMA50_Volume"
+name = "4h_Donchian_Breakout_12hADX_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,52 +24,101 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA trend filter and volume average
+    # Get 12h data for ADX trend filter and volume average
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) < 50:
         return np.zeros(n)
     
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
     volume_12h = df_12h['volume'].values
     
-    # Calculate EMA(50) on 12h close
-    ema_50_12h = np.full(len(close_12h), np.nan)
-    if len(close_12h) >= 50:
-        ema_50_12h[49] = np.mean(close_12h[:50])
-        for i in range(50, len(close_12h)):
-            ema_50_12h[i] = (close_12h[i] * 2 + ema_50_12h[i-1] * 49) / 51
+    # Calculate ADX(14) on 12h data
+    def calculate_adx(high, low, close, period=14):
+        n = len(high)
+        if n < period * 2:
+            return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
+        
+        # True Range
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr1[0] = 0  # first value
+        tr2[0] = 0
+        tr3[0] = 0
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        
+        # Directional Movement
+        dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                           np.maximum(high - np.roll(high, 1), 0), 0)
+        dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                            np.maximum(np.roll(low, 1) - low, 0), 0)
+        dm_plus[0] = 0
+        dm_minus[0] = 0
+        
+        # Smoothed values
+        atr = np.full(n, np.nan)
+        dm_plus_smooth = np.full(n, np.nan)
+        dm_minus_smooth = np.full(n, np.nan)
+        
+        if n >= period:
+            atr[period-1] = np.mean(tr[:period])
+            dm_plus_smooth[period-1] = np.mean(dm_plus[:period])
+            dm_minus_smooth[period-1] = np.mean(dm_minus[:period])
+            
+            for i in range(period, n):
+                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+                dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (period-1) + dm_plus[i]) / period
+                dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (period-1) + dm_minus[i]) / period
+        
+        # DI and DX
+        di_plus = np.full(n, np.nan)
+        di_minus = np.full(n, np.nan)
+        dx = np.full(n, np.nan)
+        
+        for i in range(period, n):
+            if atr[i] != 0:
+                di_plus[i] = 100 * dm_plus_smooth[i] / atr[i]
+                di_minus[i] = 100 * dm_minus_smooth[i] / atr[i]
+                if di_plus[i] + di_minus[i] != 0:
+                    dx[i] = 100 * np.abs(di_plus[i] - di_minus[i]) / (di_plus[i] + di_minus[i])
+        
+        # ADX
+        adx = np.full(n, np.nan)
+        if n >= 2*period:
+            adx[2*period-1] = np.mean(dx[period:2*period])
+            for i in range(2*period, n):
+                adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx, di_plus, di_minus
+    
+    adx_12h, di_plus_12h, di_minus_12h = calculate_adx(high_12h, low_12h, close_12h, 14)
     
     # Calculate 20-period average volume on 12h
     vol_avg_20_12h = np.full(len(volume_12h), np.nan)
     for i in range(20, len(volume_12h)):
         vol_avg_20_12h[i] = np.mean(volume_12h[i-20:i])
     
-    # Calculate RSI(14) on 4h data
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate Donchian channels (20-period) on 4h data
+    def calculate_donchian(high, low, period=20):
+        n = len(high)
+        upper = np.full(n, np.nan)
+        lower = np.full(n, np.nan)
+        for i in range(period-1, n):
+            upper[i] = np.max(high[i-period+1:i+1])
+            lower[i] = np.min(low[i-period+1:i+1])
+        return upper, lower
     
-    avg_gain = np.full(n, np.nan)
-    avg_loss = np.full(n, np.nan)
-    rsi = np.full(n, np.nan)
-    
-    for i in range(14, n):
-        if i == 14:
-            avg_gain[i] = np.mean(gain[1:15])
-            avg_loss[i] = np.mean(loss[1:15])
-        else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-        
-        if avg_loss[i] != 0:
-            rs = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100 - (100 / (1 + rs))
-        else:
-            rsi[i] = 100
+    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
     
     # Align all indicators to 4h timeframe
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    di_plus_12h_aligned = align_htf_to_ltf(prices, df_12h, di_plus_12h)
+    di_minus_12h_aligned = align_htf_to_ltf(prices, df_12h, di_minus_12h)
     vol_avg_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_avg_20_12h)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -77,7 +127,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20, 14)  # warmup for indicators
+    start_idx = max(40, 20)  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if outside trading session
@@ -88,7 +138,9 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if np.isnan(rsi[i]) or np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_avg_20_12h_aligned[i]):
+        if (np.isnan(adx_12h_aligned[i]) or np.isnan(di_plus_12h_aligned[i]) or 
+            np.isnan(di_minus_12h_aligned[i]) or np.isnan(vol_avg_20_12h_aligned[i]) or
+            np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -107,12 +159,14 @@ def generate_signals(prices):
                 vol_12h_current = df_12h.iloc[idx_12h]['volume']
                 vol_filter = vol_12h_current > 1.5 * vol_avg_20_12h_aligned[i]
         
+        # Trend filter: ADX > 25 and directional bias
+        uptrend = (adx_12h_aligned[i] > 25) and (di_plus_12h_aligned[i] > di_minus_12h_aligned[i])
+        downtrend = (adx_12h_aligned[i] > 25) and (di_plus_12h_aligned[i] < di_minus_12h_aligned[i])
+        
         if position == 0:
-            # Look for entry: RSI extreme + EMA trend + volume
-            # Long when RSI < 30 in uptrend (price > EMA)
-            long_condition = (rsi[i] < 30) and (close[i] > ema_50_12h_aligned[i]) and vol_filter
-            # Short when RSI > 70 in downtrend (price < EMA)
-            short_condition = (rsi[i] > 70) and (close[i] < ema_50_12h_aligned[i]) and vol_filter
+            # Look for entry: Donchian breakout + trend + volume
+            long_condition = (close[i] > donchian_upper_aligned[i]) and uptrend and vol_filter
+            short_condition = (close[i] < donchian_lower_aligned[i]) and downtrend and vol_filter
             
             if long_condition:
                 signals[i] = 0.25
@@ -121,15 +175,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: RSI > 50 or trend changes
-            if (rsi[i] > 50) or (close[i] < ema_50_12h_aligned[i]):
+            # Exit long: price retouches Donchian lower or trend changes
+            if (close[i] < donchian_lower_aligned[i]) or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: RSI < 50 or trend changes
-            if (rsi[i] < 50) or (close[i] > ema_50_12h_aligned[i]):
+            # Exit short: price retouches Donchian upper or trend changes
+            if (close[i] > donchian_upper_aligned[i]) or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
