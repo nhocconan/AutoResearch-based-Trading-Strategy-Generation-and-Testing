@@ -3,22 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d Trend and Volume Spike
-# - Bull Power = High - EMA(13), Bear Power = Low - EMA(13) on 1d timeframe
-# - Long when Bull Power > 0 and Bear Power < 0 (bullish bias) + price > EMA(13) on 6h + volume spike
-# - Short when Bear Power < 0 and Bull Power < 0 (bearish bias) + price < EMA(13) on 6h + volume spike
-# - Uses 1d EMA13 to derive power, avoiding look-ahead via proper alignment
-# - Volume spike filters for conviction, reducing false breakouts
-# - Works in bull/bear by aligning with 1d trend via Elder Ray
-# - Target: 20-35 trades/year to stay within 6f limits (80-140 total over 4 years)
+# Hypothesis: 4h KAMA + RSI + Chop Regime
+# - KAMA adapts to market noise, effective in trending and ranging markets
+# - RSI filters overbought/oversold conditions
+# - Choppy market filter (Chop > 61.8) enables mean reversion; Chop < 38.2 enables trend following
+# - Designed to work in both bull and bear markets via regime adaptation
+# - Target: 20-35 trades/year to minimize fee drag on 4h timeframe
 
-name = "6h_ElderRay_Trend_1dEMA13_Volume"
-timeframe = "6h"
+name = "4h_KAMA_RSI_Chop_Regime"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,60 +24,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for EMA13 (used to calculate Elder Ray)
+    # 1d data for Chop regime (using ATR-based Chop calculation)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate EMA13 on 1d close
-    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # True Range for Chop calculation
+    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align with index
     
-    # Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power_1d = high_1d - ema_13_1d
-    bear_power_1d = low_1d - ema_13_1d
+    # ATR(14) and Chop calculation
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    sum_tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    max_h = np.maximum.accumulate(high_1d)
+    min_l = np.minimum.accumulate(low_1d)
+    range_14 = max_h - min_l
+    chop = np.where(range_14 != 0, 100 * np.log10(sum_tr_14 / range_14) / np.log10(14), 50)
+    chop = np.where(np.isnan(range_14) | (range_14 == 0), 50, chop)
     
-    # Align to 6t timeframe (wait for completed 1d bar)
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
-    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    # 6h EMA13 for trend filter on entry timeframe
-    ema_13_6h = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # 4h KAMA calculation
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.concatenate([[np.nan], np.diff(close[:-1])]))
+    for i in range(1, len(change)):
+        change[i] = np.abs(close[i] - close[i-10]) if i >= 10 else np.nan
+    change = pd.Series(change).rolling(window=10, min_periods=10).sum().values
+    volatility = np.abs(np.concatenate([[np.nan], np.diff(close[:-1])]))
+    volatility = pd.Series(volatility).rolling(window=10, min_periods=10).sum().values
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
+    # KAMA calculation
+    kama = np.full_like(close, np.nan)
+    kama[9] = close[9]  # seed
+    for i in range(10, len(close)):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Volume spike: current volume > 2.0x 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma20)
+    # 4h RSI(14)
+    delta = np.concatenate([[np.nan], np.diff(close[:-1])])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # enough for EMA warmup
+    start_idx = 50  # ensure sufficient warmup for all indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(ema_13_6h[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Bull Power > 0 (bullish bias) + Bear Power < 0 (confirm) + price > EMA13_6h + volume spike
-            long_cond = (bull_power_aligned[i] > 0 and 
-                        bear_power_aligned[i] < 0 and
-                        close[i] > ema_13_6h[i] and
-                        volume_spike[i])
+            # Long conditions: price > KAMA + RSI < 50 (not overbought) + Chop regime filter
+            # In trending markets (Chop < 38.2): follow trend (price > KAMA)
+            # In ranging markets (Chop > 61.8): mean revert at extremes (RSI < 30)
+            if chop_aligned[i] < 38.2:  # trending regime
+                long_cond = (close[i] > kama[i] and rsi[i] < 50)
+            elif chop_aligned[i] > 61.8:  # ranging regime
+                long_cond = (rsi[i] < 30)
+            else:  # transitional regime
+                long_cond = (close[i] > kama[i] and rsi[i] < 40)
             
-            # Short: Bear Power < 0 (bearish bias) + Bull Power < 0 (confirm) + price < EMA13_6h + volume spike
-            short_cond = (bear_power_aligned[i] < 0 and 
-                         bull_power_aligned[i] < 0 and
-                         close[i] < ema_13_6h[i] and
-                         volume_spike[i])
+            # Short conditions: price < KAMA + RSI > 50 (not oversold) + Chop regime filter
+            if chop_aligned[i] < 38.2:  # trending regime
+                short_cond = (close[i] < kama[i] and rsi[i] > 50)
+            elif chop_aligned[i] > 61.8:  # ranging regime
+                short_cond = (rsi[i] > 70)
+            else:  # transitional regime
+                short_cond = (close[i] < kama[i] and rsi[i] > 60)
             
             if long_cond:
                 signals[i] = 0.25
@@ -88,15 +117,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Bear Power becomes positive (loss of bullish bias) or price < EMA13_6h
-            if bear_power_aligned[i] > 0 or close[i] < ema_13_6h[i]:
+            # Long exit: price < KAMA OR RSI > 70 (overbought)
+            if close[i] < kama[i] or rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Bull Power becomes positive (loss of bearish bias) or price > EMA13_6h
-            if bull_power_aligned[i] > 0 or close[i] > ema_13_6h[i]:
+            # Short exit: price > KAMA OR RSI < 30 (oversold)
+            if close[i] > kama[i] or rsi[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
