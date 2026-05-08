@@ -1,93 +1,97 @@
-# 4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
-# Breakout of Camarilla R3/S3 levels with 1d trend filter and volume spike.
-# Uses daily trend (EMA34) and volume > 2x 20-period average for confirmation.
-# Designed for low trade frequency (<50/year) to minimize fee drag.
-# Works in bull (breakouts) and bear (breakdowns) via symmetry.
-
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "4h"
-leverage = 1.0
-
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 6h Bollinger Band Squeeze with 1d Trend Filter and Volume Confirmation
+# Bollinger Band squeeze identifies low volatility periods that precede breakouts.
+# We enter when price breaks out of the Bollinger Bands during a squeeze, in the direction of the 1d trend.
+# Volume confirmation ensures the breakout is genuine. This strategy avoids whipsaws in ranging markets
+# by only trading during volatility expansion phases. Targets 20-40 trades per year (~80-160 total over 4 years).
+
+name = "6h_BollingerSqueeze_1dTrend_Volume"
+timeframe = "6h"
+leverage = 1.0
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Previous day OHLC for Camarilla calculation
+    # Bollinger Bands: 20-period SMA, 2 standard deviations
+    close_series = pd.Series(close)
+    sma20 = close_series.rolling(window=20, min_periods=20).mean().values
+    std20 = close_series.rolling(window=20, min_periods=20).std().values
+    upper = sma20 + (2 * std20)
+    lower = sma20 - (2 * std20)
+    
+    # Bollinger Band Width for squeeze detection: (upper - lower) / sma20
+    bb_width = (upper - lower) / sma20
+    # Squeeze threshold: BB width below its 50-period mean (low volatility)
+    bb_width_ma = pd.Series(bb_width).rolling(window=50, min_periods=50).mean().values
+    squeeze = bb_width < bb_width_ma
+    
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    prev_day_high = df_1d['high'].shift(1).values
-    prev_day_low = df_1d['low'].shift(1).values
-    prev_day_close = df_1d['close'].shift(1).values
+    # Calculate EMA50 on 1d close for trend filter
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate Camarilla levels for current 4h bar using previous day's OHLC
-    # R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
-    camarilla_r3 = prev_day_close + (prev_day_high - prev_day_low) * 1.1 / 2.0
-    camarilla_s3 = prev_day_close - (prev_day_high - prev_day_low) * 1.1 / 2.0
-    
-    # Align daily levels to 4h timeframe (waits for daily close)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # 1d trend filter: EMA34 slope
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_slope = ema34_1d[1:] - ema34_1d[:-1]
-    ema34_1d_slope = np.concatenate([[0], ema34_1d_slope])
-    ema34_1d_slope_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d_slope)
-    
-    # Volume confirmation: > 2x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_conf = volume > (vol_ma * 2.0)
+    vol_conf = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Need enough data for EMA and volume MA
+    start_idx = 60  # Need enough data for BB and EMA
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(ema34_1d_slope_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(sma20[i]) or np.isnan(std20[i]) or np.isnan(bb_width[i]) or 
+            np.isnan(bb_width_ma[i]) or np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        r3 = camarilla_r3_aligned[i]
-        s3 = camarilla_s3_aligned[i]
-        ema_slope = ema34_1d_slope_aligned[i]
+        close_val = close[i]
+        sma20_val = sma20[i]
+        upper_val = upper[i]
+        lower_val = lower[i]
+        squeeze_val = squeeze[i]
+        ema50_val = ema50_1d_aligned[i]
         vol_conf_val = vol_conf[i]
         
         if position == 0:
-            # Enter long: break above R3 with 1d uptrend and volume spike
-            if close[i] > r3 and ema_slope > 0 and vol_conf_val:
+            # Enter long: price breaks above upper BB during squeeze, price > 1d EMA50 (uptrend), volume confirmation
+            if close_val > upper_val and squeeze_val and close_val > ema50_val and vol_conf_val:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below S3 with 1d downtrend and volume spike
-            elif close[i] < s3 and ema_slope < 0 and vol_conf_val:
+            # Enter short: price breaks below lower BB during squeeze, price < 1d EMA50 (downtrend), volume confirmation
+            elif close_val < lower_val and squeeze_val and close_val < ema50_val and vol_conf_val:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns below R3 or trend turns down
-            if close[i] < r3 or ema_slope < 0:
+            # Exit long: price returns to middle band or squeeze ends
+            if close_val < sma20_val or not squeeze_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns above S3 or trend turns up
-            if close[i] > s3 or ema_slope > 0:
+            # Exit short: price returns to middle band or squeeze ends
+            if close_val > sma20_val or not squeeze_val:
                 signals[i] = 0.0
                 position = 0
             else:
