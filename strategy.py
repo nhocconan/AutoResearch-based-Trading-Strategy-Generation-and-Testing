@@ -1,15 +1,21 @@
+# 12h_Camarilla_R3S3_Breakout_1dTrend_Volume
+# Hypothesis: On 12h timeframe, use daily Camarilla R3/S3 levels for breakout signals, with 1d EMA34 for trend filter and volume spike for confirmation.
+# Works in bull markets (breakouts continue) and bear markets (mean reversion from extreme levels).
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# Strategy type: Breakout with trend and volume confirmation.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3S3_Breakout_12hTrend_Volume_v2"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 40:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,40 +23,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume spike: current volume > 1.8x 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ma20)
+    # Volume spike: current volume > 2.0x 30-period average
+    vol_ma30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_spike = volume > (2.0 * vol_ma30)
     
-    # 12h data for trend and pivot calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Daily data for trend and pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Camarilla pivot levels from previous day's OHLC (from 12h bars)
+    # Camarilla pivot levels from previous day's OHLC (from daily bars)
     # R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
-    camarilla_r3 = close_12h + (high_12h - low_12h) * 1.1 / 2
-    camarilla_s3 = close_12h - (high_12h - low_12h) * 1.1 / 2
+    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 2
+    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 2
     
-    # Align 12h EMA50 and Camarilla levels to 4h timeframe
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s3)
+    # Align 1d EMA34 and Camarilla levels to 12h timeframe
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Sufficient warmup for EMA50
+    start_idx = 34  # Sufficient warmup for EMA34
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
             np.isnan(camarilla_s3_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -58,10 +64,10 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: price above Camarilla R3, above 12h EMA50, volume spike
-            long_cond = (close[i] > camarilla_r3_aligned[i]) and (close[i] > ema_50_12h_aligned[i]) and volume_spike[i]
-            # Short conditions: price below Camarilla S3, below 12h EMA50, volume spike
-            short_cond = (close[i] < camarilla_s3_aligned[i]) and (close[i] < ema_50_12h_aligned[i]) and volume_spike[i]
+            # Long conditions: price above Camarilla R3, above 1d EMA34, volume spike
+            long_cond = (close[i] > camarilla_r3_aligned[i]) and (close[i] > ema_34_1d_aligned[i]) and volume_spike[i]
+            # Short conditions: price below Camarilla S3, below 1d EMA34, volume spike
+            short_cond = (close[i] < camarilla_s3_aligned[i]) and (close[i] < ema_34_1d_aligned[i]) and volume_spike[i]
             
             if long_cond:
                 signals[i] = 0.25
