@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams Alligator (Jaw/Teeth/Lips) with 1d volume spike and 1d ADX trend filter
-# Williams Alligator uses smoothed moving averages to identify trend direction.
-# When Lips cross above Teeth and Jaw, it signals an uptrend; when below, downtrend.
-# Volume spike confirms institutional participation. 1d ADX > 25 ensures strong trends.
-# This combination filters out whipsaws and works in both bull/bear markets by trading
-# only during strong trends. Targets ~20-40 trades/year to minimize fee drag.
+# Hypothesis: 12h Williams %R with 1d volume spike and 1d ADX trend filter
+# Williams %R identifies overbought/oversold conditions. Readings below -80 indicate oversold (long),
+# above -20 indicate overbought (short). Volume spike confirms institutional participation.
+# 1d ADX > 25 ensures we only trade in strong trends, avoiding whipsaws in ranges.
+# This combination works in both bull and bear markets by focusing on extreme momentum
+# during strong trends. Targets 12-30 trades per year (~48-120 total over 4 years).
 
-name = "4h_WilliamsAlligator_1dVolume_1dADX"
-timeframe = "4h"
+name = "12h_WilliamsR_1dVolume_1dADX"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,44 +24,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams Alligator and filters
+    # Get 1d data for Williams %R, volume, and ADX
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:  # Need enough data for SMMA
+    if len(df_1d) < 14:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Williams Alligator: three smoothed moving averages
-    # Jaw (blue): 13-period SMMA, 8 bars ahead
-    # Teeth (red): 8-period SMMA, 5 bars ahead
-    # Lips (green): 5-period SMMA, 3 bars ahead
+    # Calculate Williams %R(14) on daily
+    highest_high = np.full_like(high_1d, np.nan)
+    lowest_low = np.full_like(low_1d, np.nan)
     
-    def smma(arr, period):
-        """Smoothed Moving Average (SMMA) - Wilder's smoothing"""
-        result = np.full_like(arr, np.nan, dtype=float)
-        if len(arr) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(arr[:period])
-        # Subsequent values: (prev*(period-1) + current) / period
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
+    for i in range(len(high_1d)):
+        if i < 13:
+            continue
+        highest_high[i] = np.max(high_1d[i-13:i+1])
+        lowest_low[i] = np.min(low_1d[i-13:i+1])
     
-    jaw = smma(close_1d, 13)
-    teeth = smma(close_1d, 8)
-    lips = smma(close_1d, 5)
+    williams_r = np.full_like(high_1d, np.nan)
+    for i in range(13, len(high_1d)):
+        if highest_high[i] - lowest_low[i] != 0:
+            williams_r[i] = -100 * (highest_high[i] - close_1d[i]) / (highest_high[i] - lowest_low[i])
+        else:
+            williams_r[i] = -50  # neutral when no range
     
-    # Align Alligator lines to 4h timeframe
-    jaw_4h = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_4h = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_4h = align_htf_to_ltf(prices, df_1d, lips)
+    # Williams %R signals: oversold < -80, overbought > -20
+    williams_oversold = williams_r < -80
+    williams_overbought = williams_r > -20
     
     # Volume spike detection on 1d (volume > 2x 20-day average)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    vol_spike = volume > (vol_ma_20.values * 2.0)
+    vol_ma = np.full_like(volume_1d, np.nan)
+    for i in range(len(volume_1d)):
+        if i < 19:
+            continue
+        vol_ma[i] = np.mean(volume_1d[i-19:i+1])
+    
+    vol_spike = volume_1d > (vol_ma * 2.0)
     
     # ADX trend filter on 1d
     plus_dm = np.zeros_like(high_1d)
@@ -80,6 +81,7 @@ def generate_signals(prices):
             abs(low_1d[i] - close_1d[i-1])
         )
     
+    # Wilder smoothing
     def wilder_smooth(arr, period):
         result = np.full_like(arr, np.nan)
         if len(arr) < period:
@@ -93,6 +95,7 @@ def generate_signals(prices):
     plus_dm14 = wilder_smooth(plus_dm, 14)
     minus_dm14 = wilder_smooth(minus_dm, 14)
     
+    # Avoid division by zero
     plus_di14 = np.where(tr14 != 0, 100 * (plus_dm14 / tr14), 0)
     minus_di14 = np.where(tr14 != 0, 100 * (minus_dm14 / tr14), 0)
     
@@ -102,8 +105,13 @@ def generate_signals(prices):
     
     adx_strong = adx > 25
     adx_weak = adx < 20
-    adx_strong_4h = align_htf_to_ltf(prices, df_1d, adx_strong)
-    adx_weak_4h = align_htf_to_ltf(prices, df_1d, adx_weak)
+    
+    # Align all 1d indicators to 12h timeframe (use previous day's values)
+    williams_oversold_12h = align_htf_to_ltf(prices, df_1d, williams_oversold)
+    williams_overbought_12h = align_htf_to_ltf(prices, df_1d, williams_overbought)
+    vol_spike_12h = align_htf_to_ltf(prices, df_1d, vol_spike)
+    adx_strong_12h = align_htf_to_ltf(prices, df_1d, adx_strong)
+    adx_weak_12h = align_htf_to_ltf(prices, df_1d, adx_weak)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -112,32 +120,32 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(jaw_4h[i]) or np.isnan(teeth_4h[i]) or np.isnan(lips_4h[i]) or 
-            np.isnan(vol_spike[i]) or np.isnan(adx_strong_4h[i]) or np.isnan(adx_weak_4h[i])):
+        if (np.isnan(williams_oversold_12h[i]) or np.isnan(williams_overbought_12h[i]) or 
+            np.isnan(vol_spike_12h[i]) or np.isnan(adx_strong_12h[i]) or np.isnan(adx_weak_12h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: Lips > Teeth > Jaw (bullish alignment), volume spike, strong trend
-            if lips_4h[i] > teeth_4h[i] and teeth_4h[i] > jaw_4h[i] and vol_spike[i] and adx_strong_4h[i]:
+            # Enter long: Williams %R oversold, volume spike, strong trend
+            if williams_oversold_12h[i] and vol_spike_12h[i] and adx_strong_12h[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Lips < Teeth < Jaw (bearish alignment), volume spike, strong trend
-            elif lips_4h[i] < teeth_4h[i] and teeth_4h[i] < jaw_4h[i] and vol_spike[i] and adx_strong_4h[i]:
+            # Enter short: Williams %R overbought, volume spike, strong trend
+            elif williams_overbought_12h[i] and vol_spike_12h[i] and adx_strong_12h[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Alligator alignment breaks or trend weakens
-            if not (lips_4h[i] > teeth_4h[i] and teeth_4h[i] > jaw_4h[i]) or adx_weak_4h[i]:
+            # Exit long: Williams %R returns above -50 or trend weakens
+            if williams_r[-1] > -50 if i < len(williams_r) else False or adx_weak_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Alligator alignment breaks or trend weakens
-            if not (lips_4h[i] < teeth_4h[i] and teeth_4h[i] < jaw_4h[i]) or adx_weak_4h[i]:
+            # Exit short: Williams %R returns below -50 or trend weakens
+            if williams_r[-1] < -50 if i < len(williams_r) else False or adx_weak_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
