@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R with 1d trend filter and volume confirmation
-# Long when Williams %R < -80 (oversold) in a 1d uptrend with volume > 1.3x average
-# Short when Williams %R > -20 (overbought) in a 1d downtrend with volume > 1.3x average
-# Exit when Williams %R crosses -50 (middle) or trend reverses
-# Williams %R identifies mean-reversion extremes, 1d trend filters counter-trend trades,
-# volume confirms momentum. Targets 20-40 trades/year for low fee drag.
+# Hypothesis: 4h Williams %R with 1d EMA50 trend filter and volume confirmation
+# Long when Williams %R < -80 (oversold) with volume > 1.5x 20-period avg and 1d EMA50 upward
+# Short when Williams %R > -20 (overbought) with volume > 1.5x 20-period avg and 1d EMA50 downward
+# Exit when Williams %R crosses back above -50 (long) or below -50 (short)
+# Williams %R identifies extremes, volume confirms momentum, EMA50 filters counter-trend noise
+# Targets 20-50 trades per year for optimal fee drag (< 200 total over 4 years)
 
-name = "4h_WilliamsR_1dTrend_Volume"
+name = "4h_WilliamsR_1dEMA50_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,21 +25,16 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Williams %R (14-period)
-    def rolling_max(arr, window):
-        result = np.full_like(arr, np.nan, dtype=float)
-        for i in range(window - 1, len(arr)):
-            result[i] = np.max(arr[i - window + 1:i + 1])
-        return result
+    def williams_r(high, low, close, window):
+        highest_high = np.full_like(high, np.nan, dtype=float)
+        lowest_low = np.full_like(low, np.nan, dtype=float)
+        for i in range(window - 1, len(high)):
+            highest_high[i] = np.max(high[i - window + 1:i + 1])
+            lowest_low[i] = np.min(low[i - window + 1:i + 1])
+        wr = -100 * (highest_high - close) / (highest_high - lowest_low)
+        return wr
     
-    def rolling_min(arr, window):
-        result = np.full_like(arr, np.nan, dtype=float)
-        for i in range(window - 1, len(arr)):
-            result[i] = np.min(arr[i - window + 1:i + 1])
-        return result
-    
-    highest_high = rolling_max(high, 14)
-    lowest_low = rolling_min(low, 14)
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    wr = williams_r(high, low, close, 14)
     
     # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -54,9 +49,9 @@ def generate_signals(prices):
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     ema50_1d_slope_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d_slope)
     
-    # Volume confirmation: current volume > 1.3x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_conf = volume > (vol_ma * 1.3)
+    vol_conf = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -65,37 +60,37 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(williams_r[i]) or np.isnan(ema50_1d_aligned[i]) or 
+        if (np.isnan(wr[i]) or np.isnan(ema50_1d_aligned[i]) or 
             np.isnan(ema50_1d_slope_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        wr = williams_r[i]
+        wr_val = wr[i]
         ema50_val = ema50_1d_aligned[i]
         ema50_slope = ema50_1d_slope_aligned[i]
         vol_conf_val = vol_conf[i]
         
         if position == 0:
-            # Enter long: Williams %R oversold (< -80), volume confirmation, 1d uptrend
-            if wr < -80 and vol_conf_val and ema50_slope > 0:
+            # Enter long: Williams %R oversold (< -80), volume confirmation, 1d uptrend (positive slope)
+            if wr_val < -80 and vol_conf_val and ema50_slope > 0:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Williams %R overbought (> -20), volume confirmation, 1d downtrend
-            elif wr > -20 and vol_conf_val and ema50_slope < 0:
+            # Enter short: Williams %R overbought (> -20), volume confirmation, 1d downtrend (negative slope)
+            elif wr_val > -20 and vol_conf_val and ema50_slope < 0:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R crosses above -50 or 1d trend turns down
-            if wr > -50 or ema50_slope < 0:
+            # Exit long: Williams %R crosses back above -50
+            if wr_val > -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R crosses below -50 or 1d trend turns up
-            if wr < -50 or ema50_slope > 0:
+            # Exit short: Williams %R crosses back below -50
+            if wr_val < -50:
                 signals[i] = 0.0
                 position = 0
             else:
