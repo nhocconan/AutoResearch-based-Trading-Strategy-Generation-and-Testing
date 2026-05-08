@@ -3,98 +3,106 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy with 4h trend direction and 1d volume confirmation.
-# Long when: 4h EMA50 > EMA100 (uptrend), 1d volume > 1.5x 20-period average (high conviction),
-# and 1h price crosses above 1h EMA20 (pullback entry in uptrend).
-# Short when: 4h EMA50 < EMA100 (downtrend), 1d volume > 1.5x 20-period average,
-# and 1h price crosses below 1h EMA20 (pullback entry in downtrend).
-# Exit when price crosses back over EMA20.
-# Uses 1h timeframe as specified, with 4h trend and 1d volume for higher timeframe context.
-# Target: 60-150 total trades over 4 years (15-37/year) with controlled frequency to avoid fee drag.
+# Hypothesis: 6h Williams Alligator with 1d Elder Ray (Bull/Bear Power) for trend confirmation.
+# The Alligator (Jaw=13, Teeth=8, Lips=5 SMAs) identifies trend absence when lines are intertwined.
+# Trade only when Alligator lines are separated (trending) AND Elder Ray confirms direction.
+# Long: Lips > Teeth > Jaw AND Bull Power > 0 (close > EMA13)
+# Short: Lips < Teeth < Jaw AND Bear Power < 0 (close < EMA13)
+# Exit when Alligator lines re-intertwine (trend weakening).
+# Uses 6h timeframe with 1d Elder Ray filter to reduce false signals.
+# Target: 50-150 total trades over 4 years (12-37/year) with controlled frequency.
 
-name = "1h_EMA20_4hTrend_1dVolume"
-timeframe = "1h"
+name = "6h_WilliamsAlligator_1dElderRay"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     
-    # 4h data for trend
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 100:
+    # Williams Alligator on 6h data
+    jaw_period = 13
+    teeth_period = 8
+    lips_period = 5
+    
+    jaw = pd.Series(close).rolling(window=jaw_period, min_periods=jaw_period).mean().values
+    teeth = pd.Series(close).rolling(window=teeth_period, min_periods=teeth_period).mean().values
+    lips = pd.Series(close).rolling(window=lips_period, min_periods=lips_period).mean().values
+    
+    # Daily data for Elder Ray (Bull/Bear Power)
+    df_d = get_htf_data(prices, '1d')
+    if len(df_d) < 13:
         return np.zeros(n)
     
-    # 1d data for volume
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    close_d = df_d['close'].values
+    ema13_d = pd.Series(close_d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # 1h EMA20
-    close_s = pd.Series(close)
-    ema20 = close_s.ewm(span=20, adjust=False, min_periods=20).values
+    # Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power_d = df_d['high'].values - ema13_d
+    bear_power_d = df_d['low'].values - ema13_d
     
-    # 4h EMA50 and EMA100 for trend
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).values
-    ema100_4h = pd.Series(close_4h).ewm(span=100, adjust=False, min_periods=100).values
+    # Align Elder Ray to 6h timeframe
+    bull_power = align_htf_to_ltf(prices, df_d, bull_power_d)
+    bear_power = align_htf_to_ltf(prices, df_d, bear_power_d)
     
-    # Trend: EMA50 > EMA100 for uptrend, EMA50 < EMA100 for downtrend
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
-    ema100_4h_aligned = align_htf_to_ltf(prices, df_4h, ema100_4h)
-    trend_up = ema50_4h_aligned > ema100_4h_aligned
-    trend_down = ema50_4h_aligned < ema100_4h_aligned
+    # Alligator trend detection: lines separated (not intertwined)
+    # Jaw-Teeth-Teeth-Lips order determines trend direction
+    jaw_above_teeth = jaw > teeth
+    teeth_above_lips = teeth > lips
+    jaw_below_teeth = jaw < teeth
+    teeth_below_lips = teeth < lips
     
-    # 1d volume filter: current volume > 1.5x 20-period average
-    volume_1d = df_1d['volume'].values
-    vol_ma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_filter_1d = volume_1d > (1.5 * vol_ma20_1d)
-    volume_filter = align_htf_to_ltf(prices, df_1d, volume_filter_1d)
+    # Strong uptrend: Jaw < Teeth < Lips (lines separated, bullish alignment)
+    strong_uptrend = jaw_below_teeth & teeth_below_lips
+    # Strong downtrend: Jaw > Teeth > Lips (lines separated, bearish alignment)
+    strong_downtrend = jaw_above_teeth & teeth_above_lips
+    # Weak/no trend: lines intertwined (not separated)
+    weak_trend = ~(strong_uptrend | strong_downtrend)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 50, 100, 20)  # EMA20, EMA50, EMA100, volume MA20
+    start_idx = max(jaw_period, teeth_period, lips_period, 13)
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema20[i]) or np.isnan(ema50_4h_aligned[i]) or 
-            np.isnan(ema100_4h_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: 4h uptrend, high volume, price crosses above EMA20
-            long_cond = trend_up[i] and volume_filter[i] and (close[i] > ema20[i]) and (close[i-1] <= ema20[i-1])
-            # Short conditions: 4h downtrend, high volume, price crosses below EMA20
-            short_cond = trend_down[i] and volume_filter[i] and (close[i] < ema20[i]) and (close[i-1] >= ema20[i-1])
+            # Long conditions: strong uptrend AND bullish Elder Ray
+            long_cond = strong_uptrend[i] and (bull_power[i] > 0)
+            # Short conditions: strong downtrend AND bearish Elder Ray
+            short_cond = strong_downtrend[i] and (bear_power[i] < 0)
             
             if long_cond:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
             elif short_cond:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below EMA20
-            if close[i] < ema20[i] and close[i-1] >= ema20[i-1]:
+            # Long exit: trend weakening (lines intertwining) OR bearish power
+            if weak_trend[i] or (bear_power[i] < 0):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above EMA20
-            if close[i] > ema20[i] and close[i-1] <= ema20[i-1]:
+            # Short exit: trend weakening OR bullish power
+            if weak_trend[i] or (bull_power[i] > 0):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
