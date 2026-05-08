@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_RSI_Camarilla_Reversal_v1"
-timeframe = "6h"
+name = "12h_Donchian_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,53 +17,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # RSI(14) for overbought/oversold conditions
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    gain_ma = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    loss_ma = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = gain_ma / loss_ma
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
-    
-    # Daily Camarilla pivot levels
+    # 1d ATR for position sizing (volatility filter)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels (based on previous day)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first value
     
-    # First day: use first values
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
+    # ATR(20)
+    atr20 = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    atr20_aligned = align_htf_to_ltf(prices, df_1d, atr20)
     
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
+    # 12h Donchian channels (20-period)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
     
-    # Camarilla levels: R3, R4, S3, S4
-    r3 = pivot + (range_hl * 1.1 / 2)
-    r4 = pivot + (range_hl * 1.1)
-    s3 = pivot - (range_hl * 1.1 / 2)
-    s4 = pivot - (range_hl * 1.1)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Align Camarilla levels to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Donchian Upper/Lower
+    donch_upper = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donch_lower = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > (1.5 * vol_ma20)
+    # Align Donchian channels to 12h timeframe (already aligned)
+    donch_upper_aligned = align_htf_to_ltf(prices, df_12h, donch_upper)
+    donch_lower_aligned = align_htf_to_ltf(prices, df_12h, donch_lower)
+    
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Volume spike: current volume > 2.0x 30-period average
+    vol_ma30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_spike = volume > (2.0 * vol_ma30)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -72,23 +68,24 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(rsi[i]) or np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(volume_confirmed[i])):
+        if (np.isnan(donch_upper_aligned[i]) or np.isnan(donch_lower_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(atr20_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: RSI < 30 (oversold) AND price at or below S3, with volume confirmation
-            long_cond = (rsi[i] < 30 and 
-                        close[i] <= s3_aligned[i] and
-                        volume_confirmed[i])
+            # Long: Price breaks above Donchian Upper, price above 1d EMA50, volume spike
+            long_cond = (close[i] > donch_upper_aligned[i] and 
+                        close[i] > ema50_1d_aligned[i] and
+                        volume_spike[i])
             
-            # Short: RSI > 70 (overbought) AND price at or above R3, with volume confirmation
-            short_cond = (rsi[i] > 70 and 
-                         close[i] >= r3_aligned[i] and
-                         volume_confirmed[i])
+            # Short: Price breaks below Donchian Lower, price below 1d EMA50, volume spike
+            short_cond = (close[i] < donch_lower_aligned[i] and 
+                         close[i] < ema50_1d_aligned[i] and
+                         volume_spike[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -97,15 +94,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: RSI > 50 OR price reaches R4 (take profit)
-            if rsi[i] > 50 or close[i] >= r4_aligned[i]:
+            # Long exit: Price closes below Donchian Lower OR price crosses below 1d EMA50
+            if close[i] < donch_lower_aligned[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI < 50 OR price reaches S4 (take profit)
-            if rsi[i] < 50 or close[i] <= s4_aligned[i]:
+            # Short exit: Price closes above Donchian Upper OR price crosses above 1d EMA50
+            if close[i] > donch_upper_aligned[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
