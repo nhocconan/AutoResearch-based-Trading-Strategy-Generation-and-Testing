@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeFilter_Strict"
-timeframe = "4h"
+name = "6h_Donchian20_WeeklyPivot_Direction_VolumeConfirm"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,57 +17,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for trend filter and volatility
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Weekly data for pivot direction (higher timeframe bias)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    
+    # Weekly pivot points (using prior week's data)
+    prev_high_1w = np.roll(high_1w, 1)
+    prev_low_1w = np.roll(low_1w, 1)
+    prev_close_1w = np.roll(close_1w, 1)
+    prev_high_1w[0] = high_1w[0]
+    prev_low_1w[0] = low_1w[0]
+    prev_close_1w[0] = close_1w[0]
+    
+    pivot_1w = (prev_high_1w + prev_low_1w + prev_close_1w) / 3.0
+    range_1w = prev_high_1w - prev_low_1w
+    r1_1w = pivot_1w + (range_1w * 1.1 / 12)
+    s1_1w = pivot_1w - (range_1w * 1.1 / 12)
+    
+    # Align weekly pivot levels to 6h timeframe
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    
+    # Daily data for Donchian breakout (medium-term structure)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 25:
+        return np.zeros(n)
+    
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # 1d EMA200 for trend filter
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # Donchian channels (20-period) on daily data
+    # Upper channel: highest high of last 20 days
+    # Lower channel: lowest low of last 20 days
+    donchian_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # 1d ATR for volatility filter
-    tr = np.maximum(high_1d - low_1d, 
-                    np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), 
-                               np.abs(low_1d - np.roll(close_1d, 1))))
-    tr[0] = high_1d[0] - low_1d[0]
-    atr14_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
+    # Align Donchian levels to 6h timeframe
+    donchian_high_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_20)
+    donchian_low_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_20)
     
-    # 1d data for Camarilla pivot (previous day)
-    # Use previous day's data to avoid look-ahead
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d[0] = high_1d[0]  # first bar uses current
-    prev_low_1d[0] = low_1d[0]
-    prev_close_1d[0] = close_1d[0]
-    
-    pivot = (prev_high_1d + prev_low_1d + prev_close_1d) / 3.0
-    range_1d = prev_high_1d - prev_low_1d
-    r1 = pivot + (range_1d * 1.1 / 12)
-    s1 = pivot - (range_1d * 1.1 / 12)
-    
-    # Align Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Volume filter: 4h volume > 20-period average
+    # Volume filter: 6h volume > 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # warmup for EMA200
+    start_idx = 200  # warmup for weekly and daily calculations
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema200_1d_aligned[i]) or np.isnan(atr14_1d_aligned[i]) or
+        if (np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or 
+            np.isnan(donchian_high_20_aligned[i]) or np.isnan(donchian_low_20_aligned[i]) or
             np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -75,14 +80,14 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above R1, price above 1d EMA200, volume above average
-            long_cond = (close[i] > r1_aligned[i] and 
-                        close[i] > ema200_1d_aligned[i] and
+            # Long: Price breaks above weekly R1, price above daily Donchian upper band, volume above average
+            long_cond = (close[i] > r1_1w_aligned[i] and 
+                        close[i] > donchian_high_20_aligned[i] and
                         volume[i] > vol_ma20[i])
             
-            # Short: Price breaks below S1, price below 1d EMA200, volume above average
-            short_cond = (close[i] < s1_aligned[i] and 
-                         close[i] < ema200_1d_aligned[i] and
+            # Short: Price breaks below weekly S1, price below daily Donchian lower band, volume above average
+            short_cond = (close[i] < s1_1w_aligned[i] and 
+                         close[i] < donchian_low_20_aligned[i] and
                          volume[i] > vol_ma20[i])
             
             if long_cond:
@@ -92,15 +97,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Price closes below S1 OR price crosses below 1d EMA200
-            if close[i] < s1_aligned[i] or close[i] < ema200_1d_aligned[i]:
+            # Long exit: Price closes below weekly S1 OR price breaks below daily Donchian lower band
+            if close[i] < s1_1w_aligned[i] or close[i] < donchian_low_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price closes above R1 OR price crosses above 1d EMA200
-            if close[i] > r1_aligned[i] or close[i] > ema200_1d_aligned[i]:
+            # Short exit: Price closes above weekly R1 OR price breaks above daily Donchian upper band
+            if close[i] > r1_1w_aligned[i] or close[i] > donchian_high_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -108,7 +113,8 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R1/S1 breakout with 1d EMA200 trend filter and volume confirmation.
-# Works in bull markets via breakout continuation, in bear via mean reversion at S1/R1.
-# 4h timeframe targets 20-50 trades/year to avoid fee drag. Volume filter ensures participation.
-# Discrete sizing (0.25) minimizes churn. Works on BTC/ETH/SOL via institutional pivot levels.
+# Hypothesis: Donchian(20) breakout on daily timeframe with weekly pivot direction filter and volume confirmation.
+# Weekly pivot provides higher timeframe bias (trend direction), Donchian breakout captures medium-term momentum,
+# volume filter ensures institutional participation. Works in bull markets via breakout continuation above weekly R1,
+# in bear via breakdown below weekly S1. Target: 20-40 trades/year on 6h timeframe to minimize fee drag.
+# Discrete sizing (0.25) reduces churn. Applicable to BTC/ETH/SOL via institutional pivot and breakout levels.
