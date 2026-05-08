@@ -3,98 +3,171 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy combining 1d RSI mean reversion with 12h trend filter.
-# In bear markets, RSI extremes on daily timeframe often precede reversals.
-# Uses 12h EMA(50) to filter for trend direction, taking mean reversion trades
-# only in the direction of the higher timeframe trend to avoid counter-trend losses.
-# Designed for low trade frequency (10-20/year) with clear entry/exit rules.
+# Hypothesis: 4h strategy using 1-day Bollinger Bands with 1-week ADX trend filter.
+# Long when price touches lower BB in uptrend (ADX>25), short when touches upper BB in downtrend.
+# Uses Bollinger Band width to filter ranging markets (BW<0.05 = range, BW>0.08 = trend).
+# Designed for low trade frequency (20-40/year) with mean reversion in trends.
+# BB touch provides precise entry, ADX ensures trend alignment, BW filter avoids chop.
 
-name = "6h_RSI_MeanReversion_12hTrend"
-timeframe = "6h"
+name = "4h_1dBB_1wADX_TrendMeanReversion"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for RSI calculation
+    # Get daily data for Bollinger Bands
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 15:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 14-period RSI on daily timeframe
-    delta = np.diff(close_1d)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate Bollinger Bands (20, 2)
+    bb_middle = np.zeros_like(close_1d)
+    bb_std = np.zeros_like(close_1d)
+    bb_upper = np.zeros_like(close_1d)
+    bb_lower = np.zeros_like(close_1d)
     
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(close_1d)
-    avg_loss = np.zeros_like(close_1d)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
+    for i in range(19, len(close_1d)):
+        bb_middle[i] = np.mean(close_1d[i-19:i+1])
+        bb_std[i] = np.std(close_1d[i-19:i+1])
+        bb_upper[i] = bb_middle[i] + 2 * bb_std[i]
+        bb_lower[i] = bb_middle[i] - 2 * bb_std[i]
     
-    for i in range(14, len(close_1d)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # First 19 days have no data
+    bb_middle[:19] = bb_std[:19] = bb_upper[:19] = bb_lower[:19] = np.nan
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi_1d = np.where(avg_loss == 0, 100, 100 - (100 / (1 + rs)))
-    rsi_1d[:14] = np.nan
+    # Align Bollinger Bands to 4h timeframe
+    bb_middle_4h = align_htf_to_ltf(prices, df_1d, bb_middle)
+    bb_upper_4h = align_htf_to_ltf(prices, df_1d, bb_upper)
+    bb_lower_4h = align_htf_to_ltf(prices, df_1d, bb_lower)
     
-    # Align RSI to 6h timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get weekly data for ADX
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 12h EMA(50) for trend filter
-    close_12h_series = pd.Series(close_12h)
-    ema_50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate ADX (14)
+    def calculate_adx(high, low, close, period=14):
+        n = len(high)
+        if n < period * 2:
+            return np.full(n, np.nan)
+        
+        # True Range
+        tr = np.zeros(n)
+        tr[0] = high[0] - low[0]
+        for i in range(1, n):
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        # Directional Movement
+        plus_dm = np.zeros(n)
+        minus_dm = np.zeros(n)
+        for i in range(1, n):
+            high_diff = high[i] - high[i-1]
+            low_diff = low[i-1] - low[i]
+            if high_diff > low_diff and high_diff > 0:
+                plus_dm[i] = high_diff
+            else:
+                plus_dm[i] = 0
+            if low_diff > high_diff and low_diff > 0:
+                minus_dm[i] = low_diff
+            else:
+                minus_dm[i] = 0
+        
+        # Smoothed values
+        atr = np.zeros(n)
+        plus_dm_smooth = np.zeros(n)
+        minus_dm_smooth = np.zeros(n)
+        
+        # Initial values
+        atr[period-1] = np.mean(tr[:period])
+        plus_dm_smooth[period-1] = np.mean(plus_dm[:period])
+        minus_dm_smooth[period-1] = np.mean(minus_dm[:period])
+        
+        # Wilder smoothing
+        for i in range(period, n):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+            plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
+            minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
+        
+        # Directional Indicators
+        plus_di = np.zeros(n)
+        minus_di = np.zeros(n)
+        dx = np.zeros(n)
+        for i in range(period, n):
+            if atr[i] != 0:
+                plus_di[i] = plus_dm_smooth[i] / atr[i] * 100
+                minus_di[i] = minus_dm_smooth[i] / atr[i] * 100
+                if plus_di[i] + minus_di[i] != 0:
+                    dx[i] = abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i]) * 100
+        
+        # ADX
+        adx = np.full(n, np.nan)
+        adx[2*period-1] = np.mean(dx[period:2*period])
+        for i in range(2*period, n):
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
     
-    # Align 12h EMA to 6h timeframe
-    ema_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    adx_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
+    adx_1w_4h = align_htf_to_ltf(prices, df_1w, adx_1w)
+    
+    # Bollinger Band Width (for regime filter)
+    bb_width = (bb_upper_4h - bb_lower_4h) / bb_middle_4h
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Ensure enough data for all indicators
+    start_idx = 100  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(rsi_aligned[i]) or np.isnan(ema_aligned[i])):
+        if (np.isnan(bb_lower_4h[i]) or np.isnan(bb_upper_4h[i]) or 
+            np.isnan(bb_middle_4h[i]) or np.isnan(adx_1w_4h[i]) or
+            np.isnan(bb_width[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Regime filter: only trade when BB width indicates trend (not range)
+        is_trending = bb_width[i] > 0.08
+        
         if position == 0:
-            # Enter long when RSI < 30 (oversold) and price above 12h EMA50 (uptrend)
-            if rsi_aligned[i] < 30 and close[i] > ema_aligned[i]:
-                signals[i] = 0.25
-                position = 1
-            # Enter short when RSI > 70 (overbought) and price below 12h EMA50 (downtrend)
-            elif rsi_aligned[i] > 70 and close[i] < ema_aligned[i]:
-                signals[i] = -0.25
-                position = -1
+            # Mean reversion entries in trending markets
+            if is_trending:
+                # Long when price touches lower BB in uptrend (ADX>25 and price above middle)
+                if close[i] <= bb_lower_4h[i] and adx_1w_4h[i] > 25 and close[i] > bb_middle_4h[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # Short when price touches upper BB in downtrend (ADX>25 and price below middle)
+                elif close[i] >= bb_upper_4h[i] and adx_1w_4h[i] > 25 and close[i] < bb_middle_4h[i]:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Exit long when RSI > 50 (mean reversion complete) or trend turns down
-            if rsi_aligned[i] > 50 or close[i] < ema_aligned[i]:
+            # Long exit: price returns to middle BB or trend weakens
+            if close[i] >= bb_middle_4h[i] or adx_1w_4h[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short when RSI < 50 (mean reversion complete) or trend turns up
-            if rsi_aligned[i] < 50 or close[i] > ema_aligned[i]:
+            # Short exit: price returns to middle BB or trend weakens
+            if close[i] <= bb_middle_4h[i] or adx_1w_4h[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
