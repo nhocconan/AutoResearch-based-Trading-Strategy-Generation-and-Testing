@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian breakout with 1-week trend filter and volume confirmation
-# - Uses 20-day Donchian channels from daily timeframe for breakout signals
-# - 1-week EMA50 determines trend direction to avoid counter-trend trades
-# - Volume spike (2x 20-day average) confirms breakout strength
-# - Works in bull/bear markets by using 1-week trend filter
-# - Target: 10-25 trades/year to minimize fee drag on daily timeframe
+# Hypothesis: 6h Camarilla R3/S3 Breakout with 12h Trend and Volume Spike
+# - Uses Camarilla levels from daily timeframe (S3/S2 for long, R3/R2 for short)
+# - Breakout above S3 with 12h uptrend or below R3 with 12h downtrend
+# - Volume spike confirms breakout strength
+# - Works in bull/bear by using 12h trend filter to avoid counter-trend trades
+# - Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag on 6h timeframe
 
-name = "1d_DonchianBreakout_1wTrend_Volume"
-timeframe = "1d"
+name = "6h_Camarilla_R3S3_Breakout_12hTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,33 +24,50 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Donchian channels (20-day)
+    # 1d data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 5:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 20-day Donchian channels
-    high_max_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_min_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels using previous day's data
+    # S2 = C - (H-L)*1.16, S3 = C - (H-L)*1.25, R2 = C + (H-L)*1.16, R3 = C + (H-L)*1.25
+    n1d = len(close_1d)
+    camarilla_S2 = np.full(n1d, np.nan)
+    camarilla_S3 = np.full(n1d, np.nan)
+    camarilla_R2 = np.full(n1d, np.nan)
+    camarilla_R3 = np.full(n1d, np.nan)
     
-    # Align Donchian channels to daily timeframe
-    high_max_20_aligned = align_htf_to_ltf(prices, df_1d, high_max_20)
-    low_min_20_aligned = align_htf_to_ltf(prices, df_1d, low_min_20)
+    for i in range(1, n1d):
+        H = high_1d[i-1]
+        L = low_1d[i-1]
+        C = close_1d[i-1]
+        range_val = H - L
+        camarilla_S2[i] = C - range_val * 1.16
+        camarilla_S3[i] = C - range_val * 1.25
+        camarilla_R2[i] = C + range_val * 1.16
+        camarilla_R3[i] = C + range_val * 1.25
     
-    # 1-week data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Align Camarilla levels to 6h timeframe
+    camarilla_S2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S2)
+    camarilla_S3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S3)
+    camarilla_R2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R2)
+    camarilla_R3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R3)
+    
+    # 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 5:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    # 1-week EMA50 for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    close_12h = df_12h['close'].values
+    # 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Volume spike: current volume > 2.0x 20-day average
+    # Volume spike: current volume > 2.0x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma20)
     
@@ -61,22 +78,23 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(high_max_20_aligned[i]) or np.isnan(low_min_20_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(camarilla_S2_aligned[i]) or np.isnan(camarilla_S3_aligned[i]) or 
+            np.isnan(camarilla_R2_aligned[i]) or np.isnan(camarilla_R3_aligned[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above 20-day high with 1w uptrend + volume spike
-            long_cond = (close[i] > high_max_20_aligned[i] and 
-                        ema_50_1w_aligned[i] > ema_50_1w_aligned[i-1] and
+            # Long: price breaks above S3 (strong support) with 12h uptrend + volume spike
+            long_cond = (close[i] > camarilla_S3_aligned[i] and 
+                        ema_50_12h_aligned[i] > ema_50_12h_aligned[i-1] and
                         volume_spike[i])
             
-            # Short: price breaks below 20-day low with 1w downtrend + volume spike
-            short_cond = (close[i] < low_min_20_aligned[i] and 
-                         ema_50_1w_aligned[i] < ema_50_1w_aligned[i-1] and
+            # Short: price breaks below R3 (strong resistance) with 12h downtrend + volume spike
+            short_cond = (close[i] < camarilla_R3_aligned[i] and 
+                         ema_50_12h_aligned[i] < ema_50_12h_aligned[i-1] and
                          volume_spike[i])
             
             if long_cond:
@@ -86,15 +104,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below 20-day low
-            if close[i] < low_min_20_aligned[i]:
+            # Long exit: price breaks below S2 (weaker support)
+            if close[i] < camarilla_S2_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above 20-day high
-            if close[i] > high_max_20_aligned[i]:
+            # Short exit: price breaks above R2 (weaker resistance)
+            if close[i] > camarilla_R2_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
