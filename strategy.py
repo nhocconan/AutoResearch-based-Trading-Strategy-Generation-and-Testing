@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_Weekend_Reversal_4hTrend"
-timeframe = "1h"
+name = "6h_Weekly_Pivot_Reversal_With_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,83 +17,99 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # 1w data for weekly pivot levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # 4h RSI(14) for trend - using close prices
-    rsi_period = 14
-    delta = np.diff(close_4h, prepend=close_4h[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_4h = 100 - (100 / (1 + rs))
-    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
+    # Previous 1w bar's pivot levels
+    prev_close = np.roll(close_1w, 1)
+    prev_high = np.roll(high_1w, 1)
+    prev_low = np.roll(low_1w, 1)
+    prev_close[0] = close_1w[0]
+    prev_high[0] = high_1w[0]
+    prev_low[0] = low_1w[0]
     
-    # 4h ATR(14) for volatility filter
-    tr1 = high_4h[1:] - low_4h[1:]
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
-    tr_4h = np.concatenate([[np.max([high_4h[0] - low_4h[0], np.abs(high_4h[0] - close_4h[0]), np.abs(low_4h[0] - close_4h[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_4h = pd.Series(tr_4h).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
+    # Pivot Point (PP) and key levels: R1, S1, R2, S2
+    PP = (prev_high + prev_low + prev_close) / 3.0
+    R1 = 2 * PP - prev_low
+    S1 = 2 * PP - prev_high
+    R2 = PP + (prev_high - prev_low)
+    S2 = PP - (prev_high - prev_low)
     
-    # Precompute weekend filter (Saturday=5, Sunday=6)
-    hours = prices.index.hour
-    days = prices.index.dayofweek
-    is_weekend = (days >= 5)  # Saturday or Sunday
+    # Align weekly pivot levels to 6h timeframe
+    PP_aligned = align_htf_to_ltf(prices, df_1w, PP)
+    R1_aligned = align_htf_to_ltf(prices, df_1w, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1w, S1)
+    R2_aligned = align_htf_to_ltf(prices, df_1w, R2)
+    S2_aligned = align_htf_to_ltf(prices, df_1w, S2)
+    
+    # 1d EMA50 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Volume spike: current volume > 1.5x 24-period average
+    vol_ma24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > (1.5 * vol_ma24)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(rsi_4h_aligned[i]) or np.isnan(atr_4h_aligned[i]) or 
-            np.isnan(close[i]) or np.isnan(high[i]) or np.isnan(low[i])):
+        if (np.isnan(PP_aligned[i]) or np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or
+            np.isnan(R2_aligned[i]) or np.isnan(S2_aligned[i]) or
+            np.isnan(ema50_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Weekend + oversold RSI + volatility filter
-            long_cond = (is_weekend[i] and 
-                        rsi_4h_aligned[i] < 30 and
-                        atr_4h_aligned[i] > 0)
+            # Long: Price crosses above S1 with volume spike and above weekly EMA50
+            long_cond = (close[i] > S1_aligned[i] and 
+                        close[i] <= S1_aligned[i-1] and  # crossed above S1 this bar
+                        volume_spike[i] and
+                        close[i] > ema50_aligned[i])
             
-            # Short: Weekend + overbought RSI + volatility filter
-            short_cond = (is_weekend[i] and 
-                         rsi_4h_aligned[i] > 70 and
-                         atr_4h_aligned[i] > 0)
+            # Short: Price crosses below R1 with volume spike and below weekly EMA50
+            short_cond = (close[i] < R1_aligned[i] and 
+                         close[i] >= R1_aligned[i-1] and  # crossed below R1 this bar
+                         volume_spike[i] and
+                         close[i] < ema50_aligned[i])
             
             if long_cond:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
             elif short_cond:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: RSI crosses above 50 or weekend ends
-            if rsi_4h_aligned[i] > 50 or not is_weekend[i]:
+            # Long exit: Price crosses below S2 OR crosses below weekly EMA50
+            if (close[i] < S2_aligned[i] and close[i] >= S2_aligned[i-1]) or \
+               (close[i] < ema50_aligned[i] and close[i] >= ema50_aligned[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI crosses below 50 or weekend ends
-            if rsi_4h_aligned[i] < 50 or not is_weekend[i]:
+            # Short exit: Price crosses above R2 OR crosses above weekly EMA50
+            if (close[i] > R2_aligned[i] and close[i] <= R2_aligned[i-1]) or \
+               (close[i] > ema50_aligned[i] and close[i] <= ema50_aligned[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
