@@ -3,17 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Williams Alligator with 1-week trend filter and volume confirmation
-# The Alligator uses three SMAs (Jaw=13, Teeth=8, Lips=5) to identify trends.
-# We go long when Lips > Teeth > Jaw (bullish alignment) with price above Teeth,
-# weekly close above weekly EMA(34), and volume spike.
-# We go short when Lips < Teeth < Jaw (bearish alignment) with price below Teeth,
-# weekly close below weekly EMA(34), and volume spike.
-# Designed for low trade frequency in both bull and bear markets.
-# Target: 50-150 total trades over 4 years (12-37/year)
+# Hypothesis: Daily 20-period Donchian breakout with weekly trend filter and volume confirmation
+# We go long when price breaks above the 20-day high with weekly EMA(34) uptrend and volume spike.
+# We go short when price breaks below the 20-day low with weekly EMA(34) downtrend and volume spike.
+# Designed for low trade frequency in both bull and bear markets with proper risk control.
+# Target: 30-100 total trades over 4 years = 7-25/year (within 150 max)
 
-name = "12h_WilliamsAlligator_1wTrend_Volume"
-timeframe = "12h"
+name = "1d_Donchian20_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,24 +33,9 @@ def generate_signals(prices):
     ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Calculate Williams Alligator on 12h data
-    # Jaw (blue line): 13-period SMMA, smoothed with 8-period shift
-    # Teeth (red line): 8-period SMMA, smoothed with 5-period shift  
-    # Lips (green line): 5-period SMMA, smoothed with 3-period shift
-    def smma(arr, period):
-        """Smoothed Moving Average"""
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
-        result = np.full_like(arr, np.nan)
-        sma = np.convolve(arr, np.ones(period)/period, mode='valid')
-        result[period-1:] = sma
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
-    
-    jaw = smma(close, 13)
-    teeth = smma(close, 8)
-    lips = smma(close, 5)
+    # Calculate 20-period Donchian channels on daily data
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -66,46 +48,41 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(jaw[i]) or 
-            np.isnan(teeth[i]) or np.isnan(lips[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         ema34_1w_val = ema34_1w_aligned[i]
-        jaw_val = jaw[i]
-        teeth_val = teeth[i]
-        lips_val = lips[i]
+        upper_band = donchian_high[i]
+        lower_band = donchian_low[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: bullish alignment (Lips > Teeth > Jaw) + price above Teeth +
-            # weekly uptrend + volume spike
-            if (lips_val > teeth_val > jaw_val and 
-                close[i] > teeth_val and 
+            # Enter long: price breaks above Donchian high + weekly uptrend + volume spike
+            if (close[i] > upper_band and 
                 close[i] > ema34_1w_val and 
                 vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: bearish alignment (Lips < Teeth < Jaw) + price below Teeth +
-            # weekly downtrend + volume spike
-            elif (lips_val < teeth_val < jaw_val and 
-                  close[i] < teeth_val and 
+            # Enter short: price breaks below Donchian low + weekly downtrend + volume spike
+            elif (close[i] < lower_band and 
                   close[i] < ema34_1w_val and 
                   vol_spike):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: bearish alignment OR price below Teeth OR weekly trend turns down
-            if (lips_val < teeth_val or close[i] < teeth_val or close[i] < ema34_1w_val):
+            # Exit long: price breaks below Donchian low OR weekly trend turns down
+            if (close[i] < lower_band or close[i] < ema34_1w_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: bullish alignment OR price above Teeth OR weekly trend turns up
-            if (lips_val > teeth_val or close[i] > teeth_val or close[i] > ema34_1w_val):
+            # Exit short: price breaks above Donchian high OR weekly trend turns up
+            if (close[i] > upper_band or close[i] > ema34_1w_val):
                 signals[i] = 0.0
                 position = 0
             else:
