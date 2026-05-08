@@ -3,14 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 12h ATR-based volatility breakout with 12h trend filter and volume confirmation.
-# Long when price breaks above 12h high + ATR multiplier in uptrend with volume surge.
-# Short when price breaks below 12h low - ATR multiplier in downtrend with volume surge.
-# Uses 12h EMA(34) for trend direction and 12h ATR(14) for dynamic breakout levels.
+# Hypothesis: 6h strategy using weekly Donchian breakout with 1d trend filter and volume confirmation.
+# Long when price breaks above weekly high in uptrend with volume surge.
+# Short when price breaks below weekly low in downtrend with volume surge.
+# Uses 1d EMA(34) for trend direction and 1d ATR(14) for dynamic breakout levels.
 # Designed for low trade frequency (15-25/year) to minimize fee drag and capture sustained moves.
+# Weekly Donchian provides strong structural breaks, 1d trend filters false breakouts,
+# volume confirms institutional participation.
 
-name = "4h_ATRBreakout_12hTrend_Volume"
-timeframe = "4h"
+name = "6h_WeeklyDonchian_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,41 +25,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend and volatility
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # Get 1d data for trend and volatility
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # 12h EMA(34) for trend filter
-    close_12h_series = pd.Series(close_12h)
-    ema_34_12h = close_12h_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_up = ema_34_12h[1:] > ema_34_12h[:-1]  # Rising EMA = uptrend
-    trend_up = np.concatenate([[False], trend_up])  # Align with 12h index
+    # 1d EMA(34) for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_up = ema_34_1d[1:] > ema_34_1d[:-1]  # Rising EMA = uptrend
+    trend_up = np.concatenate([[False], trend_up])  # Align with 1d index
     
-    # 12h ATR(14) for volatility
-    high_low = high_12h - low_12h
-    high_close = np.abs(high_12h - np.roll(close_12h, 1))
-    low_close = np.abs(low_12h - np.roll(close_12h, 1))
-    high_close[0] = high_12h[0] - close_12h[0]  # First value
-    low_close[0] = low_12h[0] - close_12h[0]    # First value
+    # 1d ATR(14) for volatility
+    high_low = high_1d - low_1d
+    high_close = np.abs(high_1d - np.roll(close_1d, 1))
+    low_close = np.abs(low_1d - np.roll(close_1d, 1))
+    high_close[0] = high_1d[0] - close_1d[0]  # First value
+    low_close[0] = low_1d[0] - close_1d[0]    # First value
     tr = np.maximum(high_low, np.maximum(high_close, low_close))
     atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Dynamic breakout levels: 12h high/low ± ATR multiplier
-    upper_break = high_12h + (atr_14 * 0.5)
-    lower_break = low_12h - (atr_14 * 0.5)
+    # Get weekly data for Donchian channels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
-    # Align 12h indicators to 4h timeframe
-    trend_up_aligned = align_htf_to_ltf(prices, df_12h, trend_up.astype(float))
-    upper_break_aligned = align_htf_to_ltf(prices, df_12h, upper_break)
-    lower_break_aligned = align_htf_to_ltf(prices, df_12h, lower_break)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Volume confirmation: 4h volume > 2.0x 20-period EMA
+    # Weekly Donchian(20): highest high and lowest low of past 20 weekly candles
+    high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    
+    # Align 1d indicators to 6h timeframe
+    trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up.astype(float))
+    
+    # Align weekly Donchian levels to 6h timeframe
+    high_20_aligned = align_htf_to_ltf(prices, df_1w, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1w, low_20)
+    
+    # Volume confirmation: 6h volume > 2.0x 20-period EMA
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     vol_confirm = volume > (vol_ema * 2.0)
     
@@ -68,36 +80,36 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(trend_up_aligned[i]) or np.isnan(upper_break_aligned[i]) or
-            np.isnan(lower_break_aligned[i]) or np.isnan(vol_ema[i])):
+        if (np.isnan(trend_up_aligned[i]) or np.isnan(high_20_aligned[i]) or
+            np.isnan(low_20_aligned[i]) or np.isnan(vol_ema[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long setup: break above 12h high + ATR in uptrend with volume
-            if (trend_up_aligned[i] > 0.5 and  # 12h uptrend
-                close[i] > upper_break_aligned[i] and
+            # Long setup: break above weekly high in uptrend with volume
+            if (trend_up_aligned[i] > 0.5 and  # 1d uptrend
+                close[i] > high_20_aligned[i] and
                 vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short setup: break below 12h low - ATR in downtrend with volume
-            elif (trend_up_aligned[i] <= 0.5 and  # 12h downtrend
-                  close[i] < lower_break_aligned[i] and
+            # Short setup: break below weekly low in downtrend with volume
+            elif (trend_up_aligned[i] <= 0.5 and  # 1d downtrend
+                  close[i] < low_20_aligned[i] and
                   vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: break below 12h low or trend turns down
-            if close[i] < lower_break_aligned[i] or trend_up_aligned[i] <= 0.5:
+            # Long exit: break below weekly low or trend turns down
+            if close[i] < low_20_aligned[i] or trend_up_aligned[i] <= 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: break above 12h high or trend turns up
-            if close[i] > upper_break_aligned[i] or trend_up_aligned[i] > 0.5:
+            # Short exit: break above weekly high or trend turns up
+            if close[i] > high_20_aligned[i] or trend_up_aligned[i] > 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
