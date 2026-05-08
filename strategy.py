@@ -3,8 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+# Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA trend filter and volume confirmation.
+# Uses 1d trend (EMA34) to filter direction, volume spike for confirmation.
+# Designed to work in both bull/bear by requiring alignment with higher timeframe trend.
+# Target: 20-50 trades/year (80-200 total over 4 years) to avoid fee drag.
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,7 +39,7 @@ def generate_signals(prices):
     r1_1d = close_1d + (range_1d * 1.1 / 12)
     s1_1d = close_1d - (range_1d * 1.1 / 12)
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
@@ -44,8 +48,8 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation - 12-period average volume (6h)
-    vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
+    # Volume confirmation - 24-period average volume (24 * 4h = 96h ~ 4d)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1.0)
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
@@ -77,13 +81,13 @@ def generate_signals(prices):
             # Long: price breaks above R1 + above 1d EMA34 + volume confirmation
             if (close[i] > r1_1d_aligned[i] and 
                 close[i] > ema_34_1d_aligned[i] and
-                vol_ratio[i] > 1.8):
+                vol_ratio[i] > 2.0):
                 signals[i] = 0.25
                 position = 1
             # Short: price breaks below S1 + below 1d EMA34 + volume confirmation
             elif (close[i] < s1_1d_aligned[i] and 
                   close[i] < ema_34_1d_aligned[i] and
-                  vol_ratio[i] > 1.8):
+                  vol_ratio[i] > 2.0):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
