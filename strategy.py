@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams Alligator with 1d trend filter (EMA34) and volume confirmation (volume > 1.5x daily EMA20)
-# Williams Alligator uses three SMAs: Jaw (13), Teeth (8), Lips (5)
-# Long when Lips > Teeth > Jaw (bullish alignment) + price > daily EMA34 + volume > 1.5x daily volume EMA20
-# Short when Lips < Teeth < Jaw (bearish alignment) + price < daily EMA34 + volume > 1.5x daily volume EMA20
-# Exit when Alligator alignment breaks (Lips crosses Teeth)
+# Hypothesis: 4h Donchian breakout with 1d trend filter (EMA34) and volume confirmation (volume > 1.5x daily EMA20)
+# Long when price breaks above Donchian(20) high + price > daily EMA34 + volume > 1.5x daily volume EMA20
+# Short when price breaks below Donchian(20) low + price < daily EMA34 + volume > 1.5x daily volume EMA20
+# Exit when price crosses back through the Donchian(20) midline (10-period average)
 # Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag
 
-name = "4h_Williams_Alligator_1dEMA34_Volume"
+name = "4h_Donchian_Breakout_1dEMA34_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -39,13 +38,10 @@ def generate_signals(prices):
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     vol_ema_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ema_20)
     
-    # Calculate Williams Alligator SMAs
-    # Jaw: 13-period SMMA (Smoothed Moving Average) - we'll use SMA as approximation
-    # Teeth: 8-period SMA
-    # Lips: 5-period SMA
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().values
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().values
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().values
+    # Calculate Donchian channels (20-period)
+    upper_channel = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lower_channel = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    mid_channel = (upper_channel + lower_channel) / 2
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -54,7 +50,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for indicators
+    start_idx = 30  # warmup for Donchian and indicators
     
     for i in range(start_idx, n):
         # Skip if outside trading session
@@ -66,7 +62,7 @@ def generate_signals(prices):
         
         # Skip if any required data is NaN
         if np.isnan(ema_34_aligned[i]) or np.isnan(vol_ema_20_aligned[i]) or \
-           np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]):
+           np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or np.isnan(mid_channel[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -85,14 +81,10 @@ def generate_signals(prices):
             vol_1d_current = df_1d.iloc[idx_1d]['volume']
             vol_filter = vol_1d_current > 1.5 * vol_ema_20_aligned[i]
         
-        # Williams Alligator conditions
-        bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
-        bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]
-        
         if position == 0:
-            # Look for entry: Alligator alignment + trend + volume
-            long_condition = bullish_alignment and close[i] > ema_34_aligned[i] and vol_filter
-            short_condition = bearish_alignment and close[i] < ema_34_aligned[i] and vol_filter
+            # Look for entry: Donchian breakout + trend + volume
+            long_condition = close[i] > upper_channel[i] and close[i] > ema_34_aligned[i] and vol_filter
+            short_condition = close[i] < lower_channel[i] and close[i] < ema_34_aligned[i] and vol_filter
             
             if long_condition:
                 signals[i] = 0.25
@@ -101,15 +93,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Alligator alignment breaks (Lips crosses below Teeth)
-            if lips[i] < teeth[i]:
+            # Exit long: price crosses below midline
+            if close[i] < mid_channel[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Alligator alignment breaks (Lips crosses above Teeth)
-            if lips[i] > teeth[i]:
+            # Exit short: price crosses above midline
+            if close[i] > mid_channel[i]:
                 signals[i] = 0.0
                 position = 0
             else:
