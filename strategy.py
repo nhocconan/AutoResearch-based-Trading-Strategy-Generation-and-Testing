@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian breakout with weekly EMA34 trend filter and volume confirmation
-# Uses weekly trend filter to avoid counter-trend trades in bear markets.
-# Volume spike >1.5 filters false breakouts. Target: 15-25 trades/year.
-name = "1d_Donchian_Breakout_WeeklyEMA34_Trend_Volume"
-timeframe = "1d"
+# Hypothesis: 4h Williams Alligator with 1d trend filter and volume spike
+# Uses Jaw/Teeth/Lips crossover for trend signals. 1d EMA34 ensures trend alignment.
+# Volume spike >1.8 filters false signals. Designed for 20-30 trades/year.
+name = "4h_WilliamsAlligator_1dEMA34_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,21 +20,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 34:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate weekly EMA34 trend filter
-    close_weekly = df_weekly['close'].values
-    ema34_weekly = pd.Series(close_weekly).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema34_weekly)
+    # Calculate 1d EMA34 trend filter
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate daily Donchian channels (20-day)
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Williams Alligator (13,8,5 SMAs with future shift)
+    # Jaw: 13-period SMMA shifted 8 bars forward
+    # Teeth: 8-period SMMA shifted 5 bars forward  
+    # Lips: 5-period SMMA shifted 3 bars forward
+    def smma(arr, period):
+        """Smoothed Moving Average (SMMA)"""
+        if len(arr) < period:
+            return np.full(len(arr), np.nan)
+        result = np.full(len(arr), np.nan)
+        # First value is SMA
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: SMMA = (prev_SMMA * (period-1) + current_price) / period
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    # Volume confirmation - 20-day average volume
+    jaw = smma(high, 13)  # Using high for Jaw as per Williams
+    teeth = smma(low, 8)   # Using low for Teeth as per Williams
+    lips = smma(close, 5)  # Using close for Lips as per Williams
+    
+    # Apply forward shifts (8, 5, 3 respectively)
+    jaw_shifted = np.roll(jaw, 8)
+    teeth_shifted = np.roll(teeth, 5)
+    lips_shifted = np.roll(lips, 3)
+    
+    # Set NaN for shifted values that go out of bounds
+    jaw_shifted[:8] = np.nan
+    teeth_shifted[:5] = np.nan
+    lips_shifted[:3] = np.nan
+    
+    # Volume confirmation - 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1.0)
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
@@ -46,11 +72,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 34)  # warmup period
+    start_idx = max(60, 34)  # warmup period
     
     for i in range(start_idx, n):
-        if (np.isnan(ema34_weekly_aligned[i]) or np.isnan(high_max[i]) or 
-            np.isnan(low_min[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(jaw_shifted[i]) or np.isnan(teeth_shifted[i]) or np.isnan(lips_shifted[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,28 +89,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long entry: break above 20-day high with trend alignment and volume spike
-            if (close[i] > high_max[i] and 
-                close[i] > ema34_weekly_aligned[i] and
-                vol_ratio[i] > 1.5):
+            # Long entry: Lips > Teeth > Jaw (bullish alignment) with trend and volume
+            if (lips_shifted[i] > teeth_shifted[i] > jaw_shifted[i] and
+                close[i] > ema34_1d_aligned[i] and
+                vol_ratio[i] > 1.8):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: break below 20-day low with trend alignment and volume spike
-            elif (close[i] < low_min[i] and 
-                  close[i] < ema34_weekly_aligned[i] and
-                  vol_ratio[i] > 1.5):
+            # Short entry: Lips < Teeth < Jaw (bearish alignment) with trend and volume
+            elif (lips_shifted[i] < teeth_shifted[i] < jaw_shifted[i] and
+                  close[i] < ema34_1d_aligned[i] and
+                  vol_ratio[i] > 1.8):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: break below 20-day low (mean reversion) OR trend fails
-            if close[i] < low_min[i] or close[i] < ema34_weekly_aligned[i]:
+            # Exit long: bearish alignment OR trend fails
+            if (lips_shifted[i] < teeth_shifted[i] < jaw_shifted[i] or
+                close[i] < ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: break above 20-day high (mean reversion) OR trend fails
-            if close[i] > high_max[i] or close[i] > ema34_weekly_aligned[i]:
+            # Exit short: bullish alignment OR trend fails
+            if (lips_shifted[i] > teeth_shifted[i] > jaw_shifted[i] or
+                close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
