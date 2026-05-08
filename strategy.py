@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Supertrend_12hTrend_VolumeSpike"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,69 +17,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Daily data for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate Camarilla pivot levels (R1, S1) from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate ATR for Supertrend (10-period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR
-    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    # Camarilla levels: R1 = close + (high - low) * 1.1/12, S1 = close - (high - low) * 1.1/12
+    camarilla_range = high_1d - low_1d
+    r1 = close_1d + camarilla_range * 1.1 / 12
+    s1 = close_1d - camarilla_range * 1.1 / 12
     
-    # Supertrend calculation (10, 3.0)
-    hl2 = (high + low) / 2
-    upper_band = hl2 + 3.0 * atr
-    lower_band = hl2 - 3.0 * atr
+    # Align Camarilla levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Initialize Supertrend arrays
-    supertrend = np.full(n, np.nan)
-    direction = np.full(n, 1)  # 1 for uptrend, -1 for downtrend
-    
-    # Calculate Supertrend
-    for i in range(10, n):
-        if np.isnan(atr[i]) or atr[i] == 0:
-            continue
-            
-        # Upper and lower bands
-        upper = upper_band[i]
-        lower = lower_band[i]
-        
-        # Previous values
-        prev_supertrend = supertrend[i-1]
-        prev_direction = direction[i-1]
-        
-        # Current close
-        curr_close = close[i]
-        
-        # Update bands based on direction
-        if prev_direction == 1:
-            upper = min(upper, upper_band[i-1]) if not np.isnan(upper_band[i-1]) else upper
-        else:
-            lower = max(lower, lower_band[i-1]) if not np.isnan(lower_band[i-1]) else lower
-        
-        # Determine trend direction
-        if curr_close > upper:
-            direction[i] = 1
-        elif curr_close < lower:
-            direction[i] = -1
-        else:
-            direction[i] = prev_direction
-            if direction[i] == 1 and curr_close < upper:
-                upper = upper_band[i]
-            elif direction[i] == -1 and curr_close > lower:
-                lower = lower_band[i]
-        
-        # Set Supertrend value
-        supertrend[i] = lower if direction[i] == 1 else upper
+    # Daily trend filter: EMA34
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume spike: current volume > 2.0x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -88,28 +47,26 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for sufficient data
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(supertrend[i]) or np.isnan(direction[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Supertrend uptrend, price above Supertrend, 12h uptrend, volume spike
-            long_cond = (direction[i] == 1 and 
-                        close[i] > supertrend[i] and 
-                        ema_50_12h_aligned[i] > ema_50_12h_aligned[i-1] and
+            # Long: price breaks above R1, daily uptrend, volume spike
+            long_cond = (close[i] > r1_aligned[i] and 
+                        ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and
                         volume_spike[i])
             
-            # Short: Supertrend downtrend, price below Supertrend, 12h downtrend, volume spike
-            short_cond = (direction[i] == -1 and 
-                         close[i] < supertrend[i] and 
-                         ema_50_12h_aligned[i] < ema_50_12h_aligned[i-1] and
+            # Short: price breaks below S1, daily downtrend, volume spike
+            short_cond = (close[i] < s1_aligned[i] and 
+                         ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and
                          volume_spike[i])
             
             if long_cond:
@@ -119,15 +76,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Supertrend flips to downtrend OR price crosses below Supertrend
-            if direction[i] == -1 or close[i] < supertrend[i]:
+            # Long exit: price closes below S1 (reversion to mean)
+            if close[i] < s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Supertrend flips to uptrend OR price crosses above Supertrend
-            if direction[i] == 1 or close[i] > supertrend[i]:
+            # Short exit: price closes above R1 (reversion to mean)
+            if close[i] > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
