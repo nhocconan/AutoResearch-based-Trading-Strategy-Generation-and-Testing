@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1h EMA21 trend filter and volume spike
-# Uses tighter R3/S3 levels for mean reversion entries. 1h EMA21 ensures trend alignment.
-# Volume spike >1.8 filters false breakouts. Designed for 20-30 trades/year.
-name = "4h_Camarilla_R3S3_Breakout_1hEMA21_Trend_VolumeSpike"
+# Hypothesis: 4h Bollinger Band squeeze with 1d ADX trend filter and volume confirmation
+# Uses Bollinger Band width percentile to identify low volatility squeeze conditions.
+# Enters on breakout from squeeze with ADX > 25 (trending) and volume > 1.5x average.
+# Designed for 15-25 trades/year to minimize fee drag while capturing explosive moves.
+name = "4h_BollingerSqueeze_ADXTrend_VolumeBreakout"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,36 +21,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1h data for trend filter
-    df_1h = get_htf_data(prices, '1h')
-    if len(df_1h) < 21:
-        return np.zeros(n)
+    # Bollinger Bands (20, 2) for squeeze detection
+    close_series = pd.Series(close)
+    bb_middle = close_series.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_series.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2 * bb_std
+    bb_lower = bb_middle - 2 * bb_std
+    bb_width = bb_upper - bb_lower
     
-    # Calculate 1h EMA21 trend filter
-    close_1h = df_1h['close'].values
-    ema21_1h = pd.Series(close_1h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema21_1h_aligned = align_htf_to_ltf(prices, df_1h, ema21_1h)
+    # Bollinger Band width percentile (50-period lookback) for squeeze identification
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=50).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    ).values
     
-    # Get 1d data for Camarilla levels (previous day)
+    # Get 1d data for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Calculate 1d ADX (14)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align to 4h
-    prev_close_aligned = align_htf_to_ltf(prices, df_1d, prev_close)
-    prev_high_aligned = align_htf_to_ltf(prices, df_1d, prev_high)
-    prev_low_aligned = align_htf_to_ltf(prices, df_1d, prev_low)
+    # True Range
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Calculate Camarilla levels for current day
-    range_ = prev_high_aligned - prev_low_aligned
-    # Camarilla R3, S3 (wider bands for mean reversion)
-    r3 = prev_close_aligned + 1.1 * range_ * 1.1/2
-    s3 = prev_close_aligned - 1.1 * range_ * 1.1/2
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]])) > 
+                       (np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d), 
+                       np.maximum(high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]]), 0), 0)
+    dm_minus = np.where((np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d) > 
+                        (high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]])), 
+                        np.maximum(np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d, 0), 0)
+    
+    # Smoothed values
+    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
+    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_14 / np.where(tr_14 > 0, tr_14, 1)
+    di_minus = 100 * dm_minus_14 / np.where(tr_14 > 0, tr_14, 1)
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / np.where((di_plus + di_minus) > 0, (di_plus + di_minus), 1)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align 1d ADX to 4h
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # Volume confirmation - 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -63,11 +87,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(60, 21)  # warmup period
+    start_idx = max(50, 20)  # warmup period
     
     for i in range(start_idx, n):
-        if (np.isnan(r3[i]) or np.isnan(s3[i]) or np.isnan(ema21_1h_aligned[i]) or 
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(bb_width_percentile[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(vol_ratio[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -80,31 +104,33 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long entry: break above R3 with trend alignment and volume spike
-            if (close[i] > r3[i] and 
-                close[i] > ema21_1h_aligned[i] and
-                vol_ratio[i] > 1.8):
-                signals[i] = 0.28
-                position = 1
-            # Short entry: break below S3 with trend alignment and volume spike
-            elif (close[i] < s3[i] and 
-                  close[i] < ema21_1h_aligned[i] and
-                  vol_ratio[i] > 1.8):
-                signals[i] = -0.28
-                position = -1
+            # Entry conditions: Bollinger squeeze (< 20th percentile) + ADX > 25 + volume breakout
+            squeeze_condition = bb_width_percentile[i] < 20
+            trend_condition = adx_aligned[i] > 25
+            volume_condition = vol_ratio[i] > 1.5
+            breakout_up = close[i] > bb_upper[i]
+            breakout_down = close[i] < bb_lower[i]
+            
+            if squeeze_condition and trend_condition and volume_condition:
+                if breakout_up:
+                    signals[i] = 0.25
+                    position = 1
+                elif breakout_down:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Exit long: break below S3 (mean reversion) OR trend fails
-            if close[i] < s3[i] or close[i] < ema21_1h_aligned[i]:
+            # Exit long: break below Bollinger middle OR ADX weakens
+            if close[i] < bb_middle[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.28
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: break above R3 (mean reversion) OR trend fails
-            if close[i] > r3[i] or close[i] > ema21_1h_aligned[i]:
+            # Exit short: break above Bollinger middle OR ADX weakens
+            if close[i] > bb_middle[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.28
+                signals[i] = -0.25
     
     return signals
