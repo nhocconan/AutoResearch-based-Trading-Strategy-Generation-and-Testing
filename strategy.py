@@ -1,10 +1,10 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "1d_Weekly_Trend_Filter_RSI_MeanReversion"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,63 +17,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for trend and Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
+    close_weekly = df_weekly['close'].values
     
-    # Previous 1d bar's Camarilla pivot levels
-    prev_close = np.roll(close_1d, 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close[0] = close_1d[0]
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
+    # Weekly EMA50 for trend filter
+    ema50_weekly = pd.Series(close_weekly).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema50_weekly)
     
-    # Camarilla levels: R3, S3 (stronger breakout levels)
-    R3 = prev_close + 1.1 * (prev_high - prev_low) / 4
-    S3 = prev_close - 1.1 * (prev_high - prev_low) / 4
+    # Daily RSI(14) for mean reversion
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Align Camarilla levels to 6h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    # Wilder's smoothing
+    avg_gain = np.zeros_like(close)
+    avg_loss = np.zeros_like(close)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
     
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    for i in range(14, n):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # Volume spike: current volume > 2.0x 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma20)
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Daily SMA200 for trend context
+    sma200 = np.full_like(close, np.nan)
+    for i in range(199, n):
+        sma200[i] = np.mean(close[i-199:i+1])
+    
+    # Volume spike filter: current volume > 1.5x 20-day average
+    vol_ma20 = np.full_like(volume, np.nan)
+    for i in range(19, n):
+        vol_ma20[i] = np.mean(volume[i-19:i+1])
+    volume_spike = volume > (1.5 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 200
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(ema34_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(ema50_weekly_aligned[i]) or np.isnan(rsi[i]) or 
+            np.isnan(sma200[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above R3, price above EMA34, volume spike
-            long_cond = (close[i] > R3_aligned[i] and 
-                        close[i] > ema34_aligned[i] and
+            # Long: Weekly trend up, RSI oversold, price above SMA200, volume spike
+            long_cond = (close[i] > ema50_weekly_aligned[i] and 
+                        rsi[i] < 30 and
+                        close[i] > sma200[i] and
                         volume_spike[i])
             
-            # Short: Price breaks below S3, price below EMA34, volume spike
-            short_cond = (close[i] < S3_aligned[i] and 
-                         close[i] < ema34_aligned[i] and
+            # Short: Weekly trend down, RSI overbought, price below SMA200, volume spike
+            short_cond = (close[i] < ema50_weekly_aligned[i] and 
+                         rsi[i] > 70 and
+                         close[i] < sma200[i] and
                          volume_spike[i])
             
             if long_cond:
@@ -83,15 +91,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Price breaks below S3 OR price crosses below EMA34
-            if close[i] < S3_aligned[i] or close[i] < ema34_aligned[i]:
+            # Long exit: RSI overbought OR weekly trend turns down
+            if rsi[i] > 70 or close[i] < ema50_weekly_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price breaks above R3 OR price crosses above EMA34
-            if close[i] > R3_aligned[i] or close[i] > ema34_aligned[i]:
+            # Short exit: RSI oversold OR weekly trend turns up
+            if rsi[i] < 30 or close[i] > ema50_weekly_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
