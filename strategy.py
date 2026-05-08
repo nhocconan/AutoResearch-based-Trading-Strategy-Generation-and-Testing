@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Confirm"
-timeframe = "4h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,27 +17,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend and pivot calculation
+    # Get daily data for trend filter and pivot calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Get weekly data for higher timeframe trend filter
+    # Get weekly data for higher timeframe trend
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate daily close for EMA
+    # Calculate daily EMA34 for trend filter
     close_1d = df_1d['close'].values
-    # Calculate 1d EMA34 for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    # Calculate 1w EMA34 for higher timeframe trend
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate weekly EMA34 for higher timeframe trend
     close_1w = df_1w['close'].values
     ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate daily high/low for Camarilla pivot
+    # Calculate Camarilla pivot levels from daily data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
     # Pivot = (H + L + C) / 3
     pivot_1d = (high_1d + low_1d + close_1d) / 3.0
     # Range = H - L
@@ -46,20 +50,18 @@ def generate_signals(prices):
     r1_1d = close_1d + (range_1d * 1.1 / 12)
     s1_1d = close_1d - (range_1d * 1.1 / 12)
     
-    # Align daily data to 4h timeframe
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Align Camarilla levels to 12h timeframe
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Volume confirmation - 24-period average volume (24h equivalent)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume confirmation - 4-period average volume (2 days)
+    vol_ma = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1.0)
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
     # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    hours = prices.index.hour
     in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
@@ -83,14 +85,14 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 + above 1d EMA34 + above 1w EMA34 + volume confirmation
+            # Long: price breaks above R1 + above daily EMA34 + above weekly EMA34 + volume confirmation
             if (close[i] > r1_1d_aligned[i] and 
                 close[i] > ema_34_1d_aligned[i] and
                 close[i] > ema_34_1w_aligned[i] and
                 vol_ratio[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + below 1d EMA34 + below 1w EMA34 + volume confirmation
+            # Short: price breaks below S1 + below daily EMA34 + below weekly EMA34 + volume confirmation
             elif (close[i] < s1_1d_aligned[i] and 
                   close[i] < ema_34_1d_aligned[i] and
                   close[i] < ema_34_1w_aligned[i] and
@@ -98,14 +100,14 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price falls back below pivot OR below 1d EMA34
+            # Exit long: price falls back below pivot OR below daily EMA34
             if close[i] < pivot_1d_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price rises back above pivot OR above 1d EMA34
+            # Exit short: price rises back above pivot OR above daily EMA34
             if close[i] > pivot_1d_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
