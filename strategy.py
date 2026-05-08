@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_Spike"
 timeframe = "4h"
 leverage = 1.0
 
@@ -38,7 +38,7 @@ def generate_signals(prices):
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Volume spike: current volume > 2.0x 30-period average (4h timeframe)
+    # Volume spike: current volume > 2.0x 30-period average
     vol_ma30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     volume_spike = volume > (2.0 * vol_ma30)
     
@@ -67,10 +67,10 @@ def generate_signals(prices):
                          volume_spike[i]
             
             if long_cond:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
             elif short_cond:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Long exit: close below S3 (mean reversion to support)
@@ -78,13 +78,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
             # Short exit: close above R3 (mean reversion to resistance)
             if close[i] > r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
