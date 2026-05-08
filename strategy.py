@@ -3,15 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian Breakout with Weekly Trend and Volume Confirmation
-# Long when price breaks above 20-day high with price above weekly EMA40 and volume > 1.5x 20-day average
-# Short when price breaks below 20-day low with price below weekly EMA40 and volume > 1.5x 20-day average
-# Uses daily timeframe for structure, weekly EMA for trend filter, and volume for confirmation
-# Designed to work in both bull and bear markets by requiring trend alignment
-# Target: 20-50 trades/year (80-200 over 4 years) to stay within optimal range
+# Hypothesis: 6h Volume-Weighted Price Action with Daily Trend Filter
+# Uses volume-weighted average price (VWAP) deviation from daily VWAP as mean reversion signal.
+# Long when price deviates significantly below daily VWAP with volume confirmation.
+# Short when price deviates significantly above daily VWAP with volume confirmation.
+# Daily trend filter (price above/below daily EMA20) prevents counter-trend trades.
+# Volume spike (>2x 20-period average) confirms institutional participation.
+# Designed to work in both bull and bear markets by fading extreme deviations from fair value.
+# Target: 60-120 total trades over 4 years (15-30/year) to stay within optimal range.
 
-name = "1d_Donchian_Breakout_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "6h_VWAP_MeanReversion_TrendFilter"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,48 +26,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 40:
-        return np.zeros(n)
-    
-    weekly_close = df_weekly['close'].values
-    
-    # Calculate weekly EMA40 for trend filter
-    weekly_close_series = pd.Series(weekly_close)
-    weekly_ema40 = weekly_close_series.ewm(span=40, adjust=False, min_periods=40).mean().values
-    
-    # Get daily data for Donchian channels and volume
+    # Get daily data for VWAP and trend filter
     df_daily = get_htf_data(prices, '1d')
     if len(df_daily) < 20:
         return np.zeros(n)
     
-    daily_high = df_daily['high'].values
-    daily_low = df_daily['low'].values
-    daily_volume = df_daily['volume'].values
+    # Calculate daily VWAP
+    typical_price_daily = (df_daily['high'] + df_daily['low'] + df_daily['close']) / 3.0
+    vwap_daily = (typical_price_daily * df_daily['volume']).cumsum() / df_daily['volume'].cumsum()
+    vwap_daily = vwap_daily.values
     
-    # Calculate 20-period Donchian channels
-    donchian_high = np.full(len(daily_high), np.nan)
-    donchian_low = np.full(len(daily_low), np.nan)
+    # Calculate daily EMA20 for trend filter
+    close_daily = df_daily['close'].values
+    ema20_daily = np.full(len(close_daily), np.nan)
+    if len(close_daily) >= 20:
+        ema20_daily[19] = np.mean(close_daily[:20])
+        for i in range(20, len(close_daily)):
+            ema20_daily[i] = (close_daily[i] * 2 + ema20_daily[i-1] * 18) / 20
     
-    for i in range(len(daily_high)):
-        if i >= 19:
-            donchian_high[i] = np.max(daily_high[i-19:i+1])
-            donchian_low[i] = np.min(daily_low[i-19:i+1])
+    # Calculate daily volume average for volume filter
+    vol_daily = df_daily['volume'].values
+    vol_avg_20_daily = np.full(len(vol_daily), np.nan)
+    if len(vol_daily) >= 20:
+        for i in range(20, len(vol_daily)):
+            vol_avg_20_daily[i] = np.mean(vol_daily[i-20:i])
     
-    # Calculate 20-day average volume for volume filter
-    vol_avg_20 = np.full(len(daily_volume), np.nan)
-    for i in range(len(daily_volume)):
-        if i >= 19:
-            vol_avg_20[i] = np.mean(daily_volume[i-19:i+1])
+    # Align daily indicators to 6h timeframe
+    vwap_daily_aligned = align_htf_to_ltf(prices, df_daily, vwap_daily)
+    ema20_daily_aligned = align_htf_to_ltf(prices, df_daily, ema20_daily)
+    vol_avg_20_daily_aligned = align_htf_to_ltf(prices, df_daily, vol_avg_20_daily)
     
-    # Align weekly EMA40 to daily timeframe
-    ema40_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ema40)
+    # Calculate 6-period standard deviation of price deviation from VWAP (for z-score)
+    price_dev = close - vwap_daily_aligned
+    price_dev_ma = np.full(n, np.nan)
+    price_dev_std = np.full(n, np.nan)
     
-    # Align Donchian levels and volume average to daily timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_daily, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_daily, donchian_low)
-    vol_avg_20_aligned = align_htf_to_ltf(prices, df_daily, vol_avg_20)
+    if n >= 6:
+        for i in range(5, n):
+            window = price_dev[i-5:i+1]
+            if not np.any(np.isnan(window)):
+                price_dev_ma[i] = np.mean(window)
+                price_dev_std[i] = np.std(window)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -74,7 +75,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(40, 20)  # warmup for indicators
+    start_idx = max(20, 6)  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if outside trading session
@@ -85,31 +86,50 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(ema40_aligned[i]) or np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or np.isnan(vol_avg_20_aligned[i])):
+        if (np.isnan(vwap_daily_aligned[i]) or np.isnan(ema20_daily_aligned[i]) or
+            np.isnan(vol_avg_20_daily_aligned[i]) or np.isnan(price_dev[i]) or
+            np.isnan(price_dev_std[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume filter: current volume > 1.5x 20-day average
-        vol_filter = volume[i] > 1.5 * vol_avg_20_aligned[i]
+        # Volume filter: current daily volume > 2x 20-period average
+        vol_filter = False
+        if not np.isnan(vol_avg_20_daily_aligned[i]):
+            # Find current daily bar's volume
+            idx_daily = 0
+            while idx_daily < len(df_daily) and df_daily.iloc[idx_daily]['open_time'] <= prices.iloc[i]['open_time']:
+                idx_daily += 1
+            idx_daily -= 1  # last completed daily bar
+            
+            if idx_daily >= 0:
+                vol_daily_current = df_daily.iloc[idx_daily]['volume']
+                vol_filter = vol_daily_current > 2.0 * vol_avg_20_daily_aligned[i]
+        
+        # Calculate z-score of price deviation from VWAP
+        if price_dev_std[i] > 0:
+            z_score = (price_dev[i] - price_dev_ma[i]) / price_dev_std[i]
+        else:
+            z_score = 0
+        
+        # Determine trend direction
+        bullish_trend = close[i] > ema20_daily_aligned[i]
+        bearish_trend = close[i] < ema20_daily_aligned[i]
         
         if position == 0:
-            # Look for entry: breakout with volume and trend alignment
-            # Long when price breaks above Donchian high with price above weekly EMA40
+            # Look for entry: mean reversion with volume and trend filter
+            # Long when price is significantly below VWAP in bullish trend
             long_condition = (
-                close[i] > donchian_high_aligned[i] and 
-                close[i-1] <= donchian_high_aligned[i-1] and  # just broke above
-                close[i] > ema40_aligned[i] and              # bullish trend
+                z_score < -2.0 and  # price dev more than 2 std below mean
+                bullish_trend and   # only long in uptrend
                 vol_filter
             )
             
-            # Short when price breaks below Donchian low with price below weekly EMA40
+            # Short when price is significantly above VWAP in bearish trend
             short_condition = (
-                close[i] < donchian_low_aligned[i] and 
-                close[i-1] >= donchian_low_aligned[i-1] and  # just broke below
-                close[i] < ema40_aligned[i] and              # bearish trend
+                z_score > 2.0 and   # price dev more than 2 std above mean
+                bearish_trend and   # only short in downtrend
                 vol_filter
             )
             
@@ -120,15 +140,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price falls back below Donchian low or weekly EMA40
-            if close[i] < donchian_low_aligned[i] or close[i] < ema40_aligned[i]:
+            # Exit long: price returns to VWAP or trend changes
+            if z_score > -0.5 or not bullish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price rises back above Donchian high or weekly EMA40
-            if close[i] > donchian_high_aligned[i] or close[i] > ema40_aligned[i]:
+            # Exit short: price returns to VWAP or trend changes
+            if z_score < 0.5 or not bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
