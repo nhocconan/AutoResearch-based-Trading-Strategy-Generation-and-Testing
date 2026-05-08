@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_WilliamsVixFix_1wTrend_Volume"
-timeframe = "6h"
+name = "4h_TRIX_Volume_Spike_Chop_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,38 +17,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter and VixFix calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Get daily data for VixFix calculation
+    # Get daily data for TRIX calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate Williams VixFix on daily data
-    # VixFix = ((Highest Close in period - Low) / Highest Close in period) * 100
-    lookback = 22
-    highest_close = pd.Series(df_1d['close']).rolling(window=lookback, min_periods=lookback).max().values
-    vixfix = ((highest_close - df_1d['low'].values) / highest_close) * 100
-    vixfix = np.nan_to_num(vixfix, nan=0.0)
+    # Get weekly data for chop filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
-    # VixFix moving average for signal generation
-    vixfix_ma = pd.Series(vixfix).rolling(window=10, min_periods=10).mean().values
+    # TRIX: Triple EMA of percentage change
+    # EMA1 of close
+    ema1 = pd.Series(df_1d['close']).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # EMA2 of EMA1
+    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # EMA3 of EMA2
+    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # TRIX = 100 * (EMA3_today - EMA3_yesterday) / EMA3_yesterday
+    trix_raw = np.zeros_like(ema3)
+    trix_raw[1:] = 100 * (ema3[1:] - ema3[:-1]) / ema3[:-1]
+    trix_raw[0] = 0
     
-    # Weekly EMA for trend filter
-    weekly_close = df_1w['close'].values
-    ema_20_1w = pd.Series(weekly_close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Align TRIX to 4h timeframe
+    trix_1d_aligned = align_htf_to_ltf(prices, df_1d, trix_raw)
     
-    # Volume confirmation - 20-period average volume
+    # Chop filter on weekly: Choppy if > 61.8 (range), Trending if < 38.2
+    # Calculate True Range and ATR for chop
+    tr1 = df_1w['high'] - df_1w['low']
+    tr2 = np.abs(df_1w['high'] - df_1w['close'].shift(1))
+    tr3 = np.abs(df_1w['low'] - df_1w['close'].shift(1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1w = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Sum of True Range over 14 periods
+    tr_sum_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # Chop = 100 * log10(tr_sum_14 / (atr_1w * 14)) / log10(14)
+    chop_raw = 100 * np.log10(tr_sum_14 / (atr_1w * 14)) / np.log10(14)
+    chop_raw = np.nan_to_num(chop_raw, nan=50.0)
+    
+    # Align chop to 4h timeframe
+    chop_1w_aligned = align_htf_to_ltf(prices, df_1w, chop_raw)
+    
+    # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1.0)
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
-    
-    # Align weekly trend and daily indicators to 6h timeframe
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    vixfix_ma_aligned = align_htf_to_ltf(prices, df_1d, vixfix_ma)
     
     signals = np.zeros(n)
     position = 0
@@ -56,7 +70,7 @@ def generate_signals(prices):
     start_idx = 200
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(vixfix_ma_aligned[i]) or
+        if (np.isnan(trix_1d_aligned[i]) or np.isnan(chop_1w_aligned[i]) or 
             np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -64,28 +78,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: VixFix spikes high (fear) + above weekly EMA + volume confirmation
-            if (vixfix_ma_aligned[i] > 30 and 
-                close[i] > ema_20_1w_aligned[i] and
-                vol_ratio[i] > 1.8):
+            # Long: TRIX crosses above zero + chop > 61.8 (range) + volume spike
+            if (trix_1d_aligned[i] > 0 and trix_1d_aligned[i-1] <= 0 and
+                chop_1w_aligned[i] > 61.8 and
+                vol_ratio[i] > 2.0):
                 signals[i] = 0.25
                 position = 1
-            # Short: VixFix spikes high (fear) + below weekly EMA + volume confirmation
-            elif (vixfix_ma_aligned[i] > 30 and 
-                  close[i] < ema_20_1w_aligned[i] and
-                  vol_ratio[i] > 1.8):
+            # Short: TRIX crosses below zero + chop > 61.8 (range) + volume spike
+            elif (trix_1d_aligned[i] < 0 and trix_1d_aligned[i-1] >= 0 and
+                  chop_1w_aligned[i] > 61.8 and
+                  vol_ratio[i] > 2.0):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: VixFix drops below threshold OR price crosses below weekly EMA
-            if vixfix_ma_aligned[i] < 20 or close[i] < ema_20_1w_aligned[i]:
+            # Exit long: TRIX crosses below zero OR chop < 38.2 (trend)
+            if trix_1d_aligned[i] < 0 or chop_1w_aligned[i] < 38.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: VixFix drops below threshold OR price crosses above weekly EMA
-            if vixfix_ma_aligned[i] < 20 or close[i] > ema_20_1w_aligned[i]:
+            # Exit short: TRIX crosses above zero OR chop < 38.2 (trend)
+            if trix_1d_aligned[i] > 0 or chop_1w_aligned[i] < 38.2:
                 signals[i] = 0.0
                 position = 0
             else:
