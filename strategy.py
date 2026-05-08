@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_Refined"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,7 +23,8 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Calculate daily EMA34 for trend filter
-    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # Calculate Camarilla levels for each day
     high_d = df_1d['high'].values
@@ -94,13 +95,13 @@ def generate_signals(prices):
         
         # Trading logic
         if position == 0:
-            # Look for entry
+            # Look for entry - only trade in direction of daily trend
             if vol_confirmed:
-                # Long when price breaks above R3 and above EMA34
+                # Long when price breaks above R3 and above EMA34 (bullish trend)
                 if price > R3_today and price > ema34_today:
                     signals[i] = 0.25
                     position = 1
-                # Short when price breaks below S3 and below EMA34
+                # Short when price breaks below S3 and below EMA34 (bearish trend)
                 elif price < S3_today and price < ema34_today:
                     signals[i] = -0.25
                     position = -1
