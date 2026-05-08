@@ -1,16 +1,20 @@
-# 140932: 12h Camarilla R1/S1 Breakout with 1d Trend and Volume Confirmation
-# Hypothesis: Breakouts at daily Camarilla R1/S1 levels with 1d trend alignment and volume confirmation.
-# Uses 1d EMA(34) for trend and 20-period volume spike for confirmation.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
-# Works in bull (breakout continuation) and bear (mean reversion at R1/S1) via trend filter.
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+# Hypothesis: 4h Choppiness Index regime filter + 12h Donchian breakout + volume confirmation
+# Chop > 61.8 = range (mean revert at Donchian bands), Chop < 38.2 = trend (breakout continuation)
+# Uses 12h Donchian(20) for structure and 40-period volume spike for confirmation
+# Target: 80-120 total trades over 4 years (20-30/year) to balance opportunity and cost
+
+name = "4h_Chop_Donchian_Breakout_12hVol"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,101 +22,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 12h data for Donchian channels and chop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
+    # 12h Donchian(20) channels
+    high_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (high_20 + low_20) / 2
     
-    # Camarilla levels (R1, S1)
-    range_ = prev_high - prev_low
-    R1 = prev_close + (range_ * 1.1 / 12)
-    S1 = prev_close - (range_ * 1.1 / 12)
+    # 12h Choppiness Index (14-period)
+    atr_12h = np.zeros(len(high_12h))
+    tr_12h = np.maximum(high_12h[1:] - low_12h[1:], 
+                        np.maximum(np.abs(high_12h[1:] - close_12h[:-1]),
+                                   np.abs(low_12h[1:] - close_12h[:-1])))
+    tr_12h = np.concatenate([[high_12h[0] - low_12h[0]], tr_12h])
+    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
+    sum_tr_14 = pd.Series(tr_12h).rolling(window=14, min_periods=14).sum().values
+    highest_high_14 = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(sum_tr_14 / (highest_high_14 - lowest_low_14)) / np.log10(14)
     
-    # 1d EMA(34) for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_up = ema_34_1d[1:] > ema_34_1d[:-1]  # Rising EMA = uptrend
-    trend_up = np.concatenate([[False], trend_up])  # Align with 1d index
-    
-    # Volume confirmation: 20-period volume spike (2.0x EMA)
-    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # 40-period volume spike confirmation (2.0x EMA)
+    vol_ema = pd.Series(volume).ewm(span=40, adjust=False, min_periods=40).mean().values
     vol_confirm = volume > (vol_ema * 2.0)
     
-    # Align 1d indicators to 12h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up.astype(float))
+    # Align 12h indicators to 4h timeframe
+    high_20_aligned = align_htf_to_ltf(prices, df_12h, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_12h, low_20)
+    chop_aligned = align_htf_to_ltf(prices, df_12h, chop)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure enough data for volume EMA
+    start_idx = 40  # Ensure enough data for volume EMA
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or
-            np.isnan(trend_up_aligned[i]) or np.isnan(vol_ema[i])):
+        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or
+            np.isnan(chop_aligned[i]) or np.isnan(vol_ema[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: Break above R1 in uptrend OR bounce at S1 in downtrend
-            if (trend_up_aligned[i] > 0.5 and  # 1d uptrend
-                close[i] >= R1_aligned[i] and
-                vol_confirm[i]):
-                signals[i] = 0.25
-                position = 1
-            elif (trend_up_aligned[i] <= 0.5 and  # 1d downtrend
-                  close[i] <= S1_aligned[i] and
-                  vol_confirm[i]):
-                signals[i] = 0.25
-                position = 1
-            # Short entry: Break below S1 in downtrend OR bounce at R1 in uptrend
-            elif (trend_up_aligned[i] <= 0.5 and  # 1d downtrend
-                  close[i] <= S1_aligned[i] and
-                  vol_confirm[i]):
-                signals[i] = -0.25
-                position = -1
-            elif (trend_up_aligned[i] > 0.5 and  # 1d uptrend
-                  close[i] >= R1_aligned[i] and
-                  vol_confirm[i]):
-                signals[i] = -0.25
-                position = -1
+            # Chop > 61.8 = range: mean revert at Donchian bands
+            if chop_aligned[i] > 61.8:
+                if close[i] <= low_20_aligned[i] and vol_confirm[i]:
+                    signals[i] = 0.25
+                    position = 1
+                elif close[i] >= high_20_aligned[i] and vol_confirm[i]:
+                    signals[i] = -0.25
+                    position = -1
+            # Chop < 38.2 = trend: breakout continuation
+            elif chop_aligned[i] < 38.2:
+                if close[i] >= high_20_aligned[i] and vol_confirm[i]:
+                    signals[i] = 0.25
+                    position = 1
+                elif close[i] <= low_20_aligned[i] and vol_confirm[i]:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Long exit: Reverse signal or opposite touch
-            if (trend_up_aligned[i] <= 0.5 and  # 1d downtrend
-                close[i] <= S1_aligned[i]):  # Touch S1
+            # Long exit: opposite signal or middle band touch
+            if chop_aligned[i] > 61.8 and close[i] >= donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
-            elif (trend_up_aligned[i] > 0.5 and  # 1d uptrend
-                  close[i] >= R1_aligned[i]):  # Touch R1
+            elif chop_aligned[i] < 38.2 and close[i] <= low_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Reverse signal or opposite touch
-            if (trend_up_aligned[i] > 0.5 and  # 1d uptrend
-                close[i] >= R1_aligned[i]):  # Touch R1
+            # Short exit: opposite signal or middle band touch
+            if chop_aligned[i] > 61.8 and close[i] <= donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
-            elif (trend_up_aligned[i] <= 0.5 and  # 1d downtrend
-                  close[i] <= S1_aligned[i]):  # Touch S1
+            elif chop_aligned[i] < 38.2 and close[i] >= high_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
