@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Bollinger Band squeeze breakout with 1-day trend filter and volume confirmation
-# Long when price breaks above upper BB during low volatility (BB width < 20th percentile) and 1-day trend up
-# Short when price breaks below lower BB during low volatility and 1-day trend down
-# Bollinger Band squeeze indicates low volatility primed for breakout; trend filter ensures direction alignment
-# Volume confirmation avoids false breakouts; targets 20-50 trades/year for low fee drag
+# Hypothesis: 4-hour RSI divergence with weekly trend and volume confirmation
+# Bullish divergence: price makes lower low, RSI makes higher low → long
+# Bearish divergence: price makes higher high, RSI makes lower high → short
+# Weekly trend filter ensures alignment with higher timeframe momentum
+# Volume spike confirms institutional participation in the reversal
+# Targets 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost
 
-name = "4h_BollingerSqueeze_1dTrend_Volume"
+name = "4h_RSIDivergence_WeeklyTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,75 +24,103 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data once for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data once for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate daily EMA(50) for trend filter
-    daily_close = df_1d['close'].values
-    ema50_1d = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate weekly EMA(50) for trend filter
+    weekly_close = df_1w['close'].values
+    ema50_1w = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Bollinger Bands (20, 2) on 4h
-    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma20 + (2 * std20)
-    lower_bb = sma20 - (2 * std20)
-    bb_width = upper_bb - lower_bb
+    # RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
-    # Bollinger Band width percentile (20-period lookback for regime)
-    bb_width_percentile = pd.Series(bb_width).rolling(window=20, min_periods=20).rank(pct=True).values
-    # Squeeze condition: BB width below 20th percentile (low volatility)
-    squeeze = bb_width_percentile < 0.2
+    # Volume spike: current volume > 2.0 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
-    # Volume spike: current volume > 1.5 * 30-period average
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    # Find price and RSI extrema for divergence detection
+    # Look for lows in price and RSI (for bullish divergence)
+    price_low = pd.Series(low).rolling(window=5, center=True).min().values
+    rsi_low = pd.Series(rsi).rolling(window=5, center=True).min().values
+    # Look for highs in price and RSI (for bearish divergence)
+    price_high = pd.Series(high).rolling(window=5, center=True).max().values
+    rsi_high = pd.Series(rsi).rolling(window=5, center=True).max().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for calculations
+    start_idx = 100  # warmup for calculations
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(sma20[i]) or 
-            np.isnan(std20[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(rsi[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(price_low[i]) or 
+            np.isnan(rsi_low[i]) or np.isnan(price_high[i]) or 
+            np.isnan(rsi_high[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema50_1d_val = ema50_1d_aligned[i]
-        squeeze_active = squeeze[i]
+        ema50_1w_val = ema50_1w_aligned[i]
+        rsi_val = rsi[i]
         vol_spike = volume_spike[i]
-        close_price = close[i]
-        upper = upper_bb[i]
-        lower = lower_bb[i]
+        pl = price_low[i]
+        rl = rsi_low[i]
+        ph = price_high[i]
+        rh = rsi_high[i]
         
         if position == 0:
-            # Enter long: price breaks above upper BB during squeeze, 1-day uptrend, volume spike
-            if close_price > upper and squeeze_active and ema50_1d_val > 0 and vol_spike:
-                signals[i] = 0.25
-                position = 1
-            # Enter short: price breaks below lower BB during squeeze, 1-day downtrend, volume spike
-            elif close_price < lower and squeeze_active and ema50_1d_val < 0 and vol_spike:
-                signals[i] = -0.25
-                position = -1
+            # Bullish divergence: price makes lower low, RSI makes higher low
+            if i >= 2:
+                price_lower_low = low[i] < low[i-1] and low[i-1] < low[i-2]
+                rsi_higher_low = rsi[i] > rsi[i-1] and rsi[i-1] > rsi[i-2]
+                bullish_div = price_lower_low and rsi_higher_low
+                
+                # Bearish divergence: price makes higher high, RSI makes lower high
+                price_higher_high = high[i] > high[i-1] and high[i-1] > high[i-2]
+                rsi_lower_high = rsi[i] < rsi[i-1] and rsi[i-1] < rsi[i-2]
+                bearish_div = price_higher_high and rsi_lower_high
+                
+                if bullish_div and ema50_1w_val > 0 and vol_spike:
+                    signals[i] = 0.25
+                    position = 1
+                elif bearish_div and ema50_1w_val < 0 and vol_spike:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Exit long: price returns to middle BB or 1-day trend turns down
-            if close_price < sma20[i] or ema50_1d_val < 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
+            # Exit long: bearish divergence or weekly trend turns down
+            if i >= 2:
+                price_higher_high = high[i] > high[i-1] and high[i-1] > high[i-2]
+                rsi_lower_high = rsi[i] < rsi[i-1] and rsi[i-1] < rsi[i-2]
+                bearish_div = price_higher_high and rsi_lower_high
+                
+                if bearish_div or ema50_1w_val < 0:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to middle BB or 1-day trend turns up
-            if close_price > sma20[i] or ema50_1d_val > 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+            # Exit short: bullish divergence or weekly trend turns up
+            if i >= 2:
+                price_lower_low = low[i] < low[i-1] and low[i-1] < low[i-2]
+                rsi_higher_low = rsi[i] > rsi[i-1] and rsi[i-1] > rsi[i-2]
+                bullish_div = price_lower_low and rsi_higher_low
+                
+                if bullish_div or ema50_1w_val > 0:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
