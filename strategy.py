@@ -1,16 +1,19 @@
+# 12h_Camarilla_R3S3_Breakout_1dTrend_Volume
+# Strategy: 12h timeframe, using Camarilla R3/S3 levels from 1d timeframe for entry
+# Trend filter: price must be above/below 1d EMA34 to align with daily trend
+# Volume confirmation: volume > 1.5x 20-period average
+# Exit: price crosses back below/above opposite Camarilla level or daily EMA34
+# Position size: 0.25 (25% of capital) to manage risk and reduce overtrading
+# Designed for 12h timeframe to target 50-150 total trades over 4 years (12-37/year)
+# Uses only close prices for signals to avoid look-ahead bias
+# Works in both bull and bear markets by following daily trend via EMA34 filter
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d trend filter (EMA34) and volume confirmation.
-# Designed to capture momentum in trending markets while avoiding false breakouts in ranges.
-# Weekly timeframe (1w) used for regime filter: only trade when price is above/below weekly EMA34
-# to align with larger trend, reducing whipsaws in sideways markets.
-# Target: 50-150 trades over 4 years (12-37/year) with discrete position sizing (0.25) to minimize fee drag.
-# Works in bull markets via breakout momentum and in bear markets via short-side symmetry.
-
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_1wRegime_Volume"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
 timeframe = "12h"
 leverage = 1.0
 
@@ -50,15 +53,6 @@ def generate_signals(prices):
     R3_12h = align_htf_to_ltf(prices, df_1d, R3)
     S3_12h = align_htf_to_ltf(prices, df_1d, S3)
     
-    # Get weekly data for regime filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
     # Volume confirmation: 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
@@ -71,41 +65,37 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
         if (np.isnan(R3_12h[i]) or np.isnan(S3_12h[i]) or np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_ratio[i])):
+            np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above R3 + above daily EMA34 + above weekly EMA34 (uptrend regime) + volume
+            # Long: Price breaks above R3 + above daily EMA34 + volume
             if (close[i] > R3_12h[i] and
                 close[i] > ema_34_1d_aligned[i] and
-                close[i] > ema_34_1w_aligned[i] and
                 vol_ratio[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S3 + below daily EMA34 + below weekly EMA34 (downtrend regime) + volume
+            # Short: Price breaks below S3 + below daily EMA34 + volume
             elif (close[i] < S3_12h[i] and
                   close[i] < ema_34_1d_aligned[i] and
-                  close[i] < ema_34_1w_aligned[i] and
                   vol_ratio[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Price falls back below S3 or below daily EMA34 or below weekly EMA34 (regime change)
+            # Long exit: Price falls back below S3 or below daily EMA34
             if (close[i] < S3_12h[i] or
-                close[i] < ema_34_1d_aligned[i] or
-                close[i] < ema_34_1w_aligned[i]):
+                close[i] < ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price rises back above R3 or above daily EMA34 or above weekly EMA34 (regime change)
+            # Short exit: Price rises back above R3 or above daily EMA34
             if (close[i] > R3_12h[i] or
-                close[i] > ema_34_1d_aligned[i] or
-                close[i] > ema_34_1w_aligned[i]):
+                close[i] > ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
