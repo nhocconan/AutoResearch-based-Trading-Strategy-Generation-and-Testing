@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_Camarilla_R1S1_Breakout_4hTrend_Volume"
-timeframe = "1h"
+name = "12h_KAMA_Direction_Trend_Filter_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,50 +17,53 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend and Camarilla pivot calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1d data for KAMA and trend filters
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from 4h data
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # KAMA calculation on daily close
+    close_1d = df_1d['close'].values
+    # Efficiency Ratio (ER) - 10 period
+    change = np.abs(np.diff(close_1d, 10))  # 10-period net change
+    volatility = np.sum(np.abs(np.diff(close_1d)), axis=1)  # 10-period sum of absolute changes
+    # Pad volatility to match length
+    volatility = np.concatenate([np.full(9, np.nan), volatility])
+    er = np.where(volatility > 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    # KAMA
+    kama = np.full_like(close_1d, np.nan)
+    kama[9] = close_1d[9]  # start at period 10
+    for i in range(10, len(close_1d)):
+        if np.isnan(kama[i-1]):
+            kama[i] = close_1d[i]
+        else:
+            kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
     
-    # Pivot = (H + L + C) / 3
-    pivot_4h = (high_4h + low_4h + close_4h) / 3.0
-    # Range = H - L
-    range_4h = high_4h - low_4h
-    # Resistance and Support levels
-    r1_4h = close_4h + (range_4h * 1.1 / 12)
-    s1_4h = close_4h - (range_4h * 1.1 / 12)
+    # Align KAMA to 12h timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
     
-    # Align Camarilla levels to 1h timeframe
-    pivot_4h_aligned = align_htf_to_ltf(prices, df_4h, pivot_4h)
-    r1_4h_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
-    s1_4h_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 4h EMA34 for trend filter
-    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
-    
-    # Volume confirmation - 24-period average volume (24h)
+    # Volume confirmation - 24-period average volume (12d)
     vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1.0)
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
     # Session filter: 08-20 UTC
-    hours = prices.index.hour
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 200
+    start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(pivot_4h_aligned[i]) or np.isnan(r1_4h_aligned[i]) or 
-            np.isnan(s1_4h_aligned[i]) or np.isnan(ema_34_4h_aligned[i]) or
+        if (np.isnan(kama_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -74,31 +77,31 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 + above 4h EMA34 + volume confirmation
-            if (close[i] > r1_4h_aligned[i] and 
-                close[i] > ema_34_4h_aligned[i] and
-                vol_ratio[i] > 1.8):
-                signals[i] = 0.20
+            # Long: price above KAMA + above EMA34 + volume confirmation
+            if (close[i] > kama_aligned[i] and 
+                close[i] > ema_34_1d_aligned[i] and
+                vol_ratio[i] > 1.3):
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + below 4h EMA34 + volume confirmation
-            elif (close[i] < s1_4h_aligned[i] and 
-                  close[i] < ema_34_4h_aligned[i] and
-                  vol_ratio[i] > 1.8):
-                signals[i] = -0.20
+            # Short: price below KAMA + below EMA34 + volume confirmation
+            elif (close[i] < kama_aligned[i] and 
+                  close[i] < ema_34_1d_aligned[i] and
+                  vol_ratio[i] > 1.3):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price falls back below pivot OR below 4h EMA34
-            if close[i] < pivot_4h_aligned[i] or close[i] < ema_34_4h_aligned[i]:
+            # Exit long: price falls back below KAMA OR below EMA34
+            if close[i] < kama_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price rises back above pivot OR above 4h EMA34
-            if close[i] > pivot_4h_aligned[i] or close[i] > ema_34_4h_aligned[i]:
+            # Exit short: price rises back above KAMA OR above EMA34
+            if close[i] > kama_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
