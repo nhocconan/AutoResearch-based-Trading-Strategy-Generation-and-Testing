@@ -3,16 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d ADX for trend strength, 4h Donchian(20) breakout for entry,
-# and volume confirmation. Long when ADX > 25, price breaks above 4h Donchian upper band,
-# volume > 1.5x average. Short when ADX > 25, price breaks below 4h Donchian lower band,
-# volume > 1.5x average. Exit when price crosses opposite Donchian band or ADX < 20.
-# Position size fixed at 0.25 to limit risk and reduce trade frequency.
-# Target: 20-50 trades/year to avoid fee drag. Works in trending markets (ADX > 25).
-# Avoids range-bound markets where breakouts fail.
+# Hypothesis: 1d strategy using 1w EMA(50) trend filter, 1d Donchian(20) breakout, and volume confirmation.
+# Long when price > 1w EMA(50), breaks above 1d Donchian upper band, volume > 1.5x average.
+# Short when price < 1w EMA(50), breaks below 1d Donchian lower band, volume > 1.5x average.
+# Uses volatility-based position sizing and time-based exits to limit drawdown.
+# Target: 30-100 total trades over 4 years (7-25/year) to balance opportunity and fee drag.
 
-name = "4h_ADX25_Donchian20_Volume"
-timeframe = "4h"
+name = "1d_1wEMA50_1dDonchian_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,115 +23,94 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX trend filter
+    # Get 1w data for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    
+    # Get 1d data for Donchian bands
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Get 4h data for Donchian bands
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
+    # 1w EMA(50)
+    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    price_above_ema = close_1w > ema_50
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # 1d Donchian(20) bands
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Calculate ADX(14) on 1d
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    # Directional Movement
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    
-    # Smooth TR, +DM, -DM
-    tr_smooth = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / np.where(tr_smooth == 0, 1e-10, tr_smooth)
-    minus_di = 100 * minus_dm_smooth / np.where(tr_smooth == 0, 1e-10, tr_smooth)
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / np.where((plus_di + minus_di) == 0, 1e-10, (plus_di + minus_di))
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    adx_above_25 = adx > 25
-    adx_below_20 = adx < 20
-    
-    # 4h Donchian(20) bands
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    
-    # Align 1d ADX to 4h
-    adx_above_25_aligned = align_htf_to_ltf(prices, df_1d, adx_above_25.astype(float))
-    adx_below_20_aligned = align_htf_to_ltf(prices, df_1d, adx_below_20.astype(float))
-    # Align 4h Donchian bands to 4h
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    # Align 1w EMA trend to 1d
+    price_above_ema_aligned = align_htf_to_ltf(prices, df_1w, price_above_ema.astype(float))
+    # Align 1d Donchian bands to 1d
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
     # Volume average (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     
+    # Volatility-based position sizing (ATR-based)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    vol_factor = np.clip(atr / (close * 0.01), 0.5, 2.0)  # Normalize volatility
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_bar = 0
     
-    start_idx = 40  # Ensure enough data for indicators
+    start_idx = 50  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(adx_above_25_aligned[i]) or np.isnan(adx_below_20_aligned[i]) or
-            np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(price_above_ema_aligned[i]) or np.isnan(donchian_high_aligned[i]) or
+            np.isnan(donchian_low_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(vol_factor[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: ADX > 25, price breaks above 4h Donchian upper band, volume spike
-            if (adx_above_25_aligned[i] and
+            # Long: price > 1w EMA(50), breaks above 1d Donchian upper band, volume spike
+            if (price_above_ema_aligned[i] and
                 close[i] > donchian_high_aligned[i] and
                 vol_ratio[i] > 1.5):
-                signals[i] = 0.25
+                signals[i] = 0.25 * vol_factor[i]
                 position = 1
                 entry_bar = i
-            # Short: ADX > 25, price breaks below 4h Donchian lower band, volume spike
-            elif (adx_above_25_aligned[i] and
+            # Short: price < 1w EMA(50), breaks below 1d Donchian lower band, volume spike
+            elif (not price_above_ema_aligned[i] and
                   close[i] < donchian_low_aligned[i] and
                   vol_ratio[i] > 1.5):
-                signals[i] = -0.25
+                signals[i] = -0.25 * vol_factor[i]
                 position = -1
                 entry_bar = i
         elif position == 1:
-            # Long exit: ADX < 20 (trend weak) or price breaks below 4h Donchian lower band
-            if (adx_below_20_aligned[i] or 
-                close[i] < donchian_low_aligned[i]):
+            # Long exit: price < 1w EMA(50), breaks below Donchian lower band, or max 30 days held
+            if (not price_above_ema_aligned[i] or 
+                close[i] < donchian_low_aligned[i] or
+                i - entry_bar >= 30):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.25 * vol_factor[i]
         elif position == -1:
-            # Short exit: ADX < 20 (trend weak) or price breaks above 4h Donchian upper band
-            if (adx_below_20_aligned[i] or 
-                close[i] > donchian_high_aligned[i]):
+            # Short exit: price > 1w EMA(50), breaks above Donchian upper band, or max 30 days held
+            if (price_above_ema_aligned[i] or 
+                close[i] > donchian_high_aligned[i] or
+                i - entry_bar >= 30):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.25 * vol_factor[i]
     
     return signals
