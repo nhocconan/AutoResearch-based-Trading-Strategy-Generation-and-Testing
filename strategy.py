@@ -1,11 +1,17 @@
-# 12h strategy using daily POC (Point of Control) from volume profile with 1-week trend filter and volume confirmation
-# POC acts as dynamic support/resistance in trending markets. Long when price pulls back to POC in uptrend, short when price bounces from POC in downtrend.
-# Uses 1-week trend filter to ensure alignment with higher timeframe momentum.
-# Designed for low trade frequency (12-37/year) to minimize fee drag and capture high-probability mean reversion within trend.
-# Volume confirmation ensures institutional participation at POC level.
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_PullbackToPOC_TrendFilter_Volume"
-timeframe = "12h"
+# Hypothesis: 4h strategy using 12h Donchian breakout with volume confirmation and ADX trend filter.
+# Donchian(20) breakouts capture momentum, volume confirms strength, ADX>25 ensures trending market.
+# Long when price breaks above 12h Donchian high with volume and ADX>25.
+# Short when price breaks below 12h Donchian low with volume and ADX>25.
+# Designed for moderate trade frequency (20-40/year) to balance opportunity and cost.
+# Works in both bull and bear markets by capturing directional breaks with trend confirmation.
+
+name = "4h_DonchianBreakout_12hVolume_ADX"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -18,113 +24,112 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for volume profile POC calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 12h data for Donchian channels and ADX
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate daily POC (Point of Control) - price level with highest volume
-    poc = np.zeros_like(close_1d)
+    # Calculate Donchian channels (20-period)
+    donch_high = np.zeros_like(close_12h)
+    donch_low = np.zeros_like(close_12h)
     
-    for i in range(len(close_1d)):
-        # Create volume profile for current day using 100 price bins between low and high
-        if high_1d[i] <= low_1d[i] or volume_1d[i] <= 0:
-            poc[i] = (high_1d[i] + low_1d[i]) / 2  # fallback to midpoint
-            continue
-            
-        # Create 100 price bins
-        bins = np.linspace(low_1d[i], high_1d[i], 101)
-        # Assign each traded price to a bin (simplified: assume uniform distribution across range)
-        # More realistic: use VWAP-like weighting, but for simplicity we'll use typical price weighted by volume
-        typical_price = (high_1d[i] + low_1d[i] + close_1d[i]) / 3
-        poc[i] = typical_price  # Simplified POC approximation
+    for i in range(len(close_12h)):
+        start_idx = max(0, i - 19)
+        donch_high[i] = np.max(high_12h[start_idx:i+1])
+        donch_low[i] = np.min(low_12h[start_idx:i+1])
     
-    # For better POC approximation, use volume-weighted close over recent period
-    # Calculate VWAP over last 20 days as POC proxy
-    typical_1d = (high_1d + low_1d + close_1d) / 3
-    vwap_sum = np.zeros_like(close_1d)
-    vol_sum = np.zeros_like(close_1d)
+    # Calculate ADX (14-period) for trend strength
+    # True Range
+    tr1 = high_12h[1:] - low_12h[1:]
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[0], tr])  # First TR is 0
     
-    for i in range(len(close_1d)):
-        start_idx = max(0, i - 19)  # 20-day lookback
-        vwap_sum[i] = np.sum(typical_1d[start_idx:i+1] * volume_1d[start_idx:i+1])
-        vol_sum[i] = np.sum(volume_1d[start_idx:i+1])
-        if vol_sum[i] > 0:
-            poc[i] = vwap_sum[i] / vol_sum[i]
-        else:
-            poc[i] = typical_1d[i]
+    # Directional Movement
+    dm_plus = np.where((high_12h[1:] - high_12h[:-1]) > (low_12h[:-1] - low_12h[1:]), 
+                       np.maximum(high_12h[1:] - high_12h[:-1], 0), 0)
+    dm_minus = np.where((low_12h[:-1] - low_12h[1:]) > (high_12h[1:] - high_12h[:-1]), 
+                        np.maximum(low_12h[:-1] - low_12h[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # First few days need enough data
-    for i in range(min(20, len(poc))):
-        poc[i] = typical_1d[i]
+    # Smooth TR, DM+, DM- with Wilder's smoothing (alpha = 1/14)
+    def wilder_smooth(arr, period):
+        smoothed = np.zeros_like(arr)
+        smoothed[period-1] = np.mean(arr[:period])
+        for i in range(period, len(arr)):
+            smoothed[i] = (smoothed[i-1] * (period-1) + arr[i]) / period
+        return smoothed
     
-    # Align POC to 12h timeframe
-    poc_aligned = align_htf_to_ltf(prices, df_1d, poc)
+    tr14 = wilder_smooth(tr, 14)
+    dm_plus_14 = wilder_smooth(dm_plus, 14)
+    dm_minus_14 = wilder_smooth(dm_minus, 14)
     
-    # Get weekly trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_14 / tr14
+    di_minus = 100 * dm_minus_14 / tr14
     
-    close_1w = df_1w['close'].values
-    # Weekly EMA(34) for trend filter (more stable)
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    weekly_trend_up = ema_34_1w[1:] > ema_34_1w[:-1]  # Rising weekly EMA
-    weekly_trend_up = np.concatenate([[False], weekly_trend_up])  # Align with daily index
-    weekly_trend_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_up.astype(float))
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    dx = np.where((di_plus + di_minus) == 0, 0, dx)
     
-    # 12x EMA(50) for intermediate trend and dynamic support/resistance
-    close_series = pd.Series(close)
-    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    adx = np.zeros_like(dx)
+    adx[27] = np.mean(dx[14:28])  # First ADX after 2*period
+    for i in range(28, len(dx)):
+        adx[i] = (adx[i-1] * 13 + dx[i]) / 14
     
-    # Volume confirmation: current volume > 1.5x 20-period EMA
-    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ema * 1.5)
+    # Volume confirmation: current 12h volume > 1.5x 20-period EMA
+    vol_ema = pd.Series(df_12h['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_confirm = df_12h['volume'].values > (vol_ema * 1.5)
+    
+    # Align indicators to 4h timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_12h, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_12h, donch_low)
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    vol_confirm_aligned = align_htf_to_ltf(prices, df_12h, vol_confirm.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for EMA(50)
+    start_idx = 30  # Ensure enough data for ADX calculation
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(poc_aligned[i]) or np.isnan(ema_50[i]) or 
-            np.isnan(weekly_trend_aligned[i])):
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(vol_confirm_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long setup: pullback to POC in uptrend with volume confirmation
-            if (weekly_trend_aligned[i] > 0.5 and  # Weekly uptrend
-                close[i] > ema_50[i] and             # Above intermediate EMA
-                abs((close[i] - poc_aligned[i]) / poc_aligned[i]) < 0.015 and  # Within 1.5% of POC
-                vol_confirm[i]):
+            # Long entry: break above 12h Donchian high with volume and ADX>25
+            if (close[i] > donch_high_aligned[i] and
+                vol_confirm_aligned[i] > 0.5 and
+                adx_aligned[i] > 25):
                 signals[i] = 0.25
                 position = 1
-            # Short setup: bounce from POC in downtrend with volume confirmation
-            elif (weekly_trend_aligned[i] <= 0.5 and  # Weekly downtrend
-                  close[i] < ema_50[i] and            # Below intermediate EMA
-                  abs((close[i] - poc_aligned[i]) / poc_aligned[i]) < 0.015 and  # Within 1.5% of POC
-                  vol_confirm[i]):
+            # Short entry: break below 12h Donchian low with volume and ADX>25
+            elif (close[i] < donch_low_aligned[i] and
+                  vol_confirm_aligned[i] > 0.5 and
+                  adx_aligned[i] > 25):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price moves 2% away from POC or trend turns down
-            if abs((close[i] - poc_aligned[i]) / poc_aligned[i]) > 0.02 or weekly_trend_aligned[i] <= 0.5:
+            # Long exit: break below 12h Donchian low or ADX < 20
+            if close[i] < donch_low_aligned[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price moves 2% away from POC or trend turns up
-            if abs((close[i] - poc_aligned[i]) / poc_aligned[i]) > 0.02 or weekly_trend_aligned[i] > 0.5:
+            # Short exit: break above 12h Donchian high or ADX < 20
+            if close[i] > donch_high_aligned[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
