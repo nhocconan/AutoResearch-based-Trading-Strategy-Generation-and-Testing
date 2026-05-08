@@ -1,15 +1,15 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_KAMA_Direction_1dTrend_VolumeSpike"
-timeframe = "4h"
+name = "1d_DonchianBreakout_1wTrend"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,91 +17,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and volume spike
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate KAMA on 4h data
-    # Efficiency Ratio (ER) calculation
-    change = np.abs(np.diff(close, n=10))  # 10-period change
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # placeholder - will fix
-    # Recalculate volatility properly
-    volatility = np.zeros_like(close)
-    for i in range(1, len(close)):
-        volatility[i] = volatility[i-1] + np.abs(close[i] - close[i-1])
-    volatility = np.concatenate([[0.0], volatility[1:]])
+    # Calculate 1w EMA trend
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Avoid division by zero
-    er = np.zeros_like(close)
-    for i in range(len(close)):
-        if volatility[i] != 0:
-            er[i] = change[min(i, len(change)-1)] / volatility[i] if i >= 10 else 0
-        else:
-            er[i] = 0
+    # Calculate Donchian channels (20-period)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # KAMA calculation
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # Calculate 1d EMA trend
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Calculate 1d volume spike
-    vol_1d = df_1d['volume'].values
-    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_1d = vol_1d / vol_ma_20
-    vol_ratio_1d = np.nan_to_num(vol_ratio_1d, nan=1.0)
-    
-    # Align 1d indicators to 4h
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
+    # Calculate volume confirmation
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / vol_ma
+    vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for indicators
+    start_idx = 30  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(kama[i]) or np.isnan(ema_34_aligned[i]) or 
-            np.isnan(vol_ratio_aligned[i])):
+        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
+            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price above KAMA + 1d uptrend + volume spike
-            if (close[i] > kama[i] and 
-                close[i] > ema_34_aligned[i] and 
-                vol_ratio_aligned[i] > 1.5):
+            # Long: Price breaks above upper Donchian + 1w uptrend + volume confirmation
+            if (close[i] > high_max[i] and 
+                close[i] > ema_1w_aligned[i] and 
+                vol_ratio[i] > 1.3):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price below KAMA + 1d downtrend + volume spike
-            elif (close[i] < kama[i] and 
-                  close[i] < ema_34_aligned[i] and 
-                  vol_ratio_aligned[i] > 1.5):
+            # Short: Price breaks below lower Donchian + 1w downtrend + volume confirmation
+            elif (close[i] < low_min[i] and 
+                  close[i] < ema_1w_aligned[i] and 
+                  vol_ratio[i] > 1.3):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Price crosses below KAMA
-            if close[i] < kama[i]:
+            # Long exit: Price falls below lower Donchian
+            if close[i] < low_min[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price crosses above KAMA
-            if close[i] > kama[i]:
+            # Short exit: Price rises above upper Donchian
+            if close[i] > high_max[i]:
                 signals[i] = 0.0
                 position = 0
             else:
