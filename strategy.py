@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Donchian_WeeklyPivot_Breakout_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,74 +17,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian Channel (20-period) on 6h
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels from daily data (using previous day's range)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Previous day's high, low, close
+    prev_high = df_1d['high'].shift(1).values  # Previous day's high
+    prev_low = df_1d['low'].shift(1).values    # Previous day's low
+    prev_close = df_1d['close'].shift(1).values # Previous day's close
+    
+    # Calculate Camarilla R3 and S3 levels
+    # R3 = close + (high - low) * 1.1/2
+    # S3 = close - (high - low) * 1.1/2
+    camarilla_range = prev_high - prev_low
+    r3 = prev_close + camarilla_range * 1.1 / 2
+    s3 = prev_close - camarilla_range * 1.1 / 2
+    
+    # Align R3 and S3 to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
     # Volume spike: current volume > 2.0x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma20)
     
-    # Weekly data for pivot points
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Weekly pivot points: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    r1_1w = 2.0 * pivot_1w - low_1w
-    s1_1w = 2.0 * pivot_1w - high_1w
-    r2_1w = pivot_1w + (high_1w - low_1w)
-    s2_1w = pivot_1w - (high_1w - low_1w)
-    r3_1w = high_1w + 2.0 * (pivot_1w - low_1w)
-    s3_1w = low_1w - 2.0 * (high_1w - pivot_1w)
-    
-    # Align weekly pivot levels to 6h timeframe
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
-    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
-    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
-    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
-    
-    # Weekly trend filter: price above/below 20-week EMA
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Sufficient warmup for Donchian
+    start_idx = 34  # Sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(volume_spike[i]) or np.isnan(pivot_1w_aligned[i]) or
-            np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or
-            np.isnan(r2_1w_aligned[i]) or np.isnan(s2_1w_aligned[i]) or
-            np.isnan(r3_1w_aligned[i]) or np.isnan(s3_1w_aligned[i]) or
-            np.isnan(ema_20_1w_aligned[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above Donchian high + above weekly pivot + weekly uptrend + volume spike
-            long_cond = (close[i] > donch_high[i]) and \
-                        (close[i] > pivot_1w_aligned[i]) and \
-                        (close[i] > ema_20_1w_aligned[i]) and \
+            # Long: break above R3 + uptrend + volume spike
+            long_cond = (close[i] > r3_aligned[i]) and \
+                        (close[i] > ema_34_1d_aligned[i]) and \
                         volume_spike[i]
-            
-            # Short: break below Donchian low + below weekly pivot + weekly downtrend + volume spike
-            short_cond = (close[i] < donch_low[i]) and \
-                         (close[i] < pivot_1w_aligned[i]) and \
-                         (close[i] < ema_20_1w_aligned[i]) and \
+            # Short: break below S3 + downtrend + volume spike
+            short_cond = (close[i] < s3_aligned[i]) and \
+                         (close[i] < ema_34_1d_aligned[i]) and \
                          volume_spike[i]
             
             if long_cond:
@@ -94,15 +77,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: close below weekly pivot or Donchian low
-            if close[i] < pivot_1w_aligned[i] or close[i] < donch_low[i]:
+            # Long exit: close below EMA34 (trend reversal)
+            if close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: close above weekly pivot or Donchian high
-            if close[i] > pivot_1w_aligned[i] or close[i] > donch_high[i]:
+            # Short exit: close above EMA34
+            if close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
