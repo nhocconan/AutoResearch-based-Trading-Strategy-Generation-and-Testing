@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Williams Fractal breakout with weekly trend filter and volume confirmation
-# We go long when price breaks above a bearish fractal resistance level with weekly EMA(34) uptrend and volume spike.
-# We go short when price breaks below a bullish fractal support level with weekly EMA(34) downtrend and volume spike.
+# Hypothesis: 6-hour Elder Ray (Bull/Bear Power) with daily trend filter and volume confirmation
+# Long when Bull Power > 0 (close > EMA13) and Bear Power crosses above zero with volume spike.
+# Short when Bear Power < 0 (close < EMA13) and Bull Power crosses below zero with volume spike.
 # Uses 6h timeframe to target 12-37 trades/year, avoiding excessive frequency.
-# Williams Fractals provide natural support/resistance levels that work in both trending and ranging markets.
-# Weekly trend filter ensures we trade with the higher timeframe momentum.
-# Volume spike confirms institutional participation in the breakout.
+# Elder Ray measures bull/bear power relative to EMA, working in both trending and ranging markets.
+# Daily trend filter (EMA34) ensures alignment with higher timeframe momentum.
+# Volume spike confirms institutional participation in the move.
 
-name = "6h_WilliamsFractal_Breakout_WeeklyTrend_Volume"
+name = "6h_ElderRay_DailyTrend_Volume"
 timeframe = "6h"
 leverage = 1.0
 
@@ -25,45 +25,25 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data once for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
-    
-    # Calculate weekly EMA(34) for trend filter
-    weekly_close = df_1w['close'].values
-    ema34_1w = pd.Series(weekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
-    
-    # Get daily data for Williams Fractals
+    # Get daily data once for trend filter and Elder Ray
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:  # Need at least 5 days for fractals
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate Williams Fractals on daily data
-    # Bearish fractal: high[n-2] < high[n-1] > high[n] and high[n-3] < high[n-2] and high[n+1] < high[n]
-    # Bullish fractal: low[n-2] > low[n-1] < low[n] and low[n-3] > low[n-2] and low[n+1] > low[n]
-    high_vals = df_1d['high'].values
-    low_vals = df_1d['low'].values
+    # Calculate daily EMA(34) for trend filter
+    daily_close = df_1d['close'].values
+    ema34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    bearish_fractal = np.full(len(high_vals), np.nan)
-    bullish_fractal = np.full(len(low_vals), np.nan)
+    # Calculate daily EMA(13) for Elder Ray
+    ema13_1d = pd.Series(daily_close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
     
-    # Need at least 2 points on each side
-    for i in range(2, len(high_vals) - 2):
-        # Bearish fractal: highest high in the middle
-        if (high_vals[i] > high_vals[i-1] and high_vals[i] > high_vals[i-2] and
-            high_vals[i] > high_vals[i+1] and high_vals[i] > high_vals[i+2]):
-            bearish_fractal[i] = high_vals[i]
-        
-        # Bullish fractal: lowest low in the middle
-        if (low_vals[i] < low_vals[i-1] and low_vals[i] < low_vals[i-2] and
-            low_vals[i] < low_vals[i+1] and low_vals[i] < low_vals[i+2]):
-            bullish_fractal[i] = low_vals[i]
-    
-    # Apply additional delay of 2 days for fractal confirmation (needs 2 future candles to confirm)
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
+    # Calculate Elder Ray components
+    # Bull Power = High - EMA13
+    # Bear Power = Low - EMA13
+    bull_power = high - ema13_1d_aligned
+    bear_power = low - ema13_1d_aligned
     
     # Volume spike: current volume > 2.0 * 20-period average on 6h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -76,39 +56,39 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(bearish_fractal_aligned[i]) or 
-            np.isnan(bullish_fractal_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema34_1w_val = ema34_1w_aligned[i]
-        bearish_fractal_val = bearish_fractal_aligned[i]
-        bullish_fractal_val = bullish_fractal_aligned[i]
+        ema34_1d_val = ema34_1d_aligned[i]
+        bull_power_val = bull_power[i]
+        bear_power_val = bear_power[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: price breaks above bearish fractal resistance + weekly uptrend + volume spike
-            if (not np.isnan(bearish_fractal_val) and close[i] > bearish_fractal_val and 
-                close[i] > ema34_1w_val and vol_spike):
+            # Enter long: Bull Power crosses above zero AND daily uptrend AND volume spike
+            if (bull_power_val > 0 and bull_power_val <= bull_power[i-1] + 1e-9 and  # crossed above
+                close[i] > ema34_1d_val and vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below bullish fractal support + weekly downtrend + volume spike
-            elif (not np.isnan(bullish_fractal_val) and close[i] < bullish_fractal_val and 
-                  close[i] < ema34_1w_val and vol_spike):
+            # Enter short: Bear Power crosses below zero AND daily downtrend AND volume spike
+            elif (bear_power_val < 0 and bear_power_val >= bear_power[i-1] - 1e-9 and  # crossed below
+                  close[i] < ema34_1d_val and vol_spike):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below bullish fractal support OR weekly trend turns down
-            if (not np.isnan(bullish_fractal_val) and close[i] < bullish_fractal_val) or close[i] < ema34_1w_val:
+            # Exit long: Bear Power crosses above zero OR daily trend turns down
+            if (bear_power_val > 0 and bear_power_val >= bear_power[i-1] - 1e-9) or close[i] < ema34_1d_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above bearish fractal resistance OR weekly trend turns up
-            if (not np.isnan(bearish_fractal_val) and close[i] > bearish_fractal_val) or close[i] > ema34_1w_val:
+            # Exit short: Bull Power crosses below zero OR daily trend turns up
+            if (bull_power_val < 0 and bull_power_val <= bull_power[i-1] + 1e-9) or close[i] > ema34_1d_val:
                 signals[i] = 0.0
                 position = 0
             else:
