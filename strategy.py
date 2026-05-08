@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_KAMA_RSI_Chop"
-timeframe = "1d"
+name = "6h_Price_Action_Pivot_Reversal_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,95 +17,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data once for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data once for trend filter and pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    # 1w EMA34 trend filter
-    close_1w = df_1w['close'].values
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_1w = (close_1w > ema34_1w).astype(float)
-    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
+    # 1d EMA50 trend filter
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_1d = (close_1d > ema50_1d).astype(float)
+    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # KAMA on 1d close
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.abs(np.diff(close)).cumsum()
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Calculate daily pivots and support/resistance levels
+    # Pivot Point = (High + Low + Close) / 3
+    # R1 = 2*P - Low, S1 = 2*P - High
+    # R2 = P + (High - Low), S2 = P - (High - Low)
+    # R3 = High + 2*(P - Low), S3 = Low - 2*(High - P)
+    pp = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    r1 = 2 * pp - df_1d['low']
+    s1 = 2 * pp - df_1d['high']
+    r2 = pp + (df_1d['high'] - df_1d['low'])
+    s2 = pp - (df_1d['high'] - df_1d['low'])
+    r3 = df_1d['high'] + 2 * (pp - df_1d['low'])
+    s3 = df_1d['low'] - 2 * (df_1d['high'] - pp)
     
-    # RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / np.where(avg_loss == 0, 1e-10, avg_loss)
-    rsi = 100 - (100 / (1 + rs))
+    # Align pivot levels to 6h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2.values)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2.values)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3.values)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3.values)
     
-    # Choppiness Index (14)
-    atr = np.zeros_like(close)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    max_h = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_l = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    sum_atr14 = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
-    chop = 100 * np.log10(sum_atr14 / (max_h - min_l)) / np.log10(14)
-    
-    # Volume spike detection: current volume > 1.5 * 20-period average
+    # Volume spike detection: current volume > 2.0 * 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma20 * 1.5)
+    vol_spike = volume > (vol_ma20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # warmup for KAMA, RSI, chop, and volume MA
+    start_idx = 50  # warmup for EMA50 and volume MA
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or 
-            np.isnan(trend_1w_aligned[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(trend_1d_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: price above KAMA, RSI > 50, chop < 61.8 (trending), weekly uptrend, volume spike
-            long_cond = (close[i] > kama[i] and rsi[i] > 50 and chop[i] < 61.8 and 
-                         trend_1w_aligned[i] > 0.5 and vol_spike[i])
+            # Long setup: price near S1/S2/S3 with volume spike and daily uptrend
+            near_support = (low[i] <= s1_aligned[i] * 1.005 or 
+                           low[i] <= s2_aligned[i] * 1.005 or 
+                           low[i] <= s3_aligned[i] * 1.005)
             
-            # Short entry: price below KAMA, RSI < 50, chop < 61.8 (trending), weekly downtrend, volume spike
-            short_cond = (close[i] < kama[i] and rsi[i] < 50 and chop[i] < 61.8 and 
-                          trend_1w_aligned[i] < 0.5 and vol_spike[i])
+            # Short setup: price near R1/R2/R3 with volume spike and daily downtrend
+            near_resistance = (high[i] >= r1_aligned[i] * 0.995 or 
+                              high[i] >= r2_aligned[i] * 0.995 or 
+                              high[i] >= r3_aligned[i] * 0.995)
             
-            if long_cond:
+            if near_support and vol_spike[i] and trend_1d_aligned[i] > 0.5:
                 signals[i] = 0.25
                 position = 1
-            elif short_cond:
+            elif near_resistance and vol_spike[i] and trend_1d_aligned[i] < 0.5:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below KAMA or RSI < 40
-            if close[i] < kama[i] or rsi[i] < 40:
+            # Long exit: price reaches R1 or daily trend turns down
+            if (high[i] >= r1_aligned[i] * 0.995 or trend_1d_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above KAMA or RSI > 60
-            if close[i] > kama[i] or rsi[i] > 60:
+            # Short exit: price reaches S1 or daily trend turns up
+            if (low[i] <= s1_aligned[i] * 1.005 or trend_1d_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -113,7 +101,13 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: KAMA trend filter with RSI momentum and chop regime filter on daily timeframe.
-# Uses weekly EMA34 for trend alignment and volume spike for confirmation.
-# Works in bull markets (trend following) and bear markets (avoids choppy conditions).
-# Target: 15-25 trades/year to minimize fee decay while capturing significant moves.
+# Hypothesis: Price action reversal at daily pivot points (S1/S2/S3 for longs, R1/R2/R3 for shorts) 
+# with volume confirmation and daily trend filter on 6h timeframe. 
+# Works in ranging markets (reversions at pivot levels) and trending markets 
+# (breakouts when price breaks through pivot levels with volume). 
+# Daily EMA50 ensures alignment with medium-term trend, reducing counter-trend trades. 
+# Volume spike requirement (2x average) ensures institutional participation. 
+# Target: 20-40 trades/year to minimize fee decay while capturing meaningful moves. 
+# Pivot levels provide objective support/resistance that work across market regimes. 
+# The strategy avoids chop by requiring both proximity to pivot levels AND volume spike. 
+# Exit conditions are based on reaching opposite pivot level or trend change.
