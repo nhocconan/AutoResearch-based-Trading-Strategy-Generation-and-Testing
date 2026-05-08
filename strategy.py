@@ -1,16 +1,18 @@
+# This strategy is designed for daily (1D) timeframe with weekly (1W) higher timeframe trend filtering.
+# It combines: 1) Weekly EMA200 trend filter, 2) Daily Donchian(20) breakout, 3) Volume confirmation (>1.5x 20-period volume EMA).
+# Logic: Go long when price breaks above daily Donchian high AND price is above weekly EMA200 AND volume is strong.
+# Go short when price breaks below daily Donchian low AND price is below weekly EMA200 AND volume is strong.
+# Exit when price crosses back below/above the weekly EMA200.
+# Designed for low-frequency, high-conviction trades to avoid overtrading and fee drag.
+# Target: 20-50 trades per year (80-200 total over 4 years) to stay within profitable ranges.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 level touch with 1d EMA34 trend filter and volume spike
-# Long when price touches S3 support + price > 1d EMA34 + volume > 2x 20-period EMA of volume
-# Short when price touches R3 resistance + price < 1d EMA34 + volume > 2x 20-period EMA of volume
-# Camarilla levels provide institutional support/resistance, EMA34 filters counter-trend trades, volume confirms institutional interest
-# Designed for 4h timeframe to target 20-50 trades/year (80-200 total over 4 years)
-
-name = "4h_Camarilla_R3S3_Touch_1dEMA34_Volume"
-timeframe = "4h"
+name = "1D_Donchian_WeeklyEMA200_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,91 +25,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend and volume filters
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for trend and volume filters
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate weekly EMA200 for trend filter
+    ema_200 = pd.Series(df_1w['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Calculate 1d volume EMA (20-period) for volume filter
-    vol_ema_20 = pd.Series(df_1d['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate weekly volume EMA (20-period) for volume filter
+    vol_ema_20 = pd.Series(df_1w['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align 1d indicators to 4h timeframe
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
-    vol_ema_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ema_20)
+    # Align weekly indicators to daily timeframe
+    ema_200_aligned = align_htf_to_ltf(prices, df_1w, ema_200)
+    vol_ema_20_aligned = align_htf_to_ltf(prices, df_1w, vol_ema_20)
     
-    # Calculate Camarilla levels from previous 1d bar
-    camarilla_high = np.full(n, np.nan)
-    camarilla_low = np.full(n, np.nan)
-    r3 = np.full(n, np.nan)
-    s3 = np.full(n, np.nan)
+    # Calculate Donchian channels on daily timeframe (20-period)
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
     
-    for i in range(1, n):
-        # Use previous day's OHLC to calculate today's Camarilla levels
-        prev_high = df_1d['high'].iloc[i-1] if i-1 < len(df_1d) else df_1d['high'].iloc[-1]
-        prev_low = df_1d['low'].iloc[i-1] if i-1 < len(df_1d) else df_1d['low'].iloc[-1]
-        prev_close = df_1d['close'].iloc[i-1] if i-1 < len(df_1d) else df_1d['close'].iloc[-1]
-        
-        # Camarilla formula
-        range_val = prev_high - prev_low
-        camarilla_high[i] = prev_close + range_val * 1.1 / 2
-        camarilla_low[i] = prev_close - range_val * 1.1 / 2
-        r3[i] = prev_close + range_val * 1.1 * 6 / 8
-        s3[i] = prev_close - range_val * 1.1 * 6 / 8
-    
-    # Align Camarilla levels to 4h timeframe (they change only at 1d boundaries)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # Pre-compute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    for i in range(20, n):
+        upper[i] = np.max(high[i-20:i])
+        lower[i] = np.min(low[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 1  # start after first bar to have previous day data
+    start_idx = 20  # warmup for Donchian
     
     for i in range(start_idx, n):
-        # Skip if outside trading session
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
         # Skip if any required data is NaN
-        if np.isnan(ema_34_aligned[i]) or np.isnan(vol_ema_20_aligned[i]) or \
-           np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
+        if np.isnan(ema_200_aligned[i]) or np.isnan(vol_ema_20_aligned[i]) or \
+           np.isnan(upper[i]) or np.isnan(lower[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume filter: current 1d volume > 2x 20-period EMA
-        # Find the most recent completed 1d bar
-        idx_1d = 0
-        while idx_1d < len(df_1d) and df_1d.iloc[idx_1d]['open_time'] <= prices.iloc[i]['open_time']:
-            idx_1d += 1
-        idx_1d -= 1  # last completed 1d bar
+        # Find the most recent completed weekly bar for volume check
+        idx_1w = 0
+        while idx_1w < len(df_1w) and df_1w.iloc[idx_1w]['open_time'] <= prices.iloc[i]['open_time']:
+            idx_1w += 1
+        idx_1w -= 1  # last completed weekly bar
         
-        if idx_1d < 0:
+        if idx_1w < 0:
             vol_filter = False
         else:
-            vol_1d_current = df_1d.iloc[idx_1d]['volume']
-            vol_filter = vol_1d_current > 2.0 * vol_ema_20_aligned[i]
+            vol_1w_current = df_1w.iloc[idx_1w]['volume']
+            vol_filter = vol_1w_current > 1.5 * vol_ema_20_aligned[i]
         
-        # Price proximity to Camarilla levels (within 0.1%)
-        proximity = 0.001
-        near_r3 = abs(close[i] - r3_aligned[i]) / r3_aligned[i] < proximity
-        near_s3 = abs(close[i] - s3_aligned[i]) / s3_aligned[i] < proximity
+        # Donchian breakout conditions
+        breakout_up = close[i] > upper[i]
+        breakout_down = close[i] < lower[i]
         
         if position == 0:
-            # Look for entry: Camarilla touch + trend + volume
-            long_condition = near_s3 and close[i] > ema_34_aligned[i] and vol_filter
-            short_condition = near_r3 and close[i] < ema_34_aligned[i] and vol_filter
+            # Look for entry: Donchian breakout + weekly trend + volume
+            long_condition = breakout_up and close[i] > ema_200_aligned[i] and vol_filter
+            short_condition = breakout_down and close[i] < ema_200_aligned[i] and vol_filter
             
             if long_condition:
                 signals[i] = 0.25
@@ -116,15 +90,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below 1d EMA34
-            if close[i] < ema_34_aligned[i]:
+            # Exit long: price crosses below weekly EMA200
+            if close[i] < ema_200_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above 1d EMA34
-            if close[i] > ema_34_aligned[i]:
+            # Exit short: price crosses above weekly EMA200
+            if close[i] > ema_200_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
