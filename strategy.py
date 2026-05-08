@@ -1,12 +1,14 @@
-# 12h_Camarilla_Pivot_Breakout_1wTrend_VolumeFilter
-# Strategy: 12h timeframe using weekly Camarilla pivot levels with trend filter and volume confirmation
-# Hypothesis: Weekly pivot levels provide strong support/resistance that work in both bull and bear markets
-# Uses 1w EMA50 for trend alignment and volume spike >1.8 to confirm breakouts
-# Target: 15-25 trades/year to minimize fee drag while capturing significant moves
-# Timeframe: 12h (lower frequency reduces overtrading risk)
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_Pivot_Breakout_1wTrend_VolumeFilter"
-timeframe = "12h"
+# Hypothesis: 1d KAMA direction with 1w trend filter and volume spike
+# Uses Kaufman Adaptive Moving Average for trend detection, aligned with 1w EMA for higher timeframe trend.
+# Volume spike >1.5 confirms breakout strength. Discrete sizing 0.25 to limit trade frequency.
+# Designed to work in both bull (trend following) and bear (mean reversion at extremes) markets.
+name = "1d_KAMA_Direction_1wEMA_Trend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,36 +21,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter and Camarilla levels
+    # Get 1w data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    if len(df_1w) < 21:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 trend filter
+    # Calculate 1w EMA21 trend filter
     close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    ema21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
     
-    # Calculate weekly Camarilla levels from previous week
-    prev_close = df_1w['close'].shift(1).values
-    prev_high = df_1w['high'].shift(1).values
-    prev_low = df_1w['low'].shift(1).values
+    # Calculate KAMA on 1d close
+    # Efficiency ratio: |close - close[10]| / sum(|close - close[-1]|) over 10 periods
+    change = np.abs(np.diff(close, n=10))  # |close[t] - close[t-10]|
+    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=1)  # sum of |close[t] - close[t-1]| over 10 periods
+    # Pad arrays to match length
+    change = np.concatenate([np.full(10, np.nan), change])
+    volatility = np.concatenate([np.full(10, np.nan), volatility])
+    er = np.where(volatility > 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    # Initialize KAMA
+    kama = np.full(n, np.nan)
+    kama[9] = close[9]  # seed
+    for i in range(10, n):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
     
-    # Align to 12h
-    prev_close_aligned = align_htf_to_ltf(prices, df_1w, prev_close)
-    prev_high_aligned = align_htf_to_ltf(prices, df_1w, prev_high)
-    prev_low_aligned = align_htf_to_ltf(prices, df_1w, prev_low)
-    
-    # Calculate Camarilla levels for current week
-    range_ = prev_high_aligned - prev_low_aligned
-    # Camarilla H3, L3, H4, L4 (using weekly equivalents)
-    h3 = prev_close_aligned + 1.1 * range_ * 1.1/4
-    l3 = prev_close_aligned - 1.1 * range_ * 1.1/4
-    h4 = prev_close_aligned + 1.1 * range_ * 1.1/2
-    l4 = prev_close_aligned - 1.1 * range_ * 1.1/2
-    
-    # Volume confirmation - 24-period average volume (2 days of 12h data)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume confirmation - 20-period average volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1.0)
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
@@ -59,11 +62,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 24)  # warmup period
+    start_idx = max(30, 21)  # warmup period
     
     for i in range(start_idx, n):
-        if (np.isnan(h3[i]) or np.isnan(l3[i]) or np.isnan(h4[i]) or np.isnan(l4[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(kama[i]) or np.isnan(ema21_1w_aligned[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -76,28 +78,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long entry: break above H3 with trend alignment and volume spike
-            if (close[i] > h3[i] and 
-                close[i] > ema50_1w_aligned[i] and
-                vol_ratio[i] > 1.8):
+            # Long entry: price above KAMA with 1w trend alignment and volume spike
+            if (close[i] > kama[i] and 
+                close[i] > ema21_1w_aligned[i] and
+                vol_ratio[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: break below L3 with trend alignment and volume spike
-            elif (close[i] < l3[i] and 
-                  close[i] < ema50_1w_aligned[i] and
-                  vol_ratio[i] > 1.8):
+            # Short entry: price below KAMA with 1w trend alignment and volume spike
+            elif (close[i] < kama[i] and 
+                  close[i] < ema21_1w_aligned[i] and
+                  vol_ratio[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: break below L4 (mean reversion) OR trend fails
-            if close[i] < l4[i] or close[i] < ema50_1w_aligned[i]:
+            # Exit long: price below KAMA OR trend fails
+            if close[i] < kama[i] or close[i] < ema21_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: break above H4 (mean reversion) OR trend fails
-            if close[i] > h4[i] or close[i] > ema50_1w_aligned[i]:
+            # Exit short: price above KAMA OR trend fails
+            if close[i] > kama[i] or close[i] > ema21_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
