@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_DonchianBreakout_1dTrend_Volume_Confirmation"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,26 +17,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Donchian channel (20) once before loop
+    # Calculate 1d Camarilla pivot levels once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # 1d Donchian upper/lower (20-period)
-    donch_upper_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donch_lower_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels (R1, S1)
+    H_prev = np.roll(high_1d, 1)
+    L_prev = np.roll(low_1d, 1)
+    C_prev = np.roll(close_1d, 1)
+    H_prev[0] = np.nan
+    L_prev[0] = np.nan
+    C_prev[0] = np.nan
     
-    # Align to 6h timeframe (wait for daily bar close)
-    donch_upper_aligned = align_htf_to_ltf(prices, df_1d, donch_upper_1d)
-    donch_lower_aligned = align_htf_to_ltf(prices, df_1d, donch_lower_1d)
+    pivot = (H_prev + L_prev + C_prev) / 3
+    range_hl = H_prev - L_prev
     
-    # 1d trend: EMA50
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    R1 = pivot + (range_hl * 1.1 / 12)
+    S1 = pivot - (range_hl * 1.1 / 12)
+    
+    # Align Camarilla levels to 12h timeframe (wait for daily bar close)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    
+    # 1d trend: EMA34
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume spike: current volume > 2.0x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -49,21 +60,22 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donch_upper_aligned[i]) or np.isnan(donch_lower_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above Donchian upper + uptrend + volume spike
-            long_cond = (close[i] > donch_upper_aligned[i]) and \
-                        (close[i] > ema_50_1d_aligned[i]) and \
+            # Long: break above R1 + uptrend + volume spike
+            long_cond = (close[i] > R1_aligned[i]) and \
+                        (close[i] > ema_34_1d_aligned[i]) and \
                         volume_spike[i]
-            # Short: break below Donchian lower + downtrend + volume spike
-            short_cond = (close[i] < donch_lower_aligned[i]) and \
-                         (close[i] < ema_50_1d_aligned[i]) and \
+            # Short: break below S1 + downtrend + volume spike
+            short_cond = (close[i] < S1_aligned[i]) and \
+                         (close[i] < ema_34_1d_aligned[i]) and \
                          volume_spike[i]
             
             if long_cond:
@@ -73,15 +85,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: close below Donchian lower (mean reversion)
-            if close[i] < donch_lower_aligned[i]:
+            # Long exit: close below pivot (mean reversion to mean)
+            if close[i] < pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: close above Donchian upper (mean reversion)
-            if close[i] > donch_upper_aligned[i]:
+            # Short exit: close above pivot (mean reversion to mean)
+            if close[i] > pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
