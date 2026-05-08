@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,7 +26,7 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels (R1, S1)
+    # Calculate Camarilla levels (R3, S3)
     H_prev = np.roll(high_1d, 1)
     L_prev = np.roll(low_1d, 1)
     C_prev = np.roll(close_1d, 1)
@@ -37,12 +37,12 @@ def generate_signals(prices):
     pivot = (H_prev + L_prev + C_prev) / 3
     range_hl = H_prev - L_prev
     
-    R1 = pivot + (range_hl * 1.1 / 12)
-    S1 = pivot - (range_hl * 1.1 / 12)
+    R3 = pivot + (range_hl * 1.1 / 4)
+    S3 = pivot - (range_hl * 1.1 / 4)
     
-    # Align Camarilla levels to 4h timeframe (wait for daily bar close)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    # Align Camarilla levels to 6h timeframe (wait for daily bar close)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
     # 1d trend: EMA34
@@ -56,11 +56,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Sufficient warmup
+    start_idx = 100  # Sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
             np.isnan(pivot_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
@@ -69,12 +69,12 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: break above R1 + uptrend + volume spike
-            long_cond = (close[i] > R1_aligned[i]) and \
+            # Long: break above R3 + uptrend + volume spike
+            long_cond = (close[i] > R3_aligned[i]) and \
                         (close[i] > ema_34_1d_aligned[i]) and \
                         volume_spike[i]
-            # Short: break below S1 + downtrend + volume spike
-            short_cond = (close[i] < S1_aligned[i]) and \
+            # Short: break below S3 + downtrend + volume spike
+            short_cond = (close[i] < S3_aligned[i]) and \
                          (close[i] < ema_34_1d_aligned[i]) and \
                          volume_spike[i]
             
