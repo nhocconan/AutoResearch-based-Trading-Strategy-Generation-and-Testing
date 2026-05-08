@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Volume_Pressure_Reversal_v1"
-timeframe = "6h"
+name = "4h_1d_Pivot_Ratio_Trend_Follow_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,58 +17,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data once
+    # Get 1d data once for pivot and ATR
     df_1d = get_htf_data(prices, '1d')
+    
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 1d VWAP (Volume Weighted Average Price) ===
-    typical_price_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
-    vwap_num = (typical_price_1d * df_1d['volume'].values)
-    vwap_den = df_1d['volume'].values
-    # Cumulative sum for VWAP
-    cum_vwap_num = np.cumsum(vwap_num)
-    cum_vwap_den = np.cumsum(vwap_den)
-    vwap_1d = cum_vwap_num / (cum_vwap_den + 1e-10)
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    # === 1d Previous day's pivot points (HLC/3) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # === 1d Volume Pressure: (Close - VWAP) / StdDev of typical price ===
-    price_dev = typical_price_1d - vwap_1d
-    # Rolling standard deviation of price deviation
-    vol_pressure = price_dev / (pd.Series(price_dev).rolling(window=20, min_periods=20).std().values + 1e-10)
-    vol_pressure_aligned = align_htf_to_ltf(prices, df_1d, vol_pressure)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d[0] = high_1d[0]
+    prev_low_1d[0] = low_1d[0]
+    prev_close_1d[0] = close_1d[0]
     
-    # === 6h Volume Spike: current volume > 1.5x 20-period average ===
+    pivot = (prev_high_1d + prev_low_1d + prev_close_1d) / 3.0
+    range_1d = prev_high_1d - prev_low_1d
+    
+    # Pivot support/resistance levels (R1/S1)
+    r1 = pivot + (range_1d * 1.1 / 12)
+    s1 = pivot - (range_1d * 1.1 / 12)
+    
+    # === 1d ATR for volatility regime ===
+    tr = np.maximum(high_1d - low_1d, 
+                    np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), 
+                               np.abs(low_1d - np.roll(close_1d, 1))))
+    tr[0] = high_1d[0] - low_1d[0]
+    atr10_1d = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    atr30_1d = pd.Series(tr).ewm(span=30, adjust=False, min_periods=30).mean().values
+    
+    # Align to 4h timeframe
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    atr10_1d_4h = align_htf_to_ltf(prices, df_1d, atr10_1d)
+    atr30_1d_4h = align_htf_to_ltf(prices, df_1d, atr30_1d)
+    
+    # === 4h Volume filter: current volume > 20-period average ===
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma20 * 1.5)
     
-    # === 6h Price position relative to VWAP ===
-    price_vwap_ratio = close / (vwap_1d_aligned + 1e-10) - 1  # Normalized distance from VWAP
+    # === Regime: trending if ATR(10) > ATR(30) * 1.15 ===
+    atr_ratio = atr10_1d_4h / (atr30_1d_4h + 1e-10)
+    is_trending = atr_ratio > 1.15
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # warmup
+    start_idx = 30  # warmup for ATR30
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(vwap_1d_aligned[i]) or np.isnan(vol_pressure_aligned[i]) or 
-            np.isnan(vol_ma20[i])):
+        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or 
+            np.isnan(atr_ratio[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Look for mean reversion when price deviates significantly from VWAP
-            # with volume confirmation
-            long_cond = (price_vwap_ratio[i] < -0.015 and  # Price >1.5% below VWAP
-                        vol_pressure_aligned[i] < -0.8 and   # Strong selling pressure
-                        vol_spike[i])                       # Volume spike
-            
-            short_cond = (price_vwap_ratio[i] > 0.015 and  # Price >1.5% above VWAP
-                         vol_pressure_aligned[i] > 0.8 and   # Strong buying pressure
-                         vol_spike[i])                      # Volume spike
+            if is_trending[i]:
+                # Trending regime: breakout continuation
+                long_cond = (close[i] > r1_4h[i] and 
+                            volume[i] > vol_ma20[i])
+                short_cond = (close[i] < s1_4h[i] and 
+                             volume[i] > vol_ma20[i])
+            else:
+                # Ranging regime: mean reversion at S1/R1
+                long_cond = (close[i] < s1_4h[i] and 
+                            volume[i] > vol_ma20[i])
+                short_cond = (close[i] > r1_4h[i] and 
+                             volume[i] > vol_ma20[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -77,18 +98,28 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price returns to VWAP or adverse pressure builds
-            exit_cond = (price_vwap_ratio[i] > -0.005 or  # Back within 0.5% of VWAP
-                        vol_pressure_aligned[i] > 0.3)     # Buying pressure weakening
+            # Long exit conditions
+            if is_trending[i]:
+                # In trending market, exit on breakdown below S1
+                exit_cond = close[i] < s1_4h[i]
+            else:
+                # In ranging market, exit at R1 (mean reversion target)
+                exit_cond = close[i] > r1_4h[i]
+            
             if exit_cond:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price returns to VWAP or adverse pressure builds
-            exit_cond = (price_vwap_ratio[i] < 0.005 or   # Back within 0.5% of VWAP
-                        vol_pressure_aligned[i] < -0.3)    # Selling pressure weakening
+            # Short exit conditions
+            if is_trending[i]:
+                # In trending market, exit on breakout above R1
+                exit_cond = close[i] > r1_4h[i]
+            else:
+                # In ranging market, exit at S1 (mean reversion target)
+                exit_cond = close[i] < s1_4h[i]
+            
             if exit_cond:
                 signals[i] = 0.0
                 position = 0
@@ -97,9 +128,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Mean reversion strategy based on 1d VWAP deviation with volume pressure
-# confirmation. Enters when price deviates significantly (>1.5%) from daily VWAP
-# accompanied by strong volume pressure and volume spikes. Exits when price returns
-# to near VWAP or pressure dissipates. Works in both bull and bear markets as
-# it fades extended moves regardless of trend direction. Targets 50-150 trades over
-# 4 years to minimize fee drag. Uses discrete sizing (0.25).
+# Hypothesis: 4h strategy using 1d pivot levels (R1/S1) with adaptive regime filtering.
+# In trending markets (ATR10 > ATR30 * 1.15): breakout continuation at R1/S1 with volume confirmation.
+# In ranging markets: mean reversion at S1/R1 with volume confirmation.
+# Uses ATR ratio for regime detection to avoid whipsaws in low volatility.
+# Designed for 25-40 trades/year (100-160 over 4 years) to minimize fee drag.
+# Works in both bull (trend following) and bear (mean reversion in ranges) markets.
