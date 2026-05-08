@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian(20) breakout with weekly trend filter and volume confirmation
-# Long when price breaks above 20-day high and weekly EMA(50) uptrend and volume spike
-# Short when price breaks below 20-day low and weekly EMA(50) downtrend and volume spike
-# Donchian channels provide clear breakout levels; weekly EMA ensures trend alignment
-# Volume spike confirms breakout strength; reduces false signals in choppy markets
-# Targets 30-100 total trades over 4 years (7-25/year) for 1d timeframe
+# Hypothesis: 6-hour Williams Alligator with 12-hour trend filter and volume confirmation
+# The Williams Alligator (13,8,5 SMAs) identifies trends when jaws, teeth, and lips are aligned.
+# Long when lips > teeth > jaws (bullish alignment) and 12h EMA(34) uptrend and volume spike.
+# Short when lips < teeth < jaws (bearish alignment) and 12h EMA(34) downtrend and volume spike.
+# Volume spike confirms institutional participation; avoids choppy false signals.
+# Targets 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost.
 
-name = "1d_Donchian20_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "6h_WilliamsAlligator_12hTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,23 +24,38 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data once for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 12h data once for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 34:
         return np.zeros(n)
     
-    # Calculate weekly EMA(50) for trend filter
-    weekly_close = df_1w['close'].values
-    ema50_1w = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate 12h EMA(34) for trend filter
+    daily_close = df_12h['close'].values
+    ema34_12h = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
     
-    # Calculate daily Donchian channels (20-period high/low)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Williams Alligator: SMAs of median price
+    # Jaws: 13-period SMMA shifted 8 bars
+    # Teeth: 8-period SMMA shifted 5 bars
+    # Lips: 5-period SMMA shifted 3 bars
+    median_price = (high + low) / 2.0
     
-    # Volume spike: current volume > 2.0 * 20-day average
+    # Calculate SMAs using rolling mean (simple moving average)
+    jaws_raw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values
+    teeth_raw = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values
+    lips_raw = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values
+    
+    # Shift to align with Alligator logic
+    jaws = np.roll(jaws_raw, 8)
+    teeth = np.roll(teeth_raw, 5)
+    lips = np.roll(lips_raw, 3)
+    
+    # Set invalid values for shifted periods
+    jaws[:8] = np.nan
+    teeth[:5] = np.nan
+    lips[:3] = np.nan
+    
+    # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
@@ -51,38 +66,39 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_12h_aligned[i]) or np.isnan(jaws[i]) or 
+            np.isnan(teeth[i]) or np.isnan(lips[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema50_1w_val = ema50_1w_aligned[i]
+        ema34_12h_val = ema34_12h_aligned[i]
         price = close[i]
-        upper_channel = donchian_high[i]
-        lower_channel = donchian_low[i]
+        jaw = jaws[i]
+        tooth = teeth[i]
+        lip = lips[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: price breaks above Donchian high and weekly uptrend and volume spike
-            if price > upper_channel and price > ema50_1w_val and vol_spike:
+            # Enter long: bullish alignment (lip > tooth > jaw) and 12h uptrend and volume spike
+            if lip > tooth and tooth > jaw and close > ema34_12h_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below Donchian low and weekly downtrend and volume spike
-            elif price < lower_channel and price < ema50_1w_val and vol_spike:
+            # Enter short: bearish alignment (lip < tooth < jaw) and 12h downtrend and volume spike
+            elif lip < tooth and tooth < jaw and close < ema34_12h_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below Donchian low or weekly trend turns down
-            if price < lower_channel or price < ema50_1w_val:
+            # Exit long: alignment breaks or 12h trend turns down
+            if lip <= tooth or tooth <= jaw or close < ema34_12h_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above Donchian high or weekly trend turns up
-            if price > upper_channel or price > ema50_1w_val:
+            # Exit short: alignment breaks or 12h trend turns up
+            if lip >= tooth or tooth >= jaw or close > ema34_12h_val:
                 signals[i] = 0.0
                 position = 0
             else:
