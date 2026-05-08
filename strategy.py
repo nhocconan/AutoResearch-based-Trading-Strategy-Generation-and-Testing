@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#\057usr\137bin\057env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Designed to work in both bull and bear markets by adapting to trend strength.
 # Target: 20-50 trades/year (80-200 total over 4 years).
 
-name = "4h_Donchian_Breakout_Volume_ADX"
+name = "4h_Donchian_Breakout_Volume_ADX_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -72,9 +72,9 @@ def generate_signals(prices):
     # Smoothed values
     atr = np.zeros(len(df_daily))
     dm_plus_smooth = np.zeros(len(df_daily))
-    dm_minus_smooth = np.zeros(len(df_dali))
+    dm_minus_smooth = np.zeros(len(df_daily))
     
-    for i in range(len(df_dali)):
+    for i in range(len(df_daily)):
         if i < 14:
             if i == 0:
                 atr[i] = tr[i]
@@ -90,10 +90,10 @@ def generate_signals(prices):
             dm_minus_smooth[i] = (dm_minus_smooth[i-1] * 13 + dm_minus[i]) / 14
     
     # DI+ and DI-
-    di_plus = np.zeros(len(df_dali))
-    di_minus = np.zeros(len(df_dali))
-    dx = np.zeros(len(df_dali))
-    for i in range(len(df_dali)):
+    di_plus = np.zeros(len(df_daily))
+    di_minus = np.zeros(len(df_daily))
+    dx = np.zeros(len(df_daily))
+    for i in range(len(df_daily)):
         if atr[i] != 0:
             di_plus[i] = 100 * dm_plus_smooth[i] / atr[i]
             di_minus[i] = 100 * dm_minus_smooth[i] / atr[i]
@@ -101,8 +101,8 @@ def generate_signals(prices):
                 dx[i] = 100 * abs(di_plus[i] - di_minus[i]) / (di_plus[i] + di_minus[i])
     
     # ADX (smoothed DX)
-    adx = np.zeros(len(df_dali))
-    for i in range(len(df_dali)):
+    adx = np.zeros(len(df_daily))
+    for i in range(len(df_daily)):
         if i < 27:  # need 14+14 periods for smoothing
             adx[i] = np.nan
         elif i == 27:
@@ -111,8 +111,8 @@ def generate_signals(prices):
             adx[i] = (adx[i-1] * 13 + dx[i]) / 14
     
     # Align daily data to 4h timeframe
-    vol_avg_20_aligned = align_htf_to_ltf(prices, df_dali, vol_avg_20)
-    adx_aligned = align_htf_to_ltf(prices, df_dali, adx)
+    vol_avg_20_aligned = align_htf_to_ltf(prices, df_daily, vol_avg_20)
+    adx_aligned = align_htf_to_ltf(prices, df_daily, adx)
     
     # Calculate 4h Donchian channels (20-period)
     donchian_high = np.full(n, np.nan)
@@ -149,19 +149,19 @@ def generate_signals(prices):
             continue
         
         # Get current daily bar's data (last completed daily bar)
-        idx_dali = 0
-        while idx_dali < len(df_dali) and df_dali.iloc[idx_dali]['open_time'] <= prices.iloc[i]['open_time']:
-            idx_dali += 1
-        idx_dali -= 1  # last completed daily bar
+        idx_daily = 0
+        while idx_daily < len(df_daily) and df_daily.iloc[idx_daily]['open_time'] <= prices.iloc[i]['open_time']:
+            idx_daily += 1
+        idx_daily -= 1  # last completed daily bar
         
-        if idx_dali < 0:
+        if idx_daily < 0:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_avg_20_current = vol_avg_20[idx_dali]
-        adx_current = adx[idx_dali]
+        vol_avg_20_current = vol_avg_20[idx_daily]
+        adx_current = adx[idx_daily]
         
         if np.isnan(vol_avg_20_current) or np.isnan(adx_current):
             if position != 0:
@@ -170,7 +170,7 @@ def generate_signals(prices):
             continue
         
         # Volume confirmation: current daily volume > 1.5x 20-day average
-        vol_current = df_dali['volume'].iloc[idx_dali]
+        vol_current = df_daily['volume'].iloc[idx_daily]
         vol_confirmed = vol_current > 1.5 * vol_avg_20_current
         
         # Trend detection
