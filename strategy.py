@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_VWAP_Deviation_1dTrend_VolumeFilter"
-timeframe = "6h"
+name = "4h_Donchian20_1dTrend_VolumeBreakout"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,54 +17,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate VWAP for 6h window
-    typical_price = (high + low + close) / 3.0
-    vwap_numerator = typical_price * volume
-    vwap_denominator = volume
-    vwap = pd.Series(vwap_numerator).rolling(window=4, min_periods=4).sum().values / \
-           pd.Series(vwap_denominator).rolling(window=4, min_periods=4).sum().values
-    
-    # Calculate deviation from VWAP as percentage
-    vwap_dev = (close - vwap) / vwap * 100.0
-    
-    # 1d data for trend filter and volume context
+    # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
     # 1d EMA50 for trend filter
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # 1d volume average for context
-    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
+    # 1d ATR for volatility filter
+    tr = np.maximum(high_1d - low_1d, 
+                    np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), 
+                               np.abs(low_1d - np.roll(close_1d, 1))))
+    tr[0] = high_1d[0] - low_1d[0]
+    atr10_1d = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    atr10_1d_aligned = align_htf_to_ltf(prices, df_1d, atr10_1d)
+    
+    # 4h Donchian(20) breakout levels
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume filter: 4h volume > 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for EMA50
+    start_idx = 50  # warmup for EMA50 and Donchian
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(vwap_dev[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(vol_avg_20_1d_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(atr10_1d_aligned[i]) or
+            np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price significantly below VWAP (mean reversion) AND above 1d EMA50 (uptrend)
-            long_cond = (vwap_dev[i] < -1.5 and 
-                        close[i] > ema50_1d_aligned[i])
+            # Long: Price breaks above Donchian high, price above 1d EMA50, volume above average
+            long_cond = (close[i] > donchian_high[i] and 
+                        close[i] > ema50_1d_aligned[i] and
+                        volume[i] > vol_ma20[i])
             
-            # Short: Price significantly above VWAP (mean reversion) AND below 1d EMA50 (downtrend)
-            short_cond = (vwap_dev[i] > 1.5 and 
-                         close[i] < ema50_1d_aligned[i])
+            # Short: Price breaks below Donchian low, price below 1d EMA50, volume above average
+            short_cond = (close[i] < donchian_low[i] and 
+                         close[i] < ema50_1d_aligned[i] and
+                         volume[i] > vol_ma20[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -73,15 +78,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Price returns to VWAP OR breaks below 1d EMA50
-            if vwap_dev[i] > -0.5 or close[i] < ema50_1d_aligned[i]:
+            # Long exit: Price closes below Donchian low OR price crosses below 1d EMA50
+            if close[i] < donchian_low[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price returns to VWAP OR breaks above 1d EMA50
-            if vwap_dev[i] < 0.5 or close[i] > ema50_1d_aligned[i]:
+            # Short exit: Price closes above Donchian high OR price crosses above 1d EMA50
+            if close[i] > donchian_high[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -89,9 +94,7 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Mean reversion from 6h VWAP with 1d EMA50 trend filter.
-# In uptrends (price > 1d EMA50), buy when price deviates significantly below VWAP.
-# In downtrends (price < 1d EMA50), sell when price deviates significantly above VWAP.
-# VWAP deviation >1.5% provides entry signal, reversion to within 0.5% provides exit.
-# Works in both bull and bear markets by aligning with higher timeframe trend.
-# 6h timeframe targets 12-37 trades/year to minimize fee drag. Discrete sizing (0.25) reduces churn.
+# Hypothesis: Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
+# Works in bull markets via breakout continuation, in bear via mean reversion at Donchian bands.
+# 4h timeframe targets 19-50 trades/year to avoid fee drag. Volume filter ensures participation.
+# Discrete sizing (0.25) minimizes churn. Works on BTC/ETH/SOL via institutional breakout levels.
