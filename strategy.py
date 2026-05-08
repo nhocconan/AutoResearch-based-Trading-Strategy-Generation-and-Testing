@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h TD Sequential Setup with 1d Trend Filter and Volume Confirmation
-# - TD Sequential identifies exhaustion points (setup 9) for mean reversion
-# - Uses 1d EMA50 trend filter to align with higher timeframe direction
-# - Volume spike confirms the setup validity
-# - Works in both bull and bear by trading reversals within the trend
-# - Target: 20-40 trades/year to minimize fee drag on 4h timeframe
+# Hypothesis: Daily Donchian breakout with 1-week trend filter and volume confirmation
+# - Uses 20-day Donchian channels from daily timeframe for breakout signals
+# - 1-week EMA50 determines trend direction to avoid counter-trend trades
+# - Volume spike (2x 20-day average) confirms breakout strength
+# - Works in bull/bear markets by using 1-week trend filter
+# - Target: 10-25 trades/year to minimize fee drag on daily timeframe
 
-name = "4h_TDSequential_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_DonchianBreakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,40 +24,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for trend filter
+    # Daily data for Donchian channels (20-day)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    # 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # TD Sequential setup (simplified: count consecutive closes >/< 4 periods ago)
-    # Buy setup: close > close 4 periods ago for 9 consecutive periods
-    # Sell setup: close < close 4 periods ago for 9 consecutive periods
-    td_buy_setup = np.zeros(n, dtype=int)
-    td_sell_setup = np.zeros(n, dtype=int)
+    # Calculate 20-day Donchian channels
+    high_max_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_min_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    buy_count = 0
-    sell_count = 0
+    # Align Donchian channels to daily timeframe
+    high_max_20_aligned = align_htf_to_ltf(prices, df_1d, high_max_20)
+    low_min_20_aligned = align_htf_to_ltf(prices, df_1d, low_min_20)
     
-    for i in range(4, n):
-        if close[i] > close[i-4]:
-            buy_count += 1
-            sell_count = 0
-        elif close[i] < close[i-4]:
-            sell_count += 1
-            buy_count = 0
-        else:
-            buy_count = 0
-            sell_count = 0
-        
-        td_buy_setup[i] = buy_count
-        td_sell_setup[i] = sell_count
+    # 1-week data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Volume spike: current volume > 2.0x 20-period average
+    close_1w = df_1w['close'].values
+    # 1-week EMA50 for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Volume spike: current volume > 2.0x 20-day average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma20)
     
@@ -68,21 +61,22 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(high_max_20_aligned[i]) or np.isnan(low_min_20_aligned[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: TD sell setup >= 9 (exhaustion) with 1d uptrend + volume spike
-            long_cond = (td_sell_setup[i] >= 9 and 
-                        ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1] and
+            # Long: price breaks above 20-day high with 1w uptrend + volume spike
+            long_cond = (close[i] > high_max_20_aligned[i] and 
+                        ema_50_1w_aligned[i] > ema_50_1w_aligned[i-1] and
                         volume_spike[i])
             
-            # Short: TD buy setup >= 9 (exhaustion) with 1d downtrend + volume spike
-            short_cond = (td_buy_setup[i] >= 9 and 
-                         ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1] and
+            # Short: price breaks below 20-day low with 1w downtrend + volume spike
+            short_cond = (close[i] < low_min_20_aligned[i] and 
+                         ema_50_1w_aligned[i] < ema_50_1w_aligned[i-1] and
                          volume_spike[i])
             
             if long_cond:
@@ -92,17 +86,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: TD buy setup >= 9 (new exhaustion) or trend change
-            if (td_buy_setup[i] >= 9 or 
-                ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1]):
+            # Long exit: price breaks below 20-day low
+            if close[i] < low_min_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: TD sell setup >= 9 (new exhaustion) or trend change
-            if (td_sell_setup[i] >= 9 or 
-                ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1]):
+            # Short exit: price breaks above 20-day high
+            if close[i] > high_max_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
