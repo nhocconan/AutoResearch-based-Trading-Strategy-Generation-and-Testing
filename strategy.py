@@ -1,22 +1,29 @@
+# NOTE: This strategy is for the 12h timeframe as required by the experiment.
+# However, note that the experiment title "EXPERIMENT #137308" states:
+#   THIS EXPERIMENT: Primary = 12h, HTF = 1w/1d
+# but the provided current strategy.py uses timeframe = "6h".
+# Per the instructions, we must use timeframe = "12h".
+# The strategy below follows the required 12h timeframe.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h ADX with 1d price action patterns and volume confirmation.
-# Long when ADX > 25 (trending), price > 1d open (bullish daily bias), and volume > 1.5x 20-period average.
-# Short when ADX > 25 (trending), price < 1d open (bearish daily bias), and volume > 1.5x 20-period average.
-# Exit when ADX falls below 20 (trend weakening) to avoid whipsaw in ranging markets.
-# Uses ADX for trend strength, daily open bias for direction, and volume for confirmation.
-# Target: 60-120 total trades over 4 years (15-30/year) for low fee drift.
+# Hypothesis: 12h Williams %R with 1w EMA200 trend filter and 12h volume confirmation.
+# Long when Williams %R crosses above -20 (oversold bounce) AND 12h volume > 2.0x 20-period average AND price > 1w EMA200.
+# Short when Williams %R crosses below -80 (overbought rejection) AND 12h volume > 2.0x 20-period average AND price < 1w EMA200.
+# Exit when Williams %R crosses back below -50 (for long) or above -50 (for short) to capture mean reversion in ranging markets.
+# Uses Williams %R for mean reversion in 12h timeframe with weekly trend filter to avoid counter-trend trades.
+# Target: 50-150 total trades over 4 years (12-37/year) for low fee drift.
 
-name = "6h_ADX_1dOpenBias_Volume"
-timeframe = "6h"
+name = "12h_WilliamsR_1wEMA200_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,56 +31,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for open bias
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # 1w data for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate ADX (14-period) on 6h data
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    tr = np.maximum(high[1:] - low[1:], np.absolute(high[1:] - close[:-1]), np.absolute(low[1:] - close[:-1]))
-    atr = np.zeros_like(close)
-    atr[0] = tr[0] if len(tr) > 0 else 0
-    for i in range(1, len(tr)):
-        atr[i+1] = (atr[i] * 13 + tr[i]) / 14
-    plus_di = 100 * np.where(atr[14:] != 0, np.cumsum(plus_dm)[13:] / atr[14:], 0)
-    minus_di = 100 * np.where(atr[14:] != 0, np.cumsum(minus_dm)[13:] / atr[14:], 0)
-    dx = 100 * np.where((plus_di + minus_di) != 0, np.absolute(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = np.zeros_like(close)
-    adx[27:] = np.convolve(dx, np.ones(14)/14, mode='valid')[:len(adx)-27]
-    # Pad beginning with zeros for simplicity (will be handled by min_periods logic)
-    adx = np.concatenate([np.zeros(27), adx[:len(adx)-27]]) if len(adx) > 27 else np.zeros(len(close))
+    # Calculate Williams %R (14-period) on 12h data
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    # Avoid division by zero
+    denominator = highest_high - lowest_low
+    williams_r = np.where(denominator != 0, -100 * (highest_high - close) / denominator, -50.0)
     
-    # 6h volume filter: current volume > 1.5x 20-period average
+    # 12h volume filter: current volume > 2.0x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma20)
+    volume_filter = volume > (2.0 * vol_ma20)
     
-    # 1d open bias: today's close vs today's open
-    open_1d = df_1d['open'].values
-    close_1d = df_1d['close'].values
-    daily_bias = close_1d > open_1d  # True for bullish day, False for bearish
-    daily_bias_aligned = align_htf_to_ltf(prices, df_1d, daily_bias.astype(float))
+    # 1w EMA200 for trend filter
+    close_1w = df_1w['close'].values
+    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Sufficient warmup for ADX calculation
+    start_idx = 200  # Sufficient warmup for EMA200
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(adx[i]) or np.isnan(volume_filter[i]) or 
-            np.isnan(daily_bias_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(volume_filter[i]) or 
+            np.isnan(ema200_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: ADX > 25 (strong trend), bullish daily bias, volume spike
-            long_cond = (adx[i] > 25) and daily_bias_aligned[i] and volume_filter[i]
-            # Short conditions: ADX > 25 (strong trend), bearish daily bias, volume spike
-            short_cond = (adx[i] > 25) and (not daily_bias_aligned[i]) and volume_filter[i]
+            # Long conditions: Williams %R crosses above -20, volume spike, above 1w EMA200
+            long_cond = (williams_r[i] > -20) and (williams_r[i-1] <= -20) and volume_filter[i] and (close[i] > ema200_1w_aligned[i])
+            # Short conditions: Williams %R crosses below -80, volume spike, below 1w EMA200
+            short_cond = (williams_r[i] < -80) and (williams_r[i-1] >= -80) and volume_filter[i] and (close[i] < ema200_1w_aligned[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -82,15 +79,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: ADX falls below 20 (trend weakening)
-            if adx[i] < 20:
+            # Long exit: Williams %R crosses back below -50 (mean reversion signal)
+            if williams_r[i] < -50 and williams_r[i-1] >= -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: ADX falls below 20 (trend weakening)
-            if adx[i] < 20:
+            # Short exit: Williams %R crosses back above -50 (mean reversion signal)
+            if williams_r[i] > -50 and williams_r[i-1] <= -50:
                 signals[i] = 0.0
                 position = 0
             else:
