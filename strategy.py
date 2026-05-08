@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour KAMA trend following with daily volume confirmation and weekly volatility regime filter
-# KAMA adapts to market conditions - fast in trends, slow in ranges
-# Long when KAMA slope > 0 with volume > 1.5x average and weekly volatility < 40th percentile
-# Short when KAMA slope < 0 with volume > 1.5x average and weekly volatility < 40th percentile
-# Exit when KAMA slope reverses or volatility exceeds 60th percentile
-# Targets 25-35 trades/year to minimize fee decay while capturing sustained trends
+# Hypothesis: 12-hour Williams Alligator with daily volume confirmation and weekly volatility regime
+# The Williams Alligator (13/8/5 SMAs with 8/5/3 offsets) identifies trends when jaws/lips/teeth align
+# Long when teeth > jaws > lips with volume > 1.5x 20-day average and weekly volatility < 30th percentile
+# Short when teeth < jaws < lips with volume > 1.5x 20-day average and weekly volatility < 30th percentile
+# Exit when Alligator lines cross or volatility exceeds 70th percentile
+# Targets 20-40 trades/year to minimize fee decay while capturing sustained trends
 
-name = "12h_KAMA_Vol_VolRegime"
+name = "12h_Williams_Alligator_Vol_VolRegime"
 timeframe = "12h"
 leverage = 1.0
 
@@ -33,49 +33,33 @@ def generate_signals(prices):
     if len(df_weekly) < 30:
         return np.zeros(n)
     
-    # Calculate KAMA on 12h close
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, n=10))  # 10-period change
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # will fix below
-    # Recalculate volatility properly
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # incorrect, redo
+    # Calculate Williams Alligator on 12h close
+    # Jaw: 13-period SMA, shifted by 8 bars
+    jaw = np.full_like(close, np.nan)
+    for i in range(12, len(close)):
+        jaw[i] = np.mean(close[i-12:i+1])
+    jaw = np.roll(jaw, 8)
     
-    # Proper ER calculation
-    change = np.abs(close - np.roll(close, 10))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # still wrong
+    # Teeth: 8-period SMA, shifted by 5 bars
+    teeth = np.full_like(close, np.nan)
+    for i in range(7, len(close)):
+        teeth[i] = np.mean(close[i-7:i+1])
+    teeth = np.roll(teeth, 5)
     
-    # Correct approach: calculate ER for each point
-    er = np.zeros_like(close)
-    for i in range(10, len(close)):
-        change = np.abs(close[i] - close[i-10])
-        volatility = np.sum(np.abs(np.diff(close[i-10:i+1])))
-        if volatility > 0:
-            er[i] = change / volatility
-        else:
-            er[i] = 0
-    
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)  # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Calculate KAMA
-    kama = np.full_like(close, np.nan)
-    kama[9] = close[9]  # start after 10 periods
-    for i in range(10, len(close)):
-        if np.isnan(kama[i-1]):
-            kama[i] = close[i]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Lips: 5-period SMA, shifted by 3 bars
+    lips = np.full_like(close, np.nan)
+    for i in range(4, len(close)):
+        lips[i] = np.mean(close[i-4:i+1])
+    lips = np.roll(lips, 3)
     
     # Calculate daily average volume for volume filter
     daily_volume = df_daily['volume'].values
-    vol_ma_30 = np.full_like(daily_volume, np.nan)
+    vol_ma_20 = np.full_like(daily_volume, np.nan)
     for i in range(len(daily_volume)):
-        if i < 30:
-            vol_ma_30[i] = np.mean(daily_volume[max(0, i-29):i+1]) if i >= 0 else daily_volume[i]
+        if i < 20:
+            vol_ma_20[i] = np.mean(daily_volume[max(0, i-19):i+1]) if i >= 0 else daily_volume[i]
         else:
-            vol_ma_30[i] = np.mean(daily_volume[i-29:i+1])
+            vol_ma_20[i] = np.mean(daily_volume[i-19:i+1])
     
     # Calculate weekly volatility percentile (using ATR-based volatility)
     weekly_high = df_weekly['high'].values
@@ -89,37 +73,40 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
     
-    # ATR10
-    atr10 = np.full_like(tr, np.nan)
+    # ATR14
+    atr14 = np.full_like(tr, np.nan)
     for i in range(len(tr)):
-        if i < 10:
-            atr10[i] = np.mean(tr[max(0, i-9):i+1]) if i >= 0 else tr[i]
+        if i < 14:
+            atr14[i] = np.mean(tr[max(0, i-13):i+1]) if i >= 0 else tr[i]
         else:
-            atr10[i] = np.mean(tr[i-9:i+1])
+            atr14[i] = np.mean(tr[i-13:i+1])
     
     # Volatility percentile rank (using 50-period lookback)
-    vol_rank = np.full_like(atr10, np.nan)
-    for i in range(50, len(atr10)):
-        window = atr10[i-50:i+1]
+    vol_rank = np.full_like(atr14, np.nan)
+    for i in range(50, len(atr14)):
+        window = atr14[i-50:i+1]
         if len(window) > 0 and not np.all(np.isnan(window)):
-            current = atr10[i]
+            current = atr14[i]
             if not np.isnan(current):
                 # Calculate percentile rank
                 rank = np.sum(~np.isnan(window) & (window <= current)) / np.sum(~np.isnan(window)) * 100
                 vol_rank[i] = rank
     
     # Align indicators to 12h timeframe
-    kama_aligned = kama  # already on 12h timeframe
-    vol_ma_30_aligned = align_htf_to_ltf(prices, df_daily, vol_ma_30)
+    jaw_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), jaw)
+    teeth_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), teeth)
+    lips_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), lips)
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_daily, vol_ma_20)
     vol_rank_aligned = align_htf_to_ltf(prices, df_weekly, vol_rank)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 50)  # warmup for KAMA and vol rank
+    start_idx = max(50, 20)  # warmup for Alligator and vol rank
     
     for i in range(start_idx, n):
-        if (np.isnan(vol_ma_30_aligned[i]) or np.isnan(vol_rank_aligned[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
+            np.isnan(vol_ma_20_aligned[i]) or np.isnan(vol_rank_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -136,41 +123,40 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Volume filter: current daily volume > 1.5x 30-day average
+        # Volume filter: current daily volume > 1.5x 20-day average
         vol_daily_current = df_daily.iloc[idx_daily]['volume']
-        vol_filter = vol_daily_current > 1.5 * vol_ma_30_aligned[i]
+        vol_filter = vol_daily_current > 1.5 * vol_ma_20_aligned[i]
         
-        # Volatility regime: < 40th percentile = low volatility (trending)
-        vol_regime = vol_rank_aligned[i] < 40
+        # Volatility regime: < 30th percentile = low volatility (trending)
+        vol_regime = vol_rank_aligned[i] < 30
         
         if position == 0:
-            # Look for KAMA direction with volume confirmation and low volatility regime
-            # Long: KAMA sloping up
-            if i > 0 and not np.isnan(kama_aligned[i]) and not np.isnan(kama_aligned[i-1]):
-                if kama_aligned[i] > kama_aligned[i-1]:
-                    if vol_filter and vol_regime:
-                        signals[i] = 0.25
-                        position = 1
-                # Short: KAMA sloping down
-                elif kama_aligned[i] < kama_aligned[i-1]:
-                    if vol_filter and vol_regime:
-                        signals[i] = -0.25
-                        position = -1
-        elif position == 1:
-            # Exit long: KAMA slopes down or volatility exceeds 60th percentile
-            if i > 0 and not np.isnan(kama_aligned[i]) and not np.isnan(kama_aligned[i-1]):
-                if kama_aligned[i] < kama_aligned[i-1] or vol_rank_aligned[i] > 60:
-                    signals[i] = 0.0
-                    position = 0
-                else:
+            # Look for Alligator alignment with volume confirmation and low volatility regime
+            # Long: teeth > jaws > lips (bullish alignment)
+            if teeth_aligned[i] > jaw_aligned[i] and jaw_aligned[i] > lips_aligned[i]:
+                if vol_filter and vol_regime:
                     signals[i] = 0.25
-        elif position == -1:
-            # Exit short: KAMA slopes up or volatility exceeds 60th percentile
-            if i > 0 and not np.isnan(kama_aligned[i]) and not np.isnan(kama_aligned[i-1]):
-                if kama_aligned[i] > kama_aligned[i-1] or vol_rank_aligned[i] > 60:
-                    signals[i] = 0.0
-                    position = 0
-                else:
+                    position = 1
+            # Short: teeth < jaws < lips (bearish alignment)
+            elif teeth_aligned[i] < jaw_aligned[i] and jaw_aligned[i] < lips_aligned[i]:
+                if vol_filter and vol_regime:
                     signals[i] = -0.25
+                    position = -1
+        elif position == 1:
+            # Exit long: Alligator lines cross or volatility exceeds 70th percentile
+            if (teeth_aligned[i] <= jaw_aligned[i] or jaw_aligned[i] <= lips_aligned[i] or
+                vol_rank_aligned[i] > 70):
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        elif position == -1:
+            # Exit short: Alligator lines cross or volatility exceeds 70th percentile
+            if (teeth_aligned[i] >= jaw_aligned[i] or jaw_aligned[i] >= lips_aligned[i] or
+                vol_rank_aligned[i] > 70):
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
