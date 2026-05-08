@@ -3,20 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w trend filter and volume confirmation.
-# Long when price breaks above Donchian upper band (20) AND 1w EMA50 rising AND volume > 1.5x 20-period average.
-# Short when price breaks below Donchian lower band (20) AND 1w EMA50 falling AND volume > 1.5x 20-period average.
-# Exit when price crosses back inside Donchian channel (between upper and lower bands).
-# Uses 1d timeframe as requested, with 1w trend filter for multi-timeframe alignment.
-# Target: 30-100 total trades over 4 years (7-25/year) with tight entry conditions.
+# Hypothesis: 6h Keltner Channel breakout with 12h trend filter and volume confirmation.
+# Long when price closes above upper KC (EMA20 + 2*ATR) AND 12h EMA50 rising AND volume > 1.5x 20-period average.
+# Short when price closes below lower KC (EMA20 - 2*ATR) AND 12h EMA50 falling AND volume > 1.5x 20-period average.
+# Exit when price closes back inside KC (between upper and lower bands).
+# Keltner Channels adapt to volatility, reducing false breakouts in choppy markets.
+# 12h EMA50 ensures alignment with higher timeframe trend.
+# Volume confirmation filters out low-participation moves.
+# Target: 50-150 total trades over 4 years (12-37/year) with controlled risk.
 
-name = "1d_Donchian_20_1wEMA50_Volume"
-timeframe = "1d"
+name = "6h_Keltner_20_12hEMA50_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,43 +26,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # 12h data for Keltner calculation and trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 60:
         return np.zeros(n)
     
-    # Calculate Donchian channels (20-period high/low) from 1d data
-    high_1d = high
-    low_1d = low
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Donchian upper band (20-period high)
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    # Donchian lower band (20-period low)
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate EMA20 and ATR(20) for Keltner Channels
+    ema20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    tr_12h = np.maximum(
+        high_12h[1:] - low_12h[1:],
+        np.maximum(
+            np.abs(high_12h[1:] - close_12h[:-1]),
+            np.abs(low_12h[1:] - close_12h[:-1])
+        )
+    )
+    tr_12h = np.concatenate([[np.nan], tr_12h])  # align length
+    atr20_12h = pd.Series(tr_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Keltner Channels
+    kc_upper = ema20_12h + 2 * atr20_12h
+    kc_lower = ema20_12h - 2 * atr20_12h
     
-    # 1w EMA50 direction
-    ema50_rising = np.zeros_like(ema50_1w_aligned, dtype=bool)
-    ema50_falling = np.zeros_like(ema50_1w_aligned, dtype=bool)
-    ema50_rising[1:] = ema50_1w_aligned[1:] > ema50_1w_aligned[:-1]
-    ema50_falling[1:] = ema50_1w_aligned[1:] < ema50_1w_aligned[:-1]
+    # Align KC levels to 6h timeframe
+    kc_upper_aligned = align_htf_to_ltf(prices, df_12h, kc_upper)
+    kc_lower_aligned = align_htf_to_ltf(prices, df_12h, kc_lower)
     
-    # Volume filter: current volume > 1.5x 20-period average
+    # 12h EMA50 for trend filter
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    
+    # 12h EMA50 direction
+    ema50_rising = np.zeros_like(ema50_12h_aligned, dtype=bool)
+    ema50_falling = np.zeros_like(ema50_12h_aligned, dtype=bool)
+    ema50_rising[1:] = ema50_12h_aligned[1:] > ema50_12h_aligned[:-1]
+    ema50_falling[1:] = ema50_12h_aligned[1:] < ema50_12h_aligned[:-1]
+    
+    # Volume filter: current volume > 1.5x 20-period average (on 6h data)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Sufficient warmup for EMA50 and Donchian
+    start_idx = max(60, 20)  # Sufficient warmup for EMA50 and KC
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(ema50_rising[i]) or 
+        if (np.isnan(kc_upper_aligned[i]) or np.isnan(kc_lower_aligned[i]) or 
+            np.isnan(ema50_12h_aligned[i]) or np.isnan(ema50_rising[i]) or 
             np.isnan(ema50_falling[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -68,10 +84,10 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: price breaks above Donchian high, 1w EMA50 rising, volume filter
-            long_cond = (close[i] > donchian_high[i]) and ema50_rising[i] and volume_filter[i]
-            # Short conditions: price breaks below Donchian low, 1w EMA50 falling, volume filter
-            short_cond = (close[i] < donchian_low[i]) and ema50_falling[i] and volume_filter[i]
+            # Long conditions: close above upper KC, 12h EMA50 rising, volume filter
+            long_cond = (close[i] > kc_upper_aligned[i]) and ema50_rising[i] and volume_filter[i]
+            # Short conditions: close below lower KC, 12h EMA50 falling, volume filter
+            short_cond = (close[i] < kc_lower_aligned[i]) and ema50_falling[i] and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -80,15 +96,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses back below Donchian low
-            if close[i] < donchian_low[i]:
+            # Long exit: close back below lower KC
+            if close[i] < kc_lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses back above Donchian high
-            if close[i] > donchian_high[i]:
+            # Short exit: close back above upper KC
+            if close[i] > kc_upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
