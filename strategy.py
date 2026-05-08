@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h KAMA trend with RSI filter and volume confirmation.
-# Long when KAMA trending up, RSI > 50, and volume > 1.5x 20-period average.
-# Short when KAMA trending down, RSI < 50, and volume > 1.5x 20-period average.
-# Exit when KAMA reverses direction.
-# KAMA adapts to market noise, reducing whipsaw in ranging markets.
-# RSI filter ensures momentum alignment. Volume confirms institutional participation.
-# Target: 50-150 total trades over 4 years (12-37/year).
+# Hypothesis: 4h Donchian breakout with 1d trend filter and volume confirmation.
+# Long when price breaks above 4h Donchian upper (20-period) AND 1d EMA34 rising AND volume > 1.5x 20-period average.
+# Short when price breaks below 4h Donchian lower (20-period) AND 1d EMA34 falling AND volume > 1.5x 20-period average.
+# Exit when price crosses back inside the Donchian channel.
+# Donchian provides clear trend structure. EMA34 filters higher timeframe trend.
+# Volume confirms institutional participation. Target: 75-200 total trades over 4 years (19-50/year).
 
-name = "12h_KAMA_RSI_Volume"
-timeframe = "12h"
+name = "4h_Donchian_20_1dEMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,35 +24,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for KAMA and RSI calculation
+    # 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # KAMA calculation on 1d close
-    close_1d = df_1d['close'].values
-    direction = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.abs(np.diff(close_1d))
-    er = np.zeros_like(close_1d)
-    er[1:] = direction[1:] / np.where(volatility[1:] == 0, 1, volatility[1:])
-    sc = (er * 0.064 + 0.064) ** 2  # fast=2, slow=30
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # 4h Donchian channel (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Align KAMA to 12h timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # RSI calculation on 1d close
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss == 0, 0, avg_gain / avg_loss)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # 1d EMA34 direction
+    ema34_rising = np.zeros_like(ema34_1d_aligned, dtype=bool)
+    ema34_falling = np.zeros_like(ema34_1d_aligned, dtype=bool)
+    ema34_rising[1:] = ema34_1d_aligned[1:] > ema34_1d_aligned[:-1]
+    ema34_falling[1:] = ema34_1d_aligned[1:] < ema34_1d_aligned[:-1]
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -62,24 +52,23 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 1)  # Sufficient warmup for KAMA and RSI
+    start_idx = max(35, 20)  # Sufficient warmup for Donchian and EMA34
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(volume_filter[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(ema34_rising[i]) or 
+            np.isnan(ema34_falling[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: KAMA trending up, RSI > 50, volume filter
-            kama_up = kama_aligned[i] > kama_aligned[i-1]
-            long_cond = kama_up and (rsi_aligned[i] > 50) and volume_filter[i]
-            # Short conditions: KAMA trending down, RSI < 50, volume filter
-            kama_down = kama_aligned[i] < kama_aligned[i-1]
-            short_cond = kama_down and (rsi_aligned[i] < 50) and volume_filter[i]
+            # Long conditions: price breaks above Donchian upper, 1d EMA34 rising, volume filter
+            long_cond = (close[i] > donchian_upper[i]) and ema34_rising[i] and volume_filter[i]
+            # Short conditions: price breaks below Donchian lower, 1d EMA34 falling, volume filter
+            short_cond = (close[i] < donchian_lower[i]) and ema34_falling[i] and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -88,15 +77,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: KAMA turns down
-            if kama_aligned[i] < kama_aligned[i-1]:
+            # Long exit: price crosses back below Donchian lower
+            if close[i] < donchian_lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: KAMA turns up
-            if kama_aligned[i] > kama_aligned[i-1]:
+            # Short exit: price crosses back above Donchian upper
+            if close[i] > donchian_upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
