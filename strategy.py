@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Bollinger Band squeeze breakout with 1d trend filter and volume confirmation
-# Uses Bollinger Band width to identify low volatility (squeeze) periods, then breaks out
-# in the direction of the 1d EMA trend with volume confirmation. Designed to work in both
-# bull and bear markets by following the higher timeframe trend. Target: 20-40 trades/year.
+# Hypothesis: 4h Bull/Bear Power + 1d EMA50 trend + volume spike
+# Uses Elder's Ray Bull/Bear Power to detect institutional buying/selling pressure.
+# Bull Power = High - EMA (bullish pressure), Bear Power = EMA - Low (bearish pressure).
+# Combines with 1d EMA50 trend filter and volume spike for high-probability entries.
+# Designed for low-frequency trades to work in both bull and bear markets (2021-2026).
 
-name = "4h_BB_Squeeze_Breakout_1dEMA34_Volume"
+name = "4h_BullBearPower_1dEMA50_Volume"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,81 +23,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA trend filter
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
+    # Calculate 1d EMA50
     close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate Bollinger Bands (20, 2) on 4h data
-    bb_period = 20
-    bb_std = 2
+    # Calculate 13-period EMA for Bull/Bear Power (standard setting)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate rolling mean and std
-    close_series = pd.Series(close)
-    bb_mid = close_series.rolling(window=bb_period, min_periods=bb_period).mean().values
-    bb_std_dev = close_series.rolling(window=bb_period, min_periods=bb_period).std().values
+    # Bull Power = High - EMA13 (bullish pressure)
+    # Bear Power = EMA13 - Low (bearish pressure)
+    bull_power = high - ema13
+    bear_power = ema13 - low
     
-    bb_upper = bb_mid + (bb_std_dev * bb_std)
-    bb_lower = bb_mid - (bb_std_dev * bb_std)
-    
-    # Bollinger Band Width (normalized)
-    bb_width = (bb_upper - bb_lower) / bb_mid
-    
-    # Squeeze condition: BB width below 20-period average (low volatility)
-    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
-    squeeze_condition = bb_width < bb_width_ma
-    
-    # Get 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Volume spike (1.5x 20-period EMA)
+    # Volume spike (2x 20-period EMA)
     vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 1.5)
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Ensure enough data for indicators
+    start_idx = 60  # Ensure EMA50 and EMA13 have enough data
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_spike[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: BB squeeze breakout above upper band with 1d uptrend and volume spike
-            if (squeeze_condition[i] and 
-                close[i] > bb_upper[i] and 
-                close[i] > ema34_1d_aligned[i] and 
-                vol_spike[i]):
+            # Enter long: Bull Power > 0 (buying pressure) + 1d uptrend + volume spike
+            if (bull_power[i] > 0 and 
+                close[i] > ema50_1d_aligned[i] and vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: BB squeeze breakout below lower band with 1d downtrend and volume spike
-            elif (squeeze_condition[i] and 
-                  close[i] < bb_lower[i] and 
-                  close[i] < ema34_1d_aligned[i] and 
-                  vol_spike[i]):
+            # Enter short: Bear Power > 0 (selling pressure) + 1d downtrend + volume spike
+            elif (bear_power[i] > 0 and 
+                  close[i] < ema50_1d_aligned[i] and vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price closes below middle band or trend fails
-            if (close[i] < bb_mid[i] or 
-                close[i] < ema34_1d_aligned[i]):
+            # Exit long: Bull Power <= 0 (pressure faded) or trend fails
+            if (bull_power[i] <= 0 or 
+                close[i] < ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price closes above middle band or trend fails
-            if (close[i] > bb_mid[i] or 
-                close[i] > ema34_1d_aligned[i]):
+            # Exit short: Bear Power <= 0 (pressure faded) or trend fails
+            if (bear_power[i] <= 0 or 
+                close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
