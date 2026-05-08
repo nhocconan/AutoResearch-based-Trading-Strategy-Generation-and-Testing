@@ -3,14 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams Alligator + Volume Spike + Chop Filter
-# Uses Williams Alligator (Jaw=13, Teeth=8, Lips=5) on 4h to detect trend presence.
-# Enters long when Lips > Teeth > Jaw (bullish alignment) with volume spike (>2x 20-period average)
-# and choppy market filter (Chop > 61.8 for mean reversion context).
-# Exits when alignment breaks or volatility drops.
-# Designed to capture trend continuation moves in both bull and bear markets with controlled frequency.
+# Hypothesis: 4h Williams %R with 1d ADX trend and volume confirmation
+# Uses 4h Williams %R for mean reversion entries, filtered by daily ADX (>25) for trend strength
+# and volume spike (>2x 20-period average). Designed to capture reversals in both bull and bear
+# markets with high win rate. Target: 20-50 trades/year (80-200 total over 4 years).
 
-name = "4h_WilliamsAlligator_Volume_Chop"
+name = "4h_WilliamsR_1dADX_Trend_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,95 +22,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Chop calculation
+    # Get daily data for ADX
     df_daily = get_htf_data(prices, '1d')
     if len(df_daily) < 14:
         return np.zeros(n)
     
-    # Calculate Chop (Choppiness Index) on daily
+    # Calculate daily ADX(14)
     high_daily = df_daily['high'].values
     low_daily = df_daily['low'].values
     close_daily = df_daily['close'].values
     
-    atr_daily = np.zeros(len(close_daily))
-    for i in range(1, len(close_daily)):
-        tr = max(high_daily[i] - low_daily[i],
-                 abs(high_daily[i] - close_daily[i-1]),
-                 abs(low_daily[i] - close_daily[i-1]))
-        atr_daily[i] = tr
+    # True Range
+    tr1 = high_daily[1:] - low_daily[1:]
+    tr2 = np.abs(high_daily[1:] - close_daily[:-1])
+    tr3 = np.abs(low_daily[1:] - close_daily[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Smoothed ATR (using simple mean for simplicity, equivalent to Wilder's smoothing with enough data)
-    atr_sum = np.zeros(len(close_daily))
-    if len(close_daily) >= 14:
-        atr_sum[13] = np.sum(atr_daily[1:15])  # sum of first 14 TR values
-        for i in range(14, len(close_daily)):
-            atr_sum[i] = atr_sum[i-1] - atr_sum[i-1]/14 + atr_daily[i]
+    # Directional Movement
+    dm_plus = np.where((high_daily[1:] - high_daily[:-1]) > (low_daily[:-1] - low_daily[1:]),
+                       np.maximum(high_daily[1:] - high_daily[:-1], 0), 0)
+    dm_minus = np.where((low_daily[:-1] - low_daily[1:]) > (high_daily[1:] - high_daily[:-1]),
+                        np.maximum(low_daily[:-1] - low_daily[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
     
-    atr_14 = np.zeros(len(close_daily))
-    if len(close_daily) >= 14:
-        atr_14[13] = atr_sum[13] / 14
-        for i in range(14, len(close_daily)):
-            atr_14[i] = (atr_14[i-1] * 13 + atr_daily[i]) / 14
-    
-    # Calculate highest high and lowest low over 14 periods
-    highest_high = np.zeros(len(close_daily))
-    lowest_low = np.zeros(len(close_daily))
-    for i in range(len(close_daily)):
-        if i < 14:
-            highest_high[i] = np.nan
-            lowest_low[i] = np.nan
-        else:
-            highest_high[i] = np.max(high_daily[i-13:i+1])
-            lowest_low[i] = np.min(low_daily[i-13:i+1])
-    
-    chop = np.full(len(close_daily), np.nan)
-    for i in range(14, len(close_daily)):
-        if atr_14[i] > 0 and highest_high[i] > lowest_low[i]:
-            chop[i] = 100 * np.log10(atr_14[i] * 14 / (highest_high[i] - lowest_low[i])) / np.log10(10)
-    
-    # Chop > 61.8 indicates ranging/choppy market
-    
-    # Calculate Williams Alligator on 4h data
-    # Jaw: 13-period SMMA (smoothed moving average) of median price, shifted 8 bars forward
-    # Teeth: 8-period SMMA of median price, shifted 5 bars forward
-    # Lips: 5-period SMMA of median price, shifted 3 bars forward
-    median_price = (high + low) / 2
-    
-    def smma(arr, period):
-        """Smoothed Moving Average"""
-        sma = np.full(len(arr), np.nan)
+    # Smoothed values
+    def smooth_wilder(arr, period):
+        smoothed = np.full_like(arr, np.nan)
         if len(arr) < period:
-            return sma
-        sma[period-1] = np.mean(arr[:period])
+            return smoothed
+        smoothed[period-1] = np.nansum(arr[1:period])
         for i in range(period, len(arr)):
-            sma[i] = (sma[i-1] * (period-1) + arr[i]) / period
-        return sma
+            if np.isnan(smoothed[i-1]):
+                smoothed[i] = np.nansum(arr[i-period+1:i+1])
+            else:
+                smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + arr[i]
+        return smoothed
     
-    jaw_raw = smma(median_price, 13)
-    teeth_raw = smma(median_price, 8)
-    lips_raw = smma(median_price, 5)
+    atr = smooth_wilder(tr, 14)
+    dm_plus_smooth = smooth_wilder(dm_plus, 14)
+    dm_minus_smooth = smooth_wilder(dm_minus, 14)
     
-    # Shift forward: Jaw +8, Teeth +5, Lips +3
-    jaw = np.full_like(jaw_raw, np.nan)
-    teeth = np.full_like(teeth_raw, np.nan)
-    lips = np.full_like(lips_raw, np.nan)
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / atr
+    di_minus = 100 * dm_minus_smooth / atr
     
-    for i in range(len(jaw)):
-        if i + 8 < len(jaw):
-            jaw[i + 8] = jaw_raw[i]
-        if i + 5 < len(teeth):
-            teeth[i + 5] = teeth_raw[i]
-        if i + 3 < len(lips):
-            lips[i + 3] = lips_raw[i]
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = np.full_like(dx, np.nan)
+    if len(dx) >= 14:
+        adx[13] = np.nanmean(dx[1:14])
+        for i in range(14, len(dx)):
+            adx[i] = (adx[i-1] * 13 + dx[i]) / 14
     
-    # Align daily Chop to 4h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_daily, chop, additional_delay_bars=0)
+    # Calculate 4h Williams %R(14)
+    def williams_r(high_arr, low_arr, close_arr, period):
+        wr = np.full_like(close_arr, np.nan)
+        for i in range(period-1, len(close_arr)):
+            highest_high = np.max(high_arr[i-period+1:i+1])
+            lowest_low = np.min(low_arr[i-period+1:i+1])
+            if highest_high - lowest_low != 0:
+                wr[i] = -100 * (highest_high - close_arr[i]) / (highest_high - lowest_low)
+        return wr
+    
+    wr14 = williams_r(high, low, close, 14)
     
     # Calculate 4h volume average for volume spike
     vol_avg_20 = np.full(n, np.nan)
     if n >= 20:
         for i in range(20, n):
             vol_avg_20[i] = np.mean(volume[i-20:i])
+    
+    # Align daily ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_daily, adx)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -121,7 +103,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 13+8, 8+5, 5+3)  # warmup for indicators
+    start_idx = max(14, 20)  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if outside trading session
@@ -132,39 +114,34 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or \
-           np.isnan(chop_aligned[i]) or np.isnan(vol_avg_20[i]):
+        if np.isnan(wr14[i]) or np.isnan(adx_aligned[i]) or np.isnan(vol_avg_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Check conditions
-        # Bullish alignment: Lips > Teeth > Jaw
-        bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
-        # Bearish alignment: Jaw > Teeth > Lips
-        bearish_alignment = jaw[i] > teeth[i] and teeth[i] > lips[i]
+        strong_trend = adx_aligned[i] > 25
         vol_spike = volume[i] > 2.0 * vol_avg_20[i]
-        chop_high = chop_aligned[i] > 61.8  # choppy/ranging market
         
         if position == 0:
-            # Look for entry: Alligator alignment with volume spike in choppy market
-            if bullish_alignment and vol_spike and chop_high:
+            # Look for entry: Williams %R oversold/overbought with trend and volume confirmation
+            if wr14[i] < -80 and strong_trend and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            elif bearish_alignment and vol_spike and chop_high:
+            elif wr14[i] > -20 and strong_trend and vol_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: alignment breaks or volatility drops
-            if not bullish_alignment or not vol_spike or not chop_high:
+            # Exit long: Williams %R overbought or trend weakens or volume drops
+            if wr14[i] > -20 or not strong_trend or not vol_spike:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: alignment breaks or volatility drops
-            if not bearish_alignment or not vol_spike or not chop_high:
+            # Exit short: Williams %R oversold or trend weakens or volume drops
+            if wr14[i] < -80 or not strong_trend or not vol_spike:
                 signals[i] = 0.0
                 position = 0
             else:
