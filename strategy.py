@@ -3,19 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6s Weekly Pivot + ADX Trend + Volume Breakout
-# Uses weekly pivot points (more robust than daily) for key support/resistance
-# ADX(14) > 25 ensures we only trade in trending markets
-# Volume > 1.5x average confirms breakout validity
-# Works in bull via breakouts above weekly R1, in bear via breakdowns below weekly S1
-# Target: 15-25 trades/year to minimize fee drag while capturing major moves
-name = "6h_WeeklyPivot_ADXTrend_VolumeBreakout"
-timeframe = "6h"
+# Hypothesis: 12h Williams Alligator + Elder Ray with 1w trend filter
+# Uses Williams Alligator (Jaw/Teeth/Lips) for trend direction and Elder Ray (bull/bear power) for momentum.
+# 1w EMA50 ensures alignment with weekly trend. Volume spike >1.5 filters false signals.
+# Designed to work in both bull (riding trends) and bear (fading reversals at extremes).
+# Target: 15-25 trades/year to minimize fee drag. Discrete sizing 0.25.
+name = "12h_WilliamsAlligator_ElderRay_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,96 +22,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot points (more robust than daily)
-    df_w = get_htf_data(prices, '1w')
-    if len(df_w) < 5:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate weekly pivot points from previous week
-    # Standard pivot: P = (H + L + C) / 3
-    # R1 = 2*P - L, S1 = 2*P - H
-    # R2 = P + (H - L), S2 = P - (H - L)
-    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
+    # Calculate 1w EMA50 trend filter
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    prev_week_high = df_w['high'].shift(1).values
-    prev_week_low = df_w['low'].shift(1).values
-    prev_week_close = df_w['close'].shift(1).values
+    # Williams Alligator (13,8,5 SMAs with future shift)
+    # Jaw: 13-period SMMA shifted 8 bars
+    # Teeth: 8-period SMMA shifted 5 bars  
+    # Lips: 5-period SMMA shifted 3 bars
+    def smma(arr, period):
+        """Smoothed Moving Average (SMMA)"""
+        sma = pd.Series(arr).rolling(window=period, min_periods=period).mean().values
+        smma = np.full_like(arr, np.nan, dtype=float)
+        if len(arr) >= period:
+            smma[period-1] = sma[period-1]
+            for i in range(period, len(arr)):
+                smma[i] = (smma[i-1] * (period-1) + arr[i]) / period
+        return smma
     
-    # Align weekly data to 6h timeframe
-    prev_week_high_aligned = align_htf_to_ltf(prices, df_w, prev_week_high)
-    prev_week_low_aligned = align_htf_to_ltf(prices, df_w, prev_week_low)
-    prev_week_close_aligned = align_htf_to_ltf(prices, df_w, prev_week_close)
+    jaw = smma(close, 13)
+    teeth = smma(close, 8)
+    lips = smma(close, 5)
     
-    # Calculate pivot points
-    pivot = (prev_week_high_aligned + prev_week_low_aligned + prev_week_close_aligned) / 3.0
-    range_ = prev_week_high_aligned - prev_week_low_aligned
+    # Shift as per Alligator definition (future shift to avoid look-ahead)
+    jaw = np.roll(jaw, 8)
+    teeth = np.roll(teeth, 5)
+    lips = np.roll(lips, 3)
+    # Invalidate shifted values
+    jaw[:8] = np.nan
+    teeth[:5] = np.nan
+    lips[:3] = np.nan
     
-    # Weekly R1 and S1 (primary levels)
-    r1 = 2 * pivot - prev_week_low_aligned
-    s1 = 2 * pivot - prev_week_high_aligned
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    # Get daily data for ADX trend filter
-    df_d = get_htf_data(prices, '1d')
-    if len(df_d) < 14:
-        return np.zeros(n)
-    
-    # Calculate ADX(14) for trend strength
-    high_d = df_d['high'].values
-    low_d = df_d['low'].values
-    close_d = df_d['close'].values
-    
-    # True Range
-    tr1 = high_d - low_d
-    tr2 = np.abs(high_d - np.roll(close_d, 1))
-    tr3 = np.abs(low_d - np.roll(close_d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Directional Movement
-    dm_plus = np.where((high_d - np.roll(high_d, 1)) > (np.roll(low_d, 1) - low_d), 
-                       np.maximum(high_d - np.roll(high_d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_d, 1) - low_d) > (high_d - np.roll(high_d, 1)), 
-                        np.maximum(np.roll(low_d, 1) - low_d, 0), 0)
-    
-    # Smooth with Wilder's smoothing (equivalent to EMA with alpha=1/14)
-    def wilder_smooth(data, period):
-        result = np.zeros_like(data)
-        result[period-1] = np.nansum(data[:period])
-        for i in range(period, len(data)):
-            result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
-    
-    tr_14 = wilder_smooth(tr, 14)
-    dm_plus_14 = wilder_smooth(dm_plus, 14)
-    dm_minus_14 = wilder_smooth(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = np.where(tr_14 > 0, 100 * dm_plus_14 / tr_14, 0)
-    di_minus = np.where(tr_14 > 0, 100 * dm_minus_14 / tr_14, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = wilder_smooth(dx, 14)
-    
-    # Align ADX to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_d, adx)
-    
-    # Volume confirmation - 20-period average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation - 30-period average volume
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1.0)
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
-    # Session filter: 08-20 UTC (avoid low liquidity periods)
+    # Session filter: 08-20 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # warmup period
+    start_idx = max(100, 50, 30)  # warmup period
     
     for i in range(start_idx, n):
-        if (np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -125,28 +93,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long entry: break above weekly R1 with strong trend and volume
-            if (close[i] > r1[i] and 
-                adx_aligned[i] > 25 and
+            # Long entry: Lips > Teeth > Jaw (bullish alignment) + bull power > 0 + volume spike
+            if (lips[i] > teeth[i] > jaw[i] and 
+                bull_power[i] > 0 and
                 vol_ratio[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: break below weekly S1 with strong trend and volume
-            elif (close[i] < s1[i] and 
-                  adx_aligned[i] > 25 and
+            # Short entry: Lips < Teeth < Jaw (bearish alignment) + bear power < 0 + volume spike
+            elif (lips[i] < teeth[i] < jaw[i] and 
+                  bear_power[i] < 0 and
                   vol_ratio[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: break below weekly S1 (mean reversion) OR trend weakens
-            if close[i] < s1[i] or adx_aligned[i] < 20:
+            # Exit long: Alligator reverses (Lips < Jaw) OR bear power > 0 (bulls weakening)
+            if lips[i] < jaw[i] or bear_power[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: break above weekly R1 (mean reversion) OR trend weakens
-            if close[i] > r1[i] or adx_aligned[i] < 20:
+            # Exit short: Alligator reverses (Lips > Jaw) OR bull power < 0 (bears weakening)
+            if lips[i] > jaw[i] or bull_power[i] < 0:
                 signals[i] = 0.0
                 position = 0
             else:
