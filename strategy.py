@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_Weekly_Pivot_Breakout_Trend_Filter"
-timeframe = "1d"
+name = "6h_ElderRay_BullBearPower_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,59 +17,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data once for pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Get daily data once for Elder Ray and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Weekly high, low, close for pivot calculation
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Daily high, low, close
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate weekly pivot and support/resistance levels
-    pivot = (high_1w + low_1w + close_1w) / 3
-    r1 = 2 * pivot - low_1w
-    s1 = 2 * pivot - high_1w
-    r2 = pivot + (high_1w - low_1w)
-    s2 = pivot - (high_1w - low_1w)
+    # Calculate EMA13 for Elder Ray
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Align weekly pivot levels to daily timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    # Elder Ray components
+    bull_power_1d = high_1d - ema13_1d
+    bear_power_1d = low_1d - ema13_1d
     
-    # Weekly trend filter: EMA34
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_1w = (close_1w > ema34_1w).astype(float)
-    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
+    # Align Elder Ray to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
     
-    # Daily volume spike: current volume > 1.5 * 20-day average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma20 * 1.5)
+    # Daily trend filter: EMA34
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_1d = (close_1d > ema34_1d).astype(float)
+    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    
+    # Daily volume spike: current volume > 2.0 * 20-day average
+    vol_ma20d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume_1d > (vol_ma20d * 2.0)
+    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # warmup for indicators
+    start_idx = 50  # warmup for all indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(trend_1w_aligned[i])):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+            np.isnan(trend_1d_aligned[i]) or np.isnan(vol_spike_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: price breaks above R1 with volume spike and weekly uptrend
-            long_cond = (close[i] > r1_aligned[i] and vol_spike[i] and trend_1w_aligned[i] > 0.5)
+            # Long entry: bull power > 0 (strong buying) with volume spike and daily uptrend
+            long_cond = (bull_power_aligned[i] > 0 and vol_spike_aligned[i] and trend_1d_aligned[i] > 0.5)
             
-            # Short entry: price breaks below S1 with volume spike and weekly downtrend
-            short_cond = (close[i] < s1_aligned[i] and vol_spike[i] and trend_1w_aligned[i] < 0.5)
+            # Short entry: bear power < 0 (strong selling) with volume spike and daily downtrend
+            short_cond = (bear_power_aligned[i] < 0 and vol_spike_aligned[i] and trend_1d_aligned[i] < 0.5)
             
             if long_cond:
                 signals[i] = 0.25
@@ -78,15 +77,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price closes below pivot (mean reversion)
-            if close[i] < pivot_aligned[i]:
+            # Long exit: bull power turns negative (buying pressure fading)
+            if bull_power_aligned[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price closes above pivot (mean reversion)
-            if close[i] > pivot_aligned[i]:
+            # Short exit: bear power turns positive (selling pressure fading)
+            if bear_power_aligned[i] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -94,11 +93,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Weekly pivot breakout with volume confirmation and trend filter.
-# Uses weekly pivot levels (R1/S1) as key support/resistance.
-# Long when price breaks above weekly R1 with volume spike and weekly uptrend.
-# Short when price breaks below weekly S1 with volume spike and weekly downtrend.
-# Exits when price returns to weekly pivot (mean reversion).
-# Weekly timeframe reduces noise, works in both bull (breakouts) and bear (mean reversion) markets.
-# Volume spike ensures momentum confirmation, reducing false breakouts.
-# Target: 15-25 trades/year to minimize fee decay while capturing significant weekly moves.
+# Hypothesis: Elder Ray (Bull/Bear Power) on 6H with volume confirmation and daily trend filter.
+# Bull Power > 0 indicates buying strength (high > EMA13), Bear Power < 0 indicates selling strength (low < EMA13).
+# Works in bull markets (buying pressure drives prices up) and bear markets (selling pressure drives prices down).
+# Daily EMA34 ensures alignment with longer-term trend, reducing counter-trend trades.
+# Volume spike filter (2.0x 20-day average) ensures momentum confirmation.
+# Target: 15-35 trades/year to minimize fee decay while capturing strong momentum moves.
