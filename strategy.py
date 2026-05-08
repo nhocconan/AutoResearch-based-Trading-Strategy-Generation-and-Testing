@@ -1,10 +1,16 @@
+# 6h_AtrBreakout_1dTrend_VolumeFilter
+# Hypothesis: 6-hour ATR breakouts aligned with daily trend and volume spikes capture strong momentum moves
+# in both bull and bear markets. The strategy uses a volatility-based breakout (ATR-based channel) to
+# enter during expansion phases, with trend filter ensuring directionality and volume confirmation
+# reducing false breakouts. Targets 50-150 total trades over 4 years to minimize fee drag.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_TRIX_VolumeSpike_ChopFilter"
-timeframe = "4h"
+name = "6h_AtrBreakout_1dTrend_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,60 +23,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate TRIX on close (12-period EMA of EMA of EMA)
-    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean()
-    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
-    trix = ema3.pct_change() * 100  # percentage change
-    trix_values = trix.values
-    
-    # Volume spike: current volume > 2.0x 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma20)
-    
-    # Choppiness Index (14-period) for regime filter
-    atr = np.abs(np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1)))))
-    atr[0] = np.abs(high[0] - low[0])  # first value
-    tr_sum = pd.Series(atr).rolling(window=14, min_periods=14).sum()
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(tr_sum / (np.log14(14) * (highest_high - lowest_low))) / np.log10(14)
-    # Handle division by zero and invalid values
-    chop = np.where((highest_high - lowest_low) != 0, chop, 50.0)
-    chop = np.nan_to_num(chop, nan=50.0)
-    
-    # Daily trend filter using EMA34
+    # Daily data for trend filter and ATR calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    
+    # Calculate daily ATR(14) for volatility-based breakout channels
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = np.zeros(len(close_1d))
+    atr_1d[0] = np.nan
+    if len(tr) > 0:
+        atr_1d[1] = np.mean(tr[:1]) if len(tr) >= 1 else np.nan
+        for i in range(2, len(tr)+1):
+            atr_1d[i] = (atr_1d[i-1] * 13 + tr[i-1]) / 14
+    
+    # Calculate daily EMA(34) for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align daily indicators to 6h timeframe
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate 6-period high/low for breakout channels (using 6h data)
+    high_max6 = pd.Series(high).rolling(window=6, min_periods=6).max().values
+    low_min6 = pd.Series(low).rolling(window=6, min_periods=6).min().values
+    
+    # Volume spike: current volume > 1.8x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.8 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = max(50, 6)  # Ensure sufficient data for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(trix_values[i]) or np.isnan(volume_spike[i]) or 
-            np.isnan(chop[i]) or np.isnan(ema_34_1d_aligned[i])):
+        if (np.isnan(atr_1d_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(high_max6[i]) or np.isnan(low_min6[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Calculate dynamic breakout levels using daily ATR
+        upper_break = high_max6[i] + (0.5 * atr_1d_aligned[i])
+        lower_break = low_min6[i] - (0.5 * atr_1d_aligned[i])
+        
         if position == 0:
-            # Long: TRIX crosses above zero with volume spike and chop < 61.8 (trending) and daily uptrend
-            long_cond = (trix_values[i] > 0 and trix_values[i-1] <= 0 and
-                        volume_spike[i] and chop[i] < 61.8 and
-                        ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1])
+            # Long: price breaks above upper channel with daily uptrend + volume spike
+            long_cond = (close[i] > upper_break and 
+                        ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and
+                        volume_spike[i])
             
-            # Short: TRIX crosses below zero with volume spike and chop < 61.8 (trending) and daily downtrend
-            short_cond = (trix_values[i] < 0 and trix_values[i-1] >= 0 and
-                         volume_spike[i] and chop[i] < 61.8 and
-                         ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1])
+            # Short: price breaks below lower channel with daily downtrend + volume spike
+            short_cond = (close[i] < lower_break and 
+                         ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and
+                         volume_spike[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -79,21 +95,18 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: TRIX crosses below zero
-            if trix_values[i] < 0 and trix_values[i-1] >= 0:
+            # Long exit: price breaks below lower channel (mean reversion)
+            if close[i] < lower_break:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: TRIX crosses above zero
-            if trix_values[i] > 0 and trix_values[i-1] <= 0:
+            # Short exit: price breaks above upper channel (mean reversion)
+            if close[i] > upper_break:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
-
-def np_log10(x):
-    return np.log(x) / np.log(10)
