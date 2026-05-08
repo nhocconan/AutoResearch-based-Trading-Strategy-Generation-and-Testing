@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R with weekly trend filter and volume confirmation
-# Williams %R identifies overbought/oversold conditions. Weekly trend provides bias,
-# volume spike confirms momentum. Works in bull/bear by following weekly trend while
-# fading extremes. Target: 20-40 trades/year.
+# Hypothesis: 12h Donchian Channel Breakout with 1d EMA Trend Filter and Volume Confirmation
+# Uses daily EMA50 for trend bias, 12h Donchian breakout for entry, and volume > 1.5x 20-period average for confirmation.
+# Designed to capture strong trending moves while avoiding false breakouts in low-volume conditions.
+# Works in both bull and bear markets by following the daily trend direction.
+# Target: 25-40 trades/year (~100-160 total over 4 years).
 
-name = "6h_WilliamsR_WeeklyTrend_Volume"
-timeframe = "6h"
+name = "12h_Donchian_1dEMA50_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,41 +23,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 50:
+    # Get daily data for EMA trend filter
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 50:
         return np.zeros(n)
     
-    # Calculate weekly EMA50 for trend filter
-    close_weekly = df_weekly['close'].values
-    ema50_weekly = np.full(len(close_weekly), np.nan)
-    if len(close_weekly) >= 50:
-        ema50_weekly[49] = np.mean(close_weekly[:50])
-        for i in range(50, len(close_weekly)):
-            ema50_weekly[i] = (close_weekly[i] * 2 + ema50_weekly[i-1] * 48) / 50
+    # Calculate daily EMA50 for trend filter
+    close_daily = df_daily['close'].values
+    ema50_daily = np.full(len(close_daily), np.nan)
+    if len(close_daily) >= 50:
+        ema50_daily[49] = np.mean(close_daily[:50])
+        for i in range(50, len(close_daily)):
+            ema50_daily[i] = (close_daily[i] * 2 + ema50_daily[i-1] * 48) / 50
     
-    # Calculate 6-day Williams %R (14-period)
-    highest_high_14 = np.full(len(high), np.nan)
-    lowest_low_14 = np.full(len(low), np.nan)
-    williams_r = np.full(len(close), np.nan)
+    # Calculate daily volume average for volume confirmation
+    vol_daily = df_daily['volume'].values
+    vol_avg_20_daily = np.full(len(vol_daily), np.nan)
+    if len(vol_daily) >= 20:
+        vol_avg_20_daily[19] = np.mean(vol_daily[:20])
+        for i in range(20, len(vol_daily)):
+            vol_avg_20_daily[i] = (vol_daily[i] + vol_avg_20_daily[i-1] * 19) / 20
     
-    if len(high) >= 14:
-        for i in range(14, len(high)):
-            highest_high_14[i] = np.max(high[i-13:i+1])
-            lowest_low_14[i] = np.min(low[i-13:i+1])
-            if highest_high_14[i] > lowest_low_14[i]:
-                williams_r[i] = -100 * (highest_high_14[i] - close[i]) / (highest_high_14[i] - lowest_low_14[i])
-            else:
-                williams_r[i] = -50  # neutral
+    # Calculate 12h Donchian channels (20-period)
+    highest_high_20 = np.full(n, np.nan)
+    lowest_low_20 = np.full(n, np.nan)
+    if n >= 20:
+        for i in range(20, n):
+            highest_high_20[i] = np.max(high[i-20:i])
+            lowest_low_20[i] = np.min(low[i-20:i])
     
-    # Calculate 6-day volume average (20-period)
-    vol_avg_20 = np.full(len(volume), np.nan)
-    if len(volume) >= 20:
-        for i in range(20, len(volume)):
-            vol_avg_20[i] = np.mean(volume[i-20:i])
-    
-    # Align weekly indicators to 6h timeframe
-    ema50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema50_weekly)
+    # Align daily indicators to 12h timeframe
+    ema50_daily_aligned = align_htf_to_ltf(prices, df_daily, ema50_daily)
+    vol_avg_20_daily_aligned = align_htf_to_ltf(prices, df_daily, vol_avg_20_daily)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -65,7 +63,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20, 14)  # warmup for indicators
+    start_idx = max(50, 20, 20)  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if outside trading session
@@ -76,34 +74,30 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(ema50_weekly_aligned[i]) or np.isnan(williams_r[i]) or
-            np.isnan(vol_avg_20[i])):
+        if (np.isnan(ema50_daily_aligned[i]) or np.isnan(vol_avg_20_daily_aligned[i]) or
+            np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume[i] > 1.5 * vol_avg_20[i]
+        # Volume confirmation: current 12h volume > 1.5x 20-period average of daily volume
+        vol_confirm = False
+        if not np.isnan(vol_avg_20_daily_aligned[i]):
+            vol_confirm = volume[i] > 1.5 * vol_avg_20_daily_aligned[i]
         
         if position == 0:
-            # Look for entry: fade extremes in direction of weekly trend
-            # Williams %R < -80 = oversold, > -20 = overbought
-            oversold = williams_r[i] < -80
-            overbought = williams_r[i] > -20
-            
-            # Long when oversold and weekly uptrend
+            # Look for entry: Donchian breakout in direction of daily EMA trend with volume confirmation
             long_condition = (
-                oversold and
-                close[i] > ema50_weekly_aligned[i] and   # weekly uptrend
-                vol_confirm
+                close[i] > highest_high_20[i] and   # price breaks above 20-period high
+                close[i] > ema50_daily_aligned[i] and   # price above daily EMA50 (bullish bias)
+                vol_confirm                           # volume confirmation
             )
             
-            # Short when overbought and weekly downtrend
             short_condition = (
-                overbought and
-                close[i] < ema50_weekly_aligned[i] and   # weekly downtrend
-                vol_confirm
+                close[i] < lowest_low_20[i] and    # price breaks below 20-period low
+                close[i] < ema50_daily_aligned[i] and   # price below daily EMA50 (bearish bias)
+                vol_confirm                           # volume confirmation
             )
             
             if long_condition:
@@ -113,15 +107,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: overbought or trend reversal
-            if williams_r[i] > -20 or close[i] < ema50_weekly_aligned[i]:
+            # Exit long: price returns below Donchian low or opposite Donchian breakout
+            if close[i] < lowest_low_20[i] or close[i] < ema50_daily_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: oversold or trend reversal
-            if williams_r[i] < -80 or close[i] > ema50_weekly_aligned[i]:
+            # Exit short: price returns above Donchian high or opposite Donchian breakout
+            if close[i] > highest_high_20[i] or close[i] > ema50_daily_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
