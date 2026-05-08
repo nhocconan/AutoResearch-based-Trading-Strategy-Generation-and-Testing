@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume_v3"
-timeframe = "4h"
+name = "1h_Camarilla_R3_S3_Breakout_1dTrend_Volume_30mFilter"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -44,13 +44,21 @@ def generate_signals(prices):
         R3[i] = C + (range_val * 1.1 / 2)
         S3[i] = C - (range_val * 1.1 / 2)
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 1h timeframe
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
-    # Volume spike: current volume > 2.5x 20-period average (stricter)
+    # Volume spike: current volume > 2.0x 20-period average (stricter)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.5 * vol_ma20)
+    volume_spike = volume > (2.0 * vol_ma20)
+    
+    # 30m trend filter (for higher timeframe confirmation)
+    df_30m = get_htf_data(prices, '30m')
+    if len(df_30m) < 20:
+        return np.zeros(n)
+    close_30m = df_30m['close'].values
+    ema_20_30m = pd.Series(close_30m).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_30m_aligned = align_htf_to_ltf(prices, df_30m, ema_20_30m)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -60,28 +68,31 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(R3_aligned[i]) or 
-            np.isnan(S3_aligned[i]) or np.isnan(volume_spike[i])):
+            np.isnan(S3_aligned[i]) or np.isnan(volume_spike[i]) or 
+            np.isnan(ema_20_30m_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R3, daily uptrend, volume spike
+            # Long: price breaks above R3, daily uptrend, 30m uptrend, volume spike
             long_cond = (close[i] > R3_aligned[i] and 
                         ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and
+                        ema_20_30m_aligned[i] > ema_20_30m_aligned[i-1] and
                         volume_spike[i])
             
-            # Short: price breaks below S3, daily downtrend, volume spike
+            # Short: price breaks below S3, daily downtrend, 30m downtrend, volume spike
             short_cond = (close[i] < S3_aligned[i] and 
                          ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and
+                         ema_20_30m_aligned[i] < ema_20_30m_aligned[i-1] and
                          volume_spike[i])
             
             if long_cond:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             elif short_cond:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
             # Long exit: price crosses below S3
@@ -89,13 +100,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
             # Short exit: price crosses above R3
             if close[i] > R3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
