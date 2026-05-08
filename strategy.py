@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 12h Donchian breakout with volume confirmation and 12h EMA trend filter.
-# Designed for low trade frequency (15-25/year) to avoid fee drag. Uses 12h structure for trend direction,
-# 4h volume surge for momentum confirmation, and 12h EMA for trend alignment.
-# Works in bull/bear markets by following higher timeframe trends with strict entry filters.
+# Hypothesis: 12h strategy using daily Camarilla pivot levels with volume confirmation and daily ADX trend filter.
+# Trades on breakouts of key Camarilla levels (H3/L3) with volume spike, filtered by daily trend direction.
+# Designed for low trade frequency (15-25/year) to avoid fee drag. Uses daily structure for trend and levels,
+# 12h volume surge for momentum confirmation. Works in bull/bear by following higher timeframe trends.
 
-name = "4h_12hDonchian_VolumeTrend"
-timeframe = "4h"
+name = "12h_Camarilla_H3L3_VolumeTrend"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,52 +22,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Donchian channel and EMA
+    # Get daily data for Camarilla pivots and ADX
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate daily Camarilla levels (based on previous day)
+    # H3 = close + 1.1*(high - low)
+    # L3 = close - 1.1*(high - low)
+    # Using previous day's values to avoid look-ahead
+    range_1d = high_1d - low_1d
+    camarilla_h3 = close_1d + 1.1 * range_1d
+    camarilla_l3 = close_1d - 1.1 * range_1d
+    
+    # Shift by 1 to use previous day's levels (avoid look-ahead)
+    camarilla_h3 = np.roll(camarilla_h3, 1)
+    camarilla_l3 = np.roll(camarilla_l3, 1)
+    camarilla_h3[0] = np.nan  # First value invalid
+    camarilla_l3[0] = np.nan
+    
+    # Calculate daily ADX (14-period) for trend strength
+    def true_range(high, low, close_prev):
+        tr1 = high - low
+        tr2 = np.abs(high - close_prev)
+        tr3 = np.abs(low - close_prev)
+        return np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    close_prev_1d = np.roll(close_1d, 1)
+    close_prev_1d[0] = close_1d[0]  # First value
+    tr = true_range(high_1d, low_1d, close_prev_1d)
+    
+    # Directional movement
+    up_move = np.diff(high_1d, prepend=high_1d[0])
+    down_move = -np.diff(low_1d, prepend=low_1d[0])
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smooth TR, +DM, -DM
+    def rma(arr, period):
+        """Wilder's smoothing (RMA)"""
+        result = np.full_like(arr, np.nan)
+        if len(arr) >= period:
+            result[period-1] = np.nansum(arr[:period])
+            for i in range(period, len(arr)):
+                result[i] = result[i-1] - (result[i-1] / period) + arr[i]
+        return result
+    
+    atr = rma(tr, 14)
+    plus_di = 100 * rma(plus_dm, 14) / atr
+    minus_di = 100 * rma(minus_dm, 14) / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = rma(dx, 14)
+    
+    # Align daily indicators to 12h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Get 12h data for volume
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) < 30:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Calculate Donchian channel (20-period)
-    def rolling_max(arr, window):
-        res = np.full_like(arr, np.nan)
-        for i in range(window - 1, len(arr)):
-            res[i] = np.max(arr[i - window + 1:i + 1])
-        return res
+    # Volume spike: 1.5x 20-period EMA
+    vol_ema = pd.Series(volume_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_spike = volume_12h > (vol_ema * 1.5)
     
-    def rolling_min(arr, window):
-        res = np.full_like(arr, np.nan)
-        for i in range(window - 1, len(arr)):
-            res[i] = np.min(arr[i - window + 1:i + 1])
-        return res
-    
-    donchian_high = rolling_max(high_12h, 20)
-    donchian_low = rolling_min(low_12h, 20)
-    
-    # Calculate 12h EMA (50-period)
-    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align 12h indicators to 4h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
-    
-    # Get 4h data for volume
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
-    
-    volume_4h = df_4h['volume'].values
-    
-    # Volume spike: 2x 20-period EMA
-    vol_ema = pd.Series(volume_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike = volume_4h > (vol_ema * 2.0)
-    
-    # Align volume spike to 4h timeframe (already 4h, but ensure alignment)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_4h, vol_spike)
+    # Align volume spike to 12h timeframe
+    vol_spike_aligned = align_htf_to_ltf(prices, df_12h, vol_spike)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -76,34 +104,37 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema_12h_aligned[i]) or 
+        if (np.isnan(camarilla_h3_aligned[i]) or 
+            np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or 
             np.isnan(vol_spike_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        if position == 0:
-            # Enter long: price breaks above 12h Donchian high + volume surge + above 12h EMA
-            if close[i] > donchian_high_aligned[i] and vol_spike_aligned[i] and close[i] > ema_12h_aligned[i]:
+        # Trend filter: ADX > 25 for trending market
+        is_trending = adx_aligned[i] > 25
+        
+        if position == 0 and is_trending:
+            # Enter long: price breaks above H3 + volume spike
+            if close[i] > camarilla_h3_aligned[i] and vol_spike_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below 12h Donchian low + volume surge + below 12h EMA
-            elif close[i] < donchian_low_aligned[i] and vol_spike_aligned[i] and close[i] < ema_12h_aligned[i]:
+            # Enter short: price breaks below L3 + volume spike
+            elif close[i] < camarilla_l3_aligned[i] and vol_spike_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below 12h Donchian low
-            if close[i] < donchian_low_aligned[i]:
+            # Exit long: price breaks below L3 or ADX weakens
+            if close[i] < camarilla_l3_aligned[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above 12h Donchian high
-            if close[i] > donchian_high_aligned[i]:
+            # Exit short: price breaks above H3 or ADX weakens
+            if close[i] > camarilla_h3_aligned[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
