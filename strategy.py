@@ -1,12 +1,15 @@
-# 3/4/2025
-# Hypothesis: 6h strategy combining 1d Ichimoku cloud filter with 6h Tenkan-Kijun cross and volume confirmation.
-# Uses Ichimoku cloud from daily timeframe for trend direction (price above/below cloud),
-# Tenkan-Kijun crossover on 6h for entry timing, and volume spike for momentum confirmation.
-# Designed for low trade frequency (~20-40/year) to avoid fee drag while capturing trends in both bull and bear markets.
-# Ichimoku cloud acts as dynamic support/resistance, reducing whipsaws in ranging markets.
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Ichimoku_TK_Cross_Volume"
-timeframe = "6h"
+# Hypothesis: 12h strategy using weekly Donchian breakout with volume confirmation and 12h RSI filter.
+# Designed for low trade frequency (<25/year) to avoid fee drag. Uses weekly structure for trend direction,
+# 12h volume surge for momentum confirmation, and RSI to avoid overextended entries.
+# Works in bull/bear markets by following higher timeframe trends with strict entry filters.
+
+name = "12h_WeeklyDonchian_VolumeRSI"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,17 +22,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Ichimoku cloud
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:  # Need at least 52 periods for Senkou Span B
+    # Get weekly data for Donchian channel
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Ichimoku components
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    # Calculate Donchian channel (20-period)
     def rolling_max(arr, window):
         res = np.full_like(arr, np.nan)
         for i in range(window - 1, len(arr)):
@@ -42,34 +44,49 @@ def generate_signals(prices):
             res[i] = np.min(arr[i - window + 1:i + 1])
         return res
     
-    tenkan_sen = (rolling_max(high_1d, 9) + rolling_min(low_1d, 9)) / 2
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    kijun_sen = (rolling_max(high_1d, 26) + rolling_min(low_1d, 26)) / 2
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
-    senkou_span_a = (tenkan_sen + kijun_sen) / 2
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    senkou_span_b = (rolling_max(high_1d, 52) + rolling_min(low_1d, 52)) / 2
+    donchian_high = rolling_max(high_1w, 20)
+    donchian_low = rolling_min(low_1w, 20)
     
-    # Shift Senkou spans forward by 26 periods
-    senkou_span_a_shifted = np.roll(senkou_span_a, 26)
-    senkou_span_b_shifted = np.roll(senkou_span_b, 26)
-    senkou_span_a_shifted[:26] = np.nan
-    senkou_span_b_shifted[:26] = np.nan
+    # Align Donchian levels to 12h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
     
-    # Align Ichimoku components to 6h timeframe
-    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a_shifted)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b_shifted)
+    # Get 12h data for volume and RSI
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
+        return np.zeros(n)
     
-    # Get 6h data for volume and TK cross
+    volume_12h = df_12h['volume'].values
+    close_12h = df_12h['close'].values
+    
     # Volume spike: 2x 20-period EMA
-    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike = volume > (vol_ema * 2.0)
+    vol_ema = pd.Series(volume_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_spike = volume_12h > (vol_ema * 2.0)
     
-    # TK cross signals
-    tk_cross_up = (tenkan_sen_aligned > kijun_sen_aligned) & (tenkan_sen_aligned <= kijun_sen_aligned)
-    tk_cross_down = (tenkan_sen_aligned < kijun_sen_aligned) & (tenkan_sen_aligned >= kijun_sen_aligned)
+    # RSI (14-period)
+    def calculate_rsi(prices, period=14):
+        delta = np.diff(prices, prepend=prices[0])
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.zeros_like(gain)
+        avg_loss = np.zeros_like(loss)
+        avg_gain[period] = np.mean(gain[1:period+1])
+        avg_loss[period] = np.mean(loss[1:period+1])
+        
+        for i in range(period + 1, len(gain)):
+            avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i]) / period
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+    
+    rsi = calculate_rsi(close_12h, 14)
+    
+    # Align volume spike and RSI to 12h timeframe (already 12h, but ensure alignment)
+    vol_spike_aligned = align_htf_to_ltf(prices, df_12h, vol_spike)
+    rsi_aligned = align_htf_to_ltf(prices, df_12h, rsi)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -78,42 +95,34 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(tenkan_sen_aligned[i]) or 
-            np.isnan(kijun_sen_aligned[i]) or 
-            np.isnan(senkou_span_a_aligned[i]) or 
-            np.isnan(senkou_span_b_aligned[i]) or 
-            np.isnan(vol_spike[i])):
+        if (np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(vol_spike_aligned[i]) or 
+            np.isnan(rsi_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine cloud color and position
-        green_cloud = senkou_span_a_aligned[i] > senkou_span_b_aligned[i]
-        red_cloud = senkou_span_a_aligned[i] < senkou_span_b_aligned[i]
-        above_cloud = close[i] > max(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
-        below_cloud = close[i] < min(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
-        in_cloud = not above_cloud and not below_cloud
-        
         if position == 0:
-            # Enter long: price above green cloud + TK cross up + volume spike
-            if above_cloud and green_cloud and tk_cross_up[i] and vol_spike[i]:
+            # Enter long: price breaks above weekly Donchian high + volume surge + RSI not overbought
+            if close[i] > donchian_high_aligned[i] and vol_spike_aligned[i] and rsi_aligned[i] < 70:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price below red cloud + TK cross down + volume spike
-            elif below_cloud and red_cloud and tk_cross_down[i] and vol_spike[i]:
+            # Enter short: price breaks below weekly Donchian low + volume surge + RSI not oversold
+            elif close[i] < donchian_low_aligned[i] and vol_spike_aligned[i] and rsi_aligned[i] > 30:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below cloud or TK cross down
-            if below_cloud or tk_cross_down[i]:
+            # Exit long: price breaks below weekly Donchian low or RSI overbought
+            if close[i] < donchian_low_aligned[i] or rsi_aligned[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above cloud or TK cross up
-            if above_cloud or tk_cross_up[i]:
+            # Exit short: price breaks above weekly Donchian high or RSI oversold
+            if close[i] > donchian_high_aligned[i] or rsi_aligned[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
