@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Weekly Bollinger Band Breakout with 1w Trend and Volume Filter
-# - Bollinger Bands on weekly timeframe (20, 2.0) define dynamic support/resistance
-# - Breakout above upper band or below lower band with weekly trend alignment and volume spike
-# - Weekly trend filter avoids counter-trend trades in both bull and bear markets
-# - Target: 10-25 trades/year to minimize fee drag on daily timeframe
-# - Works in bull/bear by using weekly trend filter to avoid counter-trend trades
+# Hypothesis: 6h Elder Ray Bull/Bear Power with 1d Trend and Volume Spike
+# - Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+# - Go long when Bull Power > 0 and Bear Power > previous (bullish momentum)
+# - Go short when Bear Power < 0 and Bull Power < previous (bearish momentum)
+# - Filter by 1d EMA34 trend to avoid counter-trend trades
+# - Require volume spike (>2x 20-period average) for confirmation
+# - Works in bull/bear markets by aligning with higher timeframe trend
 
-name = "1d_Weekly_BB_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "6h_ElderRay_Power_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,31 +25,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for Bollinger Bands
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    volume_1w = df_1w['volume'].values
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Bollinger Bands (20, 2.0) on weekly close
-    sma_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + (2.0 * std_20)
-    lower_bb = sma_20 - (2.0 * std_20)
+    # EMA13 for Elder Ray calculation (6h timeframe)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Weekly trend: EMA 50 slope
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Elder Ray components
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    # Align Bollinger Bands and EMA to daily timeframe (wait for weekly bar to close)
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1w, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1w, lower_bb)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Volume spike: current daily volume > 2.0x 20-day average
+    # Volume spike: current volume > 2.0x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma20)
     
@@ -59,22 +52,24 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above upper BB + weekly uptrend + volume spike
-            long_cond = (close[i] > upper_bb_aligned[i] and 
-                        ema_50_1w_aligned[i] > ema_50_1w_aligned[i-1] and
+            # Long: Bull Power > 0, Bull Power rising, 1d uptrend, volume spike
+            long_cond = (bull_power[i] > 0 and 
+                        bull_power[i] > bull_power[i-1] and
+                        ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and
                         volume_spike[i])
             
-            # Short: price breaks below lower BB + weekly downtrend + volume spike
-            short_cond = (close[i] < lower_bb_aligned[i] and 
-                         ema_50_1w_aligned[i] < ema_50_1w_aligned[i-1] and
+            # Short: Bear Power < 0, Bear Power falling, 1d downtrend, volume spike
+            short_cond = (bear_power[i] < 0 and 
+                         bear_power[i] < bear_power[i-1] and
+                         ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and
                          volume_spike[i])
             
             if long_cond:
@@ -84,15 +79,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below lower BB (mean reversion signal)
-            if close[i] < lower_bb_aligned[i]:
+            # Long exit: Bear Power > 0 (bulls losing control) or Bear Power rising
+            if bear_power[i] > 0 or bear_power[i] > bear_power[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above upper BB (mean reversion signal)
-            if close[i] > upper_bb_aligned[i]:
+            # Short exit: Bull Power < 0 (bears losing control) or Bull Power falling
+            if bull_power[i] < 0 or bull_power[i] < bull_power[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
