@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d trend filter and volume confirmation
-# Elder Ray uses EMA13: Bull Power = High - EMA13, Bear Power = Low - EMA13
-# Long when Bull Power > 0 and Bear Power rising (less negative) with 1d uptrend and volume spike
-# Short when Bear Power < 0 and Bull Power falling (less positive) with 1d downtrend and volume spike
-# Designed for low-frequency, high-conviction trades to work in both bull and bear markets via trend alignment.
+# Hypothesis: 12h Williams Fractal breakout with daily trend filter and volume confirmation
+# Uses daily Williams Fractals for swing high/low detection on 12h timeframe.
+# Requires 1d EMA34 trend alignment and volume spike to avoid false breakouts.
+# Designed for low-frequency, high-conviction trades to minimize fee drag.
+# Williams Fractals provide strong support/resistance levels that work in both trending and ranging markets.
 
-name = "6h_ElderRay_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_WilliamsFractal_1dEMA34_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,18 +23,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate EMA13 for Elder Ray
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
-    
-    # Get 1d data for trend filter (EMA34)
+    # Get 1d data for Williams Fractals and EMA34
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    
+    # Calculate Williams Fractals (requires 2-bar lookback/forward for confirmation)
+    # Bearish fractal: high[n-2] < high[n-1] > high[n] and high[n] > high[n+1] and high[n] > high[n+2]
+    # Bullish fractal: low[n-2] > low[n-1] < low[n] and low[n] < low[n+1] and low[n] < low[n+2]
+    n1d = len(high_1d)
+    bearish_fractal = np.zeros(n1d, dtype=bool)
+    bullish_fractal = np.zeros(n1d, dtype=bool)
+    
+    for i in range(2, n1d - 2):
+        # Bearish fractal (sell signal)
+        if (high_1d[i-2] < high_1d[i-1] and 
+            high_1d[i-1] < high_1d[i] and 
+            high_1d[i] > high_1d[i+1] and 
+            high_1d[i] > high_1d[i+2]):
+            bearish_fractal[i] = True
+        
+        # Bullish fractal (buy signal)
+        if (low_1d[i-2] > low_1d[i-1] and 
+            low_1d[i-1] > low_1d[i] and 
+            low_1d[i] < low_1d[i+1] and 
+            low_1d[i] < low_1d[i+2]):
+            bullish_fractal[i] = True
+    
+    # Convert to price levels (use the fractal high/low as support/resistance)
+    bearish_level = np.where(bearish_fractal, high_1d, np.nan)
+    bullish_level = np.where(bullish_fractal, low_1d, np.nan)
+    
+    # Forward fill to maintain the level until next fractal
+    bearish_level_series = pd.Series(bearish_level)
+    bullish_level_series = pd.Series(bullish_level)
+    bearish_level_ffill = bearish_level_series.ffill().values
+    bullish_level_ffill = bullish_level_series.ffill().values
+    
+    # Calculate daily EMA34 for trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align 1d data to 12h timeframe
+    # Williams Fractals need 2 extra bars for confirmation (as per Williams theory)
+    bearish_level_aligned = align_htf_to_ltf(prices, df_1d, bearish_level_ffill, additional_delay_bars=2)
+    bullish_level_aligned = align_htf_to_ltf(prices, df_1d, bullish_level_ffill, additional_delay_bars=2)
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Volume spike (2x 20-period EMA)
@@ -44,11 +80,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Ensure EMA34 has enough data
+    start_idx = 50  # Ensure EMA34 has enough data
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+        if (np.isnan(bearish_level_aligned[i]) or np.isnan(bullish_level_aligned[i]) or 
             np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -56,29 +92,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Enter long: Bull Power > 0, Bear Power rising (less negative), 1d uptrend, volume spike
-            if (bull_power[i] > 0 and 
-                bear_power[i] > bear_power[i-1] and 
+            # Enter long: price breaks above bearish fractal level (resistance) with 1d uptrend and volume spike
+            if (close[i] > bearish_level_aligned[i] and 
                 close[i] > ema34_1d_aligned[i] and vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Bear Power < 0, Bull Power falling (less positive), 1d downtrend, volume spike
-            elif (bear_power[i] < 0 and 
-                  bull_power[i] < bull_power[i-1] and 
+            # Enter short: price breaks below bullish fractal level (support) with 1d downtrend and volume spike
+            elif (close[i] < bullish_level_aligned[i] and 
                   close[i] < ema34_1d_aligned[i] and vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Bull Power <= 0 or trend fails
-            if (bull_power[i] <= 0 or 
+            # Exit long: price breaks below bullish fractal level (support) or trend fails
+            if (close[i] < bullish_level_aligned[i] or 
                 close[i] < ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Bear Power >= 0 or trend fails
-            if (bear_power[i] >= 0 or 
+            # Exit short: price breaks above bearish fractal level (resistance) or trend fails
+            if (close[i] > bearish_level_aligned[i] or 
                 close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
