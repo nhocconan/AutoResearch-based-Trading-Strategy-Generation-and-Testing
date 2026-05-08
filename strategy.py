@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1-day EMA(34) as trend filter, 4-hour Donchian(20) breakout, and volume confirmation.
+# Hypothesis: 4h strategy using 1d EMA(34) as trend filter, 4h Donchian(20) breakout, and volume confirmation.
 # Long when 1d EMA > price (bullish trend), price breaks above 4h Donchian upper band, volume > 1.5x average.
 # Short when 1d EMA < price (bearish trend), price breaks below 4h Donchian lower band, volume > 1.5x average.
-# Uses fixed position size 0.25 to limit risk and reduce trade frequency.
+# Fixed position size of 0.25 to limit overtrading and manage drawdown. Target: 20-50 trades/year.
 # Designed to work in bull (trend follow) and bear (trend still exists in downtrends) by using daily trend filter.
-# Target: 20-50 trades/year per symbol to avoid fee drag.
 
 name = "4h_1dEMA34_4hDonchian_Volume"
 timeframe = "4h"
@@ -41,16 +40,15 @@ def generate_signals(prices):
     
     # 1-day EMA(34)
     ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_bullish = close > ema_1d[-1] if len(ema_1d) > 0 else False  # Will be replaced by aligned version
     
-    # 4-hour Donchian(20) bands
+    # 4h Donchian(20) bands
     donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
     # Align 1-day EMA to 4h (no extra delay needed for EMA as it's based on closed daily bar)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    ema_bullish_aligned = ema_1d_aligned > close  # Bullish when price below daily EMA? Wait: EMA > price means bullish trend? Actually, if EMA(34) > price, it's bearish. Let's correct.
-    # Correction: In an uptrend, price > EMA. So bullish when price > EMA.
-    ema_bullish_aligned = close > ema_1d_aligned  # Bullish when price above daily EMA
+    ema_bullish_aligned = ema_1d_aligned < close  # Bullish when price above daily EMA
     
     # Volume average (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
