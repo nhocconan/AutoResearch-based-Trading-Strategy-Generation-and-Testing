@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy combining 1-day Donchian breakout with volume confirmation and 1-day ADX trend filter.
-# Uses 1-day Donchian channels (20-period) for trend structure, enters on breakouts with volume confirmation.
-# Filters trades using 1-day ADX > 25 to ensure trending market conditions.
-# Exits when price reverses to the opposite Donchian channel or ADX falls below 20.
-# Designed for low trade frequency (20-40/year) to minimize fee drag while capturing major trends.
-# Works in both bull and bear markets by capturing breakouts in the direction of the 1-day trend.
+# Hypothesis: 4h strategy using 1-day Williams %R with volume spike and choppiness regime filter.
+# Williams %R identifies overbought/oversold conditions on daily timeframe.
+# Entry when Williams %R crosses below -80 (oversold) or above -20 (overbought) with volume confirmation.
+# Choppiness index (14) > 61.8 indicates ranging market for mean reversion trades.
+# Designed for low trade frequency (20-30/year) to avoid fee drag. Works in both trending and ranging markets.
 
-name = "4h_1dDonchian_Breakout_Volume_ADX"
+name = "4h_1dWilliamsR_Volume_Chop"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,7 +23,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian channels and ADX
+    # Get 1d data for Williams %R and Choppiness Index
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -33,107 +32,84 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1-day Donchian channels (20-period)
-    donchian_high = np.full_like(high_1d, np.nan)
-    donchian_low = np.full_like(low_1d, np.nan)
+    # Calculate 1-day Williams %R (14-period)
+    highest_high = np.maximum.accumulate(high_1d)
+    lowest_low = np.minimum.accumulate(low_1d)
+    wr = np.full_like(close_1d, np.nan)
+    for i in range(13, len(close_1d)):
+        hh = highest_high[i]
+        ll = lowest_low[i]
+        if hh != ll:
+            wr[i] = -100 * (hh - close_1d[i]) / (hh - ll)
+        else:
+            wr[i] = -50  # Avoid division by zero
     
-    for i in range(20, len(high_1d)):
-        donchian_high[i] = np.max(high_1d[i-19:i+1])
-        donchian_low[i] = np.min(low_1d[i-19:i+1])
+    # Calculate Choppiness Index (14-period)
+    atr_1d = np.zeros_like(close_1d)
+    tr_1d = np.zeros_like(close_1d)
+    for i in range(1, len(close_1d)):
+        tr = max(high_1d[i] - low_1d[i], 
+                 abs(high_1d[i] - close_1d[i-1]), 
+                 abs(low_1d[i] - close_1d[i-1]))
+        tr_1d[i] = tr
     
-    # Calculate 1-day ADX (14-period)
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value is NaN
+    for i in range(14, len(close_1d)):
+        atr_1d[i] = np.mean(tr_1d[i-13:i+1])
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    
-    # Smooth TR, DM+ and DM- using Wilder's smoothing (14-period)
-    def wilder_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nanmean(data[1:period+1])
-        for i in range(period, len(data)):
-            if not np.isnan(result[i-1]):
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    atr = wilder_smooth(tr, 14)
-    dm_plus_smooth = wilder_smooth(dm_plus, 14)
-    dm_minus_smooth = wilder_smooth(dm_minus, 14)
-    
-    # Avoid division by zero
-    dm_plus_smooth = np.where(atr == 0, 0, dm_plus_smooth)
-    dm_minus_smooth = np.where(atr == 0, 0, dm_minus_smooth)
-    
-    di_plus = 100 * dm_plus_smooth / atr
-    di_minus = 100 * dm_minus_smooth / atr
-    dx = np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100
-    dx = np.where((di_plus + di_minus) == 0, 0, dx)
-    
-    # Wilder's smoothing for DX to get ADX
-    adx = wilder_smooth(dx, 14)
+    chop = np.full_like(close_1d, np.nan)
+    for i in range(14, len(close_1d)):
+        sum_tr = np.sum(tr_1d[i-13:i+1])
+        hh = highest_high[i]
+        ll = lowest_low[i]
+        if hh != ll and sum_tr > 0:
+            chop[i] = 100 * np.log10(sum_tr / (hh - ll)) / np.log10(14)
+        else:
+            chop[i] = 50
     
     # Align 1d indicators to 4h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    wr_aligned = align_htf_to_ltf(prices, df_1d, wr)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    # Volume confirmation: 4h volume > 1.3x 20-period EMA
+    # Volume confirmation: 4h volume > 1.5x 20-period EMA
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ema * 1.3)
+    vol_confirm = volume > (vol_ema * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Ensure enough data for indicators
+    start_idx = 30  # Ensure enough data for Williams %R and Chop
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(adx_aligned[i])):
+        if np.isnan(wr_aligned[i]) or np.isnan(chop_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above 1d Donchian high with volume confirmation and ADX > 25
-            if (close[i] > donchian_high_aligned[i] and 
-                vol_confirm[i] and 
-                adx_aligned[i] > 25):
+            # Enter long: Williams %R crosses below -80 (oversold) in ranging market with volume
+            if (wr_aligned[i] < -80 and 
+                chop_aligned[i] > 61.8 and 
+                vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below 1d Donchian low with volume confirmation and ADX > 25
-            elif (close[i] < donchian_low_aligned[i] and 
-                  vol_confirm[i] and 
-                  adx_aligned[i] > 25):
+            # Enter short: Williams %R crosses above -20 (overbought) in ranging market with volume
+            elif (wr_aligned[i] > -20 and 
+                  chop_aligned[i] > 61.8 and 
+                  vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below 1d Donchian low or ADX falls below 20
-            if (close[i] < donchian_low_aligned[i] or 
-                adx_aligned[i] < 20):
+            # Exit long: Williams %R rises above -50 or chop drops below 38.2 (trending)
+            if wr_aligned[i] > -50 or chop_aligned[i] < 38.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above 1d Donchian high or ADX falls below 20
-            if (close[i] > donchian_high_aligned[i] or 
-                adx_aligned[i] < 20):
+            # Exit short: Williams %R falls below -50 or chop drops below 38.2 (trending)
+            if wr_aligned[i] < -50 or chop_aligned[i] < 38.2:
                 signals[i] = 0.0
                 position = 0
             else:
