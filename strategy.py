@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_KAMA_Trend_RSI_MeanRev"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,65 +17,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla levels and trend filter
+    # Daily data for trend and RSI
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     
-    # Calculate daily EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # KAMA calculation (daily)
+    def calculate_kama(close, period=10, fast=2, slow=30):
+        change = np.abs(np.diff(close, n=period))
+        volatility = np.sum(np.abs(np.diff(close)), axis=1)
+        er = np.zeros_like(close)
+        er[period:] = change[period-1:] / volatility[period-1:]
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        kama = np.zeros_like(close)
+        kama[period-1] = close[period-1]
+        for i in range(period, len(close)):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
     
-    # Calculate Camarilla levels from previous day
-    R3 = np.zeros(len(close_1d))
-    S3 = np.zeros(len(close_1d))
+    kama = calculate_kama(close_1d, 10, 2, 30)
+    kama_prev = np.roll(kama, 1)
+    kama_prev[0] = np.nan
+    kama_slope = kama - kama_prev
+    kama_slope_aligned = align_htf_to_ltf(prices, df_1d, kama_slope)
     
-    for i in range(1, len(close_1d)):
-        high_prev = high_1d[i-1]
-        low_prev = low_1d[i-1]
-        close_prev = close_1d[i-1]
-        range_val = high_prev - low_prev
-        
-        C = close_prev + (range_val * 1.1 / 6)
-        R3[i] = C + (range_val * 1.1 / 2)
-        S3[i] = C - (range_val * 1.1 / 2)
+    # Daily RSI(14)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
-    # Align Camarilla levels to 12h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    # 4h Bollinger Bands (20, 2)
+    close_s = pd.Series(close)
+    basis = close_s.rolling(window=20, min_periods=20).mean()
+    dev = close_s.rolling(window=20, min_periods=20).std()
+    upper = basis + 2 * dev
+    lower = basis - 2 * dev
+    bb_upper = upper.values
+    bb_lower = lower.values
     
-    # Volume spike: current volume > 1.5x 20-period average
+    # Volume filter: current volume > 1.3x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma20)
+    volume_filter = volume > (1.3 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(R3_aligned[i]) or 
-            np.isnan(S3_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(kama_slope_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+            np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R3, daily uptrend, volume spike
-            long_cond = (close[i] > R3_aligned[i] and 
-                        ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and
-                        volume_spike[i])
+            # Long: KAMA up, RSI < 50, price near lower BB
+            long_cond = (kama_slope_aligned[i] > 0 and 
+                        rsi_aligned[i] < 50 and
+                        close[i] <= bb_lower[i] * 1.02 and
+                        volume_filter[i])
             
-            # Short: price breaks below S3, daily downtrend, volume spike
-            short_cond = (close[i] < S3_aligned[i] and 
-                         ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and
-                         volume_spike[i])
+            # Short: KAMA down, RSI > 50, price near upper BB
+            short_cond = (kama_slope_aligned[i] < 0 and 
+                         rsi_aligned[i] > 50 and
+                         close[i] >= bb_upper[i] * 0.98 and
+                         volume_filter[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -84,15 +100,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below S3
-            if close[i] < S3_aligned[i]:
+            # Long exit: price crosses above middle band or RSI > 70
+            if close[i] >= basis.values[i] or rsi_aligned[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above R3
-            if close[i] > R3_aligned[i]:
+            # Short exit: price crosses below middle band or RSI < 30
+            if close[i] <= basis.values[i] or rsi_aligned[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
