@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d trend filter and volume confirmation
-# Uses Elder Ray to measure bull/bear power relative to 13-period EMA, filtered by 1d EMA34 trend
-# Volume spike required for entry to avoid false signals
-# Designed to work in both bull and bear markets by following higher timeframe trend
+# Hypothesis: 4h Williams %R mean reversion with 1d trend filter and volume confirmation
+# Williams %R identifies overbought/oversold conditions; trades against extremes when aligned with daily trend
+# Volume spike confirms momentum behind the mean reversion move
+# Designed to work in ranging markets while respecting higher timeframe trend
 # Target: 50-150 total trades over 4 years = 12-37/year
 
-name = "6h_ElderRay_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_WilliamsR_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,20 +25,18 @@ def generate_signals(prices):
     
     # Get daily data once
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate daily EMA(34) for trend direction
+    # Calculate daily EMA(50) for trend direction
     close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate 13-period EMA for Elder Ray (on 6h data)
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Calculate Elder Ray components
-    bull_power = high - ema13  # Bull Power: High - EMA13
-    bear_power = low - ema13   # Bear Power: Low - EMA13
+    # Calculate Williams %R on 4h data (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,41 +49,40 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema34_1d_val = ema34_1d_aligned[i]
-        bull = bull_power[i]
-        bear = bear_power[i]
+        ema50_1d_val = ema50_1d_aligned[i]
+        wr = williams_r[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: positive bull power + uptrend + volume spike
-            if (bull > 0 and 
-                close[i] > ema34_1d_val and 
+            # Enter long: oversold (Williams %R < -80) + uptrend + volume spike
+            if (wr < -80 and 
+                close[i] > ema50_1d_val and 
                 vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: negative bear power + downtrend + volume spike
-            elif (bear < 0 and 
-                  close[i] < ema34_1d_val and 
+            # Enter short: overbought (Williams %R > -20) + downtrend + volume spike
+            elif (wr > -20 and 
+                  close[i] < ema50_1d_val and 
                   vol_spike):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: bull power turns negative OR trend turns down
-            if (bull <= 0 or close[i] < ema34_1d_val):
+            # Exit long: Williams %R rises above -50 (momentum fading) OR trend turns down
+            if (wr > -50 or close[i] < ema50_1d_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: bear power turns positive OR trend turns up
-            if (bear >= 0 or close[i] > ema34_1d_val):
+            # Exit short: Williams %R falls below -50 (momentum fading) OR trend turns up
+            if (wr < -50 or close[i] > ema50_1d_val):
                 signals[i] = 0.0
                 position = 0
             else:
