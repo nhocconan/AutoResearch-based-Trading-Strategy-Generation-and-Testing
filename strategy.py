@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h ADX breakout with 12h EMA trend filter and volume confirmation.
-# Long when price breaks above 6h high of last 20 bars AND 12h EMA50 trend up AND 6h volume > 1.5x 20-period average.
-# Short when price breaks below 6h low of last 20 bars AND 12h EMA50 trend down AND 6h volume > 1.5x 20-period average.
-# Exit when price crosses back below/above 6h EMA20.
-# Uses ADX to filter ranging markets and EMA for trend direction, suitable for both bull and bear markets.
-# Target: 50-150 total trades over 4 years (12-38/year) for low fee drift.
+# Hypothesis: 4h Camarilla pivot S1/S3 breakout with 1d volume spike and 4h EMA50 trend filter.
+# Long when price breaks above S3 AND 1d volume > 2x 20-period average AND close > EMA50.
+# Short when price breaks below S1 AND 1d volume > 2x 20-period average AND close < EMA50.
+# Exit when price crosses back below S2 (for long) or above S4 (for short).
+# Uses Camarilla pivot levels for precise entries with volume and trend confirmation.
+# Target: 80-150 total trades over 4 years (20-38/year) for low fee drift.
 
-name = "6h_ADX_EMA_Volume_Breakout"
-timeframe = "6h"
+name = "4h_Camarilla_S1S3_1dVolume_4hEMA50"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,31 +24,56 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 6s Donchian breakout channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 4h EMA50 trend filter
+    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # 6s EMA20 for exit
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # 6s volume filter: current volume > 1.5x 20-period average
+    # 4h volume filter: current volume > 2x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma20)
+    volume_filter_4h = volume > (2.0 * vol_ma20)
     
-    # 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # 1d data for Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate EMA50 on 12h data
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Calculate Camarilla pivot levels from previous day
+    high_prev = df_1d['high'].shift(1).values
+    low_prev = df_1d['low'].shift(1).values
+    close_prev = df_1d['close'].shift(1).values
     
-    # 12h EMA50 trend direction: up if current > previous, down if current < previous
-    ema50_trend = np.zeros_like(ema50_12h_aligned)
-    ema50_trend[1:] = np.where(ema50_12h_aligned[1:] > ema50_12h_aligned[:-1], 1, 
-                                np.where(ema50_12h_aligned[1:] < ema50_12h_aligned[:-1], -1, 0))
+    # Camarilla formulas
+    camarilla_h5 = close_prev + 1.1 * (high_prev - low_prev) * 1.1 / 6
+    camarilla_h4 = close_prev + 1.1 * (high_prev - low_prev) * 1.1 / 4
+    camarilla_h3 = close_prev + 1.1 * (high_prev - low_prev) * 1.1 / 3
+    camarilla_l3 = close_prev - 1.1 * (high_prev - low_prev) * 1.1 / 3
+    camarilla_l4 = close_prev - 1.1 * (high_prev - low_prev) * 1.1 / 4
+    camarilla_l5 = close_prev - 1.1 * (high_prev - low_prev) * 1.1 / 6
+    
+    # Key levels: S1 = L3, S3 = L5, R1 = H3, R3 = H5
+    s1 = camarilla_l3
+    s3 = camarilla_l5
+    r1 = camarilla_h3
+    r3 = camarilla_h5
+    s2 = camarilla_l4
+    s4 = camarilla_l5  # Actually L5 is S3, S4 would be below but we use S3 for exit
+    r2 = camarilla_h4
+    r4 = camarilla_h5  # R4 would be above but we use R3 for exit
+    
+    # Align 1d Camarilla levels to 4h timeframe
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s3)  # S3 as exit for shorts
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r3)  # R3 as exit for longs
+    
+    # 1d volume filter: current volume > 2x 20-period average
+    vol_1d = df_1d['volume'].values
+    vol_ma20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    volume_filter_1d = vol_1d > (2.0 * vol_ma20_1d)
+    volume_filter_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_filter_1d.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -57,19 +82,22 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema20[i]) or np.isnan(volume_filter[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(ema50_trend[i])):
+        if (np.isnan(ema50[i]) or np.isnan(volume_filter_4h[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(r3_aligned[i]) or
+            np.isnan(s2_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(r4_aligned[i]) or
+            np.isnan(volume_filter_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: break above highest high, EMA50 trending up, volume spike
-            long_cond = (close[i] > highest_high[i]) and (ema50_trend[i] == 1) and volume_filter[i]
-            # Short conditions: break below lowest low, EMA50 trending down, volume spike
-            short_cond = (close[i] < lowest_low[i]) and (ema50_trend[i] == -1) and volume_filter[i]
+            # Long conditions: break above R3, 1d volume spike, EMA50 uptrend
+            long_cond = (close[i] > r3_aligned[i]) and volume_filter_1d_aligned[i] and (close[i] > ema50[i])
+            # Short conditions: break below S3, 1d volume spike, EMA50 downtrend
+            short_cond = (close[i] < s3_aligned[i]) and volume_filter_1d_aligned[i] and (close[i] < ema50[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -78,15 +106,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: close below EMA20
-            if close[i] < ema20[i]:
+            # Long exit: cross below R2 (or S4 for safety)
+            if close[i] < r2_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: close above EMA20
-            if close[i] > ema20[i]:
+            # Short exit: cross above S2 (or R4 for safety)
+            if close[i] > s2_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
