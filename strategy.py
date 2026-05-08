@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_Pivot_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_Pivot_Breakout_1dTrend_Volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -74,10 +74,10 @@ def generate_signals(prices):
                          volume_spike[i]
             
             if long_cond:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             elif short_cond:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
             # Long exit: close below L4 (mean reversion to support)
@@ -85,13 +85,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
             # Short exit: close above H4 (mean reversion to resistance)
             if close[i] > h4_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
