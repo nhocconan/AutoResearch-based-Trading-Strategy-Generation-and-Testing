@@ -3,133 +3,137 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla pivot (R3/S3) breakout + volume spike + 1w ADX trend filter
-# Camarilla pivot levels (R3/S3) act as key intraday support/resistance with high breakout potential.
-# Volume spike confirms institutional participation in the breakout.
-# 1w ADX > 25 ensures trading only in strong trends, avoiding whipsaws in ranges.
-# Exits occur when price returns to the Camarilla pivot point (PP) or trend weakens (ADX < 20).
-# Targets 20-30 trades per year (~80-120 total over 4 years) to minimize fee drag.
-# Works in both bull and bear markets by filtering for strong trends only.
+# Hypothesis: 6h Bull/Bear Power (Elder Ray) + 12h Supertrend + volume confirmation
+# Bull Power = High - EMA(13), Bear Power = EMA(13) - Low
+# Go long when Bull Power > 0 and Bear Power < 0 with rising 12h Supertrend and volume spike
+# Go short when Bear Power > 0 and Bull Power < 0 with falling 12h Supertrend and volume spike
+# Exit when power signals reverse or volume drops below average
+# Targets 15-25 trades per year (~60-100 total over 4 years) to minimize fee drag
+# Works in both bull and bear markets by using Supertrend for trend direction and Elder Ray for momentum
 
-name = "1d_Camarilla_R3S3_1dVolume_1wADX"
-timeframe = "1d"
+name = "6h_ElderRay_12hSupertrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla pivot levels from previous day
-    # PP = (H + L + C) / 3
-    # R3 = PP + (H - L) * 1.1 / 2
-    # S3 = PP - (H - L) * 1.1 / 2
-    pp = np.full_like(close, np.nan)
-    r3 = np.full_like(close, np.nan)
-    s3 = np.full_like(close, np.nan)
-    
-    for i in range(1, n):
-        # Use previous day's OHLC
-        pp[i] = (high[i-1] + low[i-1] + close[i-1]) / 3.0
-        r3[i] = pp[i] + (high[i-1] - low[i-1]) * 1.1 / 2.0
-        s3[i] = pp[i] - (high[i-1] - low[i-1]) * 1.1 / 2.0
+    # Elder Ray: Bull Power and Bear Power (13-period EMA)
+    ema_len = 13
+    close_series = pd.Series(close)
+    ema13 = close_series.ewm(span=ema_len, adjust=False, min_periods=ema_len).mean().values
+    bull_power = high - ema13
+    bear_power = ema13 - low
     
     # Volume confirmation: 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    vol_spike = volume > (vol_ma.values * 2.0)
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean()
+    vol_spike = volume > (vol_ma.values * 1.5)
     
-    # Get 1w data for ADX trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get 12h data for Supertrend
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate ADX(14) on weekly
-    plus_dm = np.zeros_like(high_1w)
-    minus_dm = np.zeros_like(high_1w)
-    tr = np.zeros_like(high_1w)
+    # Supertrend parameters
+    atr_period = 10
+    multiplier = 3.0
     
-    for i in range(1, len(high_1w)):
-        plus_dm[i] = max(high_1w[i] - high_1w[i-1], 0)
-        minus_dm[i] = max(low_1w[i-1] - low_1w[i], 0)
-        if plus_dm[i] == minus_dm[i]:
-            plus_dm[i] = 0
-            minus_dm[i] = 0
-        tr[i] = max(
-            high_1w[i] - low_1w[i],
-            abs(high_1w[i] - close_1w[i-1]),
-            abs(low_1w[i] - close_1w[i-1])
-        )
+    # Calculate True Range
+    tr1 = high_12h[1:] - low_12h[1:]
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Wilder smoothing
-    def wilder_smooth(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        result[period-1] = np.nansum(arr[:period])
-        for i in range(period, len(arr)):
-            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
-        return result
+    # Calculate ATR using Wilder's smoothing
+    atr = np.full_like(tr, np.nan)
+    if len(tr) >= atr_period:
+        atr[atr_period] = np.nanmean(tr[1:atr_period+1])
+        for i in range(atr_period+1, len(tr)):
+            atr[i] = (atr[i-1] * (atr_period - 1) + tr[i]) / atr_period
     
-    tr14 = wilder_smooth(tr, 14)
-    plus_dm14 = wilder_smooth(plus_dm, 14)
-    minus_dm14 = wilder_smooth(minus_dm, 14)
+    # Calculate Supertrend
+    hl2 = (high_12h + low_12h) / 2
+    upper_band = hl2 + (multiplier * atr)
+    lower_band = hl2 - (multiplier * atr)
     
-    # Avoid division by zero
-    plus_di14 = np.where(tr14 != 0, 100 * (plus_dm14 / tr14), 0)
-    minus_di14 = np.where(tr14 != 0, 100 * (minus_dm14 / tr14), 0)
+    supertrend = np.full_like(close_12h, np.nan)
+    direction = np.full_like(close_12h, np.nan)  # 1 for uptrend, -1 for downtrend
     
-    dx = np.where((plus_di14 + minus_di14) != 0, 
-                  100 * np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14), 0)
-    adx = wilder_smooth(dx, 14)
+    # Initialize
+    if not np.isnan(atr[atr_period]):
+        supertrend[atr_period] = lower_band[atr_period]
+        direction[atr_period] = 1 if close_12h[atr_period] > supertrend[atr_period] else -1
     
-    adx_strong = adx > 25
-    adx_weak = adx < 20
-    adx_strong_aligned = align_htf_to_ltf(prices, df_1w, adx_strong)
-    adx_weak_aligned = align_htf_to_ltf(prices, df_1w, adx_weak)
+    for i in range(atr_period + 1, len(close_12h)):
+        if np.isnan(atr[i]) or np.isnan(supertrend[i-1]):
+            continue
+            
+        if close_12h[i] > upper_band[i]:
+            direction[i] = 1
+        elif close_12h[i] < lower_band[i]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+            if direction[i] == 1 and supertrend[i-1] < lower_band[i]:
+                supertrend[i] = lower_band[i]
+            elif direction[i] == -1 and supertrend[i-1] > upper_band[i]:
+                supertrend[i] = upper_band[i]
+            else:
+                supertrend[i] = supertrend[i-1]
+        
+        if direction[i] == 1:
+            supertrend[i] = max(supertrend[i], lower_band[i])
+        else:
+            supertrend[i] = min(supertrend[i], upper_band[i])
+    
+    # Align Supertrend direction to 6h
+    supertrend_dir_aligned = align_htf_to_ltf(prices, df_12h, direction)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure sufficient data for Camarilla calculation
+    start_idx = max(ema_len, 20, atr_period + 10)  # Ensure sufficient data
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(pp[i]) or np.isnan(r3[i]) or np.isnan(s3[i]) or 
-            np.isnan(vol_spike[i]) or np.isnan(adx_strong_aligned[i]) or 
-            np.isnan(adx_weak_aligned[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(vol_spike[i]) or np.isnan(supertrend_dir_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above R3, volume spike, strong trend
-            if close[i] > r3[i] and vol_spike[i] and adx_strong_aligned[i]:
+            # Enter long: Bull Power > 0, Bear Power < 0, uptrend, volume spike
+            if bull_power[i] > 0 and bear_power[i] < 0 and supertrend_dir_aligned[i] == 1 and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S3, volume spike, strong trend
-            elif close[i] < s3[i] and vol_spike[i] and adx_strong_aligned[i]:
+            # Enter short: Bear Power > 0, Bull Power < 0, downtrend, volume spike
+            elif bear_power[i] > 0 and bull_power[i] < 0 and supertrend_dir_aligned[i] == -1 and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to pivot point or trend weakens
-            if close[i] < pp[i] or adx_weak_aligned[i]:
+            # Exit long: Bull Power <= 0 or Bear Power >= 0 or trend changes or volume drops
+            if bull_power[i] <= 0 or bear_power[i] >= 0 or supertrend_dir_aligned[i] != 1 or not vol_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to pivot point or trend weakens
-            if close[i] > pp[i] or adx_weak_aligned[i]:
+            # Exit short: Bear Power <= 0 or Bull Power >= 0 or trend changes or volume drops
+            if bear_power[i] <= 0 or bull_power[i] >= 0 or supertrend_dir_aligned[i] != -1 or not vol_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
