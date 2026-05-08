@@ -1,23 +1,20 @@
+# USO 4h_TrendFollowing_ADX14_PlusDI_MinusDI
+# Trend-following strategy using ADX and directional indicators to capture trends with proper risk management.
+# Works in both bull and bear markets by going long when +DI > -DI and ADX > 25, short when -DI > +DI and ADX > 25.
+# Uses 4h timeframe to target 20-50 trades/year, avoiding excessive frequency and fee drag.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Camarilla pivot breakout with 1-day trend filter and volume confirmation
-# Long when price breaks above R3 with 1-day EMA(34) uptrend and volume spike.
-# Short when price breaks below S3 with 1-day EMA(34) downtrend and volume spike.
-# Uses 12h timeframe to target 12-37 trades/year, avoiding excessive frequency.
-# Camarilla pivots provide statistically significant support/resistance levels.
-# Daily trend filter ensures trading with higher timeframe momentum.
-# Volume spike confirms institutional participation in the breakout.
-
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_TrendFollowing_ADX14_PlusDI_MinusDI"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,86 +22,82 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter and Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
-        return np.zeros(n)
+    # Calculate ADX and directional indicators
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
     
-    # Calculate daily EMA(34) for trend filter
-    daily_close = df_1d['close'].values
-    ema34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Directional Movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
     
-    # Calculate Camarilla pivot levels from previous day's OHLC
-    # R4 = C + ((H-L) * 1.5000)
-    # R3 = C + ((H-L) * 1.2500)
-    # R2 = C + ((H-L) * 1.1666)
-    # R1 = C + ((H-L) * 1.0833)
-    # PP = (H + L + C) / 3
-    # S1 = C - ((H-L) * 1.0833)
-    # S2 = C - ((H-L) * 1.1666)
-    # S3 = C - ((H-L) * 1.2500)
-    # S4 = C - ((H-L) * 1.5000)
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Smoothed values
+    def smooth_wilder(arr, period):
+        result = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nansum(arr[1:period+1])  # Skip first element (index 0)
+        # Subsequent values using Wilder's smoothing
+        for i in range(period, len(arr)):
+            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
+        return result
     
-    # Calculate pivot levels
-    pp = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
+    # Smooth TR, +DM, -DM
+    atr = smooth_wilder(tr, 14)
+    plus_di_smooth = smooth_wilder(plus_dm, 14)
+    minus_di_smooth = smooth_wilder(minus_dm, 14)
     
-    r3 = pp + (range_hl * 1.2500)
-    s3 = pp - (range_hl * 1.2500)
+    # Calculate +DI and -DI
+    plus_di = np.where(atr != 0, (plus_di_smooth / atr) * 100, 0)
+    minus_di = np.where(atr != 0, (minus_di_smooth / atr) * 100, 0)
     
-    # Align Camarilla levels to 12h timeframe (need previous day's values)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # Volume spike: current volume > 2.0 * 20-period average on 12h
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # Calculate DX and ADX
+    dx = np.where((plus_di + minus_di) != 0, np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100, 0)
+    adx = smooth_wilder(dx, 14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # warmup for calculations
+    start_idx = 50  # Warmup for calculations
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(adx[i]) or np.isnan(plus_di[i]) or np.isnan(minus_di[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema34_1d_val = ema34_1d_aligned[i]
-        r3_val = r3_aligned[i]
-        s3_val = s3_aligned[i]
-        vol_spike = volume_spike[i]
+        adx_val = adx[i]
+        plus_di_val = plus_di[i]
+        minus_di_val = minus_di[i]
         
         if position == 0:
-            # Enter long: price breaks above R3 + daily uptrend + volume spike
-            if (not np.isnan(r3_val) and close[i] > r3_val and 
-                close[i] > ema34_1d_val and vol_spike):
+            # Enter long: +DI > -DI and ADX > 25 (strong uptrend)
+            if plus_di_val > minus_di_val and adx_val > 25:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S3 + daily downtrend + volume spike
-            elif (not np.isnan(s3_val) and close[i] < s3_val and 
-                  close[i] < ema34_1d_val and vol_spike):
+            # Enter short: -DI > +DI and ADX > 25 (strong downtrend)
+            elif minus_di_val > plus_di_val and adx_val > 25:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below S3 OR daily trend turns down
-            if (not np.isnan(s3_val) and close[i] < s3_val) or close[i] < ema34_1d_val:
+            # Exit long: ADX falls below 20 OR -DI crosses above +DI (trend weakening or reversal)
+            if adx_val < 20 or minus_di_val > plus_di_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above R3 OR daily trend turns up
-            if (not np.isnan(r3_val) and close[i] > r3_val) or close[i] > ema34_1d_val:
+            # Exit short: ADX falls below 20 OR +DI crosses above -DI (trend weakening or reversal)
+            if adx_val < 20 or plus_di_val > minus_di_val:
                 signals[i] = 0.0
                 position = 0
             else:
