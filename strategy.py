@@ -3,22 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Elder Ray Index with weekly trend filter and volume confirmation
-# Elder Ray: Bull Power = High - EMA(13), Bear Power = EMA(13) - Low
-# Long when Bull Power > 0 and rising + weekly EMA(50) uptrend + volume spike
-# Short when Bear Power > 0 and rising + weekly EMA(50) downtrend + volume spike
-# Elder Ray measures bull/bear power relative to trend; filters weak moves
-# Weekly trend ensures higher timeframe momentum alignment
+# Hypothesis: 12-hour VWAP deviation with daily trend filter and volume confirmation
+# Long when price > VWAP(12h) + 0.5*ATR(14) + daily EMA(50) uptrend + volume spike
+# Short when price < VWAP(12h) - 0.5*ATR(14) + daily EMA(50) downtrend + volume spike
+# VWAP deviation captures mean reversion in range-bound markets while allowing trend continuation
+# Daily trend filter ensures alignment with higher timeframe momentum
 # Volume spike confirms institutional participation
 # Targets 50-150 total trades over 4 years (12-37/year) to avoid fee drag
 
-name = "6h_ElderRay_WeeklyTrend_Volume"
-timeframe = "6h"
+name = "12h_VWAP_Deviation_DailyTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -26,25 +25,31 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data once for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get daily data once for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly EMA(50) for trend filter
-    weekly_close = df_1w['close'].values
-    ema50_1w = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate daily EMA(50) for trend filter
+    daily_close = df_1d['close'].values
+    ema50_1d = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Elder Ray Index: Bull Power and Bear Power
-    # Bull Power = High - EMA(13), Bear Power = EMA(13) - Low
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = ema13 - low
+    # Calculate VWAP for 12h timeframe
+    typical_price = (high + low + close) / 3.0
+    vwap_num = np.cumsum(typical_price * volume)
+    vwap_den = np.cumsum(volume)
+    vwap = np.divide(vwap_num, vwap_den, out=np.full_like(typical_price, np.nan), where=vwap_den!=0)
     
-    # Smooth the power signals to reduce noise
-    bull_power_smooth = pd.Series(bull_power).ewm(span=5, adjust=False, min_periods=5).mean().values
-    bear_power_smooth = pd.Series(bear_power).ewm(span=5, adjust=False, min_periods=5).mean().values
+    # Calculate ATR(14) for volatility filter
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -53,41 +58,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # warmup for calculations
+    start_idx = 50  # warmup for calculations
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(bull_power_smooth[i]) or 
-            np.isnan(bear_power_smooth[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(vwap[i]) or 
+            np.isnan(atr[i]) or np.isnan(vwap_den[i]) or vwap_den[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema50_1w_val = ema50_1w_aligned[i]
-        bull = bull_power_smooth[i]
-        bear = bear_power_smooth[i]
+        ema50_1d_val = ema50_1d_aligned[i]
+        vwap_val = vwap[i]
+        atr_val = atr[i]
         vol_spike = volume_spike[i]
+        price = close[i]
         
         if position == 0:
-            # Enter long: Bull Power > 0 and rising + weekly uptrend + volume spike
-            if bull > 0 and i > start_idx and bull > bull_power_smooth[i-1] and close[i] > ema50_1w_val and vol_spike:
+            # Enter long: price > VWAP + 0.5*ATR + daily uptrend + volume spike
+            if price > vwap_val + 0.5 * atr_val and price > ema50_1d_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Bear Power > 0 and rising + weekly downtrend + volume spike
-            elif bear > 0 and i > start_idx and bear > bear_power_smooth[i-1] and close[i] < ema50_1w_val and vol_spike:
+            # Enter short: price < VWAP - 0.5*ATR + daily downtrend + volume spike
+            elif price < vwap_val - 0.5 * atr_val and price < ema50_1d_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Bull Power <= 0 OR weekly trend turns down
-            if bull <= 0 or close[i] < ema50_1w_val:
+            # Exit long: price < VWAP OR daily trend turns down
+            if price < vwap_val or price < ema50_1d_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Bear Power <= 0 OR weekly trend turns up
-            if bear <= 0 or close[i] > ema50_1w_val:
+            # Exit short: price > VWAP OR daily trend turns up
+            if price > vwap_val or price > ema50_1d_val:
                 signals[i] = 0.0
                 position = 0
             else:
