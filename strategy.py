@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R mean reversion with 1d EMA34 trend filter and volume confirmation.
-# Williams %R identifies overbought/oversold conditions. In trending markets (EMA34 slope),
-# we fade extreme readings (>80 for short, <20 for long) only when volume confirms institutional interest.
-# Works in bull markets (fading overextended rallies) and bear markets (fading oversold bounces).
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA34 trend filter and volume confirmation.
+# Elder Ray measures bull/bear power via EMA13: Bull Power = High - EMA13, Bear Power = Low - EMA13.
+# In trending markets (EMA34 slope), we go long when Bull Power > 0 and rising, short when Bear Power < 0 and falling.
+# Volume confirmation ensures institutional participation. Works in bull markets (riding uptrends) and bear markets (riding downtrends).
 # Target: 50-150 total trades over 4 years (12-37/year) with disciplined entries.
 
-name = "6h_WilliamsR_MeanRev_1dEMA34_Volume"
+name = "6h_ElderRay_Trend_Volume"
 timeframe = "6h"
 leverage = 1.0
 
@@ -23,9 +23,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 6h data for Williams %R calculation
+    # Get 6h data for Elder Ray calculation
     df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 14:
+    if len(df_6h) < 13:
         return np.zeros(n)
     
     high_6h = df_6h['high'].values
@@ -33,19 +33,12 @@ def generate_signals(prices):
     close_6h = df_6h['close'].values
     volume_6h = df_6h['volume'].values
     
-    # Calculate Williams %R (14-period): (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = np.full(len(high_6h), np.nan)
-    lowest_low = np.full(len(low_6h), np.nan)
-    for i in range(14, len(high_6h)):
-        highest_high[i] = np.max(high_6h[i-13:i+1])
-        lowest_low[i] = np.min(low_6h[i-13:i+1])
+    # Calculate EMA13 for Elder Ray
+    ema13 = pd.Series(close_6h).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    williams_r = np.full(len(close_6h), np.nan)
-    for i in range(14, len(close_6h)):
-        if highest_high[i] != lowest_low[i]:
-            williams_r[i] = ((highest_high[i] - close_6h[i]) / (highest_high[i] - lowest_low[i])) * -100
-        else:
-            williams_r[i] = -50  # neutral when range is zero
+    # Calculate Bull Power and Bear Power
+    bull_power = high_6h - ema13  # High - EMA13
+    bear_power = low_6h - ema13   # Low - EMA13
     
     # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -66,7 +59,8 @@ def generate_signals(prices):
         vol_ma_20[i] = np.mean(volume_6h[i-20:i])
     
     # Align all indicators to 6h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_6h, williams_r)
+    bull_power_aligned = align_htf_to_ltf(prices, df_6h, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_6h, bear_power)
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     ema_34_rising_aligned = align_htf_to_ltf(prices, df_1d, ema_34_rising)
     ema_34_falling_aligned = align_htf_to_ltf(prices, df_1d, ema_34_falling)
@@ -90,9 +84,9 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if np.isnan(williams_r_aligned[i]) or np.isnan(ema_34_aligned[i]) or \
-           np.isnan(ema_34_rising_aligned[i]) or np.isnan(ema_34_falling_aligned[i]) or \
-           np.isnan(vol_ma_20_aligned[i]):
+        if np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or \
+           np.isnan(ema_34_aligned[i]) or np.isnan(ema_34_rising_aligned[i]) or \
+           np.isnan(ema_34_falling_aligned[i]) or np.isnan(vol_ma_20_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -112,12 +106,14 @@ def generate_signals(prices):
                 vol_filter = vol_6h_current > 1.5 * vol_ma_20_aligned[i]
         
         if position == 0:
-            # Look for entry: Williams %R extremes + trend + volume confirmation
-            # Long when oversold (< -80) in uptrend (EMA34 rising) with volume
-            long_condition = (williams_r_aligned[i] < -80) and \
+            # Look for entry: Elder Ray signals + trend + volume confirmation
+            # Long when Bull Power > 0 and rising in uptrend (EMA34 rising) with volume
+            long_condition = (bull_power_aligned[i] > 0) and \
+                             (bull_power_aligned[i] > bull_power_aligned[i-1]) and \
                              ema_34_rising_aligned[i] and vol_filter
-            # Short when overbought (> -20) in downtrend (EMA34 falling) with volume
-            short_condition = (williams_r_aligned[i] > -20) and \
+            # Short when Bear Power < 0 and falling in downtrend (EMA34 falling) with volume
+            short_condition = (bear_power_aligned[i] < 0) and \
+                              (bear_power_aligned[i] < bear_power_aligned[i-1]) and \
                               ema_34_falling_aligned[i] and vol_filter
             
             if long_condition:
@@ -127,15 +123,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R returns to neutral (> -50) or trend fails
-            if (williams_r_aligned[i] > -50) or (not ema_34_rising_aligned[i]):
+            # Exit long: Bull Power <= 0 or trend fails
+            if (bull_power_aligned[i] <= 0) or (not ema_34_rising_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R returns to neutral (< -50) or trend fails
-            if (williams_r_aligned[i] < -50) or (not ema_34_falling_aligned[i]):
+            # Exit short: Bear Power >= 0 or trend fails
+            if (bear_power_aligned[i] >= 0) or (not ema_34_falling_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
