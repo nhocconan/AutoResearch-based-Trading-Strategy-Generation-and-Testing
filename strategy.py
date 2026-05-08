@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_WeeklyPivot_DailyTrend_Volume"
-timeframe = "1d"
+name = "6h_WeeklyPivot_DailyTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,7 +21,7 @@ def generate_signals(prices):
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma20)
     
-    # Weekly data for pivot calculation
+    # Weekly data for pivot calculation (trend filter)
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 20:
         return np.zeros(n)
@@ -35,6 +35,7 @@ def generate_signals(prices):
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
+    open_1w = df_1w['open'].values
     
     # Calculate weekly pivot: P = (H + L + C) / 3
     pivot_1w = (high_1w + low_1w + close_1w) / 3
@@ -47,7 +48,7 @@ def generate_signals(prices):
     # Daily EMA34 for trend filter
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align weekly and daily indicators to 1d timeframe
+    # Align weekly and daily indicators to 6h timeframe
     pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
     r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
     s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
