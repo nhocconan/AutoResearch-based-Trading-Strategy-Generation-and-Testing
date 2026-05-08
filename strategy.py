@@ -1,18 +1,15 @@
-# 4h_R3S3_Breakout_Volume
-# Hypothesis: Price breaking above/below R3/S3 levels with volume confirmation and trend filter works in both bull/bear markets due to institutional order flow at key pivot levels.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_R3S3_Breakout_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla levels
+    # Daily data for Camarilla levels and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -33,7 +30,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla R3/S3 levels from previous day
+    # Calculate Camarilla levels from previous day
     R3 = np.zeros(len(close_1d))
     S3 = np.zeros(len(close_1d))
     
@@ -47,7 +44,7 @@ def generate_signals(prices):
         R3[i] = C + (range_val * 1.1 / 2)
         S3[i] = C - (range_val * 1.1 / 2)
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
