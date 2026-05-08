@@ -3,20 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Index with 1d trend filter and volume confirmation.
-# Elder Ray = Bull Power (High - EMA13) and Bear Power (Low - EMA13).
-# In bull regime (price > 1d EMA50): enter long when Bull Power turns positive after being negative.
-# In bear regime (price < 1d EMA50): enter short when Bear Power turns negative after being positive.
-# Volume spike confirms institutional participation. Designed to catch trend reversals in both bull and bear markets.
-# Target: 50-150 trades over 4 years (12-37/year).
-
-name = "6h_ElderRay_Reversal_1dTrend_Volume"
-timeframe = "6h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,76 +17,86 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d trend: EMA50
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # 4h trend: EMA50
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
+    # 1d Camarilla pivot levels (R1, S1)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    H_prev = np.roll(high_1d, 1)
+    L_prev = np.roll(low_1d, 1)
+    C_prev = np.roll(close_1d, 1)
+    H_prev[0] = np.nan
+    L_prev[0] = np.nan
+    C_prev[0] = np.nan
+    pivot = (H_prev + L_prev + C_prev) / 3
+    range_hl = H_prev - L_prev
+    R1 = pivot + (range_hl * 1.1 / 6)
+    S1 = pivot - (range_hl * 1.1 / 6)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
-    # Calculate EMA13 for Elder Ray (on 6x data)
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Elder Ray components
-    bull_power = high - ema_13  # High - EMA13
-    bear_power = low - ema_13   # Low - EMA13
-    
-    # Volume spike: current volume > 2.0x 20-period average
+    # Volume spike: current volume > 2.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma20)
+    volume_spike = volume > (2.5 * vol_ma20)
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    
-    start_idx = 30  # Sufficient warmup for EMA13
+    start_idx = 100
     
     for i in range(start_idx, n):
-        # Skip if any critical data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(ema_50_4h_aligned[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        if not session_filter[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
         if position == 0:
-            # Determine regime: bull if close > 1d EMA50, bear if close < 1d EMA50
-            is_bull_regime = close[i] > ema_50_1d_aligned[i]
-            is_bear_regime = close[i] < ema_50_1d_aligned[i]
-            
-            # Long: bull regime + Bull Power turns positive (was negative or zero) + volume spike
-            if is_bull_regime:
-                bull_power_prev = bull_power[i-1]
-                bull_power_cross_up = (bull_power[i] > 0) and (bull_power_prev <= 0)
-                if bull_power_cross_up and volume_spike[i]:
-                    signals[i] = 0.25
-                    position = 1
-            
-            # Short: bear regime + Bear Power turns negative (was positive or zero) + volume spike
-            elif is_bear_regime:
-                bear_power_prev = bear_power[i-1]
-                bear_power_cross_down = (bear_power[i] < 0) and (bear_power_prev >= 0)
-                if bear_power_cross_down and volume_spike[i]:
-                    signals[i] = -0.25
-                    position = -1
-        
+            long_cond = (close[i] > R1_aligned[i]) and \
+                        (close[i] > ema_50_4h_aligned[i]) and \
+                        volume_spike[i]
+            short_cond = (close[i] < S1_aligned[i]) and \
+                         (close[i] < ema_50_4h_aligned[i]) and \
+                         volume_spike[i]
+            if long_cond:
+                signals[i] = 0.20
+                position = 1
+            elif short_cond:
+                signals[i] = -0.20
+                position = -1
         elif position == 1:
-            # Long exit: Bear Power turns negative (momentum loss) or reversal signal
-            if bear_power[i] < 0:
+            if close[i] < pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
-        
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: Bull Power turns positive (momentum loss) or reversal signal
-            if bull_power[i] > 0:
+            if close[i] > pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
