@@ -1,15 +1,10 @@
-# 4h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Enhanced
-# Hypothesis: Breakouts at strong Camarilla levels (R3/S3) with 1d EMA trend filter and volume spikes capture
-# institutional moves. Volatility filter avoids chop. Works in bull/bear by filtering with trend and volume.
-# Target: 20-40 trades/year per symbol with disciplined risk.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Enhanced"
-timeframe = "4h"
+name = "6h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -44,7 +39,7 @@ def generate_signals(prices):
     R3 = prev_close + 1.1 * (prev_high - prev_low) / 4
     S3 = prev_close - 1.1 * (prev_high - prev_low) / 4
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 6h timeframe
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
