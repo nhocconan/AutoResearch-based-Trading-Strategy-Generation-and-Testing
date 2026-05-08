@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-12h Camarilla R3/S3 Breakout with 1d Trend and Volume Spike
-- Uses Camarilla levels from daily timeframe (S3/S2 for long, R3/R2 for short)
-- Breakout above S3 with 1d uptrend or below R3 with 1d downtrend
-- Volume spike confirms breakout strength
-- Works in bull/bear by using 1d trend filter to avoid counter-trend trades
-- Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag on 12h timeframe
+4h Donchian(20) breakout + volume confirmation + ATR filter
+- Breakout above 20-period high with volume > 1.5x 20-period average
+- Breakout below 20-period low with volume > 1.5x 20-period average
+- ATR(14) filter: only trade when ATR > 0.5 * ATR(50) to avoid low volatility
+- Position size: 0.25
+- Designed for fewer trades (<50/year) to minimize fee drag on 4h timeframe
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_Volume_ATR_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,74 +26,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
-        return np.zeros(n)
+    # Donchian channels (20-period)
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla levels using previous day's data
-    # S2 = C - (H-L)*1.16, S3 = C - (H-L)*1.25, R2 = C + (H-L)*1.16, R3 = C + (H-L)*1.25
-    n1d = len(close_1d)
-    camarilla_S2 = np.full(n1d, np.nan)
-    camarilla_S3 = np.full(n1d, np.nan)
-    camarilla_R2 = np.full(n1d, np.nan)
-    camarilla_R3 = np.full(n1d, np.nan)
-    
-    for i in range(1, n1d):
-        H = high_1d[i-1]
-        L = low_1d[i-1]
-        C = close_1d[i-1]
-        range_val = H - L
-        camarilla_S2[i] = C - range_val * 1.16
-        camarilla_S3[i] = C - range_val * 1.25
-        camarilla_R2[i] = C + range_val * 1.16
-        camarilla_R3[i] = C + range_val * 1.25
-    
-    # Align Camarilla levels to 12h timeframe
-    camarilla_S2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S2)
-    camarilla_S3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S3)
-    camarilla_R2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R2)
-    camarilla_R3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R3)
-    
-    # 1d data for trend filter
-    close_1d = df_1d['close'].values
-    # 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Volume spike: current volume > 2.0x 20-period average
+    # Volume filter: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma20)
+    volume_filter = volume > (1.5 * vol_ma20)
+    
+    # ATR filter to avoid low volatility periods
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    atr_filter = atr14 > (0.5 * atr50)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(camarilla_S2_aligned[i]) or np.isnan(camarilla_S3_aligned[i]) or 
-            np.isnan(camarilla_R2_aligned[i]) or np.isnan(camarilla_R3_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
+            np.isnan(volume_filter[i]) or np.isnan(atr_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above S3 (strong support) with 1d uptrend + volume spike
-            long_cond = (close[i] > camarilla_S3_aligned[i] and 
-                        ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1] and
-                        volume_spike[i])
+            # Long: breakout above Donchian high with volume and ATR filter
+            long_cond = (close[i] > high_roll[i-1] and 
+                        volume_filter[i] and
+                        atr_filter[i])
             
-            # Short: price breaks below R3 (strong resistance) with 1d downtrend + volume spike
-            short_cond = (close[i] < camarilla_R3_aligned[i] and 
-                         ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1] and
-                         volume_spike[i])
+            # Short: breakout below Donchian low with volume and ATR filter
+            short_cond = (close[i] < low_roll[i-1] and 
+                         volume_filter[i] and
+                         atr_filter[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -102,15 +77,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below S2 (weaker support)
-            if close[i] < camarilla_S2_aligned[i]:
+            # Long exit: close below Donchian low
+            if close[i] < low_roll[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above R2 (weaker resistance)
-            if close[i] > camarilla_R2_aligned[i]:
+            # Short exit: close above Donchian high
+            if close[i] > high_roll[i]:
                 signals[i] = 0.0
                 position = 0
             else:
