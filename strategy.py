@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h 1-2-3 pattern with 1d RSI filter and volume confirmation.
-# Long when price breaks above point 2 of 1-2-3 pattern AND 1d RSI > 50 AND volume > 1.5x 20-period average.
-# Short when price breaks below point 1 of 1-2-3 pattern AND 1d RSI < 50 AND volume > 1.5x 20-period average.
-# Exit when price crosses point 3 for long or point 2 for short.
-# Uses 1-2-3 pattern for trend reversal with RSI filter to avoid counter-trend entries.
-# Target: 80-150 total trades over 4 years (20-38/year) for low fee drift.
+# Hypothesis: 12h price action strategy using 1d RSI extremes for mean reversion in range-bound markets and 1d ADX for trend-following breakouts.
+# In ranging markets (ADX < 25): Mean reversion at RSI extremes (long RSI<30, short RSI>70) with volume confirmation.
+# In trending markets (ADX >= 25): Breakout trades on 12h price crossing 1d Bollinger Bands (20,2) with volume confirmation.
+# Uses 1d timeframe for regime and signal generation to reduce noise, 12h for execution timing.
+# Target: 60-120 total trades over 4 years (15-30/year) for low fee drift.
 
-name = "4h_123Pattern_1dRSI_Volume"
-timeframe = "4h"
+name = "12h_1dRSI_ADX_BB"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,72 +23,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h 1-2-3 pattern: point 1 (recent low), point 2 (recent high), point 3 (recent low after point 2)
-    # We'll use 10-period lookback for simplicity
-    lookback = 10
-    point1 = np.full(n, np.nan)
-    point2 = np.full(n, np.nan)
-    point3 = np.full(n, np.nan)
-    
-    for i in range(lookback, n):
-        # Point 1: lowest low in lookback period
-        point1[i] = np.min(low[i-lookback:i])
-        # Point 2: highest high after point 1 formation (simplified: highest high in lookback)
-        point2[i] = np.max(high[i-lookback:i])
-        # Point 3: lowest low after point 2 (simplified: lowest low in lookback)
-        point3[i] = np.min(low[i-lookback:i])
-    
-    # 4h volume filter: current volume > 1.5x 20-period average
+    # 12h volume filter: current volume > 1.3x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma20)
+    volume_filter = volume > (1.3 * vol_ma20)
     
-    # 1d data for RSI filter
+    # 1d data for regime and signals
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate RSI (14-period) on 1d data
     close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # 1d RSI (14-period)
     delta = np.diff(close_1d, prepend=close_1d[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
-    
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
-    
-    for i in range(14, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / np.where(avg_loss == 0, 1e-10, avg_loss)
     rsi = 100 - (100 / (1 + rs))
-    rsi[:14] = 50  # Neutral before enough data
     
-    # Align 1d RSI to 4h timeframe
+    # 1d Bollinger Bands (20,2)
+    bb_middle = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    bb_std = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2 * bb_std
+    bb_lower = bb_middle - 2 * bb_std
+    
+    # 1d ADX (14-period) for regime detection
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    dx = 100 * np.abs(dm_plus_smooth - dm_minus_smooth) / (np.where(dm_plus_smooth + dm_minus_smooth == 0, 1, dm_plus_smooth + dm_minus_smooth))
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Align 1d indicators to 12h timeframe
     rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    bb_middle_aligned = align_htf_to_ltf(prices, df_1d, bb_middle)
+    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper)
+    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Sufficient warmup
+    start_idx = 40  # Sufficient warmup for all indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(point1[i]) or np.isnan(point2[i]) or np.isnan(point3[i]) or 
-            np.isnan(volume_filter[i]) or np.isnan(rsi_aligned[i])):
+        if (np.isnan(rsi_aligned[i]) or np.isnan(bb_middle_aligned[i]) or 
+            np.isnan(bb_upper_aligned[i]) or np.isnan(bb_lower_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: break above point 2, RSI > 50, volume spike
-            long_cond = (close[i] > point2[i]) and (rsi_aligned[i] > 50) and volume_filter[i]
-            # Short conditions: break below point 1, RSI < 50, volume spike
-            short_cond = (close[i] < point1[i]) and (rsi_aligned[i] < 50) and volume_filter[i]
+            # Determine regime: trending (ADX >= 25) or ranging (ADX < 25)
+            if adx_aligned[i] >= 25:
+                # Trending market: breakout trades
+                long_cond = (close[i] > bb_upper_aligned[i]) and volume_filter[i]
+                short_cond = (close[i] < bb_lower_aligned[i]) and volume_filter[i]
+            else:
+                # Ranging market: mean reversion at RSI extremes
+                long_cond = (rsi_aligned[i] < 30) and volume_filter[i]
+                short_cond = (rsi_aligned[i] > 70) and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -98,18 +112,36 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: cross below point 3
-            if close[i] < point3[i]:
-                signals[i] = 0.0
-                position = 0
+            # Long exit conditions
+            if adx_aligned[i] >= 25:
+                # In trend: exit when price crosses below BB middle
+                if close[i] < bb_middle_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
             else:
-                signals[i] = 0.25
+                # In range: exit when RSI returns to neutral (40-60)
+                if 40 <= rsi_aligned[i] <= 60:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
         elif position == -1:
-            # Short exit: cross above point 2
-            if close[i] > point2[i]:
-                signals[i] = 0.0
-                position = 0
+            # Short exit conditions
+            if adx_aligned[i] >= 25:
+                # In trend: exit when price crosses above BB middle
+                if close[i] > bb_middle_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
             else:
-                signals[i] = -0.25
+                # In range: exit when RSI returns to neutral (40-60)
+                if 40 <= rsi_aligned[i] <= 60:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
