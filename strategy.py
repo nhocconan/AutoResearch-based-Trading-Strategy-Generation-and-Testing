@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_MultiTF_Trend_Squeeze_With_Volume"
-timeframe = "6h"
+name = "12h_WeeklyPivot_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,46 +17,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for trend filter and volatility filter
+    # 1d data for weekly pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate weekly pivot levels using previous week's data
+    n1d = len(close_1d)
+    weekly_P = np.full(n1d, np.nan)
+    weekly_S1 = np.full(n1d, np.nan)
+    weekly_S2 = np.full(n1d, np.nan)
+    weekly_R1 = np.full(n1d, np.nan)
+    weekly_R2 = np.full(n1d, np.nan)
+    
+    for i in range(1, n1d):
+        PH = high_1d[i-1]  # Previous week high
+        PL = low_1d[i-1]   # Previous week low
+        PC = close_1d[i-1] # Previous week close
+        
+        P = (PH + PL + PC) / 3.0
+        weekly_P[i] = P
+        weekly_S1[i] = 2 * P - PH
+        weekly_S2[i] = P - (PH - PL)
+        weekly_R1[i] = 2 * P - PL
+        weekly_R2[i] = P + (PH - PL)
+    
+    # Align weekly pivot levels to 12h timeframe
+    weekly_P_aligned = align_htf_to_ltf(prices, df_1d, weekly_P)
+    weekly_S1_aligned = align_htf_to_ltf(prices, df_1d, weekly_S1)
+    weekly_S2_aligned = align_htf_to_ltf(prices, df_1d, weekly_S2)
+    weekly_R1_aligned = align_htf_to_ltf(prices, df_1d, weekly_R1)
+    weekly_R2_aligned = align_htf_to_ltf(prices, df_1d, weekly_R2)
     
     # 1d EMA34 for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_up = ema_34_1d > np.roll(ema_34_1d, 1)
-    ema_34_1d_down = ema_34_1d < np.roll(ema_34_1d, 1)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 1d ATR for volatility normalization
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = tr2[0] = tr3[0] = np.nan
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_ma50 = pd.Series(atr_14).rolling(window=50, min_periods=50).mean().values
-    volatility_ratio = atr_14 / atr_14_ma50
-    
-    # 6s Bollinger Bands for squeeze detection
-    bb_period = 20
-    bb_std = 2.0
-    sma_bb = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std_bb = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    bb_upper = sma_bb + bb_std * std_bb
-    bb_lower = sma_bb - bb_std * std_bb
-    bb_width = (bb_upper - bb_lower) / sma_bb
-    bb_width_ma = pd.Series(bb_width).rolling(window=50, min_periods=50).mean().values
-    bb_squeeze = bb_width < 0.5 * bb_width_ma  # Bollinger Band squeeze
-    
-    # Align 1d indicators to 6h timeframe
-    ema_34_1d_up_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d_up)
-    ema_34_1d_down_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d_down)
-    volatility_ratio_aligned = align_htf_to_ltf(prices, df_1d, volatility_ratio)
-    bb_squeeze_aligned = align_htf_to_ltf(prices, df_1d, bb_squeeze)
+    # Volume spike: current volume > 2.0x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -65,23 +68,25 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_34_1d_up_aligned[i]) or np.isnan(ema_34_1d_down_aligned[i]) or 
-            np.isnan(volatility_ratio_aligned[i]) or np.isnan(bb_squeeze_aligned[i])):
+        if (np.isnan(weekly_P_aligned[i]) or np.isnan(weekly_S1_aligned[i]) or 
+            np.isnan(weekly_S2_aligned[i]) or np.isnan(weekly_R1_aligned[i]) or 
+            np.isnan(weekly_R2_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: 1d uptrend + low volatility + volatility expansion signal
-            long_cond = (ema_34_1d_up_aligned[i] and 
-                        volatility_ratio_aligned[i] < 1.2 and  # Low volatility
-                        bb_squeeze_aligned[i])  # Bollinger squeeze
+            # Long: price breaks above R1 with 1d uptrend + volume spike
+            long_cond = (close[i] > weekly_R1_aligned[i] and 
+                        ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and
+                        volume_spike[i])
             
-            # Short: 1d downtrend + low volatility + volatility expansion signal
-            short_cond = (ema_34_1d_down_aligned[i] and 
-                         volatility_ratio_aligned[i] < 1.2 and  # Low volatility
-                         bb_squeeze_aligned[i])  # Bollinger squeeze
+            # Short: price breaks below S1 with 1d downtrend + volume spike
+            short_cond = (close[i] < weekly_S1_aligned[i] and 
+                         ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and
+                         volume_spike[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -90,17 +95,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: 1d trend reversal or volatility expansion
-            if (not ema_34_1d_up_aligned[i] or 
-                volatility_ratio_aligned[i] > 1.5):
+            # Long exit: price breaks below P (pivot point)
+            if close[i] < weekly_P_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: 1d trend reversal or volatility expansion
-            if (not ema_34_1d_down_aligned[i] or 
-                volatility_ratio_aligned[i] > 1.5):
+            # Short exit: price breaks above P (pivot point)
+            if close[i] > weekly_P_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
