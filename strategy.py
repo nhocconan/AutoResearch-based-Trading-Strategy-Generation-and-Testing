@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Index (Bull Power/Bear Power) with 1w trend filter and volume confirmation
-# Long when Bull Power > 0, Bear Power < 0, price > weekly EMA20, volume > 1.5x 20-period average
-# Short when Bull Power < 0, Bear Power > 0, price < weekly EMA20, volume > 1.5x 20-period average
-# Exit when Bull Power and Bear Power converge (|Bull Power - Bear Power| < 0.1 * ATR)
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drift
+# Hypothesis: 1d weekly EMA200 trend filter with daily Donchian(20) breakout and volume confirmation
+# Long when price breaks above Donchian high + price > weekly EMA200 + volume > 1.5x 20-day average volume
+# Short when price breaks below Donchian low + price < weekly EMA200 + volume > 1.5x 20-day average volume
+# Exit when price crosses weekly EMA200 in opposite direction
+# Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag
 
-name = "6h_ElderRay_1wEMA20_Volume"
-timeframe = "6h"
+name = "1d_Donchian_WeeklyEMA200_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,30 +23,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
+    # Get weekly data for EMA200 trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate weekly EMA20 for trend filter
-    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Calculate weekly EMA200 for trend filter
+    ema_200 = pd.Series(df_1w['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Calculate ATR(14) for exit condition
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Align weekly EMA200 to daily timeframe
+    ema_200_aligned = align_htf_to_ltf(prices, df_1w, ema_200)
     
-    # Calculate Elder Ray components (13-period EMA as per standard)
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Calculate daily Donchian channels (20-period)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume filter: current volume > 1.5x 20-period average
+    # Calculate 20-day average volume for volume filter
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > 1.5 * vol_ma_20
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -55,7 +48,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for indicators
+    start_idx = 20  # warmup for Donchian
     
     for i in range(start_idx, n):
         # Skip if outside trading session
@@ -66,16 +59,19 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if np.isnan(ema_20_1w_aligned[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(atr[i]) or np.isnan(vol_filter[i]):
+        if np.isnan(ema_200_aligned[i]) or np.isnan(high_max[i]) or np.isnan(low_min[i]) or np.isnan(vol_ma_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Volume filter: current volume > 1.5x 20-day average volume
+        vol_filter = volume[i] > 1.5 * vol_ma_20[i]
+        
         if position == 0:
-            # Look for entry: Elder Ray divergence + trend + volume
-            long_condition = bull_power[i] > 0 and bear_power[i] < 0 and close[i] > ema_20_1w_aligned[i] and vol_filter[i]
-            short_condition = bull_power[i] < 0 and bear_power[i] > 0 and close[i] < ema_20_1w_aligned[i] and vol_filter[i]
+            # Look for entry: Donchian breakout + trend + volume
+            long_condition = close[i] > high_max[i] and close[i] > ema_200_aligned[i] and vol_filter
+            short_condition = close[i] < low_min[i] and close[i] < ema_200_aligned[i] and vol_filter
             
             if long_condition:
                 signals[i] = 0.25
@@ -84,15 +80,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Elder Ray convergence
-            if abs(bull_power[i] - bear_power[i]) < 0.1 * atr[i]:
+            # Exit long: price crosses below weekly EMA200
+            if close[i] < ema_200_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Elder Ray convergence
-            if abs(bull_power[i] - bear_power[i]) < 0.1 * atr[i]:
+            # Exit short: price crosses above weekly EMA200
+            if close[i] > ema_200_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
