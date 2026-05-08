@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1-day Williams %R with 1-week SMA trend filter and volume confirmation.
-# Williams %R identifies overbought/oversold conditions; trend filter ensures trades align with higher timeframe direction.
-# Long when Williams %R < -80 (oversold) and price > 1w SMA (uptrend) with volume confirmation.
-# Short when Williams %R > -20 (overbought) and price < 1w SMA (downtrend) with volume confirmation.
-# Exit when Williams %R crosses back to -50 (mean reversion) or trend changes.
-# Designed for low trade frequency (20-30/year) to avoid fee decay. Works in both trending and ranging markets via trend filter.
+# Hypothesis: 1d strategy using weekly Donchian breakout with daily RSI filter and volume confirmation.
+# Uses weekly price structure for trend context and daily momentum for entry timing.
+# Long when price breaks above weekly Donchian high (20) and daily RSI > 55 with volume confirmation.
+# Short when price breaks below weekly Donchian low (20) and daily RSI < 45 with volume confirmation.
+# Exit when price returns to weekly Donchian midpoint or RSI reverses.
+# Designed for low trade frequency (10-20/year) to avoid fee decay. Works in trending markets via trend filter.
 
-name = "4h_1dWilliamsR_1wSMA_TrendFilter"
-timeframe = "4h"
+name = "1d_20wDonchian_RSI_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,86 +24,104 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams %R
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data for Donchian channels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    
+    # Calculate 20-week Donchian channels
+    highest_high = np.full_like(high_1w, np.nan)
+    lowest_low = np.full_like(low_1w, np.nan)
+    
+    for i in range(19, len(high_1w)):
+        highest_high[i] = np.max(high_1w[i-19:i+1])
+        lowest_low[i] = np.min(low_1w[i-19:i+1])
+    
+    # Calculate midpoint
+    donchian_mid = (highest_high + lowest_low) / 2
+    
+    # Get daily data for RSI
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
+    
     close_1d = df_1d['close'].values
     
-    # Calculate 1-day Williams %R (14-period)
-    highest_high = np.maximum.accumulate(high_1d)
-    lowest_low = np.minimum.accumulate(low_1d)
-    # For true rolling window, we need to look back 14 periods
-    hh_14 = np.full_like(high_1d, np.nan)
-    ll_14 = np.full_like(low_1d, np.nan)
+    # Calculate 14-day RSI
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    for i in range(13, len(high_1d)):
-        hh_14[i] = np.max(high_1d[i-13:i+1])
-        ll_14[i] = np.min(low_1d[i-13:i+1])
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
     
-    williams_r = -100 * (hh_14 - close_1d) / (hh_14 - ll_14)
-    williams_r[:13] = np.nan  # Not enough data
+    for i in range(len(gain)):
+        if i < 14:
+            if i == 0:
+                avg_gain[i] = np.mean(gain[:1]) if len(gain[:1]) > 0 else 0
+                avg_loss[i] = np.mean(loss[:1]) if len(loss[:1]) > 0 else 0
+            else:
+                avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+                avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # Get 1w data for SMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
+    rsi[:13] = np.nan  # Not enough data for first 14 periods
     
-    close_1w = df_1w['close'].values
-    # Calculate 1-week SMA (9-period)
-    sma_9 = np.convolve(close_1w, np.ones(9)/9, mode='same')
-    for i in range(len(close_1w)):
-        if i < 4 or i >= len(close_1w) - 4:
-            sma_9[i] = np.nan
+    # Align indicators to daily timeframe
+    highest_high_aligned = align_htf_to_ltf(prices, df_1w, highest_high)
+    lowest_low_aligned = align_htf_to_ltf(prices, df_1w, lowest_low)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_1w, donchian_mid)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
-    # Align indicators to 4h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    sma_9_aligned = align_htf_to_ltf(prices, df_1w, sma_9)
-    
-    # Volume confirmation: 4h volume > 1.3x 20-period EMA
+    # Volume confirmation: daily volume > 1.5x 20-day EMA
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ema * 1.3)
+    vol_confirm = volume > (vol_ema * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Ensure enough data for Williams %R and SMA
+    start_idx = max(30, 20)  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(williams_r_aligned[i]) or 
-            np.isnan(sma_9_aligned[i])):
+        if (np.isnan(highest_high_aligned[i]) or 
+            np.isnan(lowest_low_aligned[i]) or 
+            np.isnan(rsi_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: Williams %R < -80 (oversold) and price > 1w SMA (uptrend) with volume confirmation
-            if (williams_r_aligned[i] < -80 and 
-                close[i] > sma_9_aligned[i] and 
+            # Enter long: price breaks above weekly Donchian high and RSI > 55 with volume confirmation
+            if (close[i] > highest_high_aligned[i] and 
+                rsi_aligned[i] > 55 and 
                 vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Williams %R > -20 (overbought) and price < 1w SMA (downtrend) with volume confirmation
-            elif (williams_r_aligned[i] > -20 and 
-                  close[i] < sma_9_aligned[i] and 
+            # Enter short: price breaks below weekly Donchian low and RSI < 45 with volume confirmation
+            elif (close[i] < lowest_low_aligned[i] and 
+                  rsi_aligned[i] < 45 and 
                   vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R crosses above -50 or trend turns down
-            if williams_r_aligned[i] > -50 or close[i] < sma_9_aligned[i]:
+            # Exit long: price returns to weekly Donchian midpoint or RSI < 45
+            if close[i] < donchian_mid_aligned[i] or rsi_aligned[i] < 45:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R crosses below -50 or trend turns up
-            if williams_r_aligned[i] < -50 or close[i] > sma_9_aligned[i]:
+            # Exit short: price returns to weekly Donchian midpoint or RSI > 55
+            if close[i] > donchian_mid_aligned[i] or rsi_aligned[i] > 55:
                 signals[i] = 0.0
                 position = 0
             else:
