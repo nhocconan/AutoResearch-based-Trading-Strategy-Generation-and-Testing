@@ -3,14 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) + 1d Trend Filter + Volume Spike
-# Uses 6h EMA(13) as pivot. Bull Power = High - EMA(13), Bear Power = EMA(13) - Low.
-# Long when Bull Power > 0 and rising, Bear Power > 0 and falling, 1d EMA(50) up, volume > 1.5x 20 EMA.
-# Short when Bear Power > 0 and rising, Bull Power > 0 and falling, 1d EMA(50) down, volume > 1.5x 20 EMA.
-# Designed for low trade frequency (15-25/year) to minimize fee flood and capture momentum with trend alignment.
+# Hypothesis: 4h strategy using daily KAMA for trend and Bollinger Bands for mean-reversion signals.
+# Long when price touches lower Bollinger Band (20,2) and KAMA is rising (uptrend).
+# Short when price touches upper Bollinger Band (20,2) and KAMA is falling (downtrend).
+# Uses daily KAMA to filter trend direction and reduce whipsaw. Bollinger Bands provide
+# mean-reversion entries in ranging markets, while KAMA filters out counter-trend moves.
+# Designed for low trade frequency (20-40/year) to minimize fee drag and capture mean-reversion
+# within the dominant trend.
 
-name = "6h_ElderRay_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_KAMA_Bollinger_MeanReversion"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,81 +23,114 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get daily data for trend (KAMA) and Bollinger Bands
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     
-    # 1d EMA(50) for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_up = ema_50_1d[1:] > ema_50_1d[:-1]  # Rising EMA = uptrend
-    trend_up = np.concatenate([[False], trend_up])  # Align with 1d index
+    # Daily KAMA ( Kaufman Adaptive Moving Average )
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close_1d))
+    change = np.concatenate([[0], change])  # align with close_1d index
+    volatility = np.abs(np.diff(close_1d, 1))
+    volatility = np.concatenate([[0], volatility])
     
-    # 6h EMA(13) for Elder Ray pivot
-    close_series = pd.Series(close)
-    ema_13 = close_series.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Sum of absolute changes over 10 periods for ER numerator
+    change_sum = np.convolve(change, np.ones(10), mode='full')
+    change_sum = change_sum[9:len(change_sum)-0]  # valid part
+    change_sum = np.concatenate([np.zeros(9), change_sum])  # align
     
-    # Bull Power = High - EMA(13)
-    bull_power = high - ema_13
-    # Bear Power = EMA(13) - Low
-    bear_power = ema_13 - low
+    # Sum of absolute changes over 10 periods for ER denominator
+    volatility_sum = np.convolve(volatility, np.ones(10), mode='full')
+    volatility_sum = volatility_sum[9:len(volatility_sum)-0]
+    volatility_sum = np.concatenate([np.zeros(9), volatility_sum])
     
-    # Slope of Bull/Bear Power (1-period change)
-    bull_power_slope = bull_power[1:] - bull_power[:-1]
-    bull_power_slope = np.concatenate([[0], bull_power_slope])
-    bear_power_slope = bear_power[1:] - bear_power[:-1]
-    bear_power_slope = np.concatenate([[0], bear_power_slope])
+    # Avoid division by zero
+    er = np.where(volatility_sum != 0, change_sum / volatility_sum, 0)
     
-    # Align 1d trend to 6h
-    trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up.astype(float))
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
     
-    # Volume confirmation: 6h volume > 1.5x 20-period EMA
-    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ema * 1.5)
+    # KAMA calculation
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    
+    # Daily Bollinger Bands (20,2)
+    bb_period = 20
+    bb_std = 2
+    sma = np.convolve(close_1d, np.ones(bb_period)/bb_period, mode='same')
+    # Handle edges
+    sma[:bb_period-1] = np.nan
+    sma[-bb_period+1:] = np.nan
+    
+    # Calculate rolling std using convolution for efficiency
+    def rolling_std(arr, window):
+        # Using method: sqrt(E[X^2] - E[X]^2)
+        arr_sq = arr ** 2
+        mean = np.convolve(arr, np.ones(window)/window, mode='same')
+        mean_sq = np.convolve(arr_sq, np.ones(window)/window, mode='same')
+        var = mean_sq - mean ** 2
+        # Handle edges
+        var[:window-1] = np.nan
+        var[-window+1:] = np.nan
+        return np.sqrt(np.maximum(var, 0))
+    
+    std = rolling_std(close_1d, bb_period)
+    upper_bb = sma + (bb_std * std)
+    lower_bb = sma - (bb_std * std)
+    
+    # Align daily indicators to 4h timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
+    sma_aligned = align_htf_to_ltf(prices, df_1d, sma)  # for exit
+    
+    # Bollinger Band width for regime filter (optional, can add later)
+    # bb_width = (upper_bb - lower_bb) / sma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure enough data for EMA(20) volume
+    # Start after enough data for calculations
+    start_idx = max(30, bb_period)  # ensure BB and KAMA ready
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(trend_up_aligned[i]) or np.isnan(ema_13[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(vol_ema[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(upper_bb_aligned[i]) or
+            np.isnan(lower_bb_aligned[i]) or np.isnan(sma_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long setup: Bull Power > 0 and rising, Bear Power > 0 and falling, 1d uptrend, volume
-            if (bull_power[i] > 0 and bull_power_slope[i] > 0 and
-                bear_power[i] > 0 and bear_power_slope[i] < 0 and
-                trend_up_aligned[i] > 0.5 and vol_confirm[i]):
+            # Long: price touches lower BB and KAMA is rising (uptrend)
+            if (low[i] <= lower_bb_aligned[i] and  # touch or penetrate lower band
+                kama_aligned[i] > kama_aligned[i-1]):  # KAMA rising
                 signals[i] = 0.25
                 position = 1
-            # Short setup: Bear Power > 0 and rising, Bull Power > 0 and falling, 1d downtrend, volume
-            elif (bear_power[i] > 0 and bear_power_slope[i] > 0 and
-                  bull_power[i] > 0 and bull_power_slope[i] < 0 and
-                  trend_up_aligned[i] <= 0.5 and vol_confirm[i]):
+            # Short: price touches upper BB and KAMA is falling (downtrend)
+            elif (high[i] >= upper_bb_aligned[i] and  # touch or penetrate upper band
+                  kama_aligned[i] < kama_aligned[i-1]):  # KAMA falling
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Bull Power turns negative or Bear Power rises or trend turns down
-            if bull_power[i] <= 0 or bear_power_slope[i] > 0 or trend_up_aligned[i] <= 0.5:
+            # Long exit: price returns to SMA (mean reversion complete) or KAMA turns down
+            if (high[i] >= sma_aligned[i] or  # price back to mean
+                kama_aligned[i] < kama_aligned[i-1]):  # trend turned down
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Bear Power turns negative or Bull Power rises or trend turns up
-            if bear_power[i] <= 0 or bull_power_slope[i] > 0 or trend_up_aligned[i] > 0.5:
+            # Short exit: price returns to SMA or KAMA turns up
+            if (low[i] <= sma_aligned[i] or  # price back to mean
+                kama_aligned[i] > kama_aligned[i-1]):  # trend turned up
                 signals[i] = 0.0
                 position = 0
             else:
