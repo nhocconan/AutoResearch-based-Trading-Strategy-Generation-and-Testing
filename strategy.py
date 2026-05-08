@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_v3"
-timeframe = "4h"
+name = "1h_Camarilla_R3S3_Breakout_1dTrend_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data once
+    # Get daily data once for HTF context
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 40:
         return np.zeros(n)
@@ -40,7 +40,7 @@ def generate_signals(prices):
     r3_1d = close_1d_prev + range_1d * 1.1 / 2
     s3_1d = close_1d_prev - range_1d * 1.1 / 2
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 1h timeframe
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
@@ -52,6 +52,9 @@ def generate_signals(prices):
     daily_range_pct = range_1d / close_1d_prev
     daily_range_pct_aligned = align_htf_to_ltf(prices, df_1d, daily_range_pct)
     
+    # Session filter: 8-20 UTC (already datetime64[ms], so .hour works)
+    hours = prices.index.hour
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
@@ -61,6 +64,14 @@ def generate_signals(prices):
         # Skip if any critical data is NaN
         if (np.isnan(ema34_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or 
             np.isnan(s3_1d_aligned[i]) or np.isnan(daily_range_pct_aligned[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Session filter: only trade between 08:00-20:00 UTC
+        hour = hours[i]
+        if not (8 <= hour <= 20):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -79,12 +90,12 @@ def generate_signals(prices):
             # Enter long: price breaks above R3 with volume spike, above 1d EMA, in volatility range
             if (close[i] > r3_val and vol_spike and 
                 close[i] > ema_val and vol_filter):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             # Enter short: price breaks below S3 with volume spike, below 1d EMA, in volatility range
             elif (close[i] < s3_val and vol_spike and 
                   close[i] < ema_val and vol_filter):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
             # Exit long: price breaks below S3 OR below 1d EMA
@@ -92,13 +103,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
             # Exit short: price breaks above R3 OR above 1d EMA
             if (close[i] > r3_val or close[i] > ema_val):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
