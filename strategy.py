@@ -3,20 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h 1W/1D Mean Reversion with Volume Confirmation
-# Uses weekly RSI(14) for extreme conditions and daily EMA(34) for trend filter
-# Goes long when weekly RSI < 30 and daily EMA is rising (oversold bounce)
-# Goes short when weekly RSI > 70 and daily EMA is falling (overbought rejection)
-# Volume confirmation via 20-period volume spike to ensure participation
-# Target: 12-37 trades/year (50-150 total over 4 years) with strict entry conditions
+# Hypothesis: 4h Donchian breakout with 1d trend filter and volume confirmation.
+# Long when price breaks above Donchian(20) high in 1d uptrend with volume spike.
+# Short when price breaks below Donchian(20) low in 1d downtrend with volume spike.
+# Uses 1d EMA(34) for trend and 40-period volume spike for confirmation.
+# Target: 15-40 trades per year to minimize fee drag.
 
-name = "12h_WeeklyRSI_DailyEMA_MeanReversion_Volume"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,89 +23,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for RSI calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
-        return np.zeros(n)
-    
-    # Get daily data for EMA trend filter
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Weekly RSI(14) for mean reversion signals
-    close_1w = df_1w['close'].values
-    delta = np.diff(close_1w, prepend=close_1w[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # Wilder's smoothing for RSI
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])  # First average of first 14 periods
-    avg_loss[13] = np.mean(loss[1:14])
-    
-    for i in range(14, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi_14_1w = 100 - (100 / (1 + rs))
-    rsi_14_1w[:13] = np.nan  # Not enough data for first 13 periods
-    
-    # Daily EMA(34) for trend filter
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_rising = ema_34_1d[1:] > ema_34_1d[:-1]  # Rising EMA = uptrend
-    ema_rising = np.concatenate([[False], ema_rising])  # Align with 1d index
     
-    # Volume confirmation: 20-period volume spike (1.5x EMA)
-    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ema * 1.5)
+    # 1d EMA(34) for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_up = ema_34_1d[1:] > ema_34_1d[:-1]  # Rising EMA = uptrend
+    trend_up = np.concatenate([[False], trend_up])  # Align with 1d index
     
-    # Align weekly RSI and daily EMA to 12h timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_1w, rsi_14_1w)
-    ema_rising_aligned = align_htf_to_ltf(prices, df_1d, ema_rising.astype(float))
+    # Donchian(20) on 4h data
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    
+    # Volume confirmation: 40-period volume spike (1.8x EMA)
+    vol_ema = pd.Series(volume).ewm(span=40, adjust=False, min_periods=40).mean().values
+    vol_confirm = volume > (vol_ema * 1.8)
+    
+    # Align 1d indicators to 4h timeframe
+    trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for all indicators
+    start_idx = 40  # Ensure enough data for volume EMA and Donchian
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(rsi_aligned[i]) or np.isnan(ema_rising_aligned[i]) or 
-            np.isnan(vol_ema[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(trend_up_aligned[i]) or np.isnan(vol_ema[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: Weekly oversold + Daily uptrend + Volume spike
-            if (rsi_aligned[i] < 30 and  # Weekly RSI oversold
-                ema_rising_aligned[i] > 0.5 and  # Daily EMA rising
+            # Long entry: Donchian breakout in uptrend with volume
+            if (trend_up_aligned[i] > 0.5 and  # 1d uptrend
+                close[i] >= donchian_high[i] and
                 vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Weekly overbought + Daily downtrend + Volume spike
-            elif (rsi_aligned[i] > 70 and  # Weekly RSI overbought
-                  ema_rising_aligned[i] <= 0.5 and  # Daily EMA falling
+            # Short entry: Donchian breakdown in downtrend with volume
+            elif (trend_up_aligned[i] <= 0.5 and  # 1d downtrend
+                  close[i] <= donchian_low[i] and
                   vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Weekly RSI returns to neutral or trend breaks
-            if (rsi_aligned[i] >= 50 or  # RSI back to neutral
-                ema_rising_aligned[i] <= 0.5):  # Daily trend turns down
+            # Long exit: reverse trend or Donchian low touch
+            if (trend_up_aligned[i] <= 0.5 and  # 1d downtrend
+                close[i] <= donchian_low[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Weekly RSI returns to neutral or trend breaks
-            if (rsi_aligned[i] <= 50 or  # RSI back to neutral
-                ema_rising_aligned[i] > 0.5):  # Daily trend turns up
+            # Short exit: reverse trend or Donchian high touch
+            if (trend_up_aligned[i] > 0.5 and  # 1d uptrend
+                  close[i] >= donchian_high[i]):
                 signals[i] = 0.0
                 position = 0
             else:
