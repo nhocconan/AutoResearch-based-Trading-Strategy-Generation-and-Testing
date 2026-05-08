@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with 1d volume confirmation and 1d ADX trend filter
-# The Alligator (Jaw/Teeth/Lips) identifies trend direction via SMAs. When Lips cross above Teeth/Jaw,
-# it signals an uptrend; cross below signals downtrend. Volume confirms participation, and 1d ADX > 25
-# ensures we only trade in strong trends, avoiding whipsaws in ranges. Works in bull/bear by filtering
-# for strong trends only. Targets 15-25 trades/year (~60-100 total over 4 years) to minimize fee drag.
+# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and 1d ADX trend filter
+# Donchian breakouts capture strong momentum. Volume spike confirms institutional participation.
+# 1d ADX > 25 ensures trading only in strong trends, avoiding whipsaws in ranges.
+# Works in both bull and bear markets by filtering for strong trends only.
+# Targets 20-50 trades per year (~80-200 total over 4 years) to minimize fee drag.
 
-name = "12h_WilliamsAlligator_1dVolume_1dADX"
-timeframe = "12h"
+name = "4h_Donchian20_1dVolume_1dADX"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,33 +23,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for indicators
+    # Donchian(20) on 4h
+    lookback = 20
+    dc_high = np.full(n, np.nan)
+    dc_low = np.full(n, np.nan)
+    for i in range(lookback, n):
+        dc_high[i] = np.max(high[i-lookback:i])
+        dc_low[i] = np.min(low[i-lookback:i])
+    
+    # Get 1d data for volume and ADX
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    # Volume spike detection on 1d
+    vol_1d = df_1d['volume'].values
+    vol_ma = np.full(len(vol_1d), np.nan)
+    vol_window = 20
+    for i in range(vol_window, len(vol_1d)):
+        vol_ma[i] = np.mean(vol_1d[i-vol_window:i])
+    vol_spike_1d = vol_1d > (vol_ma * 2.0)
+    vol_spike_4h = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
+    
+    # ADX trend filter on 1d
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Williams Alligator: Jaw (13), Teeth (8), Lips (5) SMAs of median price
-    median_1d = (high_1d + low_1d) / 2
-    jaw = pd.Series(median_1d).rolling(window=13, min_periods=13).mean().values
-    teeth = pd.Series(median_1d).rolling(window=8, min_periods=8).mean().values
-    lips = pd.Series(median_1d).rolling(window=5, min_periods=5).mean().values
-    
-    # Align to 12h timeframe (use previous day's values to avoid look-ahead)
-    jaw_12h = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_12h = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_12h = align_htf_to_ltf(prices, df_1d, lips)
-    
-    # Volume spike detection on 1d (2-day MA)
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=2, min_periods=2).mean().values
-    vol_spike_1d = volume_1d > (vol_ma_1d * 2.0)
-    vol_spike_12h = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
-    
-    # ADX trend filter on 1d
     plus_dm = np.zeros_like(high_1d)
     minus_dm = np.zeros_like(high_1d)
     tr = np.zeros_like(high_1d)
@@ -66,6 +66,7 @@ def generate_signals(prices):
             abs(low_1d[i] - close_1d[i-1])
         )
     
+    # Wilder smoothing
     def wilder_smooth(arr, period):
         result = np.full_like(arr, np.nan)
         if len(arr) < period:
@@ -87,43 +88,41 @@ def generate_signals(prices):
     adx = wilder_smooth(dx, 14)
     
     adx_strong = adx > 25
-    adx_weak = adx < 20
-    adx_strong_12h = align_htf_to_ltf(prices, df_1d, adx_strong)
-    adx_weak_12h = align_htf_to_ltf(prices, df_1d, adx_weak)
+    adx_strong_4h = align_htf_to_ltf(prices, df_1d, adx_strong)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 13  # Ensure sufficient data for Alligator
+    start_idx = max(lookback, 20)  # Ensure sufficient data
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(jaw_12h[i]) or np.isnan(teeth_12h[i]) or np.isnan(lips_12h[i]) or 
-            np.isnan(vol_spike_12h[i]) or np.isnan(adx_strong_12h[i]) or np.isnan(adx_weak_12h[i])):
+        if (np.isnan(dc_high[i]) or np.isnan(dc_low[i]) or 
+            np.isnan(vol_spike_4h[i]) or np.isnan(adx_strong_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: Lips > Teeth > Jaw, volume spike, strong trend
-            if lips_12h[i] > teeth_12h[i] and teeth_12h[i] > jaw_12h[i] and vol_spike_12h[i] and adx_strong_12h[i]:
+            # Enter long: price breaks above Donchian high, volume spike, strong trend
+            if close[i] > dc_high[i] and vol_spike_4h[i] and adx_strong_4h[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Lips < Teeth < Jaw, volume spike, strong trend
-            elif lips_12h[i] < teeth_12h[i] and teeth_12h[i] < jaw_12h[i] and vol_spike_12h[i] and adx_strong_12h[i]:
+            # Enter short: price breaks below Donchian low, volume spike, strong trend
+            elif close[i] < dc_low[i] and vol_spike_4h[i] and adx_strong_4h[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Lips < Teeth or trend weakens
-            if lips_12h[i] < teeth_12h[i] or adx_weak_12h[i]:
+            # Exit long: price returns to Donchian low or trend weakens
+            if close[i] < dc_low[i] or not adx_strong_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Lips > Teeth or trend weakens
-            if lips_12h[i] > teeth_12h[i] or adx_weak_12h[i]:
+            # Exit short: price returns to Donchian high or trend weakens
+            if close[i] > dc_high[i] or not adx_strong_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
