@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Daily_Pivot_Pullback_Trend_Filter_v1"
+name = "4h_Volume_Regime_Breakout_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,66 +17,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data once for pivot levels
+    # Get 1d data once
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === Previous day's pivot points (HLC/3) ===
-    prev_high_1d = np.roll(df_1d['high'].values, 1)
-    prev_low_1d = np.roll(df_1d['low'].values, 1)
-    prev_close_1d = np.roll(df_1d['close'].values, 1)
-    prev_high_1d[0] = df_1d['high'].values[0]
-    prev_low_1d[0] = df_1d['low'].values[0]
-    prev_close_1d[0] = df_1d['close'].values[0]
+    # === 1d ATR for volatility regime ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    tr = np.maximum(high_1d - low_1d, 
+                    np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), 
+                               np.abs(low_1d - np.roll(close_1d, 1))))
+    tr[0] = high_1d[0] - low_1d[0]
+    atr20_1d = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    atr20_1d_aligned = align_htf_to_ltf(prices, df_1d, atr20_1d)
     
-    pivot = (prev_high_1d + prev_low_1d + prev_close_1d) / 3.0
-    range_1d = prev_high_1d - prev_low_1d
+    atr50_1d = pd.Series(tr).ewm(span=50, adjust=False, min_periods=50).mean().values
+    atr50_1d_aligned = align_htf_to_ltf(prices, df_1d, atr50_1d)
+    atr_ratio = atr20_1d_aligned / (atr50_1d_aligned + 1e-10)
     
-    # Pivot support/resistance levels
-    r1 = pivot + (range_1d * 1.1 / 12)
-    s1 = pivot - (range_1d * 1.1 / 12)
-    r2 = pivot + (range_1d * 1.1 / 6)
-    s2 = pivot - (range_1d * 1.1 / 6)
+    # === 4h Donchian channels (20-period) ===
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Align pivot levels to 4h timeframe
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
-    r2_4h = align_htf_to_ltf(prices, df_1d, r2)
-    s2_4h = align_htf_to_ltf(prices, df_1d, s2)
-    
-    # === 4h EMA34 for trend filter (from experiment notes) ===
-    ema34_4h = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # === 4h Volume filter: current volume > 20-period average ===
+    # === Volume filter: current volume > 1.5x 20-period average ===
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # warmup for EMA34
+    start_idx = 50  # warmup for ATR50
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or np.isnan(r2_4h[i]) or np.isnan(s2_4h[i]) or
-            np.isnan(ema34_4h[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
+            np.isnan(atr_ratio[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Pullback to S1 in uptrend (long)
-            long_cond = (close[i] > ema34_4h[i] and  # Uptrend filter
-                        close[i] <= s1_4h[i] * 1.01 and  # Near S1 (allow 1% tolerance)
-                        close[i] >= s1_4h[i] * 0.99 and
-                        volume[i] > vol_ma20[i])  # Volume confirmation
+            # Determine regime: trending if ATR ratio > 1.1, ranging if < 0.9
+            is_trending = atr_ratio[i] > 1.1
+            is_ranging = atr_ratio[i] < 0.9
             
-            # Pullback to R1 in downtrend (short)
-            short_cond = (close[i] < ema34_4h[i] and  # Downtrend filter
-                         close[i] >= r1_4h[i] * 0.99 and  # Near R1 (allow 1% tolerance)
-                         close[i] <= r1_4h[i] * 1.01 and
-                         volume[i] > vol_ma20[i])
+            if is_trending:
+                # Trending regime: breakout continuation
+                long_cond = (close[i] > high_roll[i] and 
+                            volume[i] > vol_ma20[i] * 1.5)
+                
+                short_cond = (close[i] < low_roll[i] and 
+                             volume[i] > vol_ma20[i] * 1.5)
+            elif is_ranging:
+                # Ranging regime: mean reversion at Donchian extremes
+                long_cond = (close[i] < low_roll[i] and 
+                            volume[i] > vol_ma20[i] * 1.5)
+                
+                short_cond = (close[i] > high_roll[i] and 
+                             volume[i] > vol_ma20[i] * 1.5)
+            else:
+                # Transition zone: no trades
+                long_cond = False
+                short_cond = False
             
             if long_cond:
                 signals[i] = 0.25
@@ -85,15 +90,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price reaches R1 or trend reversal
-            if close[i] >= r1_4h[i] or close[i] < ema34_4h[i]:
+            # Long exit: reverse signal or volatility contraction
+            if close[i] < low_roll[i] or atr_ratio[i] < 0.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price reaches S1 or trend reversal
-            if close[i] <= s1_4h[i] or close[i] > ema34_4h[i]:
+            # Short exit: reverse signal or volatility contraction
+            if close[i] > high_roll[i] or atr_ratio[i] < 0.8:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,8 +106,8 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Pullback to daily pivot support/resistance levels with trend filter and volume confirmation.
-# In uptrends (price > EMA34), look for long entries near S1; in downtrends, look for short entries near R1.
-# Exits at opposite pivot level or trend reversal. Uses 4h timeframe for better trade frequency control.
-# Designed to work in both bull (trend following pullbacks) and bear (mean reversion at pivots) markets.
-# Targets 50-150 trades over 4 years (12-37/year) to minimize fee drag. Uses discrete sizing (0.25) to reduce churn.
+# Hypothesis: 4h Donchian breakout with volume confirmation and ATR-based regime filter.
+# In trending markets (rising volatility): trade breakouts in direction of trend.
+# In ranging markets (low volatility): trade mean reversion at Donchian extremes.
+# Volume filter ensures institutional participation. Designed for 50-150 trades over 4 years.
+# Works in both bull (trend following) and bear (mean reversion in ranges) markets.
