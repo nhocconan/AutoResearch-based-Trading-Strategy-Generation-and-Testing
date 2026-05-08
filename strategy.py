@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_1dTrend_Volume_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,36 +17,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla levels
+    # Daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla levels for each day
-    # R1 = close + 1.1*(high-low)/12
-    # S1 = close - 1.1*(high-low)/12
-    camarilla_range = (high_1d - low_1d)
-    r1 = close_1d + (1.1 * camarilla_range) / 12
-    s1 = close_1d - (1.1 * camarilla_range) / 12
+    # Donchian channels (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Align Camarilla levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Weekly trend filter: EMA(50)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Volume confirmation: 20-period average
+    # Volume filter: 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     
@@ -57,45 +41,39 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(vol_ratio[i]) or 
+            np.isnan(high_20[i]) or np.isnan(low_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Close crosses above R1 + weekly uptrend + volume confirmation
-            if (close[i] > r1_aligned[i] and 
-                close[i-1] <= r1_aligned[i-1] and  # crossed above this bar
-                close[i] > ema_50_1w_aligned[i] and
+            # Long: Close breaks above upper Donchian + above daily EMA34 + volume confirmation
+            if (close[i] > high_20[i] and 
+                close[i] > ema_34_aligned[i] and 
                 vol_ratio[i] > 1.5):
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
-            # Short: Close crosses below S1 + weekly downtrend + volume confirmation
-            elif (close[i] < s1_aligned[i] and 
-                  close[i-1] >= s1_aligned[i-1] and  # crossed below this bar
-                  close[i] < ema_50_1w_aligned[i] and
+            # Short: Close breaks below lower Donchian + below daily EMA34 + volume confirmation
+            elif (close[i] < low_20[i] and 
+                  close[i] < ema_34_aligned[i] and 
                   vol_ratio[i] > 1.5):
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Long exit: Close crosses below S1 or weekly trend turns down
-            if (close[i] < s1_aligned[i] and 
-                close[i-1] >= s1_aligned[i-1]) or \
-               close[i] < ema_50_1w_aligned[i]:
+            # Long exit: Close breaks below lower Donchian or below daily EMA34
+            if (close[i] < low_20[i] or close[i] < ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Short exit: Close crosses above R1 or weekly trend turns up
-            if (close[i] > r1_aligned[i] and 
-                close[i-1] <= r1_aligned[i-1]) or \
-               close[i] > ema_50_1w_aligned[i]:
+            # Short exit: Close breaks above upper Donchian or above daily EMA34
+            if (close[i] > high_20[i] or close[i] > ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
