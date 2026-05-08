@@ -3,96 +3,116 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_ChaikinMoneyFlow_VolumeTrend"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
+    volume = prices['volume'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for Chaikin Money Flow
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data for Camarilla levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # Calculate 1d Chaikin Money Flow (20-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # Calculate Camarilla levels (R3, S3) from previous week
+    high_prev = df_1w['high'].shift(1).values
+    low_prev = df_1w['low'].shift(1).values
+    close_prev = df_1w['close'].shift(1).values
     
-    # Money Flow Multiplier = [(Close - Low) - (High - Close)] / (High - Low)
-    # Avoid division by zero
-    hl_range = high_1d - low_1d
-    mfm = np.zeros_like(hl_range)
-    mask = hl_range != 0
-    mfm[mask] = ((close_1d[mask] - low_1d[mask]) - (high_1d[mask] - close_1d[mask])) / hl_range[mask]
+    # Camarilla formulas
+    R3 = close_prev + 1.1 * (high_prev - low_prev) / 6
+    S3 = close_prev - 1.1 * (high_prev - low_prev) / 6
     
-    # Money Flow Volume = Money Flow Multiplier * Volume
-    mfv = mfm * volume_1d
+    # Align Camarilla levels to 12h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1w, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1w, S3)
     
-    # CMF = 20-period sum of MFV / 20-period sum of Volume
-    cmf_raw = np.full(len(df_1d), np.nan)
+    # Get daily data for trend filter (1w EMA50)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    # Calculate 1d EMA50 for trend filter
+    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Get daily data for volume spike (20-period average)
+    vol_1d = df_1d['volume'].values
+    vol_avg_20 = np.full(len(df_1d), np.nan)
     for i in range(len(df_1d)):
-        if i >= 19:  # 20-period minimum
-            sum_mfv = np.sum(mfv[i-19:i+1])
-            sum_volume = np.sum(volume_1d[i-19:i+1])
-            if sum_volume != 0:
-                cmf_raw[i] = sum_mfv / sum_volume
-    
-    # Align 1d CMF to 4h timeframe
-    cmf_aligned = align_htf_to_ltf(prices, df_1d, cmf_raw)
-    
-    # 4h volume filter: current volume > 1.5x 20-period average
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(n):
         if i >= 19:
-            vol_ma_20[i] = np.mean(volume[i-19:i+1])
+            vol_avg_20[i] = np.mean(vol_1d[i-19:i+1])
+    
+    vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # warmup for CMF and volume MA
+    start_idx = 50  # warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(cmf_aligned[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg_20_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirmed = volume[i] > 1.5 * vol_ma_20[i]
+        # Get current day's data (last completed day)
+        idx_1d = 0
+        while idx_1d < len(df_1d) and df_1d.iloc[idx_1d]['open_time'] <= prices.iloc[i]['open_time']:
+            idx_1d += 1
+        idx_1d -= 1  # last completed day
         
-        # CMF signal: positive for buying pressure, negative for selling pressure
-        cmf_positive = cmf_aligned[i] > 0.05  # threshold to avoid noise
-        cmf_negative = cmf_aligned[i] < -0.05
+        if idx_1d < 0:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        vol_current = df_1d['volume'].iloc[idx_1d]
+        vol_avg_20_current = vol_avg_20[idx_1d]
+        
+        if np.isnan(vol_current) or np.isnan(vol_avg_20_current):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Volume confirmation: current daily volume > 2.0x 20-period average
+        vol_confirmed = vol_current > 2.0 * vol_avg_20_current
+        
+        # Current price
+        price = close[i]
+        R3_level = R3_aligned[i]
+        S3_level = S3_aligned[i]
+        ema50 = ema50_1d_aligned[i]
         
         # Trading logic
         if position == 0:
             # Look for entry
             if vol_confirmed:
-                # Long when CMF shows strong buying pressure
-                if cmf_positive:
+                # Long when price breaks above R3 and above weekly EMA50
+                if price > R3_level and price > ema50:
                     signals[i] = 0.25
                     position = 1
-                # Short when CMF shows strong selling pressure
-                elif cmf_negative:
+                # Short when price breaks below S3 and below weekly EMA50
+                elif price < S3_level and price < ema50:
                     signals[i] = -0.25
                     position = -1
         elif position == 1:
             # Manage long position
             exit_signal = False
-            # Exit when CMF turns negative or volume confirmation lost
-            if not cmf_positive:
+            # Exit when price breaks below S3 or volume confirmation lost
+            if price < S3_level:
                 exit_signal = True
             elif not vol_confirmed:
                 exit_signal = True
@@ -105,8 +125,8 @@ def generate_signals(prices):
         elif position == -1:
             # Manage short position
             exit_signal = False
-            # Exit when CMF turns positive or volume confirmation lost
-            if not cmf_negative:
+            # Exit when price breaks above R3 or volume confirmation lost
+            if price > R3_level:
                 exit_signal = True
             elif not vol_confirmed:
                 exit_signal = True
