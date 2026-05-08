@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian(20) breakout with daily trend filter and volume spike
-# Long when price breaks above upper band, daily EMA(34) uptrend, and volume spike
-# Short when price breaks below lower band, daily EMA(34) downtrend, and volume spike
-# Donchian bands from prior day provide structured support/resistance
-# Daily EMA filters for higher timeframe trend alignment
+# Hypothesis: 4-hour Donchian(20) breakout with 12h EMA(50) trend filter and volume spike
+# Long when price breaks above 20-period high, 12h EMA(50) uptrend, and volume spike
+# Short when price breaks below 20-period low, 12h EMA(50) downtrend, and volume spike
+# Donchian channels provide clear breakout levels in trending markets
+# 12h EMA filters for higher timeframe trend alignment
 # Volume spike confirms institutional participation; avoids false breakouts
-# Targets 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost
+# Targets 75-200 total trades over 4 years (19-50/year) to balance opportunity and cost
 
-name = "12h_Donchian20_DailyTrend_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_12hEMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,28 +25,19 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data once for Donchian bands and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 12h data once for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate daily Donchian(20) bands from previous day
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    # Calculate 12h EMA(50) for trend filter
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Upper band: highest high of last 20 days (excluding today)
-    upper_band = pd.Series(daily_high).rolling(window=20, min_periods=20).max().shift(1).values
-    # Lower band: lowest low of last 20 days (excluding today)
-    lower_band = pd.Series(daily_low).rolling(window=20, min_periods=20).min().shift(1).values
-    
-    # Align Donchian bands to 12h timeframe (available after daily close)
-    upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
-    lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
-    
-    # Calculate daily EMA(34) for trend filter
-    ema34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Donchian(20) channels on 4h data
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -59,38 +50,38 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(high_20[i]) or 
+            np.isnan(low_20[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        upper = upper_band_aligned[i]
-        lower = lower_band_aligned[i]
-        ema34_1d_val = ema34_1d_aligned[i]
+        ema50_12h_val = ema50_12h_aligned[i]
         price = close[i]
+        upper = high_20[i]
+        lower = low_20[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: price breaks above upper band, daily uptrend, volume spike
-            if price > upper and price > ema34_1d_val and vol_spike:
+            # Enter long: price breaks above upper band, 12h uptrend, volume spike
+            if price > upper and price > ema50_12h_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below lower band, daily downtrend, volume spike
-            elif price < lower and price < ema34_1d_val and vol_spike:
+            # Enter short: price breaks below lower band, 12h downtrend, volume spike
+            elif price < lower and price < ema50_12h_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price falls below lower band or daily trend turns down
-            if price < lower or price < ema34_1d_val:
+            # Exit long: price falls below lower band or 12h trend turns down
+            if price < lower or price < ema50_12h_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price rises above upper band or daily trend turns up
-            if price > upper or price > ema34_1d_val:
+            # Exit short: price rises above upper band or 12h trend turns up
+            if price > upper or price > ema50_12h_val:
                 signals[i] = 0.0
                 position = 0
             else:
