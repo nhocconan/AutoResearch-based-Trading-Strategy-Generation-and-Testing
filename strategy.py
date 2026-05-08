@@ -1,22 +1,17 @@
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+# 1d_KAMA_RSI_Chop_WeeklyTrend
+# Hypothesis: Daily KAMA trend with weekly trend filter and RSI momentum
+# Uses KAMA's adaptive nature to capture trends while avoiding whipsaws
+# Weekly trend filter ensures alignment with higher timeframe momentum
+# RSI provides entry timing on pullbacks within the trend
+# Target: 15-25 trades per year (60-100 total over 4 years)
 
-# Hypothesis: 4h Trix + Volume Spike + 1d Trend Filter
-# Trix (Triple Exponential Average) filters noise and captures momentum.
-# Long when Trix crosses above zero with volume spike in uptrend (price > 1d EMA34).
-# Short when Trix crosses below zero with volume spike in downtrend (price < 1d EMA34).
-# Uses volume confirmation to avoid false signals. Designed for low trade frequency.
-# Target: 20-50 total trades over 4 years = 5-12/year.
-
-name = "4h_Trix_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_KAMA_RSI_Chop_WeeklyTrend"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,26 +19,50 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data once
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get weekly data once
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate daily EMA(34) for trend direction
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate weekly EMA(50) for trend direction
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Calculate Trix (15-period) on close prices
-    # Trix = EMA(EMA(EMA(close, 15), 15), 15)
-    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
-    trix = np.diff(ema3, prepend=ema3[0]) / ema3  # percentage change
+    # Calculate KAMA on daily data
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close, n=10))
+    change = np.concatenate([[np.nan]*10, change])
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)
+    volatility = pd.Series(volatility).rolling(window=10, min_periods=10).sum().values
+    volatility = np.concatenate([[np.nan]*9, volatility])
+    er = np.where(volatility != 0, change / volatility, 0)
     
-    # Volume spike: current volume > 2.0 * 20-period average
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    kama = np.full_like(close, np.nan)
+    kama[0] = close[0]
+    
+    for i in range(1, len(close)):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+    
+    # Calculate RSI(14) on daily data
+    delta = np.diff(close)
+    delta = np.concatenate([[np.nan], delta])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume spike: current volume > 1.5 * 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -52,42 +71,43 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(trix[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(kama[i]) or 
+            np.isnan(rsi[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema34_1d_val = ema34_1d_aligned[i]
-        trix_val = trix[i]
+        ema50_1w_val = ema50_1w_aligned[i]
+        kama_val = kama[i]
+        rsi_val = rsi[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: Trix crosses above zero + uptrend + volume spike
-            if (trix_val > 0 and 
-                trix[i-1] <= 0 and  # crossed above zero
-                close[i] > ema34_1d_val and 
+            # Enter long: price > KAMA (uptrend) + weekly uptrend + RSI > 50 + volume spike
+            if (close[i] > kama_val and 
+                close[i] > ema50_1w_val and 
+                rsi_val > 50 and 
                 vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Trix crosses below zero + downtrend + volume spike
-            elif (trix_val < 0 and 
-                  trix[i-1] >= 0 and  # crossed below zero
-                  close[i] < ema34_1d_val and 
+            # Enter short: price < KAMA (downtrend) + weekly downtrend + RSI < 50 + volume spike
+            elif (close[i] < kama_val and 
+                  close[i] < ema50_1w_val and 
+                  rsi_val < 50 and 
                   vol_spike):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Trix crosses below zero OR price breaks below trend
-            if (trix_val < 0 and trix[i-1] >= 0) or close[i] < ema34_1d_val:
+            # Exit long: price < KAMA OR weekly trend turns down
+            if (close[i] < kama_val or close[i] < ema50_1w_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Trix crosses above zero OR price breaks above trend
-            if (trix_val > 0 and trix[i-1] <= 0) or close[i] > ema34_1d_val:
+            # Exit short: price > KAMA OR weekly trend turns up
+            if (close[i] > kama_val or close[i] > ema50_1w_val):
                 signals[i] = 0.0
                 position = 0
             else:
