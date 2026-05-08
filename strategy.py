@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Pivot_Trend_Switch_v1"
-timeframe = "4h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_1dVolumeFilter_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,106 +17,117 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for pivots and 12h data for trend
+    # Get 4h and 1d data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_1d) < 30 or len(df_12h) < 30:
+    if len(df_4h) < 30 or len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 1d Pivot Points (standard calculation) ===
-    prev_high = np.roll(df_1d['high'].values, 1)
-    prev_low = np.roll(df_1d['low'].values, 1)
-    prev_close = np.roll(df_1d['close'].values, 1)
-    # First bar: use current values to avoid look-ahead
-    prev_high[0] = df_1d['high'].values[0]
-    prev_low[0] = df_1d['low'].values[0]
-    prev_close[0] = df_1d['close'].values[0]
+    # === 4h Trend: EMA50 ===
+    close_4h = df_4h['close'].values
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_1d = prev_high - prev_low
+    # === 1d Volume filter: current volume > 20-period average ===
+    vol_1d = df_1d['volume'].values
+    vol_ma20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
     
-    # Key levels: R1, S1, R2, S2
-    r1 = pivot + (range_1d * 1.0 / 2.0)  # Standard R1
-    s1 = pivot - (range_1d * 1.0 / 2.0)  # Standard S1
-    r2 = pivot + range_1d                # Standard R2
-    s2 = pivot - range_1d                # Standard S2
+    # === 1d Previous day's Camarilla pivot points (HLC/3) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align to 4h timeframe
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
-    r2_4h = align_htf_to_ltf(prices, df_1d, r2)
-    s2_4h = align_htf_to_ltf(prices, df_1d, s2)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d[0] = high_1d[0]
+    prev_low_1d[0] = low_1d[0]
+    prev_close_1d[0] = close_1d[0]
     
-    # === 12h EMA25 for trend filter ===
-    close_12h = df_12h['close'].values
-    ema25_12h = pd.Series(close_12h).ewm(span=25, adjust=False, min_periods=25).mean().values
-    ema25_12h_4h = align_htf_to_ltf(prices, df_12h, ema25_12h)
+    pivot = (prev_high_1d + prev_low_1d + prev_close_1d) / 3.0
+    range_1d = prev_high_1d - prev_low_1d
     
-    # === Volume confirmation: 20-period average ===
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Camarilla levels (R1, S1)
+    r1 = pivot + (range_1d * 1.1 / 12)
+    s1 = pivot - (range_1d * 1.1 / 12)
+    
+    # Align Camarilla levels to 1h timeframe
+    r1_1h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_1h = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # === 1h Session filter: 08-20 UTC ===
+    hours = prices.index.hour
+    
+    # === 1h Volume filter: current volume > 20-period average ===
+    vol_ma20_1h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # warmup for EMA25
+    start_idx = 50  # warmup for EMA50
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or np.isnan(r2_4h[i]) or np.isnan(s2_4h[i]) or
-            np.isnan(ema25_12h_4h[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(r1_1h[i]) or np.isnan(s1_1h[i]) or np.isnan(ema50_4h_aligned[i]) or
+            np.isnan(vol_ma20_1d_aligned[i]) or np.isnan(vol_ma20_1h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Session filter: 08-20 UTC
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
+        
         if position == 0:
-            # Determine trend: above/below 12h EMA25
-            uptrend = close[i] > ema25_12h_4h[i]
-            downtrend = close[i] < ema25_12h_4h[i]
+            # Long: price breaks above R1 with 4h uptrend and 1d volume confirmation
+            long_cond = (close[i] > r1_1h[i] and 
+                        close[i] > ema50_4h_aligned[i] and
+                        volume[i] > vol_ma20_1h[i] and
+                        vol_1d[i] > vol_ma20_1d_aligned[i] and
+                        in_session)
             
-            if uptrend:
-                # In uptrend: look for pullback to S1 for long entry
-                long_cond = (close[i] <= s1_4h[i] * 1.005 and  # Allow small buffer
-                            volume[i] > vol_ma20[i])
-                
-                if long_cond:
-                    signals[i] = 0.25
-                    position = 1
-            elif downtrend:
-                # In downtrend: look for bounce to R1 for short entry
-                short_cond = (close[i] >= r1_4h[i] * 0.995 and  # Allow small buffer
-                             volume[i] > vol_ma20[i])
-                
-                if short_cond:
-                    signals[i] = -0.25
-                    position = -1
+            # Short: price breaks below S1 with 4h downtrend and 1d volume confirmation
+            short_cond = (close[i] < s1_1h[i] and 
+                         close[i] < ema50_4h_aligned[i] and
+                         volume[i] > vol_ma20_1h[i] and
+                         vol_1d[i] > vol_ma20_1d_aligned[i] and
+                         in_session)
+            
+            if long_cond:
+                signals[i] = 0.20
+                position = 1
+            elif short_cond:
+                signals[i] = -0.20
+                position = -1
         elif position == 1:
-            # Long exit: either take profit at R1 or stop if trend breaks
-            if close[i] >= r1_4h[i] * 0.995:  # Take profit near R1
-                signals[i] = 0.0
-                position = 0
-            elif close[i] < ema25_12h_4h[i]:  # Trend breakdown
+            # Long exit: price breaks below S1 or 4h trend turns down
+            exit_cond = (close[i] < s1_1h[i] or 
+                        close[i] < ema50_4h_aligned[i])
+            
+            if exit_cond:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: either take profit at S1 or stop if trend breaks
-            if close[i] <= s1_4h[i] * 1.005:  # Take profit near S1
-                signals[i] = 0.0
-                position = 0
-            elif close[i] > ema25_12h_4h[i]:  # Trend reversal
+            # Short exit: price breaks above R1 or 4h trend turns up
+            exit_cond = (close[i] > r1_1h[i] or 
+                        close[i] > ema50_4h_aligned[i])
+            
+            if exit_cond:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-# Hypothesis: Pivot-based trend-following strategy that buys pullbacks to S1 in uptrends
-# and sells bounces to R1 in downtrends. Uses 12h EMA25 as trend filter and volume
-# confirmation for institutional validation. Designed to work in both bull and bear
-# markets by following the higher timeframe trend. Targets 50-150 trades over 4 years
-# (12-37/year) with discrete sizing (0.25) to minimize fee drag. Works on BTC/ETH via
-# institutional pivot levels that act as support/resistance in trending markets.
+# Hypothesis: 1h Camarilla R1/S1 breakout with 4h EMA50 trend filter and 1d volume confirmation.
+# Enters long when price breaks above R1 in 4h uptrend with volume confirmation on both 1h and 1d.
+# Enters short when price breaks below S1 in 4h downtrend with volume confirmation.
+# Uses session filter (08-20 UTC) to avoid low-liquidity hours.
+# Target: 60-150 total trades over 4 years (15-37/year) to minimize fee drag.
+# Uses discrete sizing (0.20) to reduce churn. Works in both bull (breakouts) and bear (trend continuation).
