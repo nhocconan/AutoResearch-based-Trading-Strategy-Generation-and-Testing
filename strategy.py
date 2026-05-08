@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily 20-period Donchian breakout with weekly trend filter and volume confirmation
-# We go long when price breaks above the 20-day high with weekly EMA(34) uptrend and volume spike.
-# We go short when price breaks below the 20-day low with weekly EMA(34) downtrend and volume spike.
-# Designed for low trade frequency in both bull and bear markets with proper risk control.
-# Target: 30-100 total trades over 4 years = 7-25/year (within 150 max)
+# Hypothesis: 12-hour Camarilla pivot breakout with daily trend filter and volume confirmation
+# We go long when price breaks above the daily Camarilla R3 level with daily EMA(34) uptrend and volume spike.
+# We go short when price breaks below the daily Camarilla S3 level with daily EMA(34) downtrend and volume spike.
+# The 12h timeframe reduces trade frequency while Camarilla levels provide institutional support/resistance.
+# Daily trend filter ensures alignment with higher timeframe momentum. Volume spike confirms breakout strength.
+# Designed for low trade frequency (target: 50-150 total trades over 4 years) with proper risk control.
 
-name = "1d_Donchian20_1wTrend_Volume"
-timeframe = "1d"
+name = "12h_Camarilla_R3S3_Breakout_DailyTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,21 +24,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data once
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Get daily data once for Camarilla calculation and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate weekly EMA(34) for trend direction
-    close_1w = df_1w['close'].values
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Calculate daily EMA(34) for trend filter
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate 20-period Donchian channels on daily data
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate daily Camarilla pivot levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_prev = df_1d['close'].values
     
-    # Volume spike: current volume > 2.0 * 20-period average
+    # Pivot point calculation
+    pivot = (high_1d + low_1d + close_1d_prev) / 3.0
+    range_1d = high_1d - low_1d
+    
+    # Camarilla levels: R3 = close + (high - low) * 1.1/2, S3 = close - (high - low) * 1.1/2
+    camarilla_r3 = close_1d_prev + (range_1d * 1.1 / 2)
+    camarilla_s3 = close_1d_prev - (range_1d * 1.1 / 2)
+    
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Volume spike: current volume > 2.0 * 20-period average (on 12h data)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
@@ -48,41 +62,41 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema34_1w_val = ema34_1w_aligned[i]
-        upper_band = donchian_high[i]
-        lower_band = donchian_low[i]
+        ema34_1d_val = ema34_1d_aligned[i]
+        r3_level = camarilla_r3_aligned[i]
+        s3_level = camarilla_s3_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: price breaks above Donchian high + weekly uptrend + volume spike
-            if (close[i] > upper_band and 
-                close[i] > ema34_1w_val and 
+            # Enter long: price breaks above Camarilla R3 + daily uptrend + volume spike
+            if (close[i] > r3_level and 
+                close[i] > ema34_1d_val and 
                 vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below Donchian low + weekly downtrend + volume spike
-            elif (close[i] < lower_band and 
-                  close[i] < ema34_1w_val and 
+            # Enter short: price breaks below Camarilla S3 + daily downtrend + volume spike
+            elif (close[i] < s3_level and 
+                  close[i] < ema34_1d_val and 
                   vol_spike):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below Donchian low OR weekly trend turns down
-            if (close[i] < lower_band or close[i] < ema34_1w_val):
+            # Exit long: price breaks below Camarilla S3 OR daily trend turns down
+            if (close[i] < s3_level or close[i] < ema34_1d_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above Donchian high OR weekly trend turns up
-            if (close[i] > upper_band or close[i] > ema34_1w_val):
+            # Exit short: price breaks above Camarilla R3 OR daily trend turns up
+            if (close[i] > r3_level or close[i] > ema34_1d_val):
                 signals[i] = 0.0
                 position = 0
             else:
