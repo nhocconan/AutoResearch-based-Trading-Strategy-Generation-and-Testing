@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA34 trend filter and volume confirmation.
-# Elder Ray measures bull/bear power via EMA13: Bull Power = High - EMA13, Bear Power = Low - EMA13.
-# In trending markets (EMA34 slope), we go long when Bull Power > 0 and rising, short when Bear Power < 0 and falling.
-# Volume confirmation ensures institutional participation. Works in bull markets (riding uptrends) and bear markets (riding downtrends).
+# Hypothesis: 12h Donchian breakout with 1d EMA34 trend filter and volume confirmation.
+# Donchian channels provide clear breakout levels; EMA34 confirms trend direction; volume ensures institutional participation.
+# Works in bull markets (breakouts above upper band) and bear markets (breakdowns below lower band).
 # Target: 50-150 total trades over 4 years (12-37/year) with disciplined entries.
 
-name = "6h_ElderRay_Trend_Volume"
-timeframe = "6h"
+name = "12h_Donchian_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,22 +22,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 6h data for Elder Ray calculation
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 13:
+    # Get 12h data for Donchian calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
-    volume_6h = df_6h['volume'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Calculate EMA13 for Elder Ray
-    ema13 = pd.Series(close_6h).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Calculate Bull Power and Bear Power
-    bull_power = high_6h - ema13  # High - EMA13
-    bear_power = low_6h - ema13   # Low - EMA13
+    # Calculate Donchian channels (20-period)
+    upper = np.full(len(high_12h), np.nan)
+    lower = np.full(len(low_12h), np.nan)
+    for i in range(20, len(high_12h)):
+        upper[i] = np.max(high_12h[i-20:i])
+        lower[i] = np.min(low_12h[i-20:i])
     
     # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -54,17 +51,17 @@ def generate_signals(prices):
     ema_34_falling = ema_34 < ema_34_prev
     
     # Calculate 20-period average volume for volume filter
-    vol_ma_20 = np.full(len(volume_6h), np.nan)
-    for i in range(20, len(volume_6h)):
-        vol_ma_20[i] = np.mean(volume_6h[i-20:i])
+    vol_ma_20 = np.full(len(volume), np.nan)
+    for i in range(20, len(volume)):
+        vol_ma_20[i] = np.mean(volume[i-20:i])
     
-    # Align all indicators to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_6h, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_6h, bear_power)
+    # Align all indicators to 12h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_12h, upper)
+    lower_aligned = align_htf_to_ltf(prices, df_12h, lower)
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     ema_34_rising_aligned = align_htf_to_ltf(prices, df_1d, ema_34_rising)
     ema_34_falling_aligned = align_htf_to_ltf(prices, df_1d, ema_34_falling)
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_6h, vol_ma_20)
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -84,7 +81,7 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or \
+        if np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or \
            np.isnan(ema_34_aligned[i]) or np.isnan(ema_34_rising_aligned[i]) or \
            np.isnan(ema_34_falling_aligned[i]) or np.isnan(vol_ma_20_aligned[i]):
             if position != 0:
@@ -92,28 +89,16 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Volume filter: current 6h volume > 1.5x 20-period average
-        vol_filter = False
-        if not np.isnan(vol_ma_20_aligned[i]):
-            # Find current 6h bar's volume
-            idx_6h = 0
-            while idx_6h < len(df_6h) and df_6h.iloc[idx_6h]['open_time'] <= prices.iloc[i]['open_time']:
-                idx_6h += 1
-            idx_6h -= 1  # last completed 6h bar
-            
-            if idx_6h >= 0:
-                vol_6h_current = df_6h.iloc[idx_6h]['volume']
-                vol_filter = vol_6h_current > 1.5 * vol_ma_20_aligned[i]
+        # Volume filter: current price volume > 1.5x 20-period average
+        vol_filter = volume[i] > 1.5 * vol_ma_20_aligned[i]
         
         if position == 0:
-            # Look for entry: Elder Ray signals + trend + volume confirmation
-            # Long when Bull Power > 0 and rising in uptrend (EMA34 rising) with volume
-            long_condition = (bull_power_aligned[i] > 0) and \
-                             (bull_power_aligned[i] > bull_power_aligned[i-1]) and \
+            # Look for entry: Donchian breakout + trend + volume confirmation
+            # Long when price breaks above upper Donchian in uptrend with volume
+            long_condition = (close[i] > upper_aligned[i]) and \
                              ema_34_rising_aligned[i] and vol_filter
-            # Short when Bear Power < 0 and falling in downtrend (EMA34 falling) with volume
-            short_condition = (bear_power_aligned[i] < 0) and \
-                              (bear_power_aligned[i] < bear_power_aligned[i-1]) and \
+            # Short when price breaks below lower Donchian in downtrend with volume
+            short_condition = (close[i] < lower_aligned[i]) and \
                               ema_34_falling_aligned[i] and vol_filter
             
             if long_condition:
@@ -123,15 +108,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Bull Power <= 0 or trend fails
-            if (bull_power_aligned[i] <= 0) or (not ema_34_rising_aligned[i]):
+            # Exit long: price breaks below lower Donchian or trend fails
+            if (close[i] < lower_aligned[i]) or (not ema_34_rising_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Bear Power >= 0 or trend fails
-            if (bear_power_aligned[i] >= 0) or (not ema_34_falling_aligned[i]):
+            # Exit short: price breaks above upper Donchian or trend fails
+            if (close[i] > upper_aligned[i]) or (not ema_34_falling_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
