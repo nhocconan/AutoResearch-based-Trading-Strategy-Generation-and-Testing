@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Power with 1d Trend Filter and Volume Confirmation
-# Long when Bull Power > 0 and Bear Power < 0 (bullish bias) + price > 1d EMA50 + volume spike
-# Short when Bear Power > 0 and Bull Power < 0 (bearish bias) + price < 1d EMA50 + volume spike
-# Exit when power signals reverse or volume drops
-# Works in bull/bear by using 1d trend filter and Elder Ray's bull/bear power dynamics
+# Hypothesis: 12h Camarilla pivot breakout with weekly trend filter and volume confirmation
+# Long when price breaks above Camarilla R3 level + weekly EMA > 50-period EMA + volume spike
+# Short when price breaks below Camarilla S3 level + weekly EMA < 50-period EMA + volume spike
+# Exit when price crosses Camarilla H4/L4 level or weekly trend reverses
+# Uses Camarilla pivot levels for institutional support/resistance, weekly trend filter for direction bias
+# Targets 15-25 trades/year to minimize fee drag while capturing significant breakouts
 
-name = "6h_ElderRay_Power_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_WeeklyTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,27 +24,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 and volume filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Get daily data for Camarilla pivots and volume
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 2:
+        return np.zeros(n)
     
-    # Calculate 20-day average volume for volume filter
-    vol_1d = df_1d['volume'].values
-    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    # Calculate weekly EMA(50) for trend filter
+    weekly_close = df_weekly['close'].values
+    weekly_ema_50 = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate Elder Ray Power (13-period EMA) on 6h
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    high_ema13 = high - ema_13  # Bull Power
-    low_ema13 = low - ema_13    # Bear Power
+    # Calculate daily Camarilla pivot levels (based on previous day's OHLC)
+    # Camarilla levels: H4 = close + 1.1*(high-low)/2, L4 = close - 1.1*(high-low)/2
+    # R3 = close + 1.1*(high-low)/4, S3 = close - 1.1*(high-low)/4
+    # H3 = close + 1.1*(high-low)/6, L3 = close - 1.1*(high-low)/6
+    # We'll use R3/S3 for breakout and H4/L4 for exit
+    daily_high = df_daily['high'].values
+    daily_low = df_daily['low'].values
+    daily_close = df_daily['close'].values
     
-    # Align 1d indicators to 6h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    # Calculate Camarilla levels for each day
+    camarilla_r3 = np.zeros(len(df_daily))
+    camarilla_s3 = np.zeros(len(df_daily))
+    camarilla_h4 = np.zeros(len(df_daily))
+    camarilla_l4 = np.zeros(len(df_daily))
+    
+    for i in range(len(df_daily)):
+        high_low = daily_high[i] - daily_low[i]
+        camarilla_r3[i] = daily_close[i] + 1.1 * high_low / 4
+        camarilla_s3[i] = daily_close[i] - 1.1 * high_low / 4
+        camarilla_h4[i] = daily_close[i] + 1.1 * high_low / 2
+        camarilla_l4[i] = daily_close[i] - 1.1 * high_low / 2
+    
+    # Align weekly EMA to 12h timeframe
+    weekly_ema_50_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ema_50)
+    
+    # Align daily Camarilla levels to 12h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_daily, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_daily, camarilla_s3)
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_daily, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_daily, camarilla_l4)
+    
+    # Calculate daily average volume for volume filter
+    daily_volume = df_daily['volume'].values
+    vol_ma_20 = pd.Series(daily_volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_daily, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -51,39 +80,46 @@ def generate_signals(prices):
     start_idx = 100  # warmup period
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or 
-            np.isnan(high_ema13[i]) or np.isnan(low_ema13[i])):
+        if (np.isnan(weekly_ema_50_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(camarilla_h4_aligned[i]) or 
+            np.isnan(camarilla_l4_aligned[i]) or np.isnan(vol_ma_20_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume filter: current 6h volume > 1.5x 20-period average of aligned 1d volume MA
-        vol_filter = volume[i] > 1.5 * vol_ma_20_aligned[i]
-        
-        # Trend filter: price relative to 1d EMA50
-        price_above_ema50 = close[i] > ema_50_1d_aligned[i]
-        price_below_ema50 = close[i] < ema_50_1d_aligned[i]
+        # Volume filter: current daily volume > 1.5x 20-day EMA
+        # Find the most recent completed daily bar
+        idx_daily = len(df_daily) - 1
+        while idx_daily >= 0 and df_daily.iloc[idx_daily]['open_time'] > prices.iloc[i]['open_time']:
+            idx_daily -= 1
+        vol_filter = False
+        if idx_daily >= 0:
+            vol_daily_current = df_daily.iloc[idx_daily]['volume']
+            vol_filter = vol_daily_current > 1.5 * vol_ma_20_aligned[i]
         
         if position == 0:
-            # Long: Bull Power positive, Bear Power negative, price above 1d EMA50, volume spike
-            if (high_ema13[i] > 0 and low_ema13[i] < 0 and price_above_ema50 and vol_filter):
-                signals[i] = 0.25
-                position = 1
-            # Short: Bear Power positive, Bull Power negative, price below 1d EMA50, volume spike
-            elif (low_ema13[i] > 0 and high_ema13[i] < 0 and price_below_ema50 and vol_filter):
-                signals[i] = -0.25
-                position = -1
+            # Look for breakout with volume confirmation and trend alignment
+            # Long: price breaks above Camarilla R3 + weekly uptrend + volume spike
+            if close[i] > camarilla_r3_aligned[i] and weekly_ema_50_aligned[i] > weekly_ema_50_aligned[i-1]:
+                if vol_filter:
+                    signals[i] = 0.25
+                    position = 1
+            # Short: price breaks below Camarilla S3 + weekly downtrend + volume spike
+            elif close[i] < camarilla_s3_aligned[i] and weekly_ema_50_aligned[i] < weekly_ema_50_aligned[i-1]:
+                if vol_filter:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Exit long: Power signals reverse or volume drops
-            if (high_ema13[i] <= 0 or low_ema13[i] >= 0 or not vol_filter):
+            # Exit long: price crosses below Camarilla L4 or weekly trend turns down
+            if close[i] < camarilla_l4_aligned[i] or weekly_ema_50_aligned[i] < weekly_ema_50_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Power signals reverse or volume drops
-            if (low_ema13[i] <= 0 or high_ema13[i] >= 0 or not vol_filter):
+            # Exit short: price crosses above Camarilla H4 or weekly trend turns up
+            if close[i] > camarilla_h4_aligned[i] or weekly_ema_50_aligned[i] > weekly_ema_50_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
