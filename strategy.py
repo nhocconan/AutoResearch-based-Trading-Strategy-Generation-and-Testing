@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_TrendFilter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,36 +26,31 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 1d ATR(14) for volatility filter
+    # 4h trend: EMA50 for trend filter
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # ATR(14) for stop loss
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # 1d Camarilla R3/S3 levels (stronger reversal points)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
-    
-    # 1d volatility-adjusted Bollinger Bands for range detection
-    sma_20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb_1d = sma_20_1d + (2 * std_20_1d)
-    lower_bb_1d = sma_20_1d - (2 * std_20_1d)
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb_1d)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb_1d)
-    
-    # 1d Camarilla R3/S3 levels
     pivot = (high_1d + low_1d + close_1d) / 3.0
     range_1d = high_1d - low_1d
     r3 = close_1d + (range_1d * 1.1 / 4)
     s3 = close_1d - (range_1d * 1.1 / 4)
+    
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Volume spike: current volume > 2x 20-period average
+    # Volume spike: current volume > 2.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2 * vol_ma20)
+    volume_spike = volume > (2.5 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -64,8 +59,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
-            np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(ema_50[i]) or 
             np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
@@ -74,18 +68,16 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price near lower BB + break above S3 + uptrend + volume spike
-            near_lower_bb = close[i] <= lower_bb_aligned[i] + (atr_14_1d_aligned[i] * 0.5)
-            long_cond = near_lower_bb and \
-                      (close[i] > s3_aligned[i]) and \
-                      (close[i] > ema_34_1d_aligned[i]) and \
-                      volume_spike[i]
-            # Short: price near upper BB + break below R3 + downtrend + volume spike
-            near_upper_bb = close[i] >= upper_bb_aligned[i] - (atr_14_1d_aligned[i] * 0.5)
-            short_cond = near_upper_bb and \
-                       (close[i] < r3_aligned[i]) and \
-                       (close[i] < ema_34_1d_aligned[i]) and \
-                       volume_spike[i]
+            # Long: break above R3 + uptrend (price > 1d EMA34 AND price > 4h EMA50) + volume spike
+            long_cond = (close[i] > r3_aligned[i]) and \
+                        (close[i] > ema_34_1d_aligned[i]) and \
+                        (close[i] > ema_50[i]) and \
+                        volume_spike[i]
+            # Short: break below S3 + downtrend (price < 1d EMA34 AND price < 4h EMA50) + volume spike
+            short_cond = (close[i] < s3_aligned[i]) and \
+                         (close[i] < ema_34_1d_aligned[i]) and \
+                         (close[i] < ema_50[i]) and \
+                         volume_spike[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -94,17 +86,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price near upper BB or break below S3
-            near_upper_bb = close[i] >= upper_bb_aligned[i] - (atr_14_1d_aligned[i] * 0.5)
-            if near_upper_bb or (close[i] < s3_aligned[i]):
+            # Long exit: close below S3 (mean reversion to support)
+            if close[i] < s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price near lower BB or break above R3
-            near_lower_bb = close[i] <= lower_bb_aligned[i] + (atr_14_1d_aligned[i] * 0.5)
-            if near_lower_bb or (close[i] > r3_aligned[i]):
+            # Short exit: close above R3 (mean reversion to resistance)
+            if close[i] > r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
