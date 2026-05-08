@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian channel breakout with daily volume confirmation and ADX trend filter.
-# Long when price breaks above Donchian upper band (20-period high) AND volume > 1.3x 20-period average AND ADX > 25 (trending market).
-# Short when price breaks below Donchian lower band (20-period low) AND volume > 1.3x 20-period average AND ADX > 25.
-# Exit when price crosses back inside the Donchian channel (between upper and lower bands).
-# Uses 4h timeframe with 1d volume and ADX for higher timeframe context.
-# Target: 75-200 total trades over 4 years (19-50/year) with controlled frequency to avoid fee drag.
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with weekly trend filter and volume confirmation.
+# Bull Power = High - EMA13, Bear Power = EMA13 - Low (EMA13 on 6h closes).
+# Long when Bull Power > 0 AND Bear Power < 0 AND weekly EMA50 trend up (close > weekly EMA50) AND volume > 1.5x 20-period average.
+# Short when Bear Power > 0 AND Bull Power < 0 AND weekly EMA50 trend down (close < weekly EMA50) AND volume > 1.5x 20-period average.
+# Exit when Bull Power and Bear Power have same sign (both positive or both negative) indicating loss of momentum.
+# Uses 6h timeframe with 1w EMA for trend filter. Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "4h_Donchian_20_Volume_ADX"
-timeframe = "4h"
+name = "6h_ElderRay_WeeklyTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,66 +24,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for volume and ADX
-    df_d = get_htf_data(prices, '1d')
-    if len(df_d) < 30:
+    # Weekly data for trend filter
+    df_w = get_htf_data(prices, '1w')
+    if len(df_w) < 2:
         return np.zeros(n)
     
-    # Calculate Donchian channels (20-period high/low)
-    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Weekly EMA50 for trend direction
+    close_w = df_w['close'].values
+    ema50_w = pd.Series(close_w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_w_aligned = align_htf_to_ltf(prices, df_w, ema50_w)
     
-    # Daily volume filter: current volume > 1.3x 20-period average
-    vol_ma20_d = pd.Series(df_d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ma20_d_aligned = align_htf_to_ltf(prices, df_d, vol_ma20_d)
-    volume_filter = volume > (1.3 * vol_ma20_d_aligned)
+    # Elder Ray components on 6h data
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = ema13 - low
     
-    # Daily ADX filter (14-period) for trend strength
-    # Calculate True Range
-    tr1 = df_d['high'] - df_d['low']
-    tr2 = np.abs(df_d['high'] - df_d['close'].shift(1))
-    tr3 = np.abs(df_d['low'] - df_d['close'].shift(1))
-    tr = pd.DataFrame({'tr1': tr1, 'tr2': tr2, 'tr3': tr3}).max(axis=1)
-    atr_d = tr.rolling(window=14, min_periods=14).mean()
-    
-    # Calculate Directional Movement
-    up_move = df_d['high'] - df_d['high'].shift(1)
-    down_move = df_d['low'].shift(1) - df_d['low']
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Calculate Directional Indicators
-    plus_di = 100 * (pd.Series(plus_dm).rolling(window=14, min_periods=14).sum() / atr_d)
-    minus_di = 100 * (pd.Series(minus_dm).rolling(window=14, min_periods=14).sum() / atr_d)
-    
-    # Calculate ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = dx.rolling(window=14, min_periods=14).mean()
-    adx_values = adx.values
-    adx_aligned = align_htf_to_ltf(prices, df_d, adx_values)
-    
-    # Trend filter: ADX > 25
-    trend_filter = adx_aligned > 25
+    # Volume filter: current volume > 1.5x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 30)  # Sufficient warmup for all indicators
+    start_idx = max(20, 13, 50)  # Sufficient warmup for all indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(volume_filter[i]) or np.isnan(trend_filter[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(ema50_w_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price breaks above Donchian upper, volume filter, trending market
-            long_cond = (close[i] > donchian_upper[i]) and volume_filter[i] and trend_filter[i]
-            # Short conditions: price breaks below Donchian lower, volume filter, trending market
-            short_cond = (close[i] < donchian_lower[i]) and volume_filter[i] and trend_filter[i]
+            # Long conditions: Bull Power > 0, Bear Power < 0, weekly uptrend, volume filter
+            long_cond = (bull_power[i] > 0) and (bear_power[i] < 0) and (close[i] > ema50_w_aligned[i]) and volume_filter[i]
+            # Short conditions: Bear Power > 0, Bull Power < 0, weekly downtrend, volume filter
+            short_cond = (bear_power[i] > 0) and (bull_power[i] < 0) and (close[i] < ema50_w_aligned[i]) and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -92,15 +70,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses back below Donchian lower
-            if close[i] < donchian_lower[i]:
+            # Long exit: loss of momentum (both powers positive or both negative)
+            if (bull_power[i] > 0 and bear_power[i] > 0) or (bull_power[i] < 0 and bear_power[i] < 0):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses back above Donchian upper
-            if close[i] > donchian_upper[i]:
+            # Short exit: loss of momentum (both powers positive or both negative)
+            if (bull_power[i] > 0 and bear_power[i] > 0) or (bull_power[i] < 0 and bear_power[i] < 0):
                 signals[i] = 0.0
                 position = 0
             else:
