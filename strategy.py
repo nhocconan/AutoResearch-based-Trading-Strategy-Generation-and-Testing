@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Williams Alligator with 4h ADX trend filter and volume confirmation
-# The Williams Alligator (Jaw/Teeth/Lips) identifies trend direction and strength.
-# In strong trends, the lines are well-separated and aligned (Jaw > Teeth > Lips for uptrend, reverse for downtrend).
-# We enter when the Lips cross the Teeth in the direction of the trend, confirmed by 4h ADX > 25 and volume spike.
-# Exits occur when the Alligator lines re-cross or ADX falls below 20.
-# Targets 15-35 trades per year (~60-140 total over 4 years) to minimize fee drain.
+# Hypothesis: 6h EMA(21)/EMA(50) cross with 1-week RSI(14) filter and volume confirmation
+# EMA cross provides trend direction, weekly RSI prevents entries in overbought/oversold conditions
+# Volume spike confirms institutional participation. Targets 20-40 trades per year.
+# Works in bull markets via trend following, in bear markets via avoiding counter-trend entries.
+# Uses discrete position sizing (0.25) to minimize fee churn.
 
-name = "1h_WilliamsAlligator_4hADX_Volume"
-timeframe = "1h"
+name = "6h_EMA_Cross_1wRSI_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,104 +23,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Williams Alligator: EMA as proxy for SMMA
-    jaw = pd.Series(close).ewm(span=13, adjust=False).mean().values
-    teeth = pd.Series(close).ewm(span=8, adjust=False).mean().values
-    lips = pd.Series(close).ewm(span=5, adjust=False).mean().values
+    # EMA indicators
+    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Get 4h data for ADX trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Weekly RSI for filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate ADX on 4h data
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    close_1w = df_1w['close'].values
+    delta = np.diff(close_1w, prepend=close_1w[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # True Range
-    tr1 = high_4h[1:] - low_4h[1:]
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align length
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1w = 100 - (100 / (1 + rs))
     
-    # Directional Movement
-    dm_plus = np.where((high_4h[1:] - high_4h[:-1]) > (low_4h[:-1] - low_4h[1:]), 
-                       np.maximum(high_4h[1:] - high_4h[:-1], 0), 0)
-    dm_minus = np.where((low_4h[:-1] - low_4h[1:]) > (high_4h[1:] - high_4h[:-1]), 
-                        np.maximum(low_4h[:-1] - low_4h[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    # Volume confirmation: current volume > 1.8x 30-period average
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    vol_conf = volume > (vol_ma * 1.8)
     
-    # Smoothed values
-    atr = pd.Series(tr).ewm(span=14, adjust=False).mean().values
-    di_plus = pd.Series(dm_plus).ewm(span=14, adjust=False).mean().values
-    di_minus = pd.Series(dm_minus).ewm(span=14, adjust=False).mean().values
-    
-    # ADX calculation
-    dx = np.where((di_plus + di_minus) != 0, 
-                  np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
-    adx = pd.Series(dx).ewm(span=14, adjust=False).mean().values
-    
-    # Align ADX to 1h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_4h, adx)
-    
-    # Volume confirmation: current volume > 2.0x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_conf = volume > (vol_ma * 2.0)
-    
-    # Session filter: 8-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Align weekly RSI to 6h timeframe
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Need enough data for indicators
+    start_idx = 50  # Need enough data for EMA50
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema21[i]) or np.isnan(ema50[i]) or 
+            np.isnan(rsi_1w_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        jaw_val = jaw[i]
-        teeth_val = teeth[i]
-        lips_val = lips[i]
-        adx_val = adx_aligned[i]
+        ema21_val = ema21[i]
+        ema50_val = ema50[i]
+        rsi_val = rsi_1w_aligned[i]
         vol_conf_val = vol_conf[i]
-        session_val = session_filter[i]
         
         if position == 0:
-            # Enter long: Lips cross above Teeth, Alligator aligned bullish, ADX > 25, volume confirmation, session
-            if (lips_val > teeth_val and lips_val > jaw_val and teeth_val > jaw_val and 
-                adx_val > 25 and vol_conf_val and session_val):
-                signals[i] = 0.20
+            # Enter long: EMA21 crosses above EMA50, RSI not overbought (<70), volume confirmation
+            if ema21_val > ema50_val and ema21[i-1] <= ema50[i-1] and rsi_val < 70 and vol_conf_val:
+                signals[i] = 0.25
                 position = 1
-            # Enter short: Lips cross below Teeth, Alligator aligned bearish, ADX > 25, volume confirmation, session
-            elif (lips_val < teeth_val and lips_val < jaw_val and teeth_val < jaw_val and 
-                  adx_val > 25 and vol_conf_val and session_val):
-                signals[i] = -0.20
+            # Enter short: EMA21 crosses below EMA50, RSI not oversold (>30), volume confirmation
+            elif ema21_val < ema50_val and ema21[i-1] >= ema50[i-1] and rsi_val > 30 and vol_conf_val:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Lips cross below Teeth or ADX < 20 or loss of alignment
-            if (lips_val < teeth_val or adx_val < 20 or 
-                lips_val < jaw_val or teeth_val < jaw_val):
+            # Exit long: EMA21 crosses below EMA50 or RSI overbought (>70)
+            if ema21_val < ema50_val or rsi_val > 70:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: Lips cross above Teeth or ADX < 20 or loss of alignment
-            if (lips_val > teeth_val or adx_val < 20 or 
-                lips_val > jaw_val or teeth_val > jaw_val):
+            # Exit short: EMA21 crosses above EMA50 or RSI oversold (<30)
+            if ema21_val > ema50_val or rsi_val < 30:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
