@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d regime filter and volume spike.
-# Bull Power = High - EMA13(1d), Bear Power = EMA13(1d) - Low.
-# Long when Bull Power > 0 AND Bear Power < 0 AND 1d EMA50 rising AND volume > 1.5x 20-period average.
-# Short when Bull Power < 0 AND Bear Power > 0 AND 1d EMA50 falling AND volume > 1.5x 20-period average.
-# Exit when Bull Power and Bear Power have same sign (both positive or both negative).
-# Elder Ray measures bull/bear strength relative to 1d EMA13. 1d EMA50 filters higher timeframe trend.
-# Volume spike confirms institutional participation. Target: 50-150 total trades over 4 years (12-37/year).
+# Hypothesis: 12h Williams Alligator with 1d Elder Ray force index and volume confirmation.
+# Long when price is above Alligator teeth (green line), 1d Elder Ray > 0, and volume > 1.5x 20-period average.
+# Short when price is below Alligator teeth, 1d Elder Ray < 0, and volume > 1.5x 20-period average.
+# Exit when price crosses back below/above the Alligator lips (red/blue lines).
+# Williams Alligator identifies trend presence and direction. Elder Ray confirms bull/bear power.
+# Volume filter ensures institutional participation. Designed for low-frequency, high-conviction trades.
 
-name = "6h_ElderRay_1dEMA50_Volume"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_1dElderRay_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,29 +24,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for EMA calculations
+    # 1d data for Elder Ray force index
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 13:
         return np.zeros(n)
     
-    # Calculate EMA13 and EMA50 on 1d close
-    close_1d = df_1d['close'].values
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Elder Ray Force Index (13-period EMA of price change * volume)
+    price_change = df_1d['close'].diff(1).values
+    vol_1d = df_1d['volume'].values
+    force_raw = price_change * vol_1d
+    elder_ray = pd.Series(force_raw).ewm(span=13, adjust=False, min_periods=13).mean().values
+    elder_ray_aligned = align_htf_to_ltf(prices, df_1d, elder_ray)
     
-    # Align 1d EMAs to 6h timeframe
-    ema13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Williams Alligator (13,8,5 SMAs with future shifts)
+    # Jaw (blue): 13-period SMMA shifted 8 bars forward
+    # Teeth (red): 8-period SMMA shifted 5 bars forward  
+    # Lips (green): 5-period SMMA shifted 3 bars forward
+    smma_13 = pd.Series(close).ewm(alpha=1/13, adjust=False, min_periods=13).mean().values
+    smma_8 = pd.Series(close).ewm(alpha=1/8, adjust=False, min_periods=8).mean().values
+    smma_5 = pd.Series(close).ewm(alpha=1/5, adjust=False, min_periods=5).mean().values
     
-    # 1d EMA50 direction
-    ema50_rising = np.zeros_like(ema50_1d_aligned, dtype=bool)
-    ema50_falling = np.zeros_like(ema50_1d_aligned, dtype=bool)
-    ema50_rising[1:] = ema50_1d_aligned[1:] > ema50_1d_aligned[:-1]
-    ema50_falling[1:] = ema50_1d_aligned[1:] < ema50_1d_aligned[:-1]
+    jaw = np.roll(smma_13, 8)  # shifted 8 bars forward
+    teeth = np.roll(smma_8, 5)  # shifted 5 bars forward
+    lips = np.roll(smma_5, 3)   # shifted 3 bars forward
     
-    # Elder Ray components: Bull Power = High - EMA13(1d), Bear Power = EMA13(1d) - Low
-    bull_power = high - ema13_1d_aligned
-    bear_power = ema13_1d_aligned - low
+    # Align to 12h timeframe (no additional delay needed as SMMA uses past data)
+    jaw_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), jaw)
+    teeth_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), teeth)
+    lips_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), lips)
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -56,13 +60,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 2)  # Sufficient warmup for EMA50
+    start_idx = max(13, 8, 5, 20) + 8  # max period + jaw shift
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema13_1d_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(ema50_rising[i]) or np.isnan(ema50_falling[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(elder_ray_aligned[i]) or 
             np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -70,10 +73,10 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: Bull Power > 0, Bear Power < 0, 1d EMA50 rising, volume filter
-            long_cond = (bull_power[i] > 0) and (bear_power[i] < 0) and ema50_rising[i] and volume_filter[i]
-            # Short conditions: Bull Power < 0, Bear Power > 0, 1d EMA50 falling, volume filter
-            short_cond = (bull_power[i] < 0) and (bear_power[i] > 0) and ema50_falling[i] and volume_filter[i]
+            # Long conditions: price above teeth, Elder Ray positive, volume filter
+            long_cond = (close[i] > teeth_aligned[i]) and (elder_ray_aligned[i] > 0) and volume_filter[i]
+            # Short conditions: price below teeth, Elder Ray negative, volume filter
+            short_cond = (close[i] < teeth_aligned[i]) and (elder_ray_aligned[i] < 0) and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -82,15 +85,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Bull Power and Bear Power have same sign (both >= 0 or both <= 0)
-            if (bull_power[i] >= 0 and bear_power[i] >= 0) or (bull_power[i] <= 0 and bear_power[i] <= 0):
+            # Long exit: price crosses back below lips (green line)
+            if close[i] < lips_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Bull Power and Bear Power have same sign (both >= 0 or both <= 0)
-            if (bull_power[i] >= 0 and bear_power[i] >= 0) or (bull_power[i] <= 0 and bear_power[i] <= 0):
+            # Short exit: price crosses back above lips (green line)
+            if close[i] > lips_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
