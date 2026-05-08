@@ -3,133 +3,84 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Choppiness Index regime filter + 1w EMA200 trend + 1d Donchian(20) breakout
-# In choppy markets (CHOP > 61.8): mean-reversion at Donchian bands
-# In trending markets (CHOP < 38.2): trend-following breakouts
-# Uses weekly EMA200 for long-term trend filter to avoid counter-trend trades
-# Target: 15-25 trades/year to minimize fee drag while capturing major moves
+# Hypothesis: 12-hour timeframe with 1-day trend filter and volume confirmation
+# Uses 1-day EMA(34) for trend direction and 12-hour price action for entry
+# Designed to work in both bull and bear markets by following higher timeframe trend
+# Target: 12-37 trades/year to minimize fee decay while capturing significant moves
 
-name = "1d_Chop_Regime_Donchian20_EMA200"
-timeframe = "1d"
+name = "12h_EMA34_Trend_Volume_Breakout"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get weekly data once for EMA200 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 200:
+    # Get daily data once
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate weekly EMA200 for trend filter
-    close_1w = df_1w['close'].values
-    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    # Calculate daily EMA(34) for trend direction
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate daily Choppiness Index (14-period)
-    atr_list = []
-    for i in range(n):
-        if i == 0:
-            tr = high[i] - low[i]
-        else:
-            tr = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        atr_list.append(tr)
+    # Volume spike: current volume > 2.0 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
-    atr = pd.Series(atr_list).rolling(window=14, min_periods=14).mean().values
-    sum_atr14 = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
-    maxh14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    minl14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    range14 = maxh14 - minl14
-    
-    # Avoid division by zero
-    chop = np.full(n, 50.0)
-    mask = range14 != 0
-    chop[mask] = 100 * np.log10(sum_atr14[mask] / range14[mask]) / np.log10(14)
-    
-    # Calculate daily Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 12-hour price range for breakout levels
+    price_range = high - low
+    range_ma = pd.Series(price_range).rolling(window=10, min_periods=10).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # warmup for EMA200
+    start_idx = 50  # warmup for calculations
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema200_1w_aligned[i]) or np.isnan(chop[i]) or 
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(range_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema200_1w_val = ema200_1w_aligned[i]
-        chop_val = chop[i]
-        high_val = high[i]
-        low_val = low[i]
-        close_val = close[i]
-        dch_high = donchian_high[i]
-        dch_low = donchian_low[i]
+        ema34_1d_val = ema34_1d_aligned[i]
+        vol_spike = volume_spike[i]
+        range_val = range_ma[i]
         
         if position == 0:
-            # Determine regime: choppy (>61.8) or trending (<38.2)
-            if chop_val > 61.8:
-                # Choppy regime: mean reversion at Donchian bands
-                if low_val <= dch_low and close_val > dch_low:
-                    # Long signal at lower band bounce
-                    signals[i] = 0.25
-                    position = 1
-                elif high_val >= dch_high and close_val < dch_high:
-                    # Short signal at upper band rejection
-                    signals[i] = -0.25
-                    position = -1
-            elif chop_val < 38.2:
-                # Trending regime: breakout in direction of weekly trend
-                if close_val > dch_high and close_val > ema200_1w_val:
-                    # Long breakout above upper band with uptrend
-                    signals[i] = 0.25
-                    position = 1
-                elif close_val < dch_low and close_val < ema200_1w_val:
-                    # Short breakdown below lower band with downtrend
-                    signals[i] = -0.25
-                    position = -1
+            # Enter long: close above previous high + uptrend + volume spike
+            if (close[i] > high[i-1] and 
+                close[i] > ema34_1d_val and 
+                vol_spike):
+                signals[i] = 0.25
+                position = 1
+            # Enter short: close below previous low + downtrend + volume spike
+            elif (close[i] < low[i-1] and 
+                  close[i] < ema34_1d_val and 
+                  vol_spike):
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Exit long: reverse signal or trend change
-            exit_signal = False
-            if chop_val > 61.8:
-                # In chop: exit at upper band
-                if high_val >= dch_high:
-                    exit_signal = True
-            else:
-                # In trend: exit on breakdown or trend reversal
-                if close_val < dch_low or close_val < ema200_1w_val:
-                    exit_signal = True
-            
-            if exit_signal:
+            # Exit long: close below previous low OR trend turns down
+            if (close[i] < low[i-1] or close[i] < ema34_1d_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: reverse signal or trend change
-            exit_signal = False
-            if chop_val > 61.8:
-                # In chop: exit at lower band
-                if low_val <= dch_low:
-                    exit_signal = True
-            else:
-                # In trend: exit on breakout or trend reversal
-                if close_val > dch_high or close_val > ema200_1w_val:
-                    exit_signal = True
-            
-            if exit_signal:
+            # Exit short: close above previous high OR trend turns up
+            if (close[i] > high[i-1] or close[i] > ema34_1d_val):
                 signals[i] = 0.0
                 position = 0
             else:
