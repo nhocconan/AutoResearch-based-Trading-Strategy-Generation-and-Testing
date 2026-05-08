@@ -3,20 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with weekly trend filter and volume confirmation
-# Long when price breaks above 20-period high, weekly EMA(34) uptrend, and volume spike
-# Short when price breaks below 20-period low, weekly EMA(34) downtrend, and volume spike
-# Weekly EMA filter ensures alignment with higher timeframe trend
-# Volume spike confirms breakout strength; avoids false signals
-# Targets 80-180 total trades over 4 years (20-45/year) to balance opportunity and cost
+# Hypothesis: 12-hour Donchian(20) breakout with weekly trend filter and volume confirmation
+# Long when price breaks above 12h Donchian high (20-period), weekly EMA(34) uptrend, and volume spike
+# Short when price breaks below 12h Donchian low (20-period), weekly EMA(34) downtrend, and volume spike
+# Weekly EMA filters for higher timeframe trend alignment
+# Volume spike confirms institutional participation; avoids false breakouts
+# Targets 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost
+# Uses 12h primary timeframe per experiment requirements
 
-name = "4h_Donchian20_1wTrend_Volume"
-timeframe = "4h"
+name = "12h_Donchian20_WeeklyTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -34,9 +35,12 @@ def generate_signals(prices):
     ema34_1w = pd.Series(weekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Calculate 20-period Donchian channels
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 12h Donchian channels (20-period)
+    # Highest high and lowest low over last 20 periods
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -45,7 +49,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # warmup for Donchian calculation
+    start_idx = 100  # warmup for calculations
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
@@ -58,29 +62,29 @@ def generate_signals(prices):
         
         ema34_1w_val = ema34_1w_aligned[i]
         price = close[i]
-        upper_band = donchian_high[i]
-        lower_band = donchian_low[i]
+        upper = donchian_high[i]
+        lower = donchian_low[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: price breaks above upper band, weekly uptrend, volume spike
-            if price > upper_band and price > ema34_1w_val and vol_spike:
+            # Enter long: price breaks above Donchian high, weekly uptrend, volume spike
+            if price > upper and price > ema34_1w_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below lower band, weekly downtrend, volume spike
-            elif price < lower_band and price < ema34_1w_val and vol_spike:
+            # Enter short: price breaks below Donchian low, weekly downtrend, volume spike
+            elif price < lower and price < ema34_1w_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price falls below lower band or weekly trend turns down
-            if price < lower_band or price < ema34_1w_val:
+            # Exit long: price falls below Donchian low or weekly trend turns down
+            if price < lower or price < ema34_1w_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price rises above upper band or weekly trend turns up
-            if price > upper_band or price > ema34_1w_val:
+            # Exit short: price rises above Donchian high or weekly trend turns up
+            if price > upper or price > ema34_1w_val:
                 signals[i] = 0.0
                 position = 0
             else:
