@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams Alligator + Elder Ray + Vortex with 1w trend filter
-# Uses Alligator (Jaw/Teeth/Lips) for trend, Elder Ray (bull/bear power) for momentum,
-# and Vortex for directional confirmation. Trades only when 1w trend agrees.
-# In chop (Vortex < 1), exits at Alligator mid-point. Aims for 20-60 trades/year.
+# Hypothesis: 6h Camarilla R3/S3 breakout with daily trend filter and volume spike
+# Uses daily Camarilla levels (R3/S3) for breakout entries, daily EMA34 for trend filter,
+# and volume > 1.5x 20-period average for confirmation. Trades in direction of daily trend.
+# Works in bull (breakouts with trend) and bear (breakouts against trend filtered out).
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
 
-name = "1d_Alligator_ElderRay_Vortex"
-timeframe = "1d"
+name = "6h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,109 +23,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for higher timeframe trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Get daily data for Camarilla levels, trend filter, and volume average
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    # Calculate daily Camarilla levels (using previous day's range)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Williams Alligator (13,8,5)
-    def smma(arr, period):
-        sma = np.full_like(arr, np.nan)
-        sma[period-1] = np.mean(arr[:period])
-        for i in range(period, len(arr)):
-            sma[i] = (sma[i-1] * (period-1) + arr[i]) / period
-        return sma
+    # Previous day's range for Camarilla calculation
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_range = prev_high - prev_low
     
-    jaw = smma(close, 13)  # Blue line
-    teeth = smma(close, 8)  # Red line
-    lips = smma(close, 5)   # Green line
+    # Camarilla levels (R3, S3) based on previous day
+    r3 = prev_close + (prev_range * 1.1 / 4)
+    s3 = prev_close - (prev_range * 1.1 / 4)
     
-    # Alligator signals: Lips > Teeth > Jaw = up, Lips < Teeth < Jaw = down
-    lips_above_teeth = lips > teeth
-    teeth_above_jaw = teeth > jaw
-    alligator_bull = lips_above_teeth & teeth_above_jaw
-    lips_below_teeth = lips < teeth
-    teeth_below_jaw = teeth < jaw
-    alligator_bear = lips_below_teeth & teeth_below_jaw
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_up = ema_34_1d > np.roll(ema_34_1d, 1)
+    trend_up = np.where(np.isnan(trend_up), False, trend_up)
     
-    # Elder Ray (13-period EMA)
-    close_series = pd.Series(close)
-    ema13 = close_series.ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Daily volume average (20-period)
+    vol_1d = df_1d['volume'].values
+    vol_avg_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike = vol_1d > (vol_avg_20 * 1.5)
+    vol_spike = np.where(np.isnan(vol_spike), False, vol_spike)
     
-    # Vortex Indicator (14-period)
-    def vortex(high, low, close, period=14):
-        vm_plus = np.abs(high - np.roll(low, 1))
-        vm_minus = np.abs(low - np.roll(high, 1))
-        
-        tr = np.zeros_like(close)
-        for i in range(1, len(close)):
-            tr[i] = max(high[i] - low[i], np.abs(high[i] - close[i-1]), np.abs(low[i] - close[i-1]))
-        
-        sum_vm_plus = np.zeros_like(close)
-        sum_vm_minus = np.zeros_like(close)
-        sum_tr = np.zeros_like(close)
-        
-        for i in range(period, len(close)):
-            sum_vm_plus[i] = np.sum(vm_plus[i-period+1:i+1])
-            sum_vm_minus[i] = np.sum(vm_minus[i-period+1:i+1])
-            sum_tr[i] = np.sum(tr[i-period+1:i+1])
-        
-        vi_plus = sum_vm_plus / sum_tr
-        vi_minus = sum_vm_minus / sum_tr
-        return vi_plus, vi_minus
-    
-    vi_plus, vi_minus = vortex(high, low, close, 14)
-    
-    # 1w EMA(8) for trend filter
-    close_1w_series = pd.Series(close_1w)
-    ema8_1w = close_1w_series.ewm(span=8, adjust=False, min_periods=8).mean().values
-    trend_1w_up = ema8_1w[1:] > ema8_1w[:-1]
-    trend_1w_up = np.concatenate([[False], trend_1w_up])
-    
-    # Align 1w trend to 1d
-    trend_1w_up_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_up.astype(float))
+    # Align daily indicators to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up.astype(float))
+    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Ensure enough data for all indicators
+    start_idx = 30  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(vi_plus[i]) or np.isnan(vi_minus[i]) or
-            np.isnan(trend_1w_up_aligned[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(trend_up_aligned[i]) or np.isnan(vol_spike_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: Alligator bullish, Bull Power > 0, VI+ > VI-, 1w up
-            if (alligator_bull[i] and bull_power[i] > 0 and
-                vi_plus[i] > vi_minus[i] and trend_1w_up_aligned[i]):
+            # Long breakout: price > R3, daily trend up, volume spike
+            if close[i] > r3_aligned[i] and trend_up_aligned[i] and vol_spike_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Alligator bearish, Bear Power < 0, VI- > VI+, 1w down
-            elif (alligator_bear[i] and bear_power[i] < 0 and
-                  vi_minus[i] > vi_plus[i] and not trend_1w_up_aligned[i]):
+            # Short breakout: price < S3, daily trend down, volume spike
+            elif close[i] < s3_aligned[i] and not trend_up_aligned[i] and vol_spike_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Alligator turns bearish OR Vortex loses direction
-            if not alligator_bull[i] or vi_plus[i] <= vi_minus[i]:
+            # Long exit: price re-enters Camarilla range (between S3 and R3) or trend fails
+            if close[i] < r3_aligned[i] and close[i] > s3_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            elif not trend_up_aligned[i]:  # Trend failed
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Alligator turns bullish OR Vortex loses direction
-            if not alligator_bear[i] or vi_minus[i] <= vi_plus[i]:
+            # Short exit: price re-enters Camarilla range or trend fails
+            if close[i] > s3_aligned[i] and close[i] < r3_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            elif trend_up_aligned[i]:  # Trend failed (now up)
                 signals[i] = 0.0
                 position = 0
             else:
