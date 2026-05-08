@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h 123-reversal pattern with 1d trend filter and volume confirmation
-# The 123 pattern is a swing-based reversal setup: point 1 (swing extreme), 
-# point 2 (pullback), point 3 (failure to exceed point 1). Works in both 
-# bull and bear markets by trading with the higher timeframe trend.
-# Volume confirms momentum behind the breakout. Target: 25-40 trades/year.
+# Hypothesis: 4h Supertrend trend filter with Camarilla pivot reversals at R1/S1 levels
+# Uses 1d Camarilla levels for reversal entries in direction of 1d Supertrend.
+# Volume confirmation ensures momentum behind reversals.
+# Designed for fewer trades (target 25-40/year) with clear reversal logic in both bull/bear markets.
 
-name = "4h_123Reversal_1dTrend_VolumeConfirm"
+name = "4h_Camarilla_Rev_1dSupertrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,62 +22,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
+    # Get daily data for Camarilla and Supertrend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate daily EMA20 for trend filter
+    # Calculate 1d Supertrend
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate swing highs/lows for 123 pattern (using 5-bar window)
-    def find_swing_points(high, low, window=2):
-        """Find swing highs and lows"""
-        n = len(high)
-        swing_high = np.full(n, np.nan)
-        swing_low = np.full(n, np.nan)
-        
-        for i in range(window, n - window):
-            # Swing high: highest high in window
-            if high[i] == np.max(high[i-window:i+window+1]):
-                swing_high[i] = high[i]
-            # Swing low: lowest low in window
-            if low[i] == np.min(low[i-window:i+window+1]):
-                swing_low[i] = low[i]
-        return swing_high, swing_low
+    atr_period = 10
+    atr_mult = 3.0
     
-    swing_high, swing_low = find_swing_points(high, low, 2)
+    tr1 = high_1d[1:] - low_1d[:-1]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Find 123 patterns: 
-    # For longs: swing low (point1) -> pullback high (point2) -> failure low (point3) -> break above point2
-    # For shorts: swing high (point1) -> pullback low (point2) -> failure high (point3) -> break below point2
+    atr = np.zeros_like(close_1d)
+    atr[0] = tr[0]
+    for i in range(1, len(tr)):
+        atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
     
-    # Track last swing points
-    last_swing_high = np.full(n, np.nan)
-    last_swing_low = np.full(n, np.nan)
-    last_swing_high_idx = np.full(n, -1)
-    last_swing_low_idx = np.full(n, -1)
+    basic_ub = (high_1d + low_1d) / 2 + atr_mult * atr
+    basic_lb = (high_1d + low_1d) / 2 - atr_mult * atr
     
-    for i in range(n):
-        if not np.isnan(swing_high[i]):
-            last_swing_high[i] = swing_high[i]
-            last_swing_high_idx[i] = i
-        elif i > 0:
-            last_swing_high[i] = last_swing_high[i-1]
-            last_swing_high_idx[i] = last_swing_high_idx[i-1]
+    final_ub = np.zeros_like(close_1d)
+    final_lb = np.zeros_like(close_1d)
+    final_ub[0] = basic_ub[0]
+    final_lb[0] = basic_lb[0]
+    
+    for i in range(1, len(close_1d)):
+        if basic_ub[i] < final_ub[i-1] or close_1d[i-1] > final_ub[i-1]:
+            final_ub[i] = basic_ub[i]
+        else:
+            final_ub[i] = final_ub[i-1]
             
-        if not np.isnan(swing_low[i]):
-            last_swing_low[i] = swing_low[i]
-            last_swing_low_idx[i] = i
-        elif i > 0:
-            last_swing_low[i] = last_swing_low[i-1]
-            last_swing_low_idx[i] = last_swing_low_idx[i-1]
+        if basic_lb[i] > final_lb[i-1] or close_1d[i-1] < final_lb[i-1]:
+            final_lb[i] = basic_lb[i]
+        else:
+            final_lb[i] = final_lb[i-1]
     
-    # Align daily trend to 4h
-    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
+    supertrend = np.zeros_like(close_1d)
+    for i in range(len(close_1d)):
+        if i == 0:
+            supertrend[i] = final_ub[i]
+        else:
+            if supertrend[i-1] == final_ub[i-1]:
+                if close_1d[i] <= final_ub[i]:
+                    supertrend[i] = final_ub[i]
+                else:
+                    supertrend[i] = final_lb[i]
+            else:
+                if close_1d[i] >= final_lb[i]:
+                    supertrend[i] = final_lb[i]
+                else:
+                    supertrend[i] = final_ub[i]
     
-    # Calculate volume confirmation (20-period average)
+    # Calculate 1d Camarilla levels (using previous day's data)
+    camarilla_r1 = np.zeros_like(close_1d)
+    camarilla_s1 = np.zeros_like(close_1d)
+    camarilla_r1[0] = camarilla_s1[0] = close_1d[0]  # placeholder for first day
+    
+    for i in range(1, len(close_1d)):
+        high_prev = high_1d[i-1]
+        low_prev = low_1d[i-1]
+        close_prev = close_1d[i-1]
+        camarilla_r1[i] = close_prev + 1.1 * (high_prev - low_prev) / 12
+        camarilla_s1[i] = close_prev - 1.1 * (high_prev - low_prev) / 12
+    
+    # Align indicators to 4h
+    supertrend_aligned = align_htf_to_ltf(prices, df_1d, supertrend)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # Volume confirmation (20-period average)
     vol_avg_20 = np.full(n, np.nan)
     for i in range(n):
         if i >= 19:
@@ -87,123 +106,49 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if np.isnan(ema20_1d_aligned[i]) or np.isnan(vol_avg_20[i]):
+        if np.isnan(supertrend_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or np.isnan(vol_avg_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
-        
-        # Get today's daily data for trend
-        idx_1d = 0
-        while idx_1d < len(df_1d) and df_1d.iloc[idx_1d]['open_time'] <= prices.iloc[i]['open_time']:
-            idx_1d += 1
-        idx_1d -= 1
-        
-        if idx_1d < 0:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        ema20_today = ema20_1d[idx_1d]
-        vol_avg_today = vol_avg_20[i]
-        vol_current = volume[i]
-        
-        # Volume confirmation: current volume > 1.3x average
-        vol_confirmed = vol_current > 1.3 * vol_avg_today
         
         price = close[i]
+        vol_current = volume[i]
+        vol_avg_today = vol_avg_20[i]
+        
+        # Volume confirmation: current volume > 1.5x average
+        vol_confirmed = vol_current > 1.5 * vol_avg_today
         
         if position == 0:
-            # Look for 123 reversal patterns
-            
-            # Check for long 123 pattern
-            # Need: swing low (point1), pullback to point2, failure at point3, break above point2
-            if last_swing_low_idx[i] >= 20:  # Ensure we have history
-                point1_idx = last_swing_low_idx[i]
-                point1 = last_swing_low[i]
-                
-                # Find point2: pullback high after point1
-                point2_idx = -1
-                point2 = -1
-                for j in range(point1_idx + 1, min(i, point1_idx + 20)):
-                    if high[j] > point1 and (point2 == -1 or high[j] < point2):
-                        point2 = high[j]
-                        point2_idx = j
-                
-                if point2_idx != -1 and point2 > point1:
-                    # Find point3: failure low after point2 (should not exceed point1)
-                    point3_idx = -1
-                    point3 = 1e10
-                    for j in range(point2_idx + 1, i):
-                        if low[j] < point2 and low[j] > point1 and low[j] < point3:
-                            point3 = low[j]
-                            point3_idx = j
-                    
-                    if point3_idx != -1 and point3 < point2:
-                        # Check for break above point2 (entry)
-                        if price > point2 and vol_confirmed and price > ema20_today:
-                            signals[i] = 0.25
-                            position = 1
-                            continue
-            
-            # Check for short 123 pattern
-            # Need: swing high (point1), pullback to point2, failure at point3, break below point2
-            if last_swing_high_idx[i] >= 20:
-                point1_idx = last_swing_high_idx[i]
-                point1 = last_swing_high[i]
-                
-                # Find point2: pullback low after point1
-                point2_idx = -1
-                point2 = 1e10
-                for j in range(point1_idx + 1, min(i, point1_idx + 20)):
-                    if low[j] < point1 and (point2 == 1e10 or low[j] > point2):
-                        point2 = low[j]
-                        point2_idx = j
-                
-                if point2_idx != -1 and point2 < point1:
-                    # Find point3: failure high after point2 (should not go below point1)
-                    point3_idx = -1
-                    point3 = -1
-                    for j in range(point2_idx + 1, i):
-                        if high[j] > point2 and high[j] < point1 and high[j] > point3:
-                            point3 = high[j]
-                            point3_idx = j
-                    
-                    if point3_idx != -1 and point3 > point2:
-                        # Check for break below point2 (entry)
-                        if price < point2 and vol_confirmed and price < ema20_today:
-                            signals[i] = -0.25
-                            position = -1
-                            continue
+            # Look for reversals at Camarilla levels in direction of Supertrend
+            if supertrend_aligned[i] > 0:  # Uptrend - look for longs at S1
+                if price <= camarilla_s1_aligned[i] * 1.001 and price >= camarilla_s1_aligned[i] * 0.999:
+                    if vol_confirmed:
+                        signals[i] = 0.25
+                        position = 1
+                        continue
+            else:  # Downtrend - look for shorts at R1
+                if price >= camarilla_r1_aligned[i] * 0.999 and price <= camarilla_r1_aligned[i] * 1.001:
+                    if vol_confirmed:
+                        signals[i] = -0.25
+                        position = -1
+                        continue
         
         elif position == 1:
-            # Exit long: break below point2 of the pattern or trend change
-            exit_signal = False
-            if price < ema20_today:  # Trend change
-                exit_signal = True
-            elif not vol_confirmed:  # Volume confirmation lost
-                exit_signal = True
-            
-            if exit_signal:
+            # Exit long: price crosses Supertrend or reaches R1
+            if supertrend_aligned[i] <= 0 or price >= camarilla_r1_aligned[i] * 0.999:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: break above point2 of the pattern or trend change
-            exit_signal = False
-            if price > ema20_today:  # Trend change
-                exit_signal = True
-            elif not vol_confirmed:  # Volume confirmation lost
-                exit_signal = True
-            
-            if exit_signal:
+            # Exit short: price crosses Supertrend or reaches S1
+            if supertrend_aligned[i] >= 0 or price <= camarilla_s1_aligned[i] * 1.001:
                 signals[i] = 0.0
                 position = 0
             else:
