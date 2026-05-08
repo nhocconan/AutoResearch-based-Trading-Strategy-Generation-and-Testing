@@ -3,108 +3,105 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h momentum strategy with 4h trend filter and 1d volatility filter.
-# Long when price > 1h EMA21 AND 4h EMA50 rising AND 1d ATR ratio > 1.2 (high volatility regime).
-# Short when price < 1h EMA21 AND 4h EMA50 falling AND 1d ATR ratio > 1.2.
-# Exit when price crosses back over 1h EMA21.
-# This strategy captures momentum bursts during high volatility regimes, aligned with 4h trend.
-# Volatility filter avoids choppy markets. EMA21 provides responsive entry/exit.
-# Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe.
+# Hypothesis: 6h Williams %R with 1d EMA34 filter and volume spike confirmation.
+# Long when Williams %R crosses above -80 (oversold) AND 1d EMA34 rising AND volume > 1.5x 20-period average.
+# Short when Williams %R crosses below -20 (overbought) AND 1d EMA34 falling AND volume > 1.5x 20-period average.
+# Exit when Williams %R crosses back below -50 (for longs) or above -50 (for shorts).
+# This strategy captures mean reversions in oversold/overbought conditions with trend alignment and volume confirmation.
+# Williams %R identifies extreme price levels. The 1d EMA34 filter ensures we trade with the higher timeframe trend.
+# Volume spike confirms institutional participation. Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "1h_EMA21_4hEMA50_1dATR_Volatility"
-timeframe = "1h"
+name = "6h_WilliamsR_1dEMA34_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    # 1d data for volatility filter
+    # 1d data for Williams %R calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1h EMA21 for entry/exit
-    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    
-    # 4h EMA50 for trend filter
-    ema50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
-    
-    # 4h EMA50 direction
-    ema50_rising = np.zeros_like(ema50_4h_aligned, dtype=bool)
-    ema50_falling = np.zeros_like(ema50_4h_aligned, dtype=bool)
-    ema50_rising[1:] = ema50_4h_aligned[1:] > ema50_4h_aligned[:-1]
-    ema50_falling[1:] = ema50_4h_aligned[1:] < ema50_4h_aligned[:-1]
-    
-    # 1d ATR(14) for volatility filter
+    # Calculate Williams %R (14-period) from 1d data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # 1d ATR ratio: current ATR / 50-period average ATR
-    atr_ma50 = pd.Series(atr14).ewm(span=50, adjust=False, min_periods=50).mean().values
-    atr_ratio = atr14 / atr_ma50
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    # Align Williams %R to 6h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # 1d EMA34 direction
+    ema34_rising = np.zeros_like(ema34_1d_aligned, dtype=bool)
+    ema34_falling = np.zeros_like(ema34_1d_aligned, dtype=bool)
+    ema34_rising[1:] = ema34_1d_aligned[1:] > ema34_1d_aligned[:-1]
+    ema34_falling[1:] = ema34_1d_aligned[1:] < ema34_1d_aligned[:-1]
+    
+    # Volume filter: current volume > 1.5x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(60, 50)  # Sufficient warmup for all indicators
+    start_idx = max(50, 34)  # Sufficient warmup for EMA34 and Williams %R
     
     for i in range(start_idx, n):
-        if (np.isnan(ema21[i]) or np.isnan(ema50_4h_aligned[i]) or 
-            np.isnan(ema50_rising[i]) or np.isnan(ema50_falling[i]) or 
-            np.isnan(atr_ratio_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(ema34_rising[i]) or np.isnan(ema34_falling[i]) or 
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price > EMA21, 4h EMA50 rising, high volatility (ATR ratio > 1.2)
-            long_cond = (close[i] > ema21[i]) and ema50_rising[i] and (atr_ratio_aligned[i] > 1.2)
-            # Short conditions: price < EMA21, 4h EMA50 falling, high volatility (ATR ratio > 1.2)
-            short_cond = (close[i] < ema21[i]) and ema50_falling[i] and (atr_ratio_aligned[i] > 1.2)
+            # Long conditions: Williams %R crosses above -80 (from below), EMA34 rising, volume filter
+            williams_cross_up = (williams_r_aligned[i] > -80) and (williams_r_aligned[i-1] <= -80)
+            long_cond = williams_cross_up and ema34_rising[i] and volume_filter[i]
+            # Short conditions: Williams %R crosses below -20 (from above), EMA34 falling, volume filter
+            williams_cross_down = (williams_r_aligned[i] < -20) and (williams_r_aligned[i-1] >= -20)
+            short_cond = williams_cross_down and ema34_falling[i] and volume_filter[i]
             
             if long_cond:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
             elif short_cond:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses back below EMA21
-            if close[i] < ema21[i]:
+            # Long exit: Williams %R crosses back below -50 (from above)
+            williams_cross_down_exit = (williams_r_aligned[i] < -50) and (williams_r_aligned[i-1] >= -50)
+            if williams_cross_down_exit:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses back above EMA21
-            if close[i] > ema21[i]:
+            # Short exit: Williams %R crosses back above -50 (from below)
+            williams_cross_up_exit = (williams_r_aligned[i] > -50) and (williams_r_aligned[i-1] <= -50)
+            if williams_cross_up_exit:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
