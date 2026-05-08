@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams Alligator with 1d trend filter and volume confirmation
-# Long when Alligator is bullish (jaws < teeth < lips) and 1d EMA50 up and volume > 1.5x average
-# Short when Alligator is bearish (jaws > teeth > lips) and 1d EMA50 down and volume > 1.5x average
-# Exit when Alligator direction changes or volume drops below average
-# Williams Alligator identifies trend structure, 1d EMA50 filters higher timeframe trend,
-# volume confirmation reduces false signals. Targets 20-50 trades per year to minimize fee drag.
+# Hypothesis: 4h Donchian breakout with volume confirmation and 1d trend filter
+# Long: price breaks above Donchian(20) high + volume > 1.5x average + 1d EMA(50) up
+# Short: price breaks below Donchian(20) low + volume > 1.5x average + 1d EMA(50) down
+# Exit: opposite Donchian break or volume < 0.5x average
+# Uses price structure (Donchian) + volume confirmation + trend filter for robustness
+# Targets 20-50 trades/year to minimize fee drag
 
-name = "4h_WilliamsAlligator_1dTrend_Volume"
+name = "4h_Donchian20_Volume_1dTrend"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,91 +24,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data once for trend filter
+    # Get 1d data once for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily EMA(50) for trend filter
+    # Calculate 1d EMA(50) for trend filter
     daily_close = df_1d['close'].values
     ema50_1d = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Williams Alligator (13,8,5) - Smoothed Medians
-    # Jaw: 13-period SMMA, shifted 8 bars forward
-    # Teeth: 8-period SMMA, shifted 5 bars forward  
-    # Lips: 5-period SMMA, shifted 3 bars forward
-    def smma(data, period):
-        """Smoothed Moving Average"""
-        result = np.full_like(data, np.nan, dtype=np.float64)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(data[:period])
-        # Subsequent values: (prev * (period-1) + current) / period
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    # Donchian channels (20-period)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    jaw = smma(close, 13)
-    teeth = smma(close, 8)
-    lips = smma(close, 5)
-    
-    # Shift as per Alligator definition
-    jaw = np.roll(jaw, 8)
-    teeth = np.roll(teeth, 5)
-    lips = np.roll(lips, 3)
-    # Set shifted values to NaN
-    jaw[:8] = np.nan
-    teeth[:5] = np.nan
-    lips[:3] = np.nan
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume average (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.where(vol_ma > 0, volume / vol_ma, 0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for calculations
+    start_idx = 50  # warmup
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(ema50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        jaw_val = jaw[i]
-        teeth_val = teeth[i]
-        lips_val = lips[i]
-        ema50_1d_val = ema50_1d_aligned[i]
-        vol_ratio_val = vol_ratio[i]
-        
         if position == 0:
-            # Enter long: Alligator bullish (jaws < teeth < lips), 1d EMA50 up, volume confirmation
-            if jaw_val < teeth_val < lips_val and ema50_1d_val > 0 and vol_ratio_val > 1.5:
-                signals[i] = 0.25
+            # Enter long: break above Donchian high + volume spike + 1d uptrend
+            if (close[i] > donch_high[i-1] and 
+                volume[i] > 1.5 * vol_ma[i] and 
+                ema50_1d_aligned[i] > ema50_1d_aligned[i-1]):
+                signals[i] = 0.30
                 position = 1
-            # Enter short: Alligator bearish (jaws > teeth > lips), 1d EMA50 down, volume confirmation
-            elif jaw_val > teeth_val > lips_val and ema50_1d_val < 0 and vol_ratio_val > 1.5:
-                signals[i] = -0.25
+            # Enter short: break below Donchian low + volume spike + 1d downtrend
+            elif (close[i] < donch_low[i-1] and 
+                  volume[i] > 1.5 * vol_ma[i] and 
+                  ema50_1d_aligned[i] < ema50_1d_aligned[i-1]):
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit long: Alligator turns bearish or volume drops
-            if not (jaw_val < teeth_val < lips_val) or vol_ratio_val < 1.0:
+            # Exit long: break below Donchian low or volume drops
+            if close[i] < donch_low[i-1] or volume[i] < 0.5 * vol_ma[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit short: Alligator turns bullish or volume drops
-            if not (jaw_val > teeth_val > lips_val) or vol_ratio_val < 1.0:
+            # Exit short: break above Donchian high or volume drops
+            if close[i] > donch_high[i-1] or volume[i] < 0.5 * vol_ma[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
