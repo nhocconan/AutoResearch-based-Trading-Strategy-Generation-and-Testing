@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_1dVolumeFilter_v1"
-timeframe = "1h"
+name = "6h_Power_Zone_Trend_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,117 +17,100 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h and 1d data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Get 1d data once for Elder Ray and trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_4h) < 30 or len(df_1d) < 30:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 4h Trend: EMA50 ===
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
-    
-    # === 1d Volume filter: current volume > 20-period average ===
-    vol_1d = df_1d['volume'].values
-    vol_ma20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
-    
-    # === 1d Previous day's Camarilla pivot points (HLC/3) ===
+    # === Elder Ray (Bull/Bear Power) from 1d ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d[0] = high_1d[0]
-    prev_low_1d[0] = low_1d[0]
-    prev_close_1d[0] = close_1d[0]
+    # EMA13 of close for Elder Ray calculation
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    pivot = (prev_high_1d + prev_low_1d + prev_close_1d) / 3.0
-    range_1d = prev_high_1d - prev_low_1d
+    # Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high_1d - ema13_1d
+    bear_power = low_1d - ema13_1d
     
-    # Camarilla levels (R1, S1)
-    r1 = pivot + (range_1d * 1.1 / 12)
-    s1 = pivot - (range_1d * 1.1 / 12)
+    # Align Elder Ray to 6h timeframe
+    bull_power_6h = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_6h = align_htf_to_ltf(prices, df_1d, bear_power)
     
-    # Align Camarilla levels to 1h timeframe
-    r1_1h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_1h = align_htf_to_ltf(prices, df_1d, s1)
+    # === 1d EMA20 for trend filter ===
+    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
     
-    # === 1h Session filter: 08-20 UTC ===
-    hours = prices.index.hour
+    # === 6h Volume filter: current volume > 20-period average ===
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # === 1h Volume filter: current volume > 20-period average ===
-    vol_ma20_1h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # === 1d ATR for volatility filter ===
+    tr = np.maximum(high_1d - low_1d, 
+                    np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), 
+                               np.abs(low_1d - np.roll(close_1d, 1))))
+    tr[0] = high_1d[0] - low_1d[0]
+    atr10_1d = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    atr10_1d_aligned = align_htf_to_ltf(prices, df_1d, atr10_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for EMA50
+    start_idx = 20  # warmup for EMA20 and ATR10
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r1_1h[i]) or np.isnan(s1_1h[i]) or np.isnan(ema50_4h_aligned[i]) or
-            np.isnan(vol_ma20_1d_aligned[i]) or np.isnan(vol_ma20_1h[i])):
+        if (np.isnan(bull_power_6h[i]) or np.isnan(bear_power_6h[i]) or 
+            np.isnan(ema20_1d_aligned[i]) or np.isnan(vol_ma20[i]) or 
+            np.isnan(atr10_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Session filter: 08-20 UTC
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
         if position == 0:
-            # Long: price breaks above R1 with 4h uptrend and 1d volume confirmation
-            long_cond = (close[i] > r1_1h[i] and 
-                        close[i] > ema50_4h_aligned[i] and
-                        volume[i] > vol_ma20_1h[i] and
-                        vol_1d[i] > vol_ma20_1d_aligned[i] and
-                        in_session)
+            # Entry conditions: Elder Ray alignment + trend filter + volume
+            # Long: Bull Power > 0 AND price above EMA20 (uptrend) AND volume confirmation
+            long_cond = (bull_power_6h[i] > 0 and 
+                        close[i] > ema20_1d_aligned[i] and
+                        volume[i] > vol_ma20[i])
             
-            # Short: price breaks below S1 with 4h downtrend and 1d volume confirmation
-            short_cond = (close[i] < s1_1h[i] and 
-                         close[i] < ema50_4h_aligned[i] and
-                         volume[i] > vol_ma20_1h[i] and
-                         vol_1d[i] > vol_ma20_1d_aligned[i] and
-                         in_session)
+            # Short: Bear Power < 0 AND price below EMA20 (downtrend) AND volume confirmation
+            short_cond = (bear_power_6h[i] < 0 and 
+                         close[i] < ema20_1d_aligned[i] and
+                         volume[i] > vol_ma20[i])
             
-            if long_cond:
-                signals[i] = 0.20
+            # Additional volatility filter: avoid low volatility environments
+            vol_filter = atr10_1d_aligned[i] > np.nanmedian(atr10_1d_aligned[max(0, i-50):i+1])
+            
+            if long_cond and vol_filter:
+                signals[i] = 0.25
                 position = 1
-            elif short_cond:
-                signals[i] = -0.20
+            elif short_cond and vol_filter:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below S1 or 4h trend turns down
-            exit_cond = (close[i] < s1_1h[i] or 
-                        close[i] < ema50_4h_aligned[i])
-            
-            if exit_cond:
+            # Long exit: Bear Power turns negative OR price breaks below EMA20
+            if bear_power_6h[i] < 0 or close[i] < ema20_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above R1 or 4h trend turns up
-            exit_cond = (close[i] > r1_1h[i] or 
-                        close[i] > ema50_4h_aligned[i])
-            
-            if exit_cond:
+            # Short exit: Bull Power turns positive OR price breaks above EMA20
+            if bull_power_6h[i] > 0 or close[i] > ema20_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-# Hypothesis: 1h Camarilla R1/S1 breakout with 4h EMA50 trend filter and 1d volume confirmation.
-# Enters long when price breaks above R1 in 4h uptrend with volume confirmation on both 1h and 1d.
-# Enters short when price breaks below S1 in 4h downtrend with volume confirmation.
-# Uses session filter (08-20 UTC) to avoid low-liquidity hours.
-# Target: 60-150 total trades over 4 years (15-37/year) to minimize fee drag.
-# Uses discrete sizing (0.20) to reduce churn. Works in both bull (breakouts) and bear (trend continuation).
+# Hypothesis: Elder Ray (Bull/Bear Power) from daily timeframe captures institutional
+# buying/selling pressure. Combined with EMA20 trend filter and volume confirmation,
+# this identifies high-probability trend continuation entries. Works in bull markets
+# via Bull Power > 0 + uptrend, and in bear markets via Bear Power < 0 + downtrend.
+# Volume filter ensures participation, ATR filter avoids low-volatility whipsaws.
+# Target: 50-150 trades over 4 years (12-37/year) with discrete sizing (0.25) to
+# minimize fee churn. Uses daily Elder Ray as the primary signal generator.
