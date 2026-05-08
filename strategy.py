@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Weekly Pivot Point Reversal with Volume Confirmation
-# Uses weekly pivot points (PP, R1, R2, S1, S2) calculated from prior week's OHLC.
-# In bullish regime (price above weekly PP), look for long when price rejects S1/S2 with volume.
-# In bearish regime (price below weekly PP), look for short when price rejects R1/R2 with volume.
-# Volume > 1.3x 20-period average confirms rejection strength.
-# Weekly pivot points provide institutional support/resistance levels that work in both bull/bear markets.
-# Target: 15-35 trades/year (60-140 over 4 years) to stay within optimal range.
+# Hypothesis: 6h Weekly Pivot Breakout with Daily Volume Confirmation
+# In bullish regime (price above weekly pivot), long on breakout above R1 with volume.
+# In bearish regime (price below weekly pivot), short on breakdown below S1 with volume.
+# Uses weekly pivot points as institutional support/resistance that work in both bull/bear markets.
+# Volume > 1.5x 20-day average confirms breakout strength.
+# Target: 20-50 trades/year (80-200 over 4 years) to stay within optimal range.
 
-name = "6h_WeeklyPivot_Reversal_Volume"
+name = "6h_WeeklyPivot_Breakout_Volume"
 timeframe = "6h"
 leverage = 1.0
 
@@ -33,7 +32,6 @@ def generate_signals(prices):
     weekly_high = df_weekly['high'].values
     weekly_low = df_weekly['low'].values
     weekly_close = df_weekly['close'].values
-    weekly_open = df_weekly['open'].values
     
     # Calculate weekly pivot points: PP = (H + L + C) / 3
     weekly_pivot = np.full(len(weekly_high), np.nan)
@@ -97,7 +95,7 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Volume filter: current daily volume > 1.3x 20-period average
+        # Volume filter: current daily volume > 1.5x 20-period average
         vol_filter = False
         if not np.isnan(vol_avg_20_daily_aligned[i]):
             # Find current daily bar's volume
@@ -108,7 +106,7 @@ def generate_signals(prices):
             
             if idx_daily >= 0:
                 vol_daily_current = df_daily.iloc[idx_daily]['volume']
-                vol_filter = vol_daily_current > 1.3 * vol_avg_20_daily_aligned[i]
+                vol_filter = vol_daily_current > 1.5 * vol_avg_20_daily_aligned[i]
         
         # Determine price position relative to weekly pivot levels
         price_above_r2 = close[i] > r2_aligned[i]
@@ -119,18 +117,22 @@ def generate_signals(prices):
         price_below_s2 = close[i] < s2_aligned[i]
         
         if position == 0:
-            # Look for entry: rejection at pivot levels with volume
-            # Long when price rejects S1/S2 (bounces up) in bullish regime (above PP)
+            # Look for entry: breakout with volume
+            # Long when price breaks above R1 in bullish regime (above pivot)
             long_condition = (
-                (close[i] > s1_aligned[i] and close[i-1] <= s1_aligned[i-1]) or  # bounce from S1
-                (close[i] > s2_aligned[i] and close[i-1] <= s2_aligned[i-1])     # bounce from S2
-            ) and close[i] > pivot_aligned[i] and vol_filter
+                close[i] > r1_aligned[i] and 
+                close[i-1] <= r1_aligned[i-1] and  # just broke above
+                close[i] > pivot_aligned[i] and    # bullish regime
+                vol_filter
+            )
             
-            # Short when price rejects R1/R2 (bounces down) in bearish regime (below PP)
+            # Short when price breaks below S1 in bearish regime (below pivot)
             short_condition = (
-                (close[i] < r1_aligned[i] and close[i-1] >= r1_aligned[i-1]) or  # bounce from R1
-                (close[i] < r2_aligned[i] and close[i-1] >= r2_aligned[i-1])     # bounce from R2
-            ) and close[i] < pivot_aligned[i] and vol_filter
+                close[i] < s1_aligned[i] and 
+                close[i-1] >= s1_aligned[i-1] and  # just broke below
+                close[i] < pivot_aligned[i] and    # bearish regime
+                vol_filter
+            )
             
             if long_condition:
                 signals[i] = 0.25
@@ -139,15 +141,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below S1 or reaches R1
-            if close[i] < s1_aligned[i] or close[i] > r1_aligned[i]:
+            # Exit long: price falls back below pivot or reaches R2
+            if close[i] < pivot_aligned[i] or close[i] > r2_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above R1 or reaches S1
-            if close[i] > r1_aligned[i] or close[i] < s1_aligned[i]:
+            # Exit short: price rises back above pivot or reaches S2
+            if close[i] > pivot_aligned[i] or close[i] < s2_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
