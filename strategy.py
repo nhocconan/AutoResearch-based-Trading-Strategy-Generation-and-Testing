@@ -1,20 +1,15 @@
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
-# Hypothesis: 12h timeframe reduces trade frequency to avoid fee drag. Uses Camarilla R1/S1 breakouts with 1d EMA trend filter and volume spike confirmation.
-# Works in bull/bear markets by requiring trend alignment and volume confirmation to avoid false breakouts.
-# Target: 50-150 total trades over 4 years (12-37/year) to stay within fee drag limits.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,9 +17,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla pivot, trend filter, and volume
+    # 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
+    
+    close_12h = df_12h['close'].values
+    ema20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema20_12h)
+    
+    # 1d data for Camarilla pivot and volume filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 1:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
@@ -38,46 +42,38 @@ def generate_signals(prices):
     r1 = pivot + (range_1d * 1.1 / 12)
     s1 = pivot - (range_1d * 1.1 / 12)
     
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # 1d volume average for spike detection (20-period)
-    vol_ma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Align all 1d data to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
+    
+    # 1d volume average for volume spike filter
+    vol_avg_1d = pd.Series(volume_1d).rolling(window=5, min_periods=5).mean().values
+    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Wait for EMA34 to be valid
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma20_1d_aligned[i])):
+            np.isnan(ema20_12h_aligned[i]) or np.isnan(vol_avg_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Volume spike condition: current 12h volume > 1.5x 1d average volume
-            # Approximate 12h volume as 1/2 of daily volume (since 12h is half day)
-            vol_spike = volume[i] > (vol_ma20_1d_aligned[i] * 0.5 * 1.5)
-            
-            # Long: Price breaks above R1, price above 1d EMA34, volume spike
+            # Long: Price breaks above R1, price above 12h EMA20, volume spike
             long_cond = (close[i] > r1_aligned[i] and 
-                        close[i] > ema34_1d_aligned[i] and
-                        vol_spike)
+                        close[i] > ema20_12h_aligned[i] and
+                        volume[i] > 1.5 * vol_avg_1d_aligned[i])
             
-            # Short: Price breaks below S1, price below 1d EMA34, volume spike
+            # Short: Price breaks below S1, price below 12h EMA20, volume spike
             short_cond = (close[i] < s1_aligned[i] and 
-                         close[i] < ema34_1d_aligned[i] and
-                         vol_spike)
+                         close[i] < ema20_12h_aligned[i] and
+                         volume[i] > 1.5 * vol_avg_1d_aligned[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -86,15 +82,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Price closes below S1 OR price crosses below 1d EMA34
-            if close[i] < s1_aligned[i] or close[i] < ema34_1d_aligned[i]:
+            # Long exit: Price closes below S1
+            if close[i] < s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price closes above R1 OR price crosses above 1d EMA34
-            if close[i] > r1_aligned[i] or close[i] > ema34_1d_aligned[i]:
+            # Short exit: Price closes above R1
+            if close[i] > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
