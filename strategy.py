@@ -1,17 +1,11 @@
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+# 12h strategy using daily POC (Point of Control) from volume profile with 1-week trend filter and volume confirmation
+# POC acts as dynamic support/resistance in trending markets. Long when price pulls back to POC in uptrend, short when price bounces from POC in downtrend.
+# Uses 1-week trend filter to ensure alignment with higher timeframe momentum.
+# Designed for low trade frequency (12-37/year) to minimize fee drag and capture high-probability mean reversion within trend.
+# Volume confirmation ensures institutional participation at POC level.
 
-# Hypothesis: 6h strategy using 1-day Pivot Points (Classic) with volume confirmation and trend filter.
-# Pivot points act as key support/resistance levels. Price tends to respect these levels.
-# Long when price bounces from S1/S2 in uptrend with volume confirmation.
-# Short when price is rejected from R1/R2 in downtrend with volume confirmation.
-# Uses 1-week trend filter (EMA21 slope) to ensure alignment with higher timeframe momentum.
-# Designed for low trade frequency (15-30/year) to minimize whipsaw and capture high-probability bounces.
-
-name = "6h_PivotBounce_TrendFilter_Volume"
-timeframe = "6h"
+name = "12h_PullbackToPOC_TrendFilter_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,7 +18,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Pivot Point calculation
+    # Get daily data for volume profile POC calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -32,37 +26,45 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Classic Pivot Points: P = (H+L+C)/3
-    pivot = np.zeros_like(close_1d)
-    r1 = np.zeros_like(close_1d)  # Resistance 1
-    s1 = np.zeros_like(close_1d)  # Support 1
-    r2 = np.zeros_like(close_1d)  # Resistance 2
-    s2 = np.zeros_like(close_1d)  # Support 2
+    # Calculate daily POC (Point of Control) - price level with highest volume
+    poc = np.zeros_like(close_1d)
     
-    for i in range(1, len(close_1d)):
-        # Prior day's OHLC
-        ph = high_1d[i-1]
-        pl = low_1d[i-1]
-        pc = close_1d[i-1]
-        
-        # Pivot point and support/resistance levels
-        p = (ph + pl + pc) / 3.0
-        pivot[i] = p
-        r1[i] = 2 * p - pl
-        s1[i] = 2 * p - ph
-        r2[i] = p + (ph - pl)
-        s2[i] = p - (ph - pl)
+    for i in range(len(close_1d)):
+        # Create volume profile for current day using 100 price bins between low and high
+        if high_1d[i] <= low_1d[i] or volume_1d[i] <= 0:
+            poc[i] = (high_1d[i] + low_1d[i]) / 2  # fallback to midpoint
+            continue
+            
+        # Create 100 price bins
+        bins = np.linspace(low_1d[i], high_1d[i], 101)
+        # Assign each traded price to a bin (simplified: assume uniform distribution across range)
+        # More realistic: use VWAP-like weighting, but for simplicity we'll use typical price weighted by volume
+        typical_price = (high_1d[i] + low_1d[i] + close_1d[i]) / 3
+        poc[i] = typical_price  # Simplified POC approximation
     
-    # First day has no prior data
-    pivot[0] = r1[0] = s1[0] = r2[0] = s2[0] = np.nan
+    # For better POC approximation, use volume-weighted close over recent period
+    # Calculate VWAP over last 20 days as POC proxy
+    typical_1d = (high_1d + low_1d + close_1d) / 3
+    vwap_sum = np.zeros_like(close_1d)
+    vol_sum = np.zeros_like(close_1d)
     
-    # Align Pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    for i in range(len(close_1d)):
+        start_idx = max(0, i - 19)  # 20-day lookback
+        vwap_sum[i] = np.sum(typical_1d[start_idx:i+1] * volume_1d[start_idx:i+1])
+        vol_sum[i] = np.sum(volume_1d[start_idx:i+1])
+        if vol_sum[i] > 0:
+            poc[i] = vwap_sum[i] / vol_sum[i]
+        else:
+            poc[i] = typical_1d[i]
+    
+    # First few days need enough data
+    for i in range(min(20, len(poc))):
+        poc[i] = typical_1d[i]
+    
+    # Align POC to 12h timeframe
+    poc_aligned = align_htf_to_ltf(prices, df_1d, poc)
     
     # Get weekly trend filter
     df_1w = get_htf_data(prices, '1w')
@@ -70,19 +72,19 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close_1w = df_1w['close'].values
-    # Weekly EMA(21) for trend filter
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    weekly_trend_up = ema_21_1w[1:] > ema_21_1w[:-1]  # Rising weekly EMA
+    # Weekly EMA(34) for trend filter (more stable)
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    weekly_trend_up = ema_34_1w[1:] > ema_34_1w[:-1]  # Rising weekly EMA
     weekly_trend_up = np.concatenate([[False], weekly_trend_up])  # Align with daily index
     weekly_trend_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_up.astype(float))
     
-    # 6x EMA(50) for intermediate trend and dynamic support/resistance
+    # 12x EMA(50) for intermediate trend and dynamic support/resistance
     close_series = pd.Series(close)
     ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Volume confirmation: current volume > 1.8x 30-period EMA
-    vol_ema = pd.Series(volume).ewm(span=30, adjust=False, min_periods=30).mean().values
-    vol_confirm = volume > (vol_ema * 1.8)
+    # Volume confirmation: current volume > 1.5x 20-period EMA
+    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ema * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -91,8 +93,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(ema_50[i]) or
+        if (np.isnan(poc_aligned[i]) or np.isnan(ema_50[i]) or 
             np.isnan(weekly_trend_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -100,32 +101,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long setup: bounce from S1/S2 in uptrend with volume
+            # Long setup: pullback to POC in uptrend with volume confirmation
             if (weekly_trend_aligned[i] > 0.5 and  # Weekly uptrend
                 close[i] > ema_50[i] and             # Above intermediate EMA
-                ((close[i] >= s1_aligned[i] * 0.995 and close[i] <= s1_aligned[i] * 1.005) or
-                 (close[i] >= s2_aligned[i] * 0.995 and close[i] <= s2_aligned[i] * 1.005)) and
+                abs((close[i] - poc_aligned[i]) / poc_aligned[i]) < 0.015 and  # Within 1.5% of POC
                 vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short setup: rejection from R1/R2 in downtrend with volume
+            # Short setup: bounce from POC in downtrend with volume confirmation
             elif (weekly_trend_aligned[i] <= 0.5 and  # Weekly downtrend
                   close[i] < ema_50[i] and            # Below intermediate EMA
-                  ((close[i] >= r1_aligned[i] * 0.995 and close[i] <= r1_aligned[i] * 1.005) or
-                   (close[i] >= r2_aligned[i] * 0.995 and close[i] <= r2_aligned[i] * 1.005)) and
+                  abs((close[i] - poc_aligned[i]) / poc_aligned[i]) < 0.015 and  # Within 1.5% of POC
                   vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: break below pivot or trend turns down
-            if close[i] < pivot_aligned[i] * 0.995 or weekly_trend_aligned[i] <= 0.5:
+            # Long exit: price moves 2% away from POC or trend turns down
+            if abs((close[i] - poc_aligned[i]) / poc_aligned[i]) > 0.02 or weekly_trend_aligned[i] <= 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: break above pivot or trend turns up
-            if close[i] > pivot_aligned[i] * 1.005 or weekly_trend_aligned[i] > 0.5:
+            # Short exit: price moves 2% away from POC or trend turns up
+            if abs((close[i] - poc_aligned[i]) / poc_aligned[i]) > 0.02 or weekly_trend_aligned[i] > 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
