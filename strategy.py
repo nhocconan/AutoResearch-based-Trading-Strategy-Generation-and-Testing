@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d trend filter and volume spike confirmation.
-# Long when price breaks above Camarilla R3 (daily) AND 1d EMA34 rising AND volume > 1.5x 20-period average.
-# Short when price breaks below Camarilla S3 (daily) AND 1d EMA34 falling AND volume > 1.5x 20-period average.
-# Exit when price crosses back inside the Camarilla H-L range (between H4 and L4).
-# Camarilla levels provide institutional support/resistance. EMA34 filters higher timeframe trend.
-# Volume spike confirms institutional participation. Target: 50-150 total trades over 4 years (12-37/year).
+# Hypothesis: 12h Donchian breakout with 1d ADX filter and volume confirmation.
+# Long when price breaks above Donchian upper (20-period) AND 1d ADX > 25 AND volume > 1.5x 20-period average.
+# Short when price breaks below Donchian lower (20-period) AND 1d ADX > 25 AND volume > 1.5x 20-period average.
+# Exit when price crosses back inside the Donchian channel.
+# Donchian provides clear trend structure. ADX filters for trending markets only.
+# Volume confirms breakout strength. Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "12h_Camarilla_R3S3_1dEMA34_Volume"
+name = "12h_Donchian_20_1dADX25_Volume"
 timeframe = "12h"
 leverage = 1.0
 
@@ -24,38 +24,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla calculation and trend filter
+    # 1d data for ADX calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from daily OHLC
-    # Based on previous day's close
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Calculate ADX on daily timeframe
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Camarilla levels calculation
-    R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
-    S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
-    H4 = prev_close + (prev_high - prev_low) * 1.1 / 2
-    L4 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
     
-    # Align Camarilla levels to 12h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Smoothed values (Wilder's smoothing)
+    def wilders_smoothing(data, period):
+        result = np.zeros_like(data)
+        result[period-1] = np.nansum(data[:period])
+        for i in range(period, len(data)):
+            result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
     
-    # 1d EMA34 direction
-    ema34_rising = np.zeros_like(ema34_1d_aligned, dtype=bool)
-    ema34_falling = np.zeros_like(ema34_1d_aligned, dtype=bool)
-    ema34_rising[1:] = ema34_1d_aligned[1:] > ema34_1d_aligned[:-1]
-    ema34_falling[1:] = ema34_1d_aligned[1:] < ema34_1d_aligned[:-1]
+    period = 14
+    atr_1d = wilders_smoothing(tr, period)
+    plus_di_1d = 100 * wilders_smoothing(dm_plus, period) / atr_1d
+    minus_di_1d = 100 * wilders_smoothing(dm_minus, period) / atr_1d
+    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
+    adx_1d = wilders_smoothing(dx_1d, period)
+    
+    # Handle division by zero and NaN
+    adx_1d = np.where((plus_di_1d + minus_di_1d) == 0, 0, adx_1d)
+    adx_1d = np.where(np.isnan(adx_1d), 0, adx_1d)
+    
+    # Align ADX to 12h timeframe
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Donchian channel (20-period) on 12h data
+    donchian_upper = np.zeros(n)
+    donchian_lower = np.zeros(n)
+    for i in range(n):
+        if i < 19:
+            donchian_upper[i] = np.nan
+            donchian_lower[i] = np.nan
+        else:
+            donchian_upper[i] = np.max(high[i-19:i+1])
+            donchian_lower[i] = np.min(low[i-19:i+1])
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -64,24 +89,22 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(35, 2)  # Sufficient warmup for EMA34 and Camarilla
+    start_idx = max(34, 20)  # Sufficient warmup for ADX and Donchian
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(ema34_rising[i]) or 
-            np.isnan(ema34_falling[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(adx_1d_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price breaks above R3, 1d EMA34 rising, volume filter
-            long_cond = (close[i] > R3_aligned[i]) and ema34_rising[i] and volume_filter[i]
-            # Short conditions: price breaks below S3, 1d EMA34 falling, volume filter
-            short_cond = (close[i] < S3_aligned[i]) and ema34_falling[i] and volume_filter[i]
+            # Long conditions: price breaks above Donchian upper, ADX > 25, volume filter
+            long_cond = (close[i] > donchian_upper[i]) and (adx_1d_aligned[i] > 25) and volume_filter[i]
+            # Short conditions: price breaks below Donchian lower, ADX > 25, volume filter
+            short_cond = (close[i] < donchian_lower[i]) and (adx_1d_aligned[i] > 25) and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -90,15 +113,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses back below H4 (Camarilla resistance)
-            if close[i] < H4_aligned[i]:
+            # Long exit: price crosses back below Donchian lower
+            if close[i] < donchian_lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses back above L4 (Camarilla support)
-            if close[i] > L4_aligned[i]:
+            # Short exit: price crosses back above Donchian upper
+            if close[i] > donchian_upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
