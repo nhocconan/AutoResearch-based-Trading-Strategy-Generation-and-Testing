@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R with 12h trend filter and volume confirmation
-# Williams %R measures overbought/oversold conditions; combined with 12h trend for direction
-# Volume spike required to confirm momentum. Designed to work in both bull and bear markets
-# by following higher timeframe trend and fading extremes in ranging markets.
-# Target: 50-150 total trades over 4 years = 12-37/year
+# Hypothesis: 4h Vortex Indicator with 1d trend filter and volume confirmation
+# Measures trend strength via VI+ and VI- lines. Follows higher timeframe trend
+# Requires volume spike to confirm breakouts. Designed for low trade frequency
+# Target: 20-50 total trades over 4 years = 5-12/year
 
-name = "6h_WilliamsR_12hTrend_Volume"
-timeframe = "6h"
+name = "4h_Vortex_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,22 +22,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data once
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # Get daily data once
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 12h EMA(34) for trend direction
-    close_12h = df_12h['close'].values
-    ema34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    # Calculate daily EMA(34) for trend direction
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when high == low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate Vortex Indicator (period=14) on 4h data
+    tr1 = np.maximum(high[1:], low[:-1]) - np.minimum(low[1:], high[:-1])
+    tr1 = np.concatenate([[np.nan], tr1])  # align with original arrays
+    vm_plus = np.abs(high - np.roll(low, 1))
+    vm_minus = np.abs(low - np.roll(high, 1))
+    vm_plus[0] = np.nan
+    vm_minus[0] = np.nan
+    
+    tr_sum = pd.Series(tr1).rolling(window=14, min_periods=14).sum().values
+    vi_plus = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values / tr_sum
+    vi_minus = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values / tr_sum
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,40 +55,41 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema34_12h_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(vi_plus[i]) or 
+            np.isnan(vi_minus[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema34_12h_val = ema34_12h_aligned[i]
-        wr = williams_r[i]
+        ema34_1d_val = ema34_1d_aligned[i]
+        vi_p = vi_plus[i]
+        vi_m = vi_minus[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: oversold + uptrend + volume spike
-            if (wr < -80 and 
-                close[i] > ema34_12h_val and 
+            # Enter long: VI+ > VI- (bullish trend) + uptrend + volume spike
+            if (vi_p > vi_m and 
+                close[i] > ema34_1d_val and 
                 vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: overbought + downtrend + volume spike
-            elif (wr > -20 and 
-                  close[i] < ema34_12h_val and 
+            # Enter short: VI- > VI+ (bearish trend) + downtrend + volume spike
+            elif (vi_m > vi_p and 
+                  close[i] < ema34_1d_val and 
                   vol_spike):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R returns to neutral OR trend turns down
-            if (wr > -50 or close[i] < ema34_12h_val):
+            # Exit long: trend turns bearish OR price breaks below trend
+            if (vi_m >= vi_p or close[i] < ema34_1d_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R returns to neutral OR trend turns up
-            if (wr < -50 or close[i] > ema34_12h_val):
+            # Exit short: trend turns bullish OR price breaks above trend
+            if (vi_p >= vi_m or close[i] > ema34_1d_val):
                 signals[i] = 0.0
                 position = 0
             else:
