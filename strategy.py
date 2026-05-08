@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI mean reversion with 4h trend filter and volume confirmation.
-# Long when RSI < 30 (oversold) AND price > 4h EMA50 (uptrend) AND volume > 1.5x 20-period average.
-# Short when RSI > 70 (overbought) AND price < 4h EMA50 (downtrend) AND volume > 1.5x 20-period average.
-# Exit when RSI crosses back above 50 (for long) or below 50 (for short).
-# Uses 4h EMA50 for trend direction to avoid counter-trend trades, RSI for mean reversion entries.
-# Session filter: 08-20 UTC to reduce noise.
-# Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe.
+# Hypothesis: 6h volume-weighted price action with 1w Ichimoku cloud filter.
+# Long when price crosses above 6h VWAP AND price > 1w Kumo cloud AND 6h volume > 1.5x 20-period average.
+# Short when price crosses below 6h VWAP AND price < 1w Kumo cloud AND 6h volume > 1.5x 20-period average.
+# Exit when price returns to 6h VWAP (mean reversion).
+# Uses VWAP for intraday mean reversion with weekly Ichimoku trend filter to avoid counter-trend trades.
+# Target: 80-160 total trades over 4 years (20-40/year) for balanced frequency and low fee drag.
 
-name = "1h_RSI_4hEMA50_Volume"
-timeframe = "1h"
+name = "6h_VWAP_1wIchimoku_Cloud_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,72 +24,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h data for EMA trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # 1w data for Ichimoku cloud filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate RSI (14-period) on 1h data
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    gain_ma = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    loss_ma = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = gain_ma / (loss_ma + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate 6h VWAP (typical price * volume cumulative)
+    typical_price = (high + low + close) / 3.0
+    vwap_numerator = np.cumsum(typical_price * volume)
+    vwap_denominator = np.cumsum(volume)
+    vwap = vwap_numerator / vwap_denominator
     
-    # 4h EMA50 for trend filter
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
-    
-    # Volume filter: current volume > 1.5x 20-period average
-    vol_ma20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # 6h volume filter: current volume > 1.5x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma20)
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # 1w Ichimoku cloud components
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    tenkan_sen = (pd.Series(high_1w).rolling(window=9, min_periods=9).max() + 
+                  pd.Series(low_1w).rolling(window=9, min_periods=9).min()) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    kijun_sen = (pd.Series(high_1w).rolling(window=26, min_periods=26).max() + 
+                 pd.Series(low_1w).rolling(window=26, min_periods=26).min()) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    senkou_span_b = ((pd.Series(high_1w).rolling(window=52, min_periods=52).max() + 
+                      pd.Series(low_1w).rolling(window=52, min_periods=52).min()) / 2)
+    
+    # Align Ichimoku components to 6h timeframe (cloud requires Senkou Span A/B)
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1w, tenkan_sen.values)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1w, kijun_sen.values)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1w, senkou_span_a.values, additional_delay_bars=26)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1w, senkou_span_b.values, additional_delay_bars=26)
+    
+    # Kumo cloud boundaries (use aligned Senkou Spans)
+    upper_cloud = np.maximum(senkou_span_a_aligned, senkou_span_b_aligned)
+    lower_cloud = np.minimum(senkou_span_a_aligned, senkou_span_b_aligned)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Sufficient warmup for RSI and EMA
+    start_idx = 52  # Sufficient warmup for Ichimoku calculations
     
     for i in range(start_idx, n):
-        # Skip if any critical data is NaN or outside session
-        if (np.isnan(rsi[i]) or np.isnan(ema50_4h_aligned[i]) or 
-            np.isnan(volume_filter[i]) or not session_filter[i]):
+        # Skip if any critical data is NaN
+        if (np.isnan(vwap[i]) or np.isnan(volume_filter[i]) or 
+            np.isnan(upper_cloud[i]) or np.isnan(lower_cloud[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: RSI < 30, price > 4h EMA50, volume spike, in session
-            long_cond = (rsi[i] < 30) and (close[i] > ema50_4h_aligned[i]) and volume_filter[i]
-            # Short conditions: RSI > 70, price < 4h EMA50, volume spike, in session
-            short_cond = (rsi[i] > 70) and (close[i] < ema50_4h_aligned[i]) and volume_filter[i]
+            # Long conditions: price crosses above VWAP, above Kumo cloud, volume spike
+            long_cond = (close[i] > vwap[i]) and (close[i-1] <= vwap[i-1]) and \
+                        (close[i] > upper_cloud[i]) and volume_filter[i]
+            # Short conditions: price crosses below VWAP, below Kumo cloud, volume spike
+            short_cond = (close[i] < vwap[i]) and (close[i-1] >= vwap[i-1]) and \
+                         (close[i] < lower_cloud[i]) and volume_filter[i]
             
             if long_cond:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
             elif short_cond:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: RSI crosses back above 50 (mean reversion complete)
-            if rsi[i] > 50 and rsi[i-1] <= 50:
+            # Long exit: price returns to VWAP (mean reversion)
+            if close[i] <= vwap[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI crosses back below 50 (mean reversion complete)
-            if rsi[i] < 50 and rsi[i-1] >= 50:
+            # Short exit: price returns to VWAP (mean reversion)
+            if close[i] >= vwap[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
