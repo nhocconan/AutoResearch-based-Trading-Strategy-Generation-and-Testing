@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_TripleConfirm"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_Unique"
 timeframe = "4h"
 leverage = 1.0
 
@@ -64,8 +64,10 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Triple confirmation: price breakout + volume spike + 1d trend
+            # Long entry: price breaks above R3 with volume spike and 1d uptrend
             long_cond = (close[i] > r3_4h[i] and vol_spike[i] and trend_1d_aligned[i] > 0.5)
+            
+            # Short entry: price breaks below S3 with volume spike and 1d downtrend
             short_cond = (close[i] < s3_4h[i] and vol_spike[i] and trend_1d_aligned[i] < 0.5)
             
             if long_cond:
@@ -98,4 +100,3 @@ def generate_signals(prices):
 # Uses 30-period volume MA with 2.5x threshold for stricter volume confirmation.
 # Targets 20-35 trades/year on 4h timeframe to avoid overtrading. Works in bull markets (trend-following breakouts)
 # and bear markets (reversal breakouts from extreme levels). Uses discrete sizing (0.25) to minimize churn.
-# Triple confirmation (breakout + volume + trend) reduces false signals and improves robustness across BTC/ETH/SOL.
