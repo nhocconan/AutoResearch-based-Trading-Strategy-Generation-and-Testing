@@ -3,22 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot reversal with 1d trend filter and volume confirmation.
-# Long when price touches S1 and rebounds, 1d EMA34 rising, volume > 2x 24-period average.
-# Short when price touches R1 and reverses, 1d EMA34 falling, volume > 2x 24-period average.
-# Exit when price crosses the 12-period EMA on 12h chart.
-# Uses Camarilla pivot levels from daily data for high-probability reversal zones.
-# EMA34 filter ensures trading with the higher timeframe trend.
-# Volume spike confirms institutional interest at pivot levels.
-# Target: 50-150 total trades over 4 years (12-37/year).
+# Hypothesis: 4h Choppiness Index regime filter + 12h Donchian breakout with volume confirmation.
+# Long when price breaks above 12h Donchian upper band (20) AND 4h Choppiness Index > 61.8 (ranging market) AND volume > 1.5x 20-period average.
+# Short when price breaks below 12h Donchian lower band (20) AND 4h Choppiness Index > 61.8 AND volume > 1.5x 20-period average.
+# Exit when price crosses back inside 12h Donchian channel (between upper and lower bands).
+# This strategy trades range-bound markets with clear breakout signals, using Choppiness Index to avoid trending markets where breakouts fail.
+# The 12h Donchian provides structural breakout levels, volume confirms participation, and Choppiness filters for optimal ranging conditions.
+# Target: 20-50 total trades over 4 years (5-12.5/year) to minimize fee drag.
 
-name = "12h_Camarilla_S1R1_1dEMA34_Volume"
-timeframe = "12h"
+name = "4h_Choppiness_Donchian_12h_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,64 +25,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla pivot and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # 12h data for Donchian calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous day
-    # Using previous day's high, low, close
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Calculate Donchian channels (20-period high/low) from 12h data
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Pivot point
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    # Camarilla levels
-    s1 = pivot - 1.1 * (prev_high - prev_low) / 12.0
-    r1 = pivot + 1.1 * (prev_high - prev_low) / 12.0
+    # Donchian upper band (20-period high)
+    donchian_high_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    # Donchian lower band (20-period low)
+    donchian_low_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # Align Camarilla levels to 12h timeframe
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    # Align Donchian levels to 4h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high_12h)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low_12h)
     
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # 4h data for Choppiness Index calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
+        return np.zeros(n)
     
-    # 1d EMA34 direction
-    ema34_rising = np.zeros_like(ema34_1d_aligned, dtype=bool)
-    ema34_falling = np.zeros_like(ema34_1d_aligned, dtype=bool)
-    ema34_rising[1:] = ema34_1d_aligned[1:] > ema34_1d_aligned[:-1]
-    ema34_falling[1:] = ema34_1d_aligned[1:] < ema34_1d_aligned[:-1]
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Volume filter: current volume > 2x 24-period average (adjust for 12h)
-    vol_ma24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_filter = volume > (2.0 * vol_ma24)
+    # True Range calculation
+    tr1 = high_4h - low_4h
+    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
+    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR is just high-low
     
-    # 12h EMA12 for exit
-    ema12 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # ATR(14) - smoothed true range
+    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Sum of ATR over 14 periods
+    sum_atr_14 = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
+    
+    # Highest high and lowest low over 14 periods
+    highest_high_14 = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
+    
+    # Choppiness Index: 100 * log10(sum_atr_14 / (highest_high_14 - lowest_low_14)) / log10(14)
+    # Avoid division by zero
+    range_14 = highest_high_14 - lowest_low_14
+    chop_raw = np.zeros_like(close_4h)
+    mask = range_14 > 0
+    chop_raw[mask] = 100 * np.log10(sum_atr_14[mask] / range_14[mask]) / np.log10(14)
+    
+    # Align Choppiness Index to 4h timeframe (already on 4h, but ensure alignment)
+    chop_4h = chop_raw  # Already calculated on 4h data
+    
+    # Volume filter: current volume > 1.5x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 34, 24)  # Sufficient warmup
+    start_idx = max(30, 20)  # Sufficient warmup for all indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(s1_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(ema34_rising[i]) or 
-            np.isnan(ema34_falling[i]) or np.isnan(volume_filter[i]) or
-            np.isnan(ema12[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(chop_4h[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price touches S1 and rebounds (close > S1), EMA34 rising, volume filter
-            long_cond = (close[i] > s1_aligned[i]) and (low[i] <= s1_aligned[i] * 1.001) and ema34_rising[i] and volume_filter[i]
-            # Short conditions: price touches R1 and reverses (close < R1), EMA34 falling, volume filter
-            short_cond = (close[i] < r1_aligned[i]) and (high[i] >= r1_aligned[i] * 0.999) and ema34_falling[i] and volume_filter[i]
+            # Long conditions: price breaks above Donchian high, chop > 61.8 (ranging), volume filter
+            long_cond = (close[i] > donchian_high_aligned[i]) and (chop_4h[i] > 61.8) and volume_filter[i]
+            # Short conditions: price breaks below Donchian low, chop > 61.8 (ranging), volume filter
+            short_cond = (close[i] < donchian_low_aligned[i]) and (chop_4h[i] > 61.8) and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -92,15 +109,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below 12h EMA12
-            if close[i] < ema12[i]:
+            # Long exit: price crosses back below Donchian low
+            if close[i] < donchian_low_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above 12h EMA12
-            if close[i] > ema12[i]:
+            # Short exit: price crosses back above Donchian high
+            if close[i] > donchian_high_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
