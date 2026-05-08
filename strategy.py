@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_Unique"
-timeframe = "4h"
+name = "6h_Supertrend_1dTrend_HTFVolumeFilter"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,58 +17,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data once for trend filter and Camarilla pivot levels
+    # Get 1d data once for trend filter and volume filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d EMA34 trend filter
+    # 1d EMA50 trend filter
     close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_1d = (close_1d > ema34_1d).astype(float)
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_1d = (close_1d > ema50_1d).astype(float)
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # Previous day's OHLC for Camarilla calculation (R3/S3 levels)
-    prev_high = np.roll(df_1d['high'].values, 1)
-    prev_low = np.roll(df_1d['low'].values, 1)
-    prev_close = np.roll(df_1d['close'].values, 1)
-    prev_high[0] = df_1d['high'].values[0]
-    prev_low[0] = df_1d['low'].values[0]
-    prev_close[0] = df_1d['close'].values[0]
+    # 1d volume filter: volume > 1.5 * 20-period average
+    vol_ma20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_filter_1d = df_1d['volume'].values > (vol_ma20_1d * 1.5)
+    vol_filter_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_filter_1d)
     
-    # Camarilla pivot levels calculation (R3 and S3)
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_val = prev_high - prev_low
-    r3 = pivot + (range_val * 1.1 / 2)  # R3 level
-    s3 = pivot - (range_val * 1.1 / 2)  # S3 level
+    # Supertrend on 6h: ATR(10) * 3
+    atr_period = 10
+    atr_mult = 3.0
     
-    # Align Camarilla levels to 4h timeframe
-    r3_4h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_4h = align_htf_to_ltf(prices, df_1d, s3)
+    # Calculate ATR
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
     
-    # Volume spike detection: current volume > 2.5 * 30-period average (more selective)
-    vol_ma30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    vol_spike = volume > (vol_ma30 * 2.5)
+    # Basic upper and lower bands
+    hl2 = (high + low) / 2
+    upperband = hl2 + (atr_mult * atr)
+    lowerband = hl2 - (atr_mult * atr)
+    
+    # Initialize Supertrend
+    supertrend = np.zeros(n)
+    direction = np.ones(n)  # 1 for uptrend, -1 for downtrend
+    supertrend[0] = upperband[0]
+    direction[0] = 1
+    
+    for i in range(1, n):
+        if close[i] > upperband[i-1]:
+            direction[i] = 1
+        elif close[i] < lowerband[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+            
+            if direction[i] == 1 and lowerband[i] < lowerband[i-1]:
+                lowerband[i] = lowerband[i-1]
+            if direction[i] == -1 and upperband[i] > upperband[i-1]:
+                upperband[i] = upperband[i-1]
+        
+        supertrend[i] = upperband[i] if direction[i] == -1 else lowerband[i]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # warmup for volume MA
+    start_idx = max(50, 100)  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ma30[i])):
+        if (np.isnan(trend_1d_aligned[i]) or np.isnan(vol_filter_1d_aligned[i]) or 
+            np.isnan(supertrend[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: price breaks above R3 with volume spike and 1d uptrend
-            long_cond = (close[i] > r3_4h[i] and vol_spike[i] and trend_1d_aligned[i] > 0.5)
+            # Long entry: Supertrend uptrend, 1d uptrend, and volume filter
+            long_cond = (direction[i] == 1 and trend_1d_aligned[i] > 0.5 and vol_filter_1d_aligned[i])
             
-            # Short entry: price breaks below S3 with volume spike and 1d downtrend
-            short_cond = (close[i] < s3_4h[i] and vol_spike[i] and trend_1d_aligned[i] < 0.5)
+            # Short entry: Supertrend downtrend, 1d downtrend, and volume filter
+            short_cond = (direction[i] == -1 and trend_1d_aligned[i] < 0.5 and vol_filter_1d_aligned[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -77,15 +98,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below S3 (reversal signal)
-            if close[i] < s3_4h[i]:
+            # Long exit: Supertrend flips to downtrend
+            if direction[i] == -1:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price reverses back above R3 (reversal signal)
-            if close[i] > r3_4h[i]:
+            # Short exit: Supertrend flips to uptrend
+            if direction[i] == 1:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -93,10 +114,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R3/S3 breakout strategy with volume spike confirmation and 1d EMA34 trend filter on 4h timeframe.
-# Uses wider R3/S3 levels (vs R1/S1) for fewer, higher-quality entries. Enters long when price breaks above R3
-# with volume spike and 1d uptrend (close > EMA34). Enters short when price breaks below S3 with volume spike
-# and 1d downtrend (close < EMA34). Exits when price reverses back through S3/R3 respectively.
-# Uses 30-period volume MA with 2.5x threshold for stricter volume confirmation.
-# Targets 20-35 trades/year on 4h timeframe to avoid overtrading. Works in bull markets (trend-following breakouts)
-# and bear markets (reversal breakouts from extreme levels). Uses discrete sizing (0.25) to minimize churn.
+# Hypothesis: Supertrend on 6h timeframe with 1d EMA50 trend filter and volume filter.
+# Enters long when Supertrend is uptrend, 1d close > EMA50, and 1d volume > 1.5x 20-period average.
+# Enters short when Supertrend is downtrend, 1d close < EMA50, and 1d volume > 1.5x 20-period average.
+# Exits when Supertrend flips direction.
+# Uses Supertrend(ATR=10, multiplier=3) for trend following, combined with higher timeframe
+# trend and volume confirmation to filter false signals. Works in trending markets (both bull and bear)
+# by only taking trades in the direction of the 1d trend with volume confirmation.
+# Targets 20-40 trades/year on 6h timeframe to avoid overtrading. Uses discrete sizing (0.25) to minimize churn.
