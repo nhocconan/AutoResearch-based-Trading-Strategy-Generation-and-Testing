@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h 1234 Reversal pattern with 1d volume confirmation and ADX trend filter.
-# Long when: price forms a 1234 bottom (low1 > low2 > low3 > low4), 1d volume > 1.2x 20-period average, ADX(14) > 20.
-# Short when: price forms a 1234 top (high1 < high2 < high3 < high4), 1d volume > 1.2x 20-period average, ADX(14) > 20.
-# Exit when price closes back inside the 1234 pattern range.
-# Uses 4h timeframe with 1d context for higher timeframe confirmation.
-# Target: 100-200 total trades over 4 years (25-50/year) with controlled frequency to avoid fee drag.
+# Hypothesis: 6h Ichimoku Cloud breakout with 1d trend filter and volume confirmation.
+# Long when price breaks above Kumo (cloud) AND Tenkan > Kijun (bullish TK cross) AND 1d close > 1d EMA50 (uptrend) AND 6h volume > 1.5x 20-period average.
+# Short when price breaks below Kumo AND Tenkan < Kijun AND 1d close < 1d EMA50 AND 6h volume > 1.5x 20-period average.
+# Exit when price re-enters the Kumo.
+# Uses Ichimoku for trend/momentum, 1d EMA50 for higher timeframe trend filter, and volume for confirmation.
+# Target: 50-150 total trades over 4 years (12-37/year) with controlled frequency to avoid fee drag.
 
-name = "4h_1234_Reversal_1dVolume_ADX"
-timeframe = "4h"
+name = "6h_Ichimoku_Kumo_TK_1dEMA50_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,98 +19,86 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Daily data for volume and ADX
+    # Daily data for EMA50 trend filter
     df_d = get_htf_data(prices, '1d')
-    if len(df_d) < 2:
+    if len(df_d) < 50:
         return np.zeros(n)
     
-    # 1234 pattern detection on 4h data
-    # For longs: looking for higher lows (bullish reversal)
-    # low1 (4 bars ago) > low2 (3 bars ago) > low3 (2 bars ago) > low4 (1 bar ago)
-    low1 = np.roll(low, 4)
-    low2 = np.roll(low, 3)
-    low3 = np.roll(low, 2)
-    low4 = np.roll(low, 1)
+    # Ichimoku components on 6h data
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period_tenkan = 9
+    tenkan_sen = (pd.Series(high).rolling(window=period_tenkan, min_periods=period_tenkan).max().values + 
+                  pd.Series(low).rolling(window=period_tenkan, min_periods=period_tenkan).min().values) / 2
     
-    bullish_1234 = (low1 > low2) & (low2 > low3) & (low3 > low4)
-    # For shorts: looking for lower highs (bearish reversal)
-    # high1 (4 bars ago) < high2 (3 bars ago) < high3 (2 bars ago) < high4 (1 bar ago)
-    high1 = np.roll(high, 4)
-    high2 = np.roll(high, 3)
-    high3 = np.roll(high, 2)
-    high4 = np.roll(high, 1)
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period_kijun = 26
+    kijun_sen = (pd.Series(high).rolling(window=period_kijun, min_periods=period_kijun).max().values + 
+                 pd.Series(low).rolling(window=period_kijun, min_periods=period_kijun).min().values) / 2
     
-    bearish_1234 = (high1 < high2) & (high2 < high3) & (high3 < high4)
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2, shifted 26 periods ahead
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2, shifted 26 periods ahead
+    period_senkou_b = 52
+    senkou_span_b = ((pd.Series(high).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values + 
+                      pd.Series(low).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values) / 2)
     
-    # Daily volume filter: current volume > 1.2x 20-period average
-    volume_d = df_d['volume'].values
-    vol_ma20_d = pd.Series(volume_d).rolling(window=20, min_periods=20).mean().values
-    volume_filter_d = volume_d > (1.2 * vol_ma20_d)
-    volume_filter = align_htf_to_ltf(prices, df_d, volume_filter_d)
+    # Chikou Span (Lagging Span): close shifted 26 periods behind (not used in signals)
     
-    # Daily ADX(14) for trend strength
-    high_d = df_d['high'].values
-    low_d = df_d['low'].values
+    # Align Ichimoku components to current time (account for Senkou Span shift)
+    # Senkou Span A and B are plotted 26 periods ahead, so to get current cloud values,
+    # we need to look at values that were calculated 26 periods ago
+    senkou_span_a_current = np.roll(senkou_span_a, 26)
+    senkou_span_b_current = np.roll(senkou_span_b, 26)
+    # First 26 values will be invalid due to roll, handled by NaN check
+    
+    # Kumo (Cloud) boundaries: Senkou Span A and B
+    kumo_top = np.maximum(senkou_span_a_current, senkou_span_b_current)
+    kumo_bottom = np.minimum(senkou_span_a_current, senkou_span_b_current)
+    
+    # TK Cross: Tenkan > Kijun for bullish, Tenkan < Kijun for bearish
+    tk_cross_bullish = tenkan_sen > kijun_sen
+    tk_cross_bearish = tenkan_sen < kijun_sen
+    
+    # Daily EMA50 for trend filter
     close_d = df_d['close'].values
+    ema50_d = pd.Series(close_d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Align EMA50 to 6h timeframe
+    ema50_d_aligned = align_htf_to_ltf(prices, df_d, ema50_d)
+    daily_uptrend = close_d > ema50_d  # Daily close above EMA50
+    daily_uptrend_aligned = align_htf_to_ltf(prices, df_d, daily_uptrend)
+    daily_downtrend = close_d < ema50_d  # Daily close below EMA50
+    daily_downtrend_aligned = align_htf_to_ltf(prices, df_d, daily_downtrend)
     
-    # True Range
-    tr1 = high_d - low_d
-    tr2 = np.abs(high_d - np.roll(close_d, 1))
-    tr3 = np.abs(low_d - np.roll(close_d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = high_d[0] - low_d[0]  # First TR
-    
-    # Directional Movement
-    plus_dm = np.where((high_d - np.roll(high_d, 1)) > (np.roll(low_d, 1) - low_d), 
-                       np.maximum(high_d - np.roll(high_d, 1), 0), 0)
-    minus_dm = np.where((np.roll(low_d, 1) - low_d) > (high_d - np.roll(high_d, 1)), 
-                        np.maximum(np.roll(low_d, 1) - low_d, 0), 0)
-    plus_dm[0] = 0
-    minus_dm[0] = 0
-    
-    # Smoothed values
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / atr
-    minus_di = 100 * minus_dm_smooth / atr
-    
-    # ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    adx[np.isnan(adx)] = 0
-    
-    # Align ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_d, adx)
-    
-    # Trend filter: ADX > 20 (weaker trend filter to allow more trades in ranging markets)
-    trend_filter = adx_aligned > 20
+    # Volume filter: 6h volume > 1.5x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 5  # Need at least 5 bars for 1234 pattern
+    start_idx = max(52, 26)  # Sufficient warmup for Senkou Span B (52-period)
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(bullish_1234[i]) or np.isnan(bearish_1234[i]) or 
-            np.isnan(volume_filter[i]) or np.isnan(trend_filter[i])):
+        if (np.isnan(kumo_top[i]) or np.isnan(kumo_bottom[i]) or 
+            np.isnan(tk_cross_bullish[i]) or np.isnan(tk_cross_bearish[i]) or
+            np.isnan(daily_uptrend_aligned[i]) or np.isnan(daily_downtrend_aligned[i]) or
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: bullish 1234 pattern, volume filter, trending/ranging market
-            long_cond = bullish_1234[i] and volume_filter[i] and trend_filter[i]
-            # Short conditions: bearish 1234 pattern, volume filter, trending/ranging market
-            short_cond = bearish_1234[i] and volume_filter[i] and trend_filter[i]
+            # Long conditions: price above Kumo, bullish TK cross, daily uptrend, volume confirmation
+            long_cond = (close[i] > kumo_top[i]) and tk_cross_bullish[i] and daily_uptrend_aligned[i] and volume_filter[i]
+            # Short conditions: price below Kumo, bearish TK cross, daily downtrend, volume confirmation
+            short_cond = (close[i] < kumo_bottom[i]) and tk_cross_bearish[i] and daily_downtrend_aligned[i] and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -119,17 +107,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price closes below the lowest point of the 1234 pattern
-            exit_level = min(low[i-3], low[i-2], low[i-1], low[i])
-            if close[i] < exit_level:
+            # Long exit: price re-enters Kumo (closes below Kumo top)
+            if close[i] < kumo_top[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price closes above the highest point of the 1234 pattern
-            exit_level = max(high[i-3], high[i-2], high[i-1], high[i])
-            if close[i] > exit_level:
+            # Short exit: price re-enters Kumo (closes above Kumo bottom)
+            if close[i] > kumo_bottom[i]:
                 signals[i] = 0.0
                 position = 0
             else:
