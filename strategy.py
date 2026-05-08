@@ -3,39 +3,68 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w trend filter and volume confirmation
-# Go long when price breaks above upper Donchian channel, short when breaks below lower channel.
-# Confirmed by 1-week EMA(34) trend and volume > 2x 20-period average.
-# Designed for low trade frequency in both bull and bear markets (1d timeframe).
-# Target: 30-100 total trades over 4 years (7-25/year)
+# Hypothesis: 12h Camarilla Pivot R3/S3 breakout with 1d trend filter and volume spike
+# Camarilla pivots provide strong support/resistance levels. Breakout above R3 or below S3
+# with volume confirmation and aligned daily trend (EMA34) captures strong moves.
+# Designed for low trade frequency: only trades on significant breakouts with confirmation.
+# Target: 50-150 total trades over 4 years = 12-37/year
 
-name = "1d_Donchian20_1wTrend_Volume"
-timeframe = "1d"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
+
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels for the period"""
+    # Typical price for the period
+    typical_price = (high + low + close) / 3.0
+    # Range
+    range_val = high - low
+    
+    # Camarilla levels
+    # R4 = close + (high - low) * 1.500
+    # R3 = close + (high - low) * 1.250
+    # R2 = close + (high - low) * 1.166
+    # R1 = close + (high - low) * 1.083
+    # S1 = close - (high - low) * 1.083
+    # S2 = close - (high - low) * 1.166
+    # S3 = close - (high - low) * 1.250
+    # S4 = close - (high - low) * 1.500
+    
+    r3 = close + range_val * 1.250
+    s3 = close - range_val * 1.250
+    r4 = close + range_val * 1.500
+    s4 = close - range_val * 1.500
+    
+    return r3, s3, r4, s4
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data once
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Get daily data once
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate weekly EMA(34) for trend direction
-    close_1w = df_1w['close'].values
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Calculate daily EMA(34) for trend direction
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate Donchian channels (20-period) on daily data
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels for each 12h bar
+    r3 = np.full(n, np.nan)
+    s3 = np.full(n, np.nan)
+    r4 = np.full(n, np.nan)
+    s4 = np.full(n, np.nan)
+    
+    for i in range(n):
+        r3[i], s3[i], r4[i], s4[i] = calculate_camarilla(high[i], low[i], close[i])
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -44,45 +73,43 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for calculations
+    start_idx = 30  # warmup for calculations
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(high_max[i]) or 
-            np.isnan(low_min[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(r3[i]) or np.isnan(s3[i]) or 
+            np.isnan(r4[i]) or np.isnan(s4[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema34_1w_val = ema34_1w_aligned[i]
-        upper_channel = high_max[i]
-        lower_channel = low_min[i]
+        ema34_1d_val = ema34_1d_aligned[i]
+        r3_val = r3[i]
+        s3_val = s3[i]
+        r4_val = r4[i]
+        s4_val = s4[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: price breaks above upper Donchian + uptrend + volume spike
-            if (close[i] > upper_channel and 
-                close[i] > ema34_1w_val and 
-                vol_spike):
+            # Enter long: price breaks above R3 with volume spike and uptrend
+            if (close[i] > r3_val and vol_spike and close[i] > ema34_1d_val):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below lower Donchian + downtrend + volume spike
-            elif (close[i] < lower_channel and 
-                  close[i] < ema34_1w_val and 
-                  vol_spike):
+            # Enter short: price breaks below S3 with volume spike and downtrend
+            elif (close[i] < s3_val and vol_spike and close[i] < ema34_1d_val):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below lower Donchian OR trend turns bearish
-            if close[i] < lower_channel or close[i] < ema34_1w_val:
+            # Exit long: price breaks below S3 (reversal) or trend changes
+            if close[i] < s3_val or close[i] < ema34_1d_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above upper Donchian OR trend turns bullish
-            if close[i] > upper_channel or close[i] > ema34_1w_val:
+            # Exit short: price breaks above R3 (reversal) or trend changes
+            if close[i] > r3_val or close[i] > ema34_1d_val:
                 signals[i] = 0.0
                 position = 0
             else:
