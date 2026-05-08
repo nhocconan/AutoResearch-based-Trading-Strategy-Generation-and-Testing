@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_WeeklyPivot_DailyTrend_Volume_v4"
-timeframe = "6h"
+name = "12h_WeeklyPivot_DailyTrend_Volume_v4"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -45,7 +45,7 @@ def generate_signals(prices):
     r1_1w = close_1w + (range_1w * 1.1 / 12)
     s1_1w = close_1w - (range_1w * 1.1 / 12)
     
-    # Align 1d EMA50, weekly pivot levels to 6h timeframe
+    # Align 1d EMA50, weekly pivot levels to 12h timeframe
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
     r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
@@ -54,7 +54,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Sufficient warmup for EMA50
+    start_idx = 60  # Sufficient warmup for EMA50
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
