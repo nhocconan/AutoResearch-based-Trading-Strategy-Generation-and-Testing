@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using Bollinger Band squeeze breakout with volume confirmation and daily trend filter.
-# In low volatility (Bollinger Band width < 20th percentile), price is primed for breakout.
-# Long when price breaks above upper BB with volume > 1.5x 20-period average and daily trend up.
-# Short when price breaks below lower BB with volume confirmation and daily trend down.
-# Uses 1-day trend filter to avoid counter-trend trades. Designed for low trade frequency (15-25/year).
+# Hypothesis: 4h strategy using 12h ATR-based volatility breakout with 12h trend filter and volume confirmation.
+# Long when price breaks above 12h high + ATR multiplier in uptrend with volume surge.
+# Short when price breaks below 12h low - ATR multiplier in downtrend with volume surge.
+# Uses 12h EMA(34) for trend direction and 12h ATR(14) for dynamic breakout levels.
+# Designed for low trade frequency (15-25/year) to minimize fee drag and capture sustained moves.
 
-name = "12h_BBSqueeze_Breakout_TrendFilter_Volume"
-timeframe = "12h"
+name = "4h_ATRBreakout_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,78 +23,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20, 2) - calculate on close
-    close_series = pd.Series(close)
-    bb_middle = close_series.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_series.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
-    bb_width = bb_upper - bb_lower
-    
-    # Bollinger Band width percentile (20-period lookback) - identifies squeeze
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=20, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-    ).values
-    
-    # Daily trend filter - use 1-day EMA crossover
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 12h data for trend and volatility
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 34:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_fast_1d = pd.Series(close_1d).ewm(span=9, adjust=False, min_periods=9).mean().values
-    ema_slow_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
-    daily_trend_up = ema_fast_1d > ema_slow_1d  # True for uptrend
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Align daily trend to 12h timeframe
-    daily_trend_up_aligned = align_htf_to_ltf(prices, df_1d, daily_trend_up.astype(float))
+    # 12h EMA(34) for trend filter
+    close_12h_series = pd.Series(close_12h)
+    ema_34_12h = close_12h_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_up = ema_34_12h[1:] > ema_34_12h[:-1]  # Rising EMA = uptrend
+    trend_up = np.concatenate([[False], trend_up])  # Align with 12h index
     
-    # Volume confirmation: current volume > 1.5x 20-period EMA
+    # 12h ATR(14) for volatility
+    high_low = high_12h - low_12h
+    high_close = np.abs(high_12h - np.roll(close_12h, 1))
+    low_close = np.abs(low_12h - np.roll(close_12h, 1))
+    high_close[0] = high_12h[0] - close_12h[0]  # First value
+    low_close[0] = low_12h[0] - close_12h[0]    # First value
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Dynamic breakout levels: 12h high/low ± ATR multiplier
+    upper_break = high_12h + (atr_14 * 0.5)
+    lower_break = low_12h - (atr_14 * 0.5)
+    
+    # Align 12h indicators to 4h timeframe
+    trend_up_aligned = align_htf_to_ltf(prices, df_12h, trend_up.astype(float))
+    upper_break_aligned = align_htf_to_ltf(prices, df_12h, upper_break)
+    lower_break_aligned = align_htf_to_ltf(prices, df_12h, lower_break)
+    
+    # Volume confirmation: 4h volume > 2.0x 20-period EMA
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ema * 1.5)
+    vol_confirm = volume > (vol_ema * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure enough data for BB calculation
+    start_idx = 34  # Ensure enough data for EMA(34)
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(bb_width_percentile[i]) or np.isnan(bb_upper[i]) or 
-            np.isnan(bb_lower[i]) or np.isnan(daily_trend_up_aligned[i])):
+        if (np.isnan(trend_up_aligned[i]) or np.isnan(upper_break_aligned[i]) or
+            np.isnan(lower_break_aligned[i]) or np.isnan(vol_ema[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Bollinger Band squeeze condition: width < 20th percentile
-            bb_squeeze = bb_width_percentile[i] < 20
-            
-            if bb_squeeze:
-                # Long setup: break above upper BB with volume and daily uptrend
-                if (close[i] > bb_upper[i] and 
-                    daily_trend_up_aligned[i] > 0.5 and 
-                    vol_confirm[i]):
-                    signals[i] = 0.25
-                    position = 1
-                # Short setup: break below lower BB with volume and daily downtrend
-                elif (close[i] < bb_lower[i] and 
-                      daily_trend_up_aligned[i] <= 0.5 and 
-                      vol_confirm[i]):
-                    signals[i] = -0.25
-                    position = -1
+            # Long setup: break above 12h high + ATR in uptrend with volume
+            if (trend_up_aligned[i] > 0.5 and  # 12h uptrend
+                close[i] > upper_break_aligned[i] and
+                vol_confirm[i]):
+                signals[i] = 0.25
+                position = 1
+            # Short setup: break below 12h low - ATR in downtrend with volume
+            elif (trend_up_aligned[i] <= 0.5 and  # 12h downtrend
+                  close[i] < lower_break_aligned[i] and
+                  vol_confirm[i]):
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Long exit: price returns to middle BB or trend turns down
-            if close[i] < bb_middle[i] or daily_trend_up_aligned[i] <= 0.5:
+            # Long exit: break below 12h low or trend turns down
+            if close[i] < lower_break_aligned[i] or trend_up_aligned[i] <= 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price returns to middle BB or trend turns up
-            if close[i] > bb_middle[i] or daily_trend_up_aligned[i] > 0.5:
+            # Short exit: break above 12h high or trend turns up
+            if close[i] > upper_break_aligned[i] or trend_up_aligned[i] > 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
