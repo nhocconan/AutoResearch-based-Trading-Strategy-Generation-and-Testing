@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with volume spike and daily volatility filter
-# Uses daily Camarilla pivot levels (R3/S3) on 4h timeframe, filtered by volume > 2x 20-period average and
-# daily ATR > 1.5x its 20-period average. Designed to capture high-volume breakouts at key institutional
-# levels during volatile periods, effective in both bull and bear markets. Target: 25-50 trades/year.
+# Hypothesis: 4h CCI mean-reversion with daily volatility filter
+# Uses daily CCI(20) to identify overbought/oversold conditions, filtered by daily ATR > 1.5x its 20-period average.
+# Enters long when CCI < -100 and short when CCI > 100, with position sizing of 0.25.
+# Designed to capture mean-reversion moves during volatile periods, effective in both bull and bear markets.
+# Target: 25-50 trades/year.
 
-name = "4h_Camarilla_R3S3_Breakout_Volume_VolatilityFilter"
+name = "4h_CCI_MeanReversion_VolatilityFilter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,7 +23,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots and ATR
+    # Get daily data for CCI and ATR
     df_daily = get_htf_data(prices, '1d')
     if len(df_daily) < 20:
         return np.zeros(n)
@@ -51,19 +52,22 @@ def generate_signals(prices):
             else:
                 atr_daily[i] = (atr_daily[i-1] * 19 + tr_daily[i]) / 20
     
-    # Calculate Camarilla levels (R3, S3) from previous day
-    # R3 = close + 1.1*(high - low)/2, S3 = close - 1.1*(high - low)/2
-    camarilla_r3 = np.full(len(close_daily), np.nan)
-    camarilla_s3 = np.full(len(close_daily), np.nan)
+    # Calculate daily CCI(20)
+    typical_price_daily = (high_daily + low_daily + close_daily) / 3
+    sma_tp = np.full(len(typical_price_daily), np.nan)
+    mad = np.full(len(typical_price_daily), np.nan)
+    cci_daily = np.full(len(typical_price_daily), np.nan)
     
-    for i in range(len(close_daily)):
-        camarilla_r3[i] = close_daily[i] + 1.1 * (high_daily[i] - low_daily[i]) / 2
-        camarilla_s3[i] = close_daily[i] - 1.1 * (high_daily[i] - low_daily[i]) / 2
+    for i in range(len(typical_price_daily)):
+        if i >= 19:  # need 20 periods for SMA and MAD
+            sma_tp[i] = np.mean(typical_price_daily[i-19:i+1])
+            mad[i] = np.mean(np.abs(typical_price_daily[i-19:i+1] - sma_tp[i]))
+            if mad[i] != 0:
+                cci_daily[i] = (typical_price_daily[i] - sma_tp[i]) / (0.015 * mad[i])
     
     # Align daily data to 4h timeframe
     atr_daily_aligned = align_htf_to_ltf(prices, df_daily, atr_daily)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_daily, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_daily, camarilla_s3)
+    cci_daily_aligned = align_htf_to_ltf(prices, df_daily, cci_daily)
     
     # Calculate 4h volume average for volume filter
     vol_avg_20 = np.full(n, np.nan)
@@ -89,8 +93,8 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(atr_daily_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(cci_daily_aligned[i]) or np.isnan(atr_daily_aligned[i]) or 
+            np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -129,29 +133,26 @@ def generate_signals(prices):
                      atr_daily_current > 1.5 * atr_avg_20)
         
         # Check conditions
-        price_above_r3 = close[i] > camarilla_r3_aligned[i]
-        price_below_s3 = close[i] < camarilla_s3_aligned[i]
+        cci_value = cci_daily_aligned[i]
         
         if position == 0:
-            # Look for entry: Camarilla breakout with volatility filter and volume confirmation
-            if price_above_r3 and vol_filter and volume[i] > 2.0 * vol_avg_20[i]:
+            # Look for entry: CCI mean-reversion with volatility filter
+            if cci_value < -100 and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            elif price_below_s3 and vol_filter and volume[i] > 2.0 * vol_avg_20[i]:
+            elif cci_value > 100 and vol_filter:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to S3 or volatility/volume drops
-            if (close[i] < camarilla_s3_aligned[i] or not vol_filter or 
-                volume[i] <= 2.0 * vol_avg_20[i]):
+            # Exit long: CCI returns to neutral zone or volatility drops
+            if (cci_value > -50 or not vol_filter):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to R3 or volatility/volume drops
-            if (close[i] > camarilla_r3_aligned[i] or not vol_filter or 
-                volume[i] <= 2.0 * vol_avg_20[i]):
+            # Exit short: CCI returns to neutral zone or volatility drops
+            if (cci_value < 50 or not vol_filter):
                 signals[i] = 0.0
                 position = 0
             else:
