@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d ADX trend filter and 4h volume confirmation.
-# Long when price breaks above Donchian(20) upper band AND 1d ADX > 25 (trending) AND 4h volume > 1.5x 20-period average.
-# Short when price breaks below Donchian(20) lower band AND 1d ADX > 25 AND 4h volume > 1.5x 20-period average.
+# Hypothesis: 12h Donchian breakout with 1d ADX trend filter and 12h volume confirmation.
+# Long when price breaks above Donchian(20) upper band AND 1d ADX > 25 (trending) AND 12h volume > 1.5x 20-period average.
+# Short when price breaks below Donchian(20) lower band AND 1d ADX > 25 AND 12h volume > 1.5x 20-period average.
 # Exit when price crosses back below Donchian middle (for long) or above Donchian middle (for short).
 # Uses Donchian breakouts for trend capture with ADX filter to avoid ranging markets.
-# Target: 100-200 total trades over 4 years (25-50/year) for low fee drift.
+# Target: 80-150 total trades over 4 years (20-38/year) for low fee drift.
 
-name = "4h_Donchian_1dADX_Volume_v2"
-timeframe = "4h"
+name = "12h_Donchian_1dADX_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,14 +24,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h Donchian channels (20-period)
+    # 12h Donchian channels (20-period)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     donchian_upper = highest_high
     donchian_lower = lowest_low
     donchian_middle = (donchian_upper + donchian_lower) / 2
     
-    # 4h volume filter: current volume > 1.5x 20-period average
+    # 12h volume filter: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma20)
     
@@ -74,7 +74,7 @@ def generate_signals(prices):
     adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     adx[np.isnan(dx)] = 0  # Handle division by zero
     
-    # Align 1d ADX to 4h timeframe
+    # Align 1d ADX to 12h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
