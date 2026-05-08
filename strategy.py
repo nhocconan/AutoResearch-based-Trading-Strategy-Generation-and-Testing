@@ -3,8 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_Weekly_Camarilla_R3S3_Breakout_Trend_Volume"
-timeframe = "1d"
+# Hypothesis: 6h Donchian(20) breakout with weekly trend filter and volume confirmation
+# Uses weekly trend (from 1w data) to filter breakouts - only trade in direction of weekly trend
+# In bull markets: catches breakouts with weekly uptrend
+# In bear markets: avoids false breakouts by only taking shorts when weekly downtrend
+# Volume spike confirms institutional participation in breakout
+# Target: 50-150 total trades over 4 years (12-37/year)
+name = "6h_Donchian20_WeeklyTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,28 +23,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data once
+    # Get weekly data once for trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate weekly Camarilla levels (R3, S3)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Calculate weekly EMA(50) for trend direction
     close_1w = df_1w['close'].values
-    pivot = (high_1w + low_1w + close_1w) / 3
-    range_1w = high_1w - low_1w
-    r3 = pivot + (high_1w - low_1w) * 1.1 / 4
-    s3 = pivot - (high_1w - low_1w) * 1.1 / 4
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    # Get daily data for Donchian channels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
     
-    # Weekly trend: close above/below 50-period SMA
-    sma50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
-    sma50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma50_1w)
+    # Calculate daily Donchian(20) breakout levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
     
-    # Daily volume spike: current volume > 2.0 * 20-day average
+    # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
@@ -49,41 +57,41 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(sma50_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(donch_high_aligned[i]) or 
+            np.isnan(donch_low_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        r3_val = r3_aligned[i]
-        s3_val = s3_aligned[i]
-        sma50_val = sma50_1w_aligned[i]
+        ema50_1w_val = ema50_1w_aligned[i]
+        upper = donch_high_aligned[i]
+        lower = donch_low_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: price breaks above weekly R3 + uptrend + volume spike
-            if (close[i] > r3_val and 
-                close[i] > sma50_val and 
+            # Enter long: price breaks above daily Donchian high + weekly uptrend + volume spike
+            if (close[i] > upper and 
+                close[i] > ema50_1w_val and 
                 vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below weekly S3 + downtrend + volume spike
-            elif (close[i] < s3_val and 
-                  close[i] < sma50_val and 
+            # Enter short: price breaks below daily Donchian low + weekly downtrend + volume spike
+            elif (close[i] < lower and 
+                  close[i] < ema50_1w_val and 
                   vol_spike):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below weekly S3 OR trend turns down
-            if (close[i] < s3_val or close[i] < sma50_val):
+            # Exit long: price breaks below daily Donchian low OR weekly trend turns down
+            if (close[i] < lower or close[i] < ema50_1w_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above weekly R3 OR trend turns up
-            if (close[i] > r3_val or close[i] > sma50_val):
+            # Exit short: price breaks above daily Donchian high OR weekly trend turns up
+            if (close[i] > upper or close[i] > ema50_1w_val):
                 signals[i] = 0.0
                 position = 0
             else:
