@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_WeeklyDonchianBreakout_TrendVolume_v3"
-timeframe = "1d"
+name = "6h_KAMA_144_Trend_VolumeSpike_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,56 +17,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for Donchian channels and trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Daily data for trend filter and volume calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    volume_1w = df_1w['volume'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Weekly Donchian channels (20-period)
-    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # KAMA on 6h close (144 period, fast=2, slow=30)
+    close_series = pd.Series(close)
+    change = abs(close_series.diff(1))
+    volatility = change.rolling(window=144, min_periods=144).sum()
+    er = change / volatility.replace(0, np.nan)
+    er = er.fillna(0)
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2
+    kama = [close[0]]
+    for i in range(1, len(close)):
+        kama.append(kama[-1] + sc[i] * (close[i] - kama[-1]))
+    kama = np.array(kama)
     
-    # Weekly EMA50 for trend filter
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Daily EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Align weekly indicators to daily timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    
-    # Daily volume spike: current volume > 2.5x 20-period average (more selective for 1d)
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.5 * vol_ma20)
+    # Daily volume spike: volume > 2.0x 20-day average
+    vol_ma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = volume_1d > (2.0 * vol_ma20_1d)
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 200
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(kama[i]) or np.isnan(ema50_aligned[i]) or 
+            np.isnan(vol_spike_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above weekly Donchian high, price above weekly EMA50, volume spike
-            long_cond = (close[i] > donchian_high_aligned[i] and 
-                        close[i] > ema50_1w_aligned[i] and
-                        volume_spike[i])
+            # Long: Price above KAMA, price above daily EMA50, daily volume spike
+            long_cond = (close[i] > kama[i] and 
+                        close[i] > ema50_aligned[i] and
+                        vol_spike_1d_aligned[i])
             
-            # Short: Price breaks below weekly Donchian low, price below weekly EMA50, volume spike
-            short_cond = (close[i] < donchian_low_aligned[i] and 
-                         close[i] < ema50_1w_aligned[i] and
-                         volume_spike[i])
+            # Short: Price below KAMA, price below daily EMA50, daily volume spike
+            short_cond = (close[i] < kama[i] and 
+                         close[i] < ema50_aligned[i] and
+                         vol_spike_1d_aligned[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -75,15 +78,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Price breaks below weekly Donchian low OR price crosses below weekly EMA50
-            if close[i] < donchian_low_aligned[i] or close[i] < ema50_1w_aligned[i]:
+            # Long exit: Price crosses below KAMA
+            if close[i] < kama[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price breaks above weekly Donchian high OR price crosses above weekly EMA50
-            if close[i] > donchian_high_aligned[i] or close[i] > ema50_1w_aligned[i]:
+            # Short exit: Price crosses above KAMA
+            if close[i] > kama[i]:
                 signals[i] = 0.0
                 position = 0
             else:
