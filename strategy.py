@@ -1,10 +1,11 @@
+pips
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeFilter"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -52,11 +53,11 @@ def generate_signals(prices):
     r1 = pivot + (range_1d * 1.1 / 12)
     s1 = pivot - (range_1d * 1.1 / 12)
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume filter: 12h volume > 20-period average
+    # Volume filter: 4h volume > 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -110,5 +111,5 @@ def generate_signals(prices):
 
 # Hypothesis: Camarilla R1/S1 breakout with 1d EMA200 trend filter and volume confirmation.
 # Works in bull markets via breakout continuation, in bear via mean reversion at S1/R1.
-# 12h timeframe targets 12-37 trades/year to avoid fee drag. Volume filter ensures participation.
+# 4h timeframe targets 20-50 trades/year to avoid fee drag. Volume filter ensures participation.
 # Discrete sizing (0.25) minimizes churn. Works on BTC/ETH/SOL via institutional pivot levels.
