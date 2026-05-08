@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Stochastic_Trend_Breakout"
-timeframe = "6h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -12,66 +12,62 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1-day trend filter (HTF)
+    # Daily data for Camarilla pivot and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    # Calculate daily Camarilla pivot levels (R1, S1)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # 1-day EMA20 for trend
-    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
-    # 6h Stochastic %K (14,3,3)
-    low_min = pd.Series(low).rolling(window=14, min_periods=14).min()
-    high_max = pd.Series(high).rolling(window=14, min_periods=14).max()
-    stoch_k = 100 * (close - low_min) / (high_max - low_min)
-    stoch_k = stoch_k.replace([np.inf, -np.inf], np.nan).fillna(50)
-    # Smooth %K with 3-period SMA
-    stoch_k_smooth = stoch_k.rolling(window=3, min_periods=3).mean()
-    # %D is 3-period SMA of smoothed %K
-    stoch_d = stoch_k_smooth.rolling(window=3, min_periods=3).mean()
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    r1 = close_1d + range_1d * 1.1 / 12
+    s1 = close_1d - range_1d * 1.1 / 12
     
-    # Volume filter: current volume > 1.3x 20-period average
+    # Align to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume spike: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.3 * vol_ma20)
+    volume_spike = volume > (1.5 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for indicators
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_20_1d_aligned[i]) or np.isnan(stoch_k_smooth.iloc[i]) or 
-            np.isnan(stoch_d.iloc[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        stoch_k_val = stoch_k_smooth.iloc[i]
-        stoch_d_val = stoch_d.iloc[i]
-        
         if position == 0:
-            # Long: Stochastic bullish crossover in oversold (<20) + uptrend + volume
-            long_cond = (stoch_k_val > stoch_d_val and 
-                        stoch_k_val < 20 and 
-                        stoch_k_smooth.iloc[i-1] <= stoch_d.iloc[i-1] and  # crossover just happened
-                        close[i] > ema_20_1d_aligned[i] and
-                        volume_filter[i])
+            # Long: price breaks above R1, daily uptrend, volume spike
+            long_cond = (close[i] > r1_aligned[i] and 
+                        ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and
+                        volume_spike[i])
             
-            # Short: Stochastic bearish crossover in overbought (>80) + downtrend + volume
-            short_cond = (stoch_k_val < stoch_d_val and 
-                         stoch_k_val > 80 and 
-                         stoch_k_smooth.iloc[i-1] >= stoch_d.iloc[i-1] and  # crossover just happened
-                         close[i] < ema_20_1d_aligned[i] and
-                         volume_filter[i])
+            # Short: price breaks below S1, daily downtrend, volume spike
+            short_cond = (close[i] < s1_aligned[i] and 
+                         ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and
+                         volume_spike[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -80,19 +76,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Stochastic bearish crossover OR price below EMA
-            if (stoch_k_val < stoch_d_val and 
-                stoch_k_smooth.iloc[i-1] >= stoch_d.iloc[i-1]) or \
-               close[i] < ema_20_1d_aligned[i]:
+            # Long exit: price crosses below S1
+            if close[i] < s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Stochastic bullish crossover OR price above EMA
-            if (stoch_k_val > stoch_d_val and 
-                stoch_k_smooth.iloc[i-1] <= stoch_d.iloc[i-1]) or \
-               close[i] > ema_20_1d_aligned[i]:
+            # Short exit: price crosses above R1
+            if close[i] > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
