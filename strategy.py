@@ -3,13 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
-# Uses tighter R3/S3 levels (mean reversion targets) for higher probability entries.
-# 1d EMA34 ensures trend alignment. Volume spike >2.0 filters false breakouts.
-# Works in bull via breakouts, in bear via reversals at R3/S3.
-# Target: 15-25 trades/year to avoid fee drag. Discrete sizing 0.25.
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "12h"
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1h EMA21 trend filter and volume spike
+# Uses tighter R3/S3 levels for mean reversion entries. 1h EMA21 ensures trend alignment.
+# Volume spike >1.8 filters false breakouts. Designed for 20-30 trades/year.
+name = "4h_Camarilla_R3S3_Breakout_1hEMA21_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,23 +20,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 1h data for trend filter
+    df_1h = get_htf_data(prices, '1h')
+    if len(df_1h) < 21:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 trend filter
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate 1h EMA21 trend filter
+    close_1h = df_1h['close'].values
+    ema21_1h = pd.Series(close_1h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema21_1h_aligned = align_htf_to_ltf(prices, df_1h, ema21_1h)
     
     # Get 1d data for Camarilla levels (previous day)
-    # We need the previous day's OHLC for today's Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Calculate Camarilla levels from previous day
     prev_close = df_1d['close'].shift(1).values
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
     
-    # Align to 12h
+    # Align to 4h
     prev_close_aligned = align_htf_to_ltf(prices, df_1d, prev_close)
     prev_high_aligned = align_htf_to_ltf(prices, df_1d, prev_high)
     prev_low_aligned = align_htf_to_ltf(prices, df_1d, prev_low)
@@ -61,10 +63,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(60, 34)  # warmup period
+    start_idx = max(60, 21)  # warmup period
     
     for i in range(start_idx, n):
-        if (np.isnan(r3[i]) or np.isnan(s3[i]) or np.isnan(ema34_1d_aligned[i]) or 
+        if (np.isnan(r3[i]) or np.isnan(s3[i]) or np.isnan(ema21_1h_aligned[i]) or 
             np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -80,29 +82,29 @@ def generate_signals(prices):
         if position == 0:
             # Long entry: break above R3 with trend alignment and volume spike
             if (close[i] > r3[i] and 
-                close[i] > ema34_1d_aligned[i] and
-                vol_ratio[i] > 2.0):
-                signals[i] = 0.25
+                close[i] > ema21_1h_aligned[i] and
+                vol_ratio[i] > 1.8):
+                signals[i] = 0.28
                 position = 1
             # Short entry: break below S3 with trend alignment and volume spike
             elif (close[i] < s3[i] and 
-                  close[i] < ema34_1d_aligned[i] and
-                  vol_ratio[i] > 2.0):
-                signals[i] = -0.25
+                  close[i] < ema21_1h_aligned[i] and
+                  vol_ratio[i] > 1.8):
+                signals[i] = -0.28
                 position = -1
         elif position == 1:
             # Exit long: break below S3 (mean reversion) OR trend fails
-            if close[i] < s3[i] or close[i] < ema34_1d_aligned[i]:
+            if close[i] < s3[i] or close[i] < ema21_1h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.28
         elif position == -1:
             # Exit short: break above R3 (mean reversion) OR trend fails
-            if close[i] > r3[i] or close[i] > ema34_1d_aligned[i]:
+            if close[i] > r3[i] or close[i] > ema21_1h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.28
     
     return signals
