@@ -3,13 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_WeeklyPivot_R1S1_Breakout_1dTrend_Volume"
-timeframe = "6h"
+# Hypothesis: 4h Donchian breakout with volume confirmation and ATR filter
+# Uses 20-period Donchian channels for structure, volume spike for confirmation,
+# and ATR-based volatility filter to avoid choppy markets. Designed to work in
+# both bull (breakouts continue) and bear (false breakouts filtered by volatility).
+name = "4h_Donchian_Breakout_Volume_ATR_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,84 +21,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
-    # Calculate weekly pivot levels (using previous week's data)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Weekly pivot = (H + L + C) / 3
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    # Weekly range = H - L
-    range_1w = high_1w - low_1w
-    # Resistance levels (R1, R2)
-    r1_1w = pivot_1w + (range_1w * 1.0 / 3)
-    r2_1w = pivot_1w + (range_1w * 2.0 / 3)
-    # Support levels (S1, S2)
-    s1_1w = pivot_1w - (range_1w * 1.0 / 3)
-    s2_1w = pivot_1w - (range_1w * 2.0 / 3)
-    
-    # Align weekly pivot levels to 6h timeframe
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    
-    # Daily EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 20-period Donchian channels
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation - 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1.0)
+    vol_ratio = np.where(vol_ma > 0, volume / vol_ma, 1.0)
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
+    
+    # ATR for volatility filter and stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 200
-    
-    for i in range(start_idx, n):
-        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or 
-            np.isnan(s1_1w_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or
-            np.isnan(vol_ratio[i])):
+    for i in range(20, n):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Volatility filter: avoid extremely low volatility (chop) and extreme volatility
+        vol_filter = (atr[i] > 0.01 * close[i]) and (atr[i] < 0.05 * close[i])
+        
         if position == 0:
-            # Long: price breaks above R1 + above daily EMA34 + volume confirmation
-            if (close[i] > r1_1w_aligned[i] and 
-                close[i] > ema_34_1d_aligned[i] and
-                vol_ratio[i] > 1.8):
+            # Long: break above Donchian high + volume confirmation + volatility filter
+            if (close[i] > donchian_high[i] and 
+                vol_ratio[i] > 1.5 and vol_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + below daily EMA34 + volume confirmation
-            elif (close[i] < s1_1w_aligned[i] and 
-                  close[i] < ema_34_1d_aligned[i] and
-                  vol_ratio[i] > 1.8):
+            # Short: break below Donchian low + volume confirmation + volatility filter
+            elif (close[i] < donchian_low[i] and 
+                  vol_ratio[i] > 1.5 and vol_filter):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price falls back below pivot OR below daily EMA34
-            if close[i] < pivot_1w_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            # Exit long: break below Donchian low or volatility too high
+            if (close[i] < donchian_low[i] or 
+                atr[i] > 0.05 * close[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price rises back above pivot OR above daily EMA34
-            if close[i] > pivot_1w_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            # Exit short: break above Donchian high or volatility too high
+            if (close[i] > donchian_high[i] or 
+                atr[i] > 0.05 * close[i]):
                 signals[i] = 0.0
                 position = 0
             else:
