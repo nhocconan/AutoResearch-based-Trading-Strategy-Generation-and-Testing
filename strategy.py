@@ -1,17 +1,18 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with daily volume confirmation and ADX trend filter.
-# Uses 4h price channel breakouts confirmed by daily volume > 1.5x 20-day average.
-# In trending markets (ADX > 25), follows breakout direction.
-# In ranging markets (ADX < 20), uses mean reversion at channel boundaries.
+# Hypothesis: 1d Donchian(20) breakout with weekly volume confirmation and ADX trend filter.
+# Uses daily price channel breakouts confirmed by weekly volume > 1.8x 10-week average.
+# In trending markets (weekly ADX > 25), follows breakout direction.
+# In ranging markets (weekly ADX < 20), uses mean reversion at channel boundaries.
 # Designed to work in both bull and bear markets by adapting to trend strength.
-# Target: 20-50 trades/year (80-200 total over 4 years).
+# Target: 10-25 trades/year (40-100 total over 4 years).
 
-name = "4h_Donchian_Breakout_Volume_ADX_v2"
-timeframe = "4h"
+name = "1d_Donchian_Breakout_WeeklyVolume_ADX"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,59 +23,58 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get daily data for volume and ADX
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 30:
+    # Get weekly data for volume and ADX
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 20:
         return np.zeros(n)
     
-    # Calculate daily volume average (20-period)
-    vol_avg_20 = np.full(len(df_daily), np.nan)
+    # Calculate weekly volume average (10-period)
+    vol_avg_10 = np.full(len(df_weekly), np.nan)
     vol_sum = 0
-    for i in range(len(df_daily)):
-        vol_sum += df_daily['volume'].iloc[i]
-        if i >= 19:
-            if i == 19:
-                vol_avg_20[i] = vol_sum / 20
+    for i in range(len(df_weekly)):
+        vol_sum += df_weekly['volume'].iloc[i]
+        if i >= 9:
+            if i == 9:
+                vol_avg_10[i] = vol_sum / 10
             else:
-                vol_sum -= df_daily['volume'].iloc[i-20]
-                vol_avg_20[i] = vol_sum / 20
+                vol_sum -= df_weekly['volume'].iloc[i-10]
+                vol_avg_10[i] = vol_sum / 10
     
-    # Calculate daily ADX (14-period)
-    high_daily = df_daily['high'].values
-    low_daily = df_daily['low'].values
-    close_daily = df_daily['close'].values
+    # Calculate weekly ADX (14-period)
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
+    close_weekly = df_weekly['close'].values
     
     # True Range
-    tr = np.zeros(len(df_daily))
-    for i in range(len(df_daily)):
+    tr = np.zeros(len(df_weekly))
+    for i in range(len(df_weekly)):
         if i == 0:
-            tr[i] = high_daily[i] - low_daily[i]
+            tr[i] = high_weekly[i] - low_weekly[i]
         else:
             tr[i] = max(
-                high_daily[i] - low_daily[i],
-                abs(high_daily[i] - close_daily[i-1]),
-                abs(low_daily[i] - close_daily[i-1])
+                high_weekly[i] - low_weekly[i],
+                abs(high_weekly[i] - close_weekly[i-1]),
+                abs(low_weekly[i] - close_weekly[i-1])
             )
     
     # Directional Movement
-    dm_plus = np.zeros(len(df_daily))
-    dm_minus = np.zeros(len(df_daily))
-    for i in range(1, len(df_daily)):
-        up_move = high_daily[i] - high_daily[i-1]
-        down_move = low_daily[i-1] - low_daily[i]
+    dm_plus = np.zeros(len(df_weekly))
+    dm_minus = np.zeros(len(df_weekly))
+    for i in range(1, len(df_weekly)):
+        up_move = high_weekly[i] - high_weekly[i-1]
+        down_move = low_weekly[i-1] - low_weekly[i]
         if up_move > down_move and up_move > 0:
             dm_plus[i] = up_move
         if down_move > up_move and down_move > 0:
             dm_minus[i] = down_move
     
     # Smoothed values
-    atr = np.zeros(len(df_daily))
-    dm_plus_smooth = np.zeros(len(df_daily))
-    dm_minus_smooth = np.zeros(len(df_daily))
+    atr = np.zeros(len(df_weekly))
+    dm_plus_smooth = np.zeros(len(df_weekly))
+    dm_minus_smooth = np.zeros(len(df_weekly))
     
-    for i in range(len(df_daily)):
+    for i in range(len(df_weekly)):
         if i < 14:
             if i == 0:
                 atr[i] = tr[i]
@@ -90,10 +90,10 @@ def generate_signals(prices):
             dm_minus_smooth[i] = (dm_minus_smooth[i-1] * 13 + dm_minus[i]) / 14
     
     # DI+ and DI-
-    di_plus = np.zeros(len(df_daily))
-    di_minus = np.zeros(len(df_daily))
-    dx = np.zeros(len(df_daily))
-    for i in range(len(df_daily)):
+    di_plus = np.zeros(len(df_weekly))
+    di_minus = np.zeros(len(df_weekly))
+    dx = np.zeros(len(df_weekly))
+    for i in range(len(df_weekly)):
         if atr[i] != 0:
             di_plus[i] = 100 * dm_plus_smooth[i] / atr[i]
             di_minus[i] = 100 * dm_minus_smooth[i] / atr[i]
@@ -101,8 +101,8 @@ def generate_signals(prices):
                 dx[i] = 100 * abs(di_plus[i] - di_minus[i]) / (di_plus[i] + di_minus[i])
     
     # ADX (smoothed DX)
-    adx = np.zeros(len(df_daily))
-    for i in range(len(df_daily)):
+    adx = np.zeros(len(df_weekly))
+    for i in range(len(df_weekly)):
         if i < 27:  # need 14+14 periods for smoothing
             adx[i] = np.nan
         elif i == 27:
@@ -110,11 +110,11 @@ def generate_signals(prices):
         else:
             adx[i] = (adx[i-1] * 13 + dx[i]) / 14
     
-    # Align daily data to 4h timeframe
-    vol_avg_20_aligned = align_htf_to_ltf(prices, df_daily, vol_avg_20)
-    adx_aligned = align_htf_to_ltf(prices, df_daily, adx)
+    # Align weekly data to daily timeframe
+    vol_avg_10_aligned = align_htf_to_ltf(prices, df_weekly, vol_avg_10)
+    adx_aligned = align_htf_to_ltf(prices, df_weekly, adx)
     
-    # Calculate 4h Donchian channels (20-period)
+    # Calculate daily Donchian channels (20-period)
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     
@@ -123,55 +123,44 @@ def generate_signals(prices):
             donchian_high[i] = np.max(high[i-19:i+1])
             donchian_low[i] = np.min(low[i-19:i+1])
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 30)  # warmup for indicators
+    start_idx = max(20, 28)  # warmup for indicators
     
     for i in range(start_idx, n):
-        # Skip if outside trading session
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
         # Skip if any required data is NaN
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(vol_avg_20_aligned[i]) or np.isnan(adx_aligned[i])):
+            np.isnan(vol_avg_10_aligned[i]) or np.isnan(adx_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Get current daily bar's data (last completed daily bar)
-        idx_daily = 0
-        while idx_daily < len(df_daily) and df_daily.iloc[idx_daily]['open_time'] <= prices.iloc[i]['open_time']:
-            idx_daily += 1
-        idx_daily -= 1  # last completed daily bar
+        # Get current weekly bar's data (last completed weekly bar)
+        idx_weekly = 0
+        while idx_weekly < len(df_weekly) and df_weekly.iloc[idx_weekly]['open_time'] <= prices.iloc[i]['open_time']:
+            idx_weekly += 1
+        idx_weekly -= 1  # last completed weekly bar
         
-        if idx_daily < 0:
+        if idx_weekly < 0:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_avg_20_current = vol_avg_20[idx_daily]
-        adx_current = adx[idx_daily]
+        vol_avg_10_current = vol_avg_10[idx_weekly]
+        adx_current = adx[idx_weekly]
         
-        if np.isnan(vol_avg_20_current) or np.isnan(adx_current):
+        if np.isnan(vol_avg_10_current) or np.isnan(adx_current):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current daily volume > 1.5x 20-day average
-        vol_current = df_daily['volume'].iloc[idx_daily]
-        vol_confirmed = vol_current > 1.5 * vol_avg_20_current
+        # Volume confirmation: current weekly volume > 1.8x 10-week average
+        vol_current = df_weekly['volume'].iloc[idx_weekly]
+        vol_confirmed = vol_current > 1.8 * vol_avg_10_current
         
         # Trend detection
         is_trending = adx_current > 25
