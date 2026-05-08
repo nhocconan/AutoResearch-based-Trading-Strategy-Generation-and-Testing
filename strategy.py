@@ -3,15 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Band squeeze breakout with 1d volume confirmation and 1d ADX trend filter
-# Bollinger Band width < 50th percentile indicates low volatility (squeeze). Breakout above upper band
-# or below lower band with volume surge signals strong directional move. 1d ADX > 25 ensures we only
-# trade in strong trends, avoiding whipsaws in ranges. This strategy captures volatility expansion
-# phases that occur in both bull and bear markets. Targets 15-25 trades per year (~60-100 total over 4 years)
-# to minimize fee drag while maintaining edge in volatile markets.
+# Hypothesis: 4h Camarilla R1/S1 breakout with 12h volume spike and 12h ADX trend filter
+# Combines strong intraday support/resistance (Camarilla R1/S1) with volume confirmation
+# and trend strength (ADX > 25). Targets 20-40 trades per year (~80-160 total over 4 years)
+# to minimize fee drift while maintaining edge in both bull and bear markets.
 
-name = "6h_BollingerSqueeze_1dVolume_1dADX"
-timeframe = "6h"
+name = "4h_Camarilla_R1S1_12hVolume_12hADX"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,51 +22,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20, 2) on 6h
-    bb_period = 20
-    bb_std = 2
-    ma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean()
-    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std()
-    upper_band = ma + (std * bb_std)
-    lower_band = ma - (std * bb_std)
-    bb_width = (upper_band - lower_band) / ma
-    
-    # Bollinger Band width percentile (lookback 50 periods ~ 150h)
-    bb_width_percentile = pd.Series(bb_width).rolling(window=50, min_periods=20).rank(pct=True) * 100
-    squeeze = bb_width_percentile < 50  # Below 50th percentile = squeeze
-    
-    # Get 1d data for volume and ADX
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 12h data for Camarilla and filters
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Volume spike detection on 1d (24-period MA = 4 days)
-    vol_ma = pd.Series(df_1d['volume'].values).rolling(window=24, min_periods=24).mean()
-    vol_spike = df_1d['volume'].values > (vol_ma.values * 2.0)
-    vol_spike_6h = align_htf_to_ltf(prices, df_1d, vol_spike)
+    # Calculate Camarilla levels from previous 12h bar's OHLC
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # ADX calculation on 1d
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Camarilla multipliers for R1/S1
+    R1 = close_12h + 1.1 * (high_12h - low_12h) / 12
+    S1 = close_12h - 1.1 * (high_12h - low_12h) / 12
     
-    # True Range and Directional Movement
-    tr = np.zeros_like(high_1d)
-    plus_dm = np.zeros_like(high_1d)
-    minus_dm = np.zeros_like(high_1d)
+    # Align Camarilla levels to 4h timeframe (use previous 12h bar's levels)
+    R1_4h = align_htf_to_ltf(prices, df_12h, R1)
+    S1_4h = align_htf_to_ltf(prices, df_12h, S1)
     
-    for i in range(1, len(high_1d)):
-        hl = high_1d[i] - low_1d[i]
-        hc = abs(high_1d[i] - close_1d[i-1])
-        lc = abs(low_1d[i] - close_1d[i-1])
-        tr[i] = max(hl, hc, lc)
-        
-        plus_dm[i] = max(high_1d[i] - high_1d[i-1], 0)
-        minus_dm[i] = max(low_1d[i-1] - low_1d[i], 0)
-        
+    # Volume spike detection on 12h (2x 24-period MA = ~48 periods of 12h = 24d)
+    vol_ma = pd.Series(volume).rolling(window=48, min_periods=48).mean()
+    vol_spike = volume > (vol_ma.values * 2.0)
+    
+    # ADX trend filter on 12h
+    # Calculate ADX(14) on 12h
+    plus_dm = np.zeros_like(high_12h)
+    minus_dm = np.zeros_like(high_12h)
+    tr = np.zeros_like(high_12h)
+    
+    for i in range(1, len(high_12h)):
+        plus_dm[i] = max(high_12h[i] - high_12h[i-1], 0)
+        minus_dm[i] = max(low_12h[i-1] - low_12h[i], 0)
         if plus_dm[i] == minus_dm[i]:
             plus_dm[i] = 0
             minus_dm[i] = 0
+        tr[i] = max(
+            high_12h[i] - low_12h[i],
+            abs(high_12h[i] - close_12h[i-1]),
+            abs(low_12h[i] - close_12h[i-1])
+        )
     
     # Wilder smoothing
     def wilder_smooth(arr, period):
@@ -93,44 +85,41 @@ def generate_signals(prices):
     adx = wilder_smooth(dx, 14)
     
     adx_strong = adx > 25
-    adx_weak = adx < 20
-    adx_strong_6h = align_htf_to_ltf(prices, df_1d, adx_strong)
-    adx_weak_6h = align_htf_to_ltf(prices, df_1d, adx_weak)
+    adx_strong_4h = align_htf_to_ltf(prices, df_12h, adx_strong)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(bb_period, 50, 24)  # Ensure sufficient data
+    start_idx = 48  # Ensure sufficient data for volume MA
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
-            np.isnan(squeeze[i]) or np.isnan(vol_spike_6h[i]) or 
-            np.isnan(adx_strong_6h[i]) or np.isnan(adx_weak_6h[i])):
+        if (np.isnan(R1_4h[i]) or np.isnan(S1_4h[i]) or 
+            np.isnan(vol_spike[i]) or np.isnan(adx_strong_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: breakout above upper band during squeeze, volume spike, strong trend
-            if close[i] > upper_band[i] and squeeze[i] and vol_spike_6h[i] and adx_strong_6h[i]:
+            # Enter long: price breaks above R1, volume spike, strong trend
+            if close[i] > R1_4h[i] and vol_spike[i] and adx_strong_4h[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: breakout below lower band during squeeze, volume spike, strong trend
-            elif close[i] < lower_band[i] and squeeze[i] and vol_spike_6h[i] and adx_strong_6h[i]:
+            # Enter short: price breaks below S1, volume spike, strong trend
+            elif close[i] < S1_4h[i] and vol_spike[i] and adx_strong_4h[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: return to middle band or trend weakens
-            if close[i] < ma[i] or adx_weak_6h[i]:
+            # Exit long: price returns to S1 or trend weakens
+            if close[i] < S1_4h[i] or not adx_strong_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: return to middle band or trend weakens
-            if close[i] > ma[i] or adx_weak_6h[i]:
+            # Exit short: price returns to R1 or trend weakens
+            if close[i] > R1_4h[i] or not adx_strong_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
