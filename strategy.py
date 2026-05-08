@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_WeeklyPivot_DailyTrend_Volume_v3"
-timeframe = "6h"
+name = "1d_WeeklyPivot_DailyTrend_Volume_v4"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,7 +23,7 @@ def generate_signals(prices):
     
     # Daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # Weekly data for pivot calculation
@@ -45,7 +45,7 @@ def generate_signals(prices):
     r1_1w = close_1w + (range_1w * 1.1 / 12)
     s1_1w = close_1w - (range_1w * 1.1 / 12)
     
-    # Align 1d EMA50, weekly pivot levels to 6h timeframe
+    # Align 1d EMA50, weekly pivot levels to daily timeframe
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
     r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
@@ -73,10 +73,10 @@ def generate_signals(prices):
             short_cond = (close[i] < s1_1w_aligned[i]) and (close[i] < ema_50_1d_aligned[i]) and volume_spike[i]
             
             if long_cond:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             elif short_cond:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
             # Long exit: price crosses below weekly pivot
@@ -84,13 +84,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
             # Short exit: price crosses above weekly pivot
             if close[i] > pivot_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
