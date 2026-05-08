@@ -1,17 +1,20 @@
-# 1d_KAMA_RSI_Chop_WeeklyTrend
-# Hypothesis: Daily KAMA trend with weekly trend filter and RSI momentum
-# Uses KAMA's adaptive nature to capture trends while avoiding whipsaws
-# Weekly trend filter ensures alignment with higher timeframe momentum
-# RSI provides entry timing on pullbacks within the trend
-# Target: 15-25 trades per year (60-100 total over 4 years)
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_KAMA_RSI_Chop_WeeklyTrend"
-timeframe = "1d"
+# Hypothesis: 4h RSI with 1d trend filter and volume confirmation
+# Uses RSI for mean reversion in ranging markets, filtered by daily trend
+# Requires volume spike to confirm entries, designed for low trade frequency
+# Target: 20-50 total trades over 4 years = 5-12/year
+
+name = "4h_RSI_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,50 +22,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data once
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get daily data once
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate weekly EMA(50) for trend direction
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate daily EMA(50) for trend direction
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate KAMA on daily data
-    # Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close, n=10))
-    change = np.concatenate([[np.nan]*10, change])
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)
-    volatility = pd.Series(volatility).rolling(window=10, min_periods=10).sum().values
-    volatility = np.concatenate([[np.nan]*9, volatility])
-    er = np.where(volatility != 0, change / volatility, 0)
-    
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    kama = np.full_like(close, np.nan)
-    kama[0] = close[0]
-    
-    for i in range(1, len(close)):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
-    
-    # Calculate RSI(14) on daily data
-    delta = np.diff(close)
-    delta = np.concatenate([[np.nan], delta])
+    # Calculate RSI(14) on 4h data
+    delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    gain_ma = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    loss_ma = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    rs = gain_ma / (loss_ma + 1e-10)
     rsi = 100 - (100 / (1 + rs))
     
-    # Volume spike: current volume > 1.5 * 20-day average
+    # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -71,43 +54,40 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(kama[i]) or 
-            np.isnan(rsi[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(rsi[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema50_1w_val = ema50_1w_aligned[i]
-        kama_val = kama[i]
+        ema50_1d_val = ema50_1d_aligned[i]
         rsi_val = rsi[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: price > KAMA (uptrend) + weekly uptrend + RSI > 50 + volume spike
-            if (close[i] > kama_val and 
-                close[i] > ema50_1w_val and 
-                rsi_val > 50 and 
+            # Enter long: RSI oversold (<30) + uptrend + volume spike
+            if (rsi_val < 30 and 
+                close[i] > ema50_1d_val and 
                 vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price < KAMA (downtrend) + weekly downtrend + RSI < 50 + volume spike
-            elif (close[i] < kama_val and 
-                  close[i] < ema50_1w_val and 
-                  rsi_val < 50 and 
+            # Enter short: RSI overbought (>70) + downtrend + volume spike
+            elif (rsi_val > 70 and 
+                  close[i] < ema50_1d_val and 
                   vol_spike):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price < KAMA OR weekly trend turns down
-            if (close[i] < kama_val or close[i] < ema50_1w_val):
+            # Exit long: RSI overbought OR trend turns down
+            if (rsi_val > 70 or close[i] < ema50_1d_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price > KAMA OR weekly trend turns up
-            if (close[i] > kama_val or close[i] > ema50_1w_val):
+            # Exit short: RSI oversold OR trend turns up
+            if (rsi_val < 30 or close[i] > ema50_1d_val):
                 signals[i] = 0.0
                 position = 0
             else:
