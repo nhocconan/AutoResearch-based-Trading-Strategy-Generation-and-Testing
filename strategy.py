@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_Weekly_TurtleBreakout_Volume"
-timeframe = "1d"
+name = "4h_Keltner_Breakout_Volume_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,53 +17,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for trend filter and Donchian channels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # 1-day data for ATR calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Calculate daily ATR(20) for Keltner channels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly 20-period Donchian channels
-    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
+    # True Range for daily data
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
     
-    # Weekly EMA50 for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # ATR(20) using Wilder's smoothing (equivalent to RMA)
+    atr_20 = np.zeros_like(tr)
+    atr_20[19] = np.mean(tr[:20])  # Initialize with SMA
+    for i in range(20, len(tr)):
+        atr_20[i] = (atr_20[i-1] * 19 + tr[i]) / 20
     
-    # Daily volume spike: current volume > 2.0x 20-period average
+    # Calculate EMA(20) of close for Keltner middle line
+    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Keltner Channels: EMA(20) ± 2 * ATR(20)
+    upper_keltner = ema_20_1d + 2 * atr_20
+    lower_keltner = ema_20_1d - 2 * atr_20
+    
+    # Align Keltner channels to 4h timeframe
+    upper_keltner_aligned = align_htf_to_ltf(prices, df_1d, upper_keltner)
+    lower_keltner_aligned = align_htf_to_ltf(prices, df_1d, lower_keltner)
+    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    
+    # Volume spike: current volume > 2.0x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 40  # Enough for indicators to warm up
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(upper_keltner_aligned[i]) or np.isnan(lower_keltner_aligned[i]) or 
+            np.isnan(ema_20_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above weekly Donchian high, weekly uptrend, volume spike
-            long_cond = (close[i] > donchian_high_aligned[i] and 
-                        ema_50_1w_aligned[i] > ema_50_1w_aligned[i-1] and
-                        volume_spike[i])
+            # Long: price breaks above upper Keltner band with volume spike
+            long_cond = (close[i] > upper_keltner_aligned[i] and volume_spike[i])
             
-            # Short: price breaks below weekly Donchian low, weekly downtrend, volume spike
-            short_cond = (close[i] < donchian_low_aligned[i] and 
-                         ema_50_1w_aligned[i] < ema_50_1w_aligned[i-1] and
-                         volume_spike[i])
+            # Short: price breaks below lower Keltner band with volume spike
+            short_cond = (close[i] < lower_keltner_aligned[i] and volume_spike[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -72,15 +84,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below weekly Donchian low
-            if close[i] < donchian_low_aligned[i]:
+            # Long exit: price closes below middle line (EMA20)
+            if close[i] < ema_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above weekly Donchian high
-            if close[i] > donchian_high_aligned[i]:
+            # Short exit: price closes above middle line (EMA20)
+            if close[i] > ema_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
