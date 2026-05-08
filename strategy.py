@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
-# Uses daily timeframe for trend and pivot levels, 4h for execution.
-# Designed to work in both bull and bear markets by aligning with daily trend.
-# Volume confirmation ensures momentum behind breakouts.
-# Target: 20-50 trades/year to avoid fee drag.
+# Hypothesis: 4h 123-reversal pattern with 1d trend filter and volume confirmation
+# The 123 pattern is a swing-based reversal setup: point 1 (swing extreme), 
+# point 2 (pullback), point 3 (failure to exceed point 1). Works in both 
+# bull and bear markets by trading with the higher timeframe trend.
+# Volume confirms momentum behind the breakout. Target: 25-40 trades/year.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_Tight"
+name = "4h_123Reversal_1dTrend_VolumeConfirm"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,56 +23,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla levels and trend filter
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend filter
+    # Calculate daily EMA20 for trend filter
     close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate Camarilla levels for each day
-    high_d = df_1d['high'].values
-    low_d = df_1d['low'].values
-    close_d = df_1d['close'].values
+    # Calculate swing highs/lows for 123 pattern (using 5-bar window)
+    def find_swing_points(high, low, window=2):
+        """Find swing highs and lows"""
+        n = len(high)
+        swing_high = np.full(n, np.nan)
+        swing_low = np.full(n, np.nan)
+        
+        for i in range(window, n - window):
+            # Swing high: highest high in window
+            if high[i] == np.max(high[i-window:i+window+1]):
+                swing_high[i] = high[i]
+            # Swing low: lowest low in window
+            if low[i] == np.min(low[i-window:i+window+1]):
+                swing_low[i] = low[i]
+        return swing_high, swing_low
     
-    # Camarilla R3 and S3 levels
-    R3 = close_d + (high_d - low_d) * 1.1 / 2
-    S3 = close_d - (high_d - low_d) * 1.1 / 2
+    swing_high, swing_low = find_swing_points(high, low, 2)
     
-    # Calculate daily volume average (30-period)
-    vol_1d = df_1d['volume'].values
-    vol_avg_30 = np.full(len(df_1d), np.nan)
-    for i in range(len(df_1d)):
-        if i >= 29:
-            vol_avg_30[i] = np.mean(vol_1d[i-29:i+1])
+    # Find 123 patterns: 
+    # For longs: swing low (point1) -> pullback high (point2) -> failure low (point3) -> break above point2
+    # For shorts: swing high (point1) -> pullback low (point2) -> failure high (point3) -> break below point2
     
-    # Align all indicators to 4h timeframe
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    vol_avg_30_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_30)
+    # Track last swing points
+    last_swing_high = np.full(n, np.nan)
+    last_swing_low = np.full(n, np.nan)
+    last_swing_high_idx = np.full(n, -1)
+    last_swing_low_idx = np.full(n, -1)
+    
+    for i in range(n):
+        if not np.isnan(swing_high[i]):
+            last_swing_high[i] = swing_high[i]
+            last_swing_high_idx[i] = i
+        elif i > 0:
+            last_swing_high[i] = last_swing_high[i-1]
+            last_swing_high_idx[i] = last_swing_high_idx[i-1]
+            
+        if not np.isnan(swing_low[i]):
+            last_swing_low[i] = swing_low[i]
+            last_swing_low_idx[i] = i
+        elif i > 0:
+            last_swing_low[i] = last_swing_low[i-1]
+            last_swing_low_idx[i] = last_swing_low_idx[i-1]
+    
+    # Align daily trend to 4h
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
+    
+    # Calculate volume confirmation (20-period average)
+    vol_avg_20 = np.full(n, np.nan)
+    for i in range(n):
+        if i >= 19:
+            vol_avg_20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # warmup
+    start_idx = 30
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(R3_aligned[i]) or 
-            np.isnan(S3_aligned[i]) or np.isnan(vol_avg_30_aligned[i])):
+        # Skip if required data unavailable
+        if np.isnan(ema20_1d_aligned[i]) or np.isnan(vol_avg_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Get current day's data (last completed day)
+        # Get today's daily data for trend
         idx_1d = 0
         while idx_1d < len(df_1d) and df_1d.iloc[idx_1d]['open_time'] <= prices.iloc[i]['open_time']:
             idx_1d += 1
-        idx_1d -= 1  # last completed day
+        idx_1d -= 1
         
         if idx_1d < 0:
             if position != 0:
@@ -80,48 +109,84 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Current day's data
-        ema34_today = ema34_1d[idx_1d]
-        R3_today = R3[idx_1d]
-        S3_today = S3[idx_1d]
-        vol_today = df_1d['volume'].iloc[idx_1d]
-        vol_avg_today = vol_avg_30[idx_1d]
+        ema20_today = ema20_1d[idx_1d]
+        vol_avg_today = vol_avg_20[i]
+        vol_current = volume[i]
         
-        if np.isnan(ema34_today) or np.isnan(R3_today) or np.isnan(S3_today) or np.isnan(vol_today) or np.isnan(vol_avg_today):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
+        # Volume confirmation: current volume > 1.3x average
+        vol_confirmed = vol_current > 1.3 * vol_avg_today
         
-        # Volume confirmation: current daily volume > 1.5x 30-period average
-        vol_confirmed = vol_today > 1.5 * vol_avg_today
-        
-        # Current price
         price = close[i]
         
-        # Trading logic
         if position == 0:
-            # Look for entry - only trade in direction of daily trend
-            if vol_confirmed:
-                # Long when price breaks above R3 and above EMA34 (bullish trend)
-                if price > R3_today and price > ema34_today:
-                    signals[i] = 0.25
-                    position = 1
-                # Short when price breaks below S3 and below EMA34 (bearish trend)
-                elif price < S3_today and price < ema34_today:
-                    signals[i] = -0.25
-                    position = -1
+            # Look for 123 reversal patterns
+            
+            # Check for long 123 pattern
+            # Need: swing low (point1), pullback to point2, failure at point3, break above point2
+            if last_swing_low_idx[i] >= 20:  # Ensure we have history
+                point1_idx = last_swing_low_idx[i]
+                point1 = last_swing_low[i]
+                
+                # Find point2: pullback high after point1
+                point2_idx = -1
+                point2 = -1
+                for j in range(point1_idx + 1, min(i, point1_idx + 20)):
+                    if high[j] > point1 and (point2 == -1 or high[j] < point2):
+                        point2 = high[j]
+                        point2_idx = j
+                
+                if point2_idx != -1 and point2 > point1:
+                    # Find point3: failure low after point2 (should not exceed point1)
+                    point3_idx = -1
+                    point3 = 1e10
+                    for j in range(point2_idx + 1, i):
+                        if low[j] < point2 and low[j] > point1 and low[j] < point3:
+                            point3 = low[j]
+                            point3_idx = j
+                    
+                    if point3_idx != -1 and point3 < point2:
+                        # Check for break above point2 (entry)
+                        if price > point2 and vol_confirmed and price > ema20_today:
+                            signals[i] = 0.25
+                            position = 1
+                            continue
+            
+            # Check for short 123 pattern
+            # Need: swing high (point1), pullback to point2, failure at point3, break below point2
+            if last_swing_high_idx[i] >= 20:
+                point1_idx = last_swing_high_idx[i]
+                point1 = last_swing_high[i]
+                
+                # Find point2: pullback low after point1
+                point2_idx = -1
+                point2 = 1e10
+                for j in range(point1_idx + 1, min(i, point1_idx + 20)):
+                    if low[j] < point1 and (point2 == 1e10 or low[j] > point2):
+                        point2 = low[j]
+                        point2_idx = j
+                
+                if point2_idx != -1 and point2 < point1:
+                    # Find point3: failure high after point2 (should not go below point1)
+                    point3_idx = -1
+                    point3 = -1
+                    for j in range(point2_idx + 1, i):
+                        if high[j] > point2 and high[j] < point1 and high[j] > point3:
+                            point3 = high[j]
+                            point3_idx = j
+                    
+                    if point3_idx != -1 and point3 > point2:
+                        # Check for break below point2 (entry)
+                        if price < point2 and vol_confirmed and price < ema20_today:
+                            signals[i] = -0.25
+                            position = -1
+                            continue
+        
         elif position == 1:
-            # Manage long position
+            # Exit long: break below point2 of the pattern or trend change
             exit_signal = False
-            # Exit when price breaks below S3
-            if price < S3_today:
+            if price < ema20_today:  # Trend change
                 exit_signal = True
-            # Exit when price crosses below EMA34
-            elif price < ema34_today:
-                exit_signal = True
-            # Exit when volume confirmation lost
-            elif not vol_confirmed:
+            elif not vol_confirmed:  # Volume confirmation lost
                 exit_signal = True
             
             if exit_signal:
@@ -129,17 +194,13 @@ def generate_signals(prices):
                 position = 0
             else:
                 signals[i] = 0.25
+        
         elif position == -1:
-            # Manage short position
+            # Exit short: break above point2 of the pattern or trend change
             exit_signal = False
-            # Exit when price breaks above R3
-            if price > R3_today:
+            if price > ema20_today:  # Trend change
                 exit_signal = True
-            # Exit when price crosses above EMA34
-            elif price > ema34_today:
-                exit_signal = True
-            # Exit when volume confirmation lost
-            elif not vol_confirmed:
+            elif not vol_confirmed:  # Volume confirmation lost
                 exit_signal = True
             
             if exit_signal:
