@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with daily volume confirmation and ADX filter
-# Uses daily Donchian channels for trend context, volume spike for confirmation,
-# and 12h ADX to filter weak trends. Works in bull/bear via breakout logic with
-# volume and trend strength filters. Target: 50-150 total trades over 4 years.
+# Hypothesis: 12h ADX trend strength + 1-day Donchian breakout with volume confirmation
+# Uses 1-day ADX to filter strong trends, 1-day Donchian channels for breakout signals,
+# and 12h volume spike for confirmation. Works in bull/bear markets by capturing
+# strong directional moves with volume confirmation. Target: 50-150 total trades over 4 years.
 
-name = "12h_Donchian_Breakout_DailyVolume_ADX"
+name = "12h_ADX_Trend_DailyDonchian_Volume"
 timeframe = "12h"
 leverage = 1.0
 
@@ -22,37 +22,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Donchian channels and volume average
+    # Get daily data for ADX and Donchian channels
     df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 20:
+    if len(df_daily) < 34:  # Need enough for ADX calculation
         return np.zeros(n)
     
-    # Calculate daily Donchian channels (20-period)
-    high_20 = pd.Series(df_daily['high'].values).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(df_daily['low'].values).rolling(window=20, min_periods=20).min().values
+    # Calculate daily ADX (14-period)
+    high_d = df_daily['high'].values
+    low_d = df_daily['low'].values
+    close_d = df_daily['close'].values
     
-    # Calculate daily volume average (20-period EMA)
-    vol_ema_20 = pd.Series(df_daily['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Align daily indicators to 12h timeframe
-    high_20_aligned = align_htf_to_ltf(prices, df_daily, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_daily, low_20)
-    vol_ema_20_aligned = align_htf_to_ltf(prices, df_daily, vol_ema_20)
-    
-    # Calculate 12h ADX (14-period)
     # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
+    tr1 = high_d[1:] - low_d[1:]
+    tr2 = np.abs(high_d[1:] - close_d[:-1])
+    tr3 = np.abs(low_d[1:] - close_d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
     # Directional Movement
-    dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    dm_plus = np.where((high_d[1:] - high_d[:-1]) > (low_d[:-1] - low_d[1:]), np.maximum(high_d[1:] - high_d[:-1], 0), 0)
+    dm_minus = np.where((low_d[:-1] - low_d[1:]) > (high_d[1:] - high_d[:-1]), np.maximum(low_d[:-1] - low_d[1:], 0), 0)
     dm_plus = np.concatenate([[0], dm_plus])
     dm_minus = np.concatenate([[0], dm_minus])
     
-    # Wilder's smoothing
+    # Wilder's smoothing function
     def wilders_smoothing(data, period):
         result = np.full_like(data, np.nan)
         if len(data) < period:
@@ -74,6 +66,18 @@ def generate_signals(prices):
     dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
     adx = wilders_smoothing(dx, 14)
     
+    # Calculate daily Donchian channels (20-period)
+    high_20 = pd.Series(high_d).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_d).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 12h volume EMA (20-period) for volume spike detection
+    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Align daily indicators to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_daily, adx)
+    high_20_aligned = align_htf_to_ltf(prices, df_daily, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_daily, low_20)
+    
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
@@ -91,27 +95,18 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or
-            np.isnan(vol_ema_20_aligned[i]) or np.isnan(adx[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(high_20_aligned[i]) or 
+            np.isnan(low_20_aligned[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume filter: current daily volume > 1.8x 20-day EMA
-        # Find the most recent completed daily bar
-        idx_daily = len(df_daily) - 1
-        while idx_daily >= 0 and df_daily.iloc[idx_daily]['open_time'] > prices.iloc[i]['open_time']:
-            idx_daily -= 1
-        
-        if idx_daily < 0:
-            vol_filter = False
-        else:
-            vol_daily_current = df_daily.iloc[idx_daily]['volume']
-            vol_filter = vol_daily_current > 1.8 * vol_ema_20_aligned[i]
+        # Volume filter: current 12h volume > 2.0x 20-period EMA
+        vol_filter = volume[i] > 2.0 * vol_ema_20[i]
         
         # ADX filter: > 25 indicates strong trend
-        adx_filter = adx[i] > 25
+        adx_filter = adx_aligned[i] > 25
         
         if position == 0:
             # Look for breakout entry with volume and ADX confirmation
@@ -123,14 +118,14 @@ def generate_signals(prices):
                 position = -1
         elif position == 1:
             # Exit long: price breaks below lower Donchian or ADX weakens
-            if close[i] < low_20_aligned[i] or adx[i] < 20:
+            if close[i] < low_20_aligned[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Exit short: price breaks above upper Donchian or ADX weakens
-            if close[i] > high_20_aligned[i] or adx[i] < 20:
+            if close[i] > high_20_aligned[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
