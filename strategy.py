@@ -1,15 +1,19 @@
-#!/usr/bin/env python3
+# 4h_Bollinger_Squeeze_Breakout_1dTrend_Volume
+# Hypothesis: In low volatility (Bollinger Band squeeze), price is primed for breakout.
+# Combine with daily trend filter (EMA34) and volume spike for confirmation.
+# Works in both bull/bear: squeeze precedes volatility expansion in any regime.
+# Target: 20-40 trades/year on 4h to avoid fee drag.
+name = "4h_Bollinger_Squeeze_Breakout_1dTrend_Volume"
+timeframe = "4h"
+leverage = 1.0
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Choppiness_Reversal_Signal_v1"
-timeframe = "12h"
-leverage = 1.0
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,102 +21,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Choppiness Index (trend/range filter)
+    # Bollinger Bands (20, 2) on 4h
+    bb_period = 20
+    bb_mult = 2
+    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean()
+    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std()
+    upper = sma + bb_mult * std
+    lower = sma - bb_mult * std
+    bb_width = (upper - lower) / sma  # normalized width
+    
+    # Bollinger Squeeze: width below 20-period average of width
+    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean()
+    squeeze = bb_width < bb_width_ma
+    
+    # Daily trend filter: EMA34
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate True Range for 1d
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.concatenate([[0.0], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    # Calculate ATR(14) for 1d
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate ADX(14) components for 1d
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[0.0], plus_dm])
-    minus_dm = np.concatenate([[0.0], minus_dm])
-    
-    # Smooth DM and TR for ADX
-    atr_period = 14
-    plus_di_1d = 100 * pd.Series(plus_dm).ewm(alpha=1/atr_period, adjust=False).mean().values / atr_1d
-    minus_di_1d = 100 * pd.Series(minus_dm).ewm(alpha=1/atr_period, adjust=False).mean().values / atr_1d
-    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d + 1e-10)
-    adx_1d = pd.Series(dx_1d).ewm(alpha=1/atr_period, adjust=False).mean().values
-    
-    # Calculate Choppiness Index (14-period)
-    sum_tr_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
-    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop_1d = 100 * np.log10(sum_tr_14 / (highest_high_14 - lowest_low_14 + 1e-10)) / np.log10(14)
-    
-    # Align HTF indicators to 12h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
-    
-    # 12h RSI(14) for mean reversion signals
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_12h = 100 - (100 / (1 + rs))
-    
-    # Volume spike filter: current volume > 1.8x 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ma20)
+    # Volume spike: current volume > 2x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    volume_spike = volume > (2 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = max(bb_period, 20)  # ensure indicators ready
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(adx_1d_aligned[i]) or np.isnan(chop_1d_aligned[i]) or 
-            np.isnan(rsi_12h[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(squeeze[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Regime filter: Only trade in ranging markets (Choppiness > 61.8)
-        # and avoid strong trends (ADX < 25)
-        ranging_market = chop_1d_aligned[i] > 61.8
-        weak_trend = adx_1d_aligned[i] < 25
-        
         if position == 0:
-            # Mean reversion signals in ranging market
-            if ranging_market and weak_trend:
-                # Oversold RSI + volume spike = long
-                if rsi_12h[i] < 30 and volume_spike[i]:
-                    signals[i] = 0.25
-                    position = 1
-                # Overbought RSI + volume spike = short
-                elif rsi_12h[i] > 70 and volume_spike[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # Long: squeeze breakout above upper band, daily uptrend, volume spike
+            long_cond = (squeeze[i] and 
+                        close[i] > upper[i] and
+                        ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and
+                        volume_spike[i])
+            
+            # Short: squeeze breakout below lower band, daily downtrend, volume spike
+            short_cond = (squeeze[i] and 
+                         close[i] < lower[i] and
+                         ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and
+                         volume_spike[i])
+            
+            if long_cond:
+                signals[i] = 0.25
+                position = 1
+            elif short_cond:
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Long exit: RSI returns to neutral or overbought
-            if rsi_12h[i] > 50:
+            # Long exit: price closes below SMA (mean reversion) OR opposite squeeze breakout
+            if close[i] < sma[i] or (squeeze[i] and close[i] < lower[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI returns to neutral or oversold
-            if rsi_12h[i] < 50:
+            # Short exit: price closes above SMA OR opposite squeeze breakout
+            if close[i] > sma[i] or (squeeze[i] and close[i] > upper[i]):
                 signals[i] = 0.0
                 position = 0
             else:
