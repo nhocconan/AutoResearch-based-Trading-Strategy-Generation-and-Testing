@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_WeeklyPivot_DailyTrend_Volume_v1"
-timeframe = "12h"
+name = "6h_WeeklyPivot_DailyTrend_Volume_v4"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -45,7 +45,7 @@ def generate_signals(prices):
     r1_1w = close_1w + (range_1w * 1.1 / 12)
     s1_1w = close_1w - (range_1w * 1.1 / 12)
     
-    # Align 1d EMA50, weekly pivot levels to 12h timeframe
+    # Align 1d EMA50, weekly pivot levels to 6h timeframe
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
     r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
