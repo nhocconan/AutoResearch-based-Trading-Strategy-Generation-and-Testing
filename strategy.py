@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_KAMA_Trend_RSI_MeanReversion"
+name = "4h_Donchian20_VolumeTrend"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 80:
+    if n < 40:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,76 +17,96 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # KAMA trend filter from 1d (higher timeframe)
+    # Calculate 1d ADX for regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 15:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # Efficiency Ratio (ER) for KAMA
-    change = np.abs(np.diff(close_1d))
-    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0) if len(change) > 0 else 0
-    # Vectorized ER calculation
-    er = np.zeros_like(close_1d)
-    for i in range(10, len(close_1d)):
-        if i >= 10:
-            ch = np.abs(close_1d[i] - close_1d[i-10])
-            vol = np.sum(np.abs(np.diff(close_1d[i-9:i+1])))
-            er[i] = ch / vol if vol != 0 else 0
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama)
     
-    # RSI(14) on 4h for mean reversion signals
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    # Prepend first value to match length
-    rsi = np.concatenate([[50], rsi])
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
     
-    # Bollinger Bands width for regime filter (chop detection)
-    bb_middle = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    bb_std = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
-    bb_width = (bb_upper - bb_lower) / (bb_middle + 1e-10)
-    # Chop regime: high BB width = trending, low BB width = ranging
-    bb_width_rank = pd.Series(bb_width).rolling(window=50, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else 0.5, raw=False
-    ).values
-    chop_threshold = 0.5  # Below 0.5 = choppy/ranging, above = trending
+    # Directional Movement
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[0.0], plus_dm])
+    minus_dm = np.concatenate([[0.0], minus_dm])
+    
+    # Smoothed TR and DM
+    atr = np.full_like(tr, np.nan)
+    plus_dm_smooth = np.full_like(plus_dm, np.nan)
+    minus_dm_smooth = np.full_like(minus_dm, np.nan)
+    
+    for i in range(len(tr)):
+        if i < 14:
+            continue
+        if i == 14:
+            atr[i] = np.nanmean(tr[1:15])
+            plus_dm_smooth[i] = np.nansum(plus_dm[1:15])
+            minus_dm_smooth[i] = np.nansum(minus_dm[1:15])
+        else:
+            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+            plus_dm_smooth[i] = (plus_dm_smooth[i-1] * 13 + plus_dm[i]) / 14
+            minus_dm_smooth[i] = (minus_dm_smooth[i-1] * 13 + minus_dm[i]) / 14
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / atr
+    minus_di = 100 * minus_dm_smooth / atr
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    
+    # ADX
+    adx = np.full_like(dx, np.nan)
+    for i in range(len(dx)):
+        if i < 27:
+            continue
+        if i == 27:
+            adx[i] = np.nanmean(dx[14:28])
+        else:
+            adx[i] = (adx[i-1] * 13 + dx[i]) / 14
+    
+    adx_1d = adx
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # 4h Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume spike: current volume > 1.5x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Sufficient warmup
+    start_idx = 30  # Sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(kama_1d_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(bb_width_rank[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(adx_1d_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price below KAMA (dip in uptrend) + oversold RSI + choppy market
-            long_cond = (close[i] < kama_1d_aligned[i]) and \
-                        (rsi[i] < 30) and \
-                        (bb_width_rank[i] < chop_threshold)
-            # Short: price above KAMA (rally in downtrend) + overbought RSI + choppy market
-            short_cond = (close[i] > kama_1d_aligned[i]) and \
-                         (rsi[i] > 70) and \
-                         (bb_width_rank[i] < chop_threshold)
+            # Long: break above Donchian high + strong trend (ADX > 25) + volume spike
+            long_cond = (close[i] > donchian_high[i]) and \
+                        (adx_1d_aligned[i] > 25) and \
+                        volume_spike[i]
+            # Short: break below Donchian low + strong trend (ADX > 25) + volume spike
+            short_cond = (close[i] < donchian_low[i]) and \
+                         (adx_1d_aligned[i] > 25) and \
+                         volume_spike[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -95,15 +115,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses above KAMA or RSI overbought
-            if close[i] > kama_1d_aligned[i] or rsi[i] > 70:
+            # Long exit: close below Donchian low (mean reversion)
+            if close[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses below KAMA or RSI oversold
-            if close[i] < kama_1d_aligned[i] or rsi[i] < 30:
+            # Short exit: close above Donchian high (mean reversion)
+            if close[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
