@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Donchian_20_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_Liquidity_Grab_Fade_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,13 +17,13 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume spike: current volume > 1.8x 20-period average
+    # Volume filter: volume > 1.8x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ma20)
+    volume_filter = volume > (1.8 * vol_ma20)
     
-    # 1d data for trend and Donchian calculation
+    # Get 1d data for trend and liquidity levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
@@ -32,35 +32,41 @@ def generate_signals(prices):
     
     # 1d EMA50 for trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Donchian channel (20) from 1d data
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Align 1d EMA50 and Donchian levels to 4h timeframe
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    
+    # Previous day's high and low for liquidity grab detection
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    
+    prev_high_aligned = align_htf_to_ltf(prices, df_1d, prev_high)
+    prev_low_aligned = align_htf_to_ltf(prices, df_1d, prev_low)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Sufficient warmup for EMA50
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(prev_high_aligned[i]) or 
+            np.isnan(prev_low_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price above Donchian high, above 1d EMA50, volume spike
-            long_cond = (close[i] > donchian_high_aligned[i]) and (close[i] > ema_50_1d_aligned[i]) and volume_spike[i]
-            # Short conditions: price below Donchian low, below 1d EMA50, volume spike
-            short_cond = (close[i] < donchian_low_aligned[i]) and (close[i] < ema_50_1d_aligned[i]) and volume_spike[i]
+            # Long: price breaks below previous day's low (liquidity grab) then reverses above it,
+            # with uptrend bias (price above 1d EMA50) and volume confirmation
+            liq_grab_long = low[i] < prev_low_aligned[i] and close[i] > prev_low_aligned[i]
+            long_cond = liq_grab_long and (close[i] > ema_50_1d_aligned[i]) and volume_filter[i]
+            
+            # Short: price breaks above previous day's high (liquidity grab) then reverses below it,
+            # with downtrend bias (price below 1d EMA50) and volume confirmation
+            liq_grab_short = high[i] > prev_high_aligned[i] and close[i] < prev_high_aligned[i]
+            short_cond = liq_grab_short and (close[i] < ema_50_1d_aligned[i]) and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -69,15 +75,23 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below Donchian low (reversion to mean)
-            if close[i] < donchian_low_aligned[i]:
+            # Long exit: price breaks below previous day's low (stop loss) or
+            # takes profit at previous day's high
+            if low[i] < prev_low_aligned[i]:  # stop loss
+                signals[i] = 0.0
+                position = 0
+            elif high[i] >= prev_high_aligned[i]:  # take profit
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above Donchian high (reversion to mean)
-            if close[i] > donchian_high_aligned[i]:
+            # Short exit: price breaks above previous day's high (stop loss) or
+            # takes profit at previous day's low
+            if high[i] > prev_high_aligned[i]:  # stop loss
+                signals[i] = 0.0
+                position = 0
+            elif low[i] <= prev_low_aligned[i]:  # take profit
                 signals[i] = 0.0
                 position = 0
             else:
