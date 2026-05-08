@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Fractal breakout with daily trend filter and volume confirmation
-# Uses daily Williams Fractals for swing high/low detection on 12h timeframe.
-# Requires 1d EMA34 trend alignment and volume spike to avoid false breakouts.
-# Designed for low-frequency, high-conviction trades to minimize fee drag.
-# Williams Fractals provide strong support/resistance levels that work in both trending and ranging markets.
+# Hypothesis: 4h Camarilla R4/S4 breakout with 1d EMA34 trend and volume confirmation
+# Uses daily Camarilla levels (tighter than R3/S3) for high-probability breakouts.
+# Requires alignment with daily EMA34 trend and volume spike to filter false signals.
+# Designed for low-frequency trades (<400 total) to minimize fee drag and work in both bull/bear markets.
 
-name = "12h_WilliamsFractal_1dEMA34_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R4S4_1dEMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,54 +22,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams Fractals and EMA34
+    # Get 1d data for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
+    # Calculate daily Camarilla levels (R4, S4 - outer bands)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Williams Fractals (requires 2-bar lookback/forward for confirmation)
-    # Bearish fractal: high[n-2] < high[n-1] > high[n] and high[n] > high[n+1] and high[n] > high[n+2]
-    # Bullish fractal: low[n-2] > low[n-1] < low[n] and low[n] < low[n+1] and low[n] < low[n+2]
-    n1d = len(high_1d)
-    bearish_fractal = np.zeros(n1d, dtype=bool)
-    bullish_fractal = np.zeros(n1d, dtype=bool)
+    # Previous day's values for today's Camarilla levels
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    for i in range(2, n1d - 2):
-        # Bearish fractal (sell signal)
-        if (high_1d[i-2] < high_1d[i-1] and 
-            high_1d[i-1] < high_1d[i] and 
-            high_1d[i] > high_1d[i+1] and 
-            high_1d[i] > high_1d[i+2]):
-            bearish_fractal[i] = True
-        
-        # Bullish fractal (buy signal)
-        if (low_1d[i-2] > low_1d[i-1] and 
-            low_1d[i-1] > low_1d[i] and 
-            low_1d[i] < low_1d[i+1] and 
-            low_1d[i] < low_1d[i+2]):
-            bullish_fractal[i] = True
+    # Camarilla calculations for R4/S4 (outer bands)
+    R4 = prev_close + (prev_high - prev_low) * 1.1 / 2
+    S4 = prev_close - (prev_high - prev_low) * 1.1 / 2
     
-    # Convert to price levels (use the fractal high/low as support/resistance)
-    bearish_level = np.where(bearish_fractal, high_1d, np.nan)
-    bullish_level = np.where(bullish_fractal, low_1d, np.nan)
+    # Align Camarilla levels to 4h timeframe
+    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
+    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
     
-    # Forward fill to maintain the level until next fractal
-    bearish_level_series = pd.Series(bearish_level)
-    bullish_level_series = pd.Series(bullish_level)
-    bearish_level_ffill = bearish_level_series.ffill().values
-    bullish_level_ffill = bullish_level_series.ffill().values
-    
-    # Calculate daily EMA34 for trend filter
+    # Get 1d data for EMA34 trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align 1d data to 12h timeframe
-    # Williams Fractals need 2 extra bars for confirmation (as per Williams theory)
-    bearish_level_aligned = align_htf_to_ltf(prices, df_1d, bearish_level_ffill, additional_delay_bars=2)
-    bullish_level_aligned = align_htf_to_ltf(prices, df_1d, bullish_level_ffill, additional_delay_bars=2)
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Volume spike (2x 20-period EMA)
@@ -84,7 +63,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(bearish_level_aligned[i]) or np.isnan(bullish_level_aligned[i]) or 
+        if (np.isnan(R4_aligned[i]) or np.isnan(S4_aligned[i]) or 
             np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -92,27 +71,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Enter long: price breaks above bearish fractal level (resistance) with 1d uptrend and volume spike
-            if (close[i] > bearish_level_aligned[i] and 
+            # Enter long: price breaks above R4 with 1d uptrend and volume spike
+            if (close[i] > R4_aligned[i] and 
                 close[i] > ema34_1d_aligned[i] and vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below bullish fractal level (support) with 1d downtrend and volume spike
-            elif (close[i] < bullish_level_aligned[i] and 
+            # Enter short: price breaks below S4 with 1d downtrend and volume spike
+            elif (close[i] < S4_aligned[i] and 
                   close[i] < ema34_1d_aligned[i] and vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below bullish fractal level (support) or trend fails
-            if (close[i] < bullish_level_aligned[i] or 
+            # Exit long: price breaks below S4 or trend fails
+            if (close[i] < S4_aligned[i] or 
                 close[i] < ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above bearish fractal level (resistance) or trend fails
-            if (close[i] > bearish_level_aligned[i] or 
+            # Exit short: price breaks above R4 or trend fails
+            if (close[i] > R4_aligned[i] or 
                 close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
