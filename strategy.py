@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d trend filter and volume confirmation
-# Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-# Long when Bull Power > 0, 1d EMA34 rising, volume > 1.5x average
-# Short when Bear Power < 0, 1d EMA34 falling, volume > 1.5x average
-# Uses Elder Ray for momentum, 1d EMA34 for trend filter, volume for confirmation
-# Targets 12-37 trades per year (50-150 over 4 years) for low fee drag and high win rate
-# Works in both bull and bear markets due to trend filter and volume confirmation
+# Hypothesis: 12h Williams Alligator (13,8,5 SMAs) with 1d trend filter and volume confirmation
+# Long when price > Jaw, Teeth > Lips (bullish alignment), 1d EMA34 rising, volume > 1.5x avg
+# Short when price < Jaw, Teeth < Lips (bearish alignment), 1d EMA34 falling, volume > 1.5x avg
+# Uses Alligator for trend identification, EMA34 for higher timeframe trend filter, volume for confirmation
+# Targets 12-37 trades per year (48-148 over 4 years) for low fee drag and high win rate
+# Works in both bull and bear markets due to dual timeframe trend alignment and volume confirmation
 
-name = "6h_ElderRay_1dEMA34_Volume"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_1dEMA34_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,9 +19,9 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
     # Get 1d data for trend filter
@@ -30,12 +29,11 @@ def generate_signals(prices):
     if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate EMA13 for Elder Ray
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Elder Ray components
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Williams Alligator: 13,8,5 period SMAs on median price
+    median_price = (high + low) / 2
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values  # 13-period (blue line)
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values   # 8-period (red line)
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values    # 5-period (green line)
     
     # Calculate EMA34 on 1d close for trend filter
     close_1d = df_1d['close'].values
@@ -49,41 +47,43 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Need at least 34 days of data for EMA34
+    start_idx = 13  # Need at least 13 periods for Jaw calculation
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
             np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        bull_val = bull_power[i]
-        bear_val = bear_power[i]
+        close_val = close[i]
+        jaw_val = jaw[i]
+        teeth_val = teeth[i]
+        lips_val = lips[i]
         ema34_1d_val = ema34_1d_aligned[i]
         vol_conf_val = vol_conf[i]
         
         if position == 0:
-            # Enter long: Bull Power > 0, 1d uptrend, volume confirmation
-            if bull_val > 0 and ema34_1d_val > 0 and vol_conf_val:
+            # Enter long: price > Jaw, Teeth > Lips (bullish alignment), 1d uptrend, volume confirmation
+            if close_val > jaw_val and teeth_val > lips_val and ema34_1d_val > 0 and vol_conf_val:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Bear Power < 0, 1d downtrend, volume confirmation
-            elif bear_val < 0 and ema34_1d_val < 0 and vol_conf_val:
+            # Enter short: price < Jaw, Teeth < Lips (bearish alignment), 1d downtrend, volume confirmation
+            elif close_val < jaw_val and teeth_val < lips_val and ema34_1d_val < 0 and vol_conf_val:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Bull Power <= 0 or 1d trend down
-            if bull_val <= 0 or ema34_1d_val < 0:
+            # Exit long: price < Jaw OR Teeth < Lips (loss of bullish alignment) OR 1d trend down
+            if close_val < jaw_val or teeth_val < lips_val or ema34_1d_val < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Bear Power >= 0 or 1d trend up
-            if bear_val >= 0 or ema34_1d_val > 0:
+            # Exit short: price > Jaw OR Teeth > Lips (loss of bearish alignment) OR 1d trend up
+            if close_val > jaw_val or teeth_val > lips_val or ema34_1d_val > 0:
                 signals[i] = 0.0
                 position = 0
             else:
