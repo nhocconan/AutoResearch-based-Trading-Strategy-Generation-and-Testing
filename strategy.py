@@ -3,20 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Bollinger Band breakout with weekly trend filter and volume confirmation
-# Designed for low trade frequency on daily timeframe: 10-25 trades/year.
-# Long when price breaks above upper BB(20,2) with weekly EMA(34) uptrend and volume spike.
-# Short when price breaks below lower BB(20,2) with weekly EMA(34) downtrend and volume spike.
-# Uses mean reversion exits when price returns to BB middle band.
-# Target: 20-80 total trades over 4 years = 5-20/year
+# Hypothesis: 12h Donchian breakout with 1d trend filter and volume confirmation
+# Donchian channel breakouts (20-period) capture breakouts in both bull and bear markets.
+# Combined with 1d EMA(34) trend filter to ensure directional alignment.
+# Volume confirmation filters out false breakouts. Designed for low trade frequency.
+# Target: 50-150 total trades over 4 years = 12-37/year
 
-name = "1d_BollingerBreakout_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "12h_Donchian20_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,24 +23,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data once
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Get daily data once
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate weekly EMA(34) for trend direction
-    close_1w = df_1w['close'].values
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Calculate daily EMA(34) for trend direction
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Bollinger Bands on daily data
-    bb_period = 20
-    bb_std = 2
-    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_band = sma + (bb_std * std)
-    lower_band = sma - (bb_std * std)
-    middle_band = sma
+    # Donchian channel on 12h data
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -50,47 +44,45 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(bb_period, 34)  # warmup for calculations
+    start_idx = 60  # warmup for calculations
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(sma[i]) or 
-            np.isnan(std[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema34_1w_val = ema34_1w_aligned[i]
-        upper = upper_band[i]
-        lower = lower_band[i]
-        middle = middle_band[i]
+        ema34_1d_val = ema34_1d_aligned[i]
+        upper = donchian_high[i]
+        lower = donchian_low[i]
         vol_spike = volume_spike[i]
-        price = close[i]
         
         if position == 0:
-            # Enter long: price breaks above upper BB + weekly uptrend + volume spike
-            if (price > upper and 
-                ema34_1w_val > sma[i] and  # weekly EMA > daily SMA = uptrend
+            # Enter long: breakout above upper band + uptrend + volume spike
+            if (close[i] > upper and 
+                close[i] > ema34_1d_val and 
                 vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below lower BB + weekly downtrend + volume spike
-            elif (price < lower and 
-                  ema34_1w_val < sma[i] and  # weekly EMA < daily SMA = downtrend
+            # Enter short: breakout below lower band + downtrend + volume spike
+            elif (close[i] < lower and 
+                  close[i] < ema34_1d_val and 
                   vol_spike):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to middle BB
-            if price <= middle:
+            # Exit long: breakdown below lower band OR trend reversal
+            if close[i] < lower or close[i] < ema34_1d_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to middle BB
-            if price >= middle:
+            # Exit short: breakout above upper band OR trend reversal
+            if close[i] > upper or close[i] > ema34_1d_val:
                 signals[i] = 0.0
                 position = 0
             else:
