@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,69 +17,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla levels and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get weekly data once for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla levels
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Get daily data once for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Camarilla R1 and S1 levels
-    R1 = prev_close + 1.1 * (prev_high - prev_low) / 12
-    S1 = prev_close - 1.1 * (prev_high - prev_low) / 12
+    # Weekly EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Align Camarilla levels to 4h timeframe (with 1-day delay for previous day's data)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    # Daily high, low, close for Camarilla calculation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Daily EMA34 for trend filter
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate Camarilla levels for previous day
+    R3 = np.zeros(len(close_1d))
+    S3 = np.zeros(len(close_1d))
+    for i in range(1, len(close_1d)):
+        prev_high = high_1d[i-1]
+        prev_low = low_1d[i-1]
+        prev_close = close_1d[i-1]
+        range_val = prev_high - prev_low
+        R3[i] = prev_close + range_val * 1.1 / 4
+        S3[i] = prev_close - range_val * 1.1 / 4
     
-    # Volume spike detection (20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 2.0)
+    # Align Camarilla levels to 12h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    
+    # Volume filter: current volume > 1.5x 20-period average
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # warmup for EMA34
+    start_idx = 50  # warmup
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(ema34_aligned[i])):
+        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(R3_aligned[i]) or 
+            np.isnan(S3_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        vol_ok = volume[i] > vol_ma[i] * 1.5
+        
         if position == 0:
-            # Long breakout: price breaks above R1 with volume spike and price > EMA34 (uptrend)
-            long_cond = (close[i] > R1_aligned[i]) and vol_spike[i] and (close[i] > ema34_aligned[i])
-            
-            # Short breakdown: price breaks below S1 with volume spike and price < EMA34 (downtrend)
-            short_cond = (close[i] < S1_aligned[i]) and vol_spike[i] and (close[i] < ema34_aligned[i])
-            
-            if long_cond:
+            # Long: price breaks above R3 AND weekly uptrend (price > EMA50) AND volume confirmation
+            if (close[i] > R3_aligned[i]) and (close[i] > ema50_1w_aligned[i]) and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            elif short_cond:
+            # Short: price breaks below S3 AND weekly downtrend (price < EMA50) AND volume confirmation
+            elif (close[i] < S3_aligned[i]) and (close[i] < ema50_1w_aligned[i]) and vol_ok:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below S1 (breakdown of support) or volume drops
-            if (close[i] < S1_aligned[i]) or not vol_spike[i]:
+            # Exit long: price closes below S3 (reversal) OR weekly trend turns down
+            if (close[i] < S3_aligned[i]) or (close[i] < ema50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above R1 (breakout of resistance) or volume drops
-            if (close[i] > R1_aligned[i]) or not vol_spike[i]:
+            # Exit short: price closes above R3 (reversal) OR weekly trend turns up
+            if (close[i] > R3_aligned[i]) or (close[i] > ema50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -87,10 +98,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R1/S1 levels act as intraday support/resistance. 
-# Long when price breaks above R1 with volume confirmation in uptrend (price > EMA34).
-# Short when price breaks below S1 with volume confirmation in downtrend (price < EMA34).
-# Exits when price retests the opposite level or volume fades.
-# Works in both bull and bear markets by following the daily trend filter.
-# Volume spike ensures breakouts are genuine, not false breaks.
-# Target: 20-50 trades per year to minimize fee decay while capturing meaningful moves.
+# Hypothesis: Camarilla R3/S3 levels act as strong support/resistance. 
+# Breakouts with volume confirmation and weekly trend filter capture institutional moves.
+# Long when price > R3, weekly uptrend, and volume spike. 
+# Short when price < S3, weekly downtrend, and volume spike.
+# Exits when price reverses to opposite level or weekly trend changes.
+# Weekly trend filter reduces whipsaws in sideways markets. 
+# Target: 50-150 total trades over 4 years = 12-37/year to minimize fee decay.
