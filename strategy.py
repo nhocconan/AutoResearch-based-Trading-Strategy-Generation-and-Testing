@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,7 +19,7 @@ def generate_signals(prices):
     
     # Get 1d data once
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     # Calculate 1d EMA(34) for trend direction
@@ -27,13 +27,19 @@ def generate_signals(prices):
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate 1d Camarilla levels (R1, S1)
+    # Calculate 1d high/low for Camarilla pivot levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d_prev = df_1d['close'].values
-    # Camarilla: R1 = close + (high - low) * 1.12, S1 = close - (high - low) * 1.12
-    camarilla_r1 = close_1d_prev + (high_1d - low_1d) * 1.12
-    camarilla_s1 = close_1d_prev - (high_1d - low_1d) * 1.12
+    close_1d_prev = np.roll(close_1d, 1)
+    high_1d_prev = np.roll(high_1d, 1)
+    low_1d_prev = np.roll(low_1d, 1)
+    close_1d_prev[0] = close_1d[0]  # first bar uses current close as previous
+    high_1d_prev[0] = high_1d[0]
+    low_1d_prev[0] = low_1d[0]
+    
+    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    camarilla_r1 = close_1d_prev + (high_1d_prev - low_1d_prev) * 1.1 / 12
+    camarilla_s1 = close_1d_prev - (high_1d_prev - low_1d_prev) * 1.1 / 12
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
