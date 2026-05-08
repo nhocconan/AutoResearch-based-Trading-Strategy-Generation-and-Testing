@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_WilliamsVixFix_WeeklyTrend_Volume"
-timeframe = "6h"
+name = "12h_Donchian20_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,71 +17,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data once for Williams Vix Fix
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 22:
+    # Get 1d data once
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Williams Vix Fix on weekly: measures fear/greed (low = fear, high = greed)
-    highest_close = pd.Series(df_weekly['close']).rolling(window=22, min_periods=22).max().values
-    wvf = ((highest_close - df_weekly['low'].values) / highest_close) * 100
-    wvf_ma = pd.Series(wvf).rolling(window=10, min_periods=10).mean().values
-    wvf_ma_aligned = align_htf_to_ltf(prices, df_weekly, wvf_ma)
+    # Calculate 1d EMA(34) for trend direction
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Get daily trend for context
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 50:
-        return np.zeros(n)
+    # Calculate 12h Donchian(20) breakout levels
+    high_12h = high  # Already 12h resolution
+    low_12h = low
+    donch_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # Daily EMA(50) for trend
-    ema50_daily = pd.Series(df_daily['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_daily_aligned = align_htf_to_ltf(prices, df_daily, ema50_daily)
-    
-    # Volume spike: current volume > 2.5 * 20-period average
+    # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.5 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # warmup
+    start_idx = 60  # warmup for calculations
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(wvf_ma_aligned[i]) or np.isnan(ema50_daily_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(donch_high[i]) or 
+            np.isnan(donch_low[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        wvf_val = wvf_ma_aligned[i]
-        ema50_daily_val = ema50_daily_aligned[i]
+        ema34_1d_val = ema34_1d_aligned[i]
+        upper = donch_high[i]
+        lower = donch_low[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: WVF low (fear) + price above daily EMA + volume spike (capitulation bounce)
-            if (wvf_val < 30 and 
-                close[i] > ema50_daily_val and 
+            # Enter long: price breaks above 12h Donchian high + uptrend + volume spike
+            if (close[i] > upper and 
+                close[i] > ema34_1d_val and 
                 vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: WVF high (greed) + price below daily EMA + volume spike (exhaustion)
-            elif (wvf_val > 80 and 
-                  close[i] < ema50_daily_val and 
+            # Enter short: price breaks below 12h Donchian low + downtrend + volume spike
+            elif (close[i] < lower and 
+                  close[i] < ema34_1d_val and 
                   vol_spike):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: WVF rises above 50 (fear subsiding) OR price below daily EMA
-            if (wvf_val > 50 or close[i] < ema50_daily_val):
+            # Exit long: price breaks below 12h Donchian low OR trend turns down
+            if (close[i] < lower or close[i] < ema34_1d_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: WVF falls below 50 (greed subsiding) OR price above daily EMA
-            if (wvf_val < 50 or close[i] > ema50_daily_val):
+            # Exit short: price breaks above 12h Donchian high OR trend turns up
+            if (close[i] > upper or close[i] > ema34_1d_val):
                 signals[i] = 0.0
                 position = 0
             else:
