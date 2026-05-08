@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with daily volume confirmation and weekly ADX trend filter
-# Long when price breaks above R3 level + daily volume > 1.5x 20-period SMA + weekly ADX > 25
-# Short when price breaks below S3 level + daily volume > 1.5x 20-period SMA + weekly ADX > 25
-# Exit when price crosses opposite S1/R1 level or weekly ADX falls below 20
-# Uses Camarilla pivots for institutional levels, volume for confirmation, ADX for trend strength
-# Targets 25-35 trades/year to minimize fee drag while capturing strong directional moves in both bull and bear markets
+# Hypothesis: 1-day Donchian breakout with weekly ADX trend filter and volume confirmation
+# Long when price breaks above 20-day high + weekly ADX > 25 + daily volume > 1.5x 20-day average
+# Short when price breaks below 20-day low + weekly ADX > 25 + daily volume > 1.5x 20-day average
+# Exit when price crosses opposite 10-day level or weekly ADX falls below 20
+# Uses Donchian channels for breakout signals, volume for confirmation, ADX for trend strength
+# Targets 15-25 trades/year to minimize fee decay while capturing strong directional moves in bull/bear markets
 
-name = "4h_Camarilla_R3S3_Breakout_DailyVolume_WeeklyADX"
-timeframe = "4h"
+name = "1d_Donchian_Breakout_WeeklyADX_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,7 +24,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots and volume
+    # Get daily data for Donchian channels and volume
     df_daily = get_htf_data(prices, '1d')
     if len(df_daily) < 20:
         return np.zeros(n)
@@ -78,82 +78,82 @@ def generate_signals(prices):
     dx = np.where((di_plus + di_minus) > 0, np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
     adx = smooth_series(dx, 14)
     
-    # Calculate daily Camarilla pivot levels (R3, S3, R1, S1)
+    # Calculate daily Donchian channels (20-period)
     daily_high = df_daily['high'].values
     daily_low = df_daily['low'].values
-    daily_close = df_daily['close'].values
     
-    # Pivot point
-    pivot = (daily_high + daily_low + daily_close) / 3.0
+    # Upper and lower bands
+    upper_20 = np.full_like(daily_high, np.nan)
+    lower_20 = np.full_like(daily_low, np.nan)
     
-    # Camarilla levels
-    camarilla_range = daily_high - daily_low
-    r3 = pivot + camarilla_range * 1.1 / 4.0
-    s3 = pivot - camarilla_range * 1.1 / 4.0
-    r1 = pivot + camarilla_range * 1.1 / 12.0
-    s1 = pivot - camarilla_range * 1.1 / 12.0
+    for i in range(len(daily_high)):
+        if i >= 19:
+            upper_20[i] = np.max(daily_high[i-19:i+1])
+            lower_20[i] = np.min(daily_low[i-19:i+1])
+    
+    # Calculate daily Donchian channels (10-period for exit)
+    upper_10 = np.full_like(daily_high, np.nan)
+    lower_10 = np.full_like(daily_low, np.nan)
+    
+    for i in range(len(daily_high)):
+        if i >= 9:
+            upper_10[i] = np.max(daily_high[i-9:i+1])
+            lower_10[i] = np.min(daily_low[i-9:i+1])
     
     # Calculate daily average volume for volume filter
     daily_volume = df_daily['volume'].values
     vol_ma_20 = smooth_series(daily_volume, 20)
     
-    # Align weekly ADX to 4h timeframe
+    # Align weekly ADX to daily timeframe
     adx_aligned = align_htf_to_ltf(prices, df_weekly, adx)
     
-    # Align daily Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_daily, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_daily, s3)
-    r1_aligned = align_htf_to_ltf(prices, df_daily, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_daily, s1)
+    # Align daily Donchian levels to daily timeframe
+    upper_20_aligned = align_htf_to_ltf(prices, df_daily, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_daily, lower_20)
+    upper_10_aligned = align_htf_to_ltf(prices, df_daily, upper_10)
+    lower_10_aligned = align_htf_to_ltf(prices, df_daily, lower_10)
     
-    # Align daily volume MA to 4h timeframe
+    # Align daily volume MA to daily timeframe
     vol_ma_20_aligned = align_htf_to_ltf(prices, df_daily, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # warmup period
+    start_idx = 40  # warmup period
     
     for i in range(start_idx, n):
-        if (np.isnan(adx_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(vol_ma_20_aligned[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or 
+            np.isnan(upper_10_aligned[i]) or np.isnan(lower_10_aligned[i]) or np.isnan(vol_ma_20_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Volume filter: current daily volume > 1.5x 20-day SMA
-        # Find the most recent completed daily bar
-        idx_daily = len(df_daily) - 1
-        while idx_daily >= 0 and df_daily.iloc[idx_daily]['open_time'] > prices.iloc[i]['open_time']:
-            idx_daily -= 1
-        vol_filter = False
-        if idx_daily >= 0:
-            vol_daily_current = df_daily.iloc[idx_daily]['volume']
-            vol_filter = vol_daily_current > 1.5 * vol_ma_20_aligned[i]
+        vol_filter = volume[i] > 1.5 * vol_ma_20_aligned[i]
         
         if position == 0:
             # Look for breakout with volume confirmation and strong trend (ADX > 25)
-            # Long: price breaks above R3 level + ADX > 25 + volume spike
-            if close[i] > r3_aligned[i] and adx_aligned[i] > 25:
+            # Long: price breaks above 20-day high + ADX > 25 + volume spike
+            if close[i] > upper_20_aligned[i] and adx_aligned[i] > 25:
                 if vol_filter:
                     signals[i] = 0.25
                     position = 1
-            # Short: price breaks below S3 level + ADX > 25 + volume spike
-            elif close[i] < s3_aligned[i] and adx_aligned[i] > 25:
+            # Short: price breaks below 20-day low + ADX > 25 + volume spike
+            elif close[i] < lower_20_aligned[i] and adx_aligned[i] > 25:
                 if vol_filter:
                     signals[i] = -0.25
                     position = -1
         elif position == 1:
-            # Exit long: price crosses below S1 level or ADX falls below 20
-            if close[i] < s1_aligned[i] or adx_aligned[i] < 20:
+            # Exit long: price crosses below 10-day low or ADX falls below 20
+            if close[i] < lower_10_aligned[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above R1 level or ADX falls below 20
-            if close[i] > r1_aligned[i] or adx_aligned[i] < 20:
+            # Exit short: price crosses above 10-day high or ADX falls below 20
+            if close[i] > upper_10_aligned[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
