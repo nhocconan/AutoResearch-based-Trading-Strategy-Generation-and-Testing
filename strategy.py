@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy combining 1-week Donchian breakout direction with 1-day volume confirmation and ATR-based volatility filter.
-# Uses weekly Donchian(20) breakout for trend direction, enters on pullbacks to the 20-period EMA on 6h chart with volume spike.
-# Volatility filter ensures trades only occur when ATR(14) is above its 50-period average, avoiding low-volatility chop.
-# Designed for low trade frequency (15-25/year) to minimize fee impact while capturing high-probability trend continuations.
+# Hypothesis: 12h strategy using 1-day Donchian breakout with volume confirmation and daily trend filter.
+# Long when price breaks above 20-day high with volume > 1.5x average and daily EMA(50) rising.
+# Short when price breaks below 20-day low with volume > 1.5x average and daily EMA(50) falling.
+# Designed for low trade frequency (15-25/year) to minimize fee drag and capture breakouts in trending markets.
 
-name = "6h_WeeklyDonchian_EMAPullback_VolumeVolatility"
-timeframe = "6h"
+name = "12h_DonchianBreakout_TrendFilter_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,95 +22,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Donchian breakout direction
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    
-    # Calculate weekly Donchian channels (20-period)
-    high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    
-    # Weekly breakout signals: 1 for bullish breakout, -1 for bearish breakout
-    weekly_breakout_up = np.where(high_1w > high_20, 1, 0)
-    weekly_breakout_down = np.where(low_1w < low_20, -1, 0)
-    weekly_direction = weekly_breakout_up + weekly_breakout_down  # 1, -1, or 0
-    
-    # Align weekly direction to 6h timeframe
-    weekly_direction_aligned = align_htf_to_ltf(prices, df_1w, weekly_direction.astype(float))
-    
-    # Get daily data for volume confirmation
+    # Get daily data for Donchian channels and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    volume_1d = df_1d['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Daily volume confirmation: current volume > 2.0x 20-period EMA
-    vol_ema_20 = pd.Series(volume_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume_1d > (vol_ema_20 * 2.0)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike.astype(float))
+    # Calculate 20-period Donchian channels on daily
+    high_series = pd.Series(high_1d)
+    low_series = pd.Series(low_1d)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # 6h indicators: EMA(20) for pullback entries, ATR(14) for volatility filter
-    close_series = pd.Series(close)
-    ema_20 = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Daily EMA(50) for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    daily_trend_up = ema_50_1d[1:] > ema_50_1d[:-1]  # Rising EMA
+    daily_trend_up = np.concatenate([[False], daily_trend_up])  # Align with daily index
     
-    # ATR(14) calculation
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = tr3[0] = 0  # First period has no prior close
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Align indicators to 12h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    daily_trend_aligned = align_htf_to_ltf(prices, df_1d, daily_trend_up.astype(float))
     
-    # ATR filter: current ATR > 1.2x 50-period EMA of ATR (avoid low volatility)
-    atr_ema_50 = pd.Series(atr_14).ewm(span=50, adjust=False, min_periods=50).mean().values
-    volatility_filter = atr_14 > (atr_ema_50 * 1.2)
+    # Volume confirmation: current volume > 1.5x 20-period EMA
+    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ema * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Ensure enough data for all indicators
+    start_idx = 50  # Ensure enough data for EMA(50)
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(weekly_direction_aligned[i]) or np.isnan(volume_spike_aligned[i]) or
-            np.isnan(ema_20[i]) or np.isnan(volatility_filter[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(daily_trend_aligned[i]) or np.isnan(vol_ema[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long setup: weekly bullish breakout, price near EMA(20), volume spike, adequate volatility
-            if (weekly_direction_aligned[i] > 0.5 and  # Weekly bullish breakout
-                close[i] <= ema_20[i] * 1.01 and       # Within 1% above EMA(20) (pullback)
-                close[i] >= ema_20[i] * 0.99 and
-                volume_spike_aligned[i] > 0.5 and      # Daily volume spike
-                volatility_filter[i]):                 # Sufficient volatility
+            # Long setup: break above Donchian high with volume and uptrend
+            if (close[i] > donchian_high_aligned[i] and
+                daily_trend_aligned[i] > 0.5 and
+                vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short setup: weekly bearish breakout, price near EMA(20), volume spike, adequate volatility
-            elif (weekly_direction_aligned[i] < -0.5 and  # Weekly bearish breakout
-                  close[i] >= ema_20[i] * 0.99 and       # Within 1% below EMA(20) (pullback)
-                  close[i] <= ema_20[i] * 1.01 and
-                  volume_spike_aligned[i] > 0.5 and
-                  volatility_filter[i]):
+            # Short setup: break below Donchian low with volume and downtrend
+            elif (close[i] < donchian_low_aligned[i] and
+                  daily_trend_aligned[i] <= 0.5 and
+                  vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: weekly direction turns bearish or price breaks significantly above EMA
-            if weekly_direction_aligned[i] < -0.5 or close[i] > ema_20[i] * 1.02:
+            # Long exit: break below Donchian low or trend turns down
+            if close[i] < donchian_low_aligned[i] or daily_trend_aligned[i] <= 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: weekly direction turns bullish or price breaks significantly below EMA
-            if weekly_direction_aligned[i] > 0.5 or close[i] < ema_20[i] * 0.98:
+            # Short exit: break above Donchian high or trend turns up
+            if close[i] > donchian_high_aligned[i] or daily_trend_aligned[i] > 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
