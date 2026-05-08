@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_ADX_Trend_Filter_VolumeBreakout"
-timeframe = "4h"
+name = "1d_Camarilla_R3S3_Breakout_1wTrend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,87 +17,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate ADX for trend strength
-    # TR
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first value
-    
-    # DM+
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    dm_plus[0] = 0
-    # DM-
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    dm_minus[0] = 0
-    
-    # Smooth with Wilder's smoothing (alpha = 1/period)
-    period = 14
-    alpha = 1.0 / period
-    
-    atr = np.zeros(n)
-    atr[0] = tr[0]
-    for i in range(1, n):
-        atr[i] = (1 - alpha) * atr[i-1] + alpha * tr[i]
-    
-    dm_plus_smooth = np.zeros(n)
-    dm_minus_smooth = np.zeros(n)
-    dm_plus_smooth[0] = dm_plus[0]
-    dm_minus_smooth[0] = dm_minus[0]
-    for i in range(1, n):
-        dm_plus_smooth[i] = (1 - alpha) * dm_plus_smooth[i-1] + alpha * dm_plus[i]
-        dm_minus_smooth[i] = (1 - alpha) * dm_minus_smooth[i-1] + alpha * dm_minus[i]
-    
-    # DI+ and DI-
-    di_plus = np.where(atr > 0, 100 * dm_plus_smooth / atr, 0)
-    di_minus = np.where(atr > 0, 100 * dm_minus_smooth / atr, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = np.zeros(n)
-    adx[0] = dx[0]
-    for i in range(1, n):
-        adx[i] = (1 - alpha) * adx[i-1] + alpha * dx[i]
-    
-    # Daily trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    close_1w = df_1w['close'].values
     
-    # Volume spike: current volume > 2x 20-period average
+    # Calculate weekly EMA34 for trend filter
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Daily Camarilla pivot levels
+    high_1 = high[-1] if len(high) >= 1 else high[0]
+    low_1 = low[-1] if len(low) >= 1 else low[0]
+    close_1 = close[-1] if len(close) >= 1 else close[0]
+    # Calculate Camarilla levels for each day using previous day's OHLC
+    # We need to shift to get previous day's values
+    high_shift = np.roll(high, 1)
+    low_shift = np.roll(low, 1)
+    close_shift = np.roll(close, 1)
+    high_shift[0] = high[0]  # first day uses same day's high
+    low_shift[0] = low[0]    # first day uses same day's low
+    close_shift[0] = close[0] # first day uses same day's close
+    
+    # Camarilla R3, R4, S3, S4 levels
+    # R4 = Close + (High - Low) * 1.500
+    # R3 = Close + (High - Low) * 1.250
+    # S3 = Close - (High - Low) * 1.250
+    # S4 = Close - (High - Low) * 1.500
+    camarilla_r3 = close_shift + (high_shift - low_shift) * 1.250
+    camarilla_s3 = close_shift - (high_shift - low_shift) * 1.250
+    
+    # Daily volume spike: current volume > 2.0x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 50  # Need enough data for calculations
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(adx[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(camarilla_r3[i]) or 
+            np.isnan(camarilla_s3[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: ADX > 25 (strong trend), price above daily EMA50, volume spike
-            long_cond = (adx[i] > 25 and 
-                        close[i] > ema_50_1d_aligned[i] and
+            # Long: price breaks above R3 with volume spike and weekly uptrend
+            long_cond = (close[i] > camarilla_r3[i] and 
+                        ema_34_1w_aligned[i] > ema_34_1w_aligned[i-1] and
                         volume_spike[i])
             
-            # Short: ADX > 25 (strong trend), price below daily EMA50, volume spike
-            short_cond = (adx[i] > 25 and 
-                         close[i] < ema_50_1d_aligned[i] and
+            # Short: price breaks below S3 with volume spike and weekly downtrend
+            short_cond = (close[i] < camarilla_s3[i] and 
+                         ema_34_1w_aligned[i] < ema_34_1w_aligned[i-1] and
                          volume_spike[i])
             
             if long_cond:
@@ -107,15 +85,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: ADX drops below 20 (weakening trend) or price crosses below daily EMA50
-            if adx[i] < 20 or close[i] < ema_50_1d_aligned[i]:
+            # Long exit: price crosses below S3 (reversion to mean)
+            if close[i] < camarilla_s3[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: ADX drops below 20 (weakening trend) or price crosses above daily EMA50
-            if adx[i] < 20 or close[i] > ema_50_1d_aligned[i]:
+            # Short exit: price crosses above R3 (reversion to mean)
+            if close[i] > camarilla_r3[i]:
                 signals[i] = 0.0
                 position = 0
             else:
