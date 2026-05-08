@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_Weekly_Donchian_Breakout_Trend_Filter_v1"
-timeframe = "1d"
+name = "6h_Volume_Pressure_Reversal_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,51 +17,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data once
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data once
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Weekly Donchian channels (20-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
+    # === 1d VWAP (Volume Weighted Average Price) ===
+    typical_price_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
+    vwap_num = (typical_price_1d * df_1d['volume'].values)
+    vwap_den = df_1d['volume'].values
+    # Cumulative sum for VWAP
+    cum_vwap_num = np.cumsum(vwap_num)
+    cum_vwap_den = np.cumsum(vwap_den)
+    vwap_1d = cum_vwap_num / (cum_vwap_den + 1e-10)
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
     
-    # Weekly EMA20 for trend filter
-    close_1w = df_1w['close'].values
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # === 1d Volume Pressure: (Close - VWAP) / StdDev of typical price ===
+    price_dev = typical_price_1d - vwap_1d
+    # Rolling standard deviation of price deviation
+    vol_pressure = price_dev / (pd.Series(price_dev).rolling(window=20, min_periods=20).std().values + 1e-10)
+    vol_pressure_aligned = align_htf_to_ltf(prices, df_1d, vol_pressure)
     
-    # Daily volume filter: current volume > 20-period average
+    # === 6h Volume Spike: current volume > 1.5x 20-period average ===
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (vol_ma20 * 1.5)
+    
+    # === 6h Price position relative to VWAP ===
+    price_vwap_ratio = close / (vwap_1d_aligned + 1e-10) - 1  # Normalized distance from VWAP
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # warmup for Donchian
+    start_idx = 20  # warmup
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(ema20_1w_aligned[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(vwap_1d_aligned[i]) or np.isnan(vol_pressure_aligned[i]) or 
+            np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long breakout: price breaks above weekly Donchian high with trend filter and volume
-            long_cond = (close[i] > donchian_high_aligned[i] and
-                        close[i] > ema20_1w_aligned[i] and
-                        volume[i] > vol_ma20[i])
+            # Look for mean reversion when price deviates significantly from VWAP
+            # with volume confirmation
+            long_cond = (price_vwap_ratio[i] < -0.015 and  # Price >1.5% below VWAP
+                        vol_pressure_aligned[i] < -0.8 and   # Strong selling pressure
+                        vol_spike[i])                       # Volume spike
             
-            # Short breakdown: price breaks below weekly Donchian low with trend filter and volume
-            short_cond = (close[i] < donchian_low_aligned[i] and
-                         close[i] < ema20_1w_aligned[i] and
-                         volume[i] > vol_ma20[i])
+            short_cond = (price_vwap_ratio[i] > 0.015 and  # Price >1.5% above VWAP
+                         vol_pressure_aligned[i] > 0.8 and   # Strong buying pressure
+                         vol_spike[i])                      # Volume spike
             
             if long_cond:
                 signals[i] = 0.25
@@ -70,18 +77,18 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below weekly Donchian low or trend reversal
-            exit_cond = (close[i] < donchian_low_aligned[i] or
-                        close[i] < ema20_1w_aligned[i])
+            # Long exit: price returns to VWAP or adverse pressure builds
+            exit_cond = (price_vwap_ratio[i] > -0.005 or  # Back within 0.5% of VWAP
+                        vol_pressure_aligned[i] > 0.3)     # Buying pressure weakening
             if exit_cond:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above weekly Donchian high or trend reversal
-            exit_cond = (close[i] > donchian_high_aligned[i] or
-                        close[i] > ema20_1w_aligned[i])
+            # Short exit: price returns to VWAP or adverse pressure builds
+            exit_cond = (price_vwap_ratio[i] < 0.005 or   # Back within 0.5% of VWAP
+                        vol_pressure_aligned[i] < -0.3)    # Selling pressure weakening
             if exit_cond:
                 signals[i] = 0.0
                 position = 0
@@ -90,9 +97,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Weekly Donchian breakout with trend filter and volume confirmation.
-# In bull markets: catches breakouts above weekly channels with EMA20 trend filter.
-# In bear markets: captures breakdowns below weekly channels during downtrends.
-# Volume confirmation ensures institutional participation. Uses 1d timeframe to target
-# 20-50 trades over 4 years (5-12/year) to minimize fee drag. Weekly timeframe avoids
-# noise and aligns with institutional weekly cycles. Discrete sizing (0.25) reduces churn.
+# Hypothesis: Mean reversion strategy based on 1d VWAP deviation with volume pressure
+# confirmation. Enters when price deviates significantly (>1.5%) from daily VWAP
+# accompanied by strong volume pressure and volume spikes. Exits when price returns
+# to near VWAP or pressure dissipates. Works in both bull and bear markets as
+# it fades extended moves regardless of trend direction. Targets 50-150 trades over
+# 4 years to minimize fee drag. Uses discrete sizing (0.25).
