@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3S3_Breakout_12hTrend_VolumeSpike"
+name = "4h_RSI_Pullback_MultiTrend_VolumeFilter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,89 +17,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data once for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    # 12h EMA50 trend filter
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_12h = (close_12h > ema50_12h).astype(float)
-    trend_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_12h)
-    
-    # Get 1d data once for Camarilla pivot levels
+    # Get 1d data once for RSI calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla calculation (R3/S3 levels)
-    prev_high = np.roll(df_1d['high'].values, 1)
-    prev_low = np.roll(df_1d['low'].values, 1)
-    prev_close = np.roll(df_1d['close'].values, 1)
-    prev_high[0] = df_1d['high'].values[0]
-    prev_low[0] = df_1d['low'].values[0]
-    prev_close[0] = df_1d['close'].values[0]
+    # Calculate 14-period RSI on daily closes
+    close_1d = df_1d['close'].values
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Camarilla pivot levels calculation (R3 and S3)
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_val = prev_high - prev_low
-    r3 = pivot + (range_val * 1.1 / 2)  # R3 level
-    s3 = pivot - (range_val * 1.1 / 2)  # S3 level
+    # Get 4h data for trend filters (EMA20 and EMA50)
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_ema20 = (close > ema20).astype(float)
+    trend_ema50 = (close > ema50).astype(float)
+    trend_combined = (trend_ema20 + trend_ema50) / 2.0  # Average of both trends
     
-    # Align Camarilla levels to 4h timeframe
-    r3_4h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_4h = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # Volume spike detection: current volume > 2.5 * 30-period average
-    vol_ma30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    vol_spike = volume > (vol_ma30 * 2.5)
+    # Volume filter: current volume > 1.5 * 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (vol_ma20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # warmup for volume MA
+    start_idx = 50  # warmup for EMA50 and RSI
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or np.isnan(trend_12h_aligned[i]) or np.isnan(vol_ma30[i])):
+        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(trend_combined[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: price breaks above R3 with volume spike and 12h uptrend
-            long_cond = (close[i] > r3_4h[i] and vol_spike[i] and trend_12h_aligned[i] > 0.5)
+            # Long entry: RSI pullback from oversold (<30) with bullish alignment and volume
+            long_cond = (rsi_1d_aligned[i] < 30 and trend_combined[i] > 0.5 and vol_filter[i])
             
-            # Short entry: price breaks below S3 with volume spike and 12h downtrend
-            short_cond = (close[i] < s3_4h[i] and vol_spike[i] and trend_12h_aligned[i] < 0.5)
+            # Short entry: RSI pullback from overbought (>70) with bearish alignment and volume
+            short_cond = (rsi_1d_aligned[i] > 70 and trend_combined[i] < 0.5 and vol_filter[i])
             
             if long_cond:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
             elif short_cond:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below S3 (reversal signal)
-            if close[i] < s3_4h[i]:
+            # Long exit: RSI reaches overbought (>70) or trend turns bearish
+            if rsi_1d_aligned[i] > 70 or trend_combined[i] < 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price reverses back above R3 (reversal signal)
-            if close[i] > r3_4h[i]:
+            # Short exit: RSI reaches oversold (<30) or trend turns bullish
+            if rsi_1d_aligned[i] < 30 or trend_combined[i] > 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-# Hypothesis: Camarilla R3/S3 breakout strategy with volume spike confirmation and 12h EMA50 trend filter on 4h timeframe.
-# Uses 12h trend filter for multi-timeframe alignment and 1d Camarilla levels for structure.
-# Volume spike filter (2.5x 30-period average) reduces false breakouts.
-# Designed to work in both bull (trend-following breakouts) and bear (reversal from extreme levels) markets.
-# Discrete sizing (0.30) minimizes churn. Target: 20-40 trades/year.
+# Hypothesis: RSI pullback strategy on 4h timeframe using daily RSI for overbought/oversold signals.
+# Uses dual EMA trend filter (20/50) for multi-timeframe alignment and volume confirmation.
+# Enters long when daily RSI < 30 (oversold) with bullish trend alignment and volume spike.
+# Enters short when daily RSI > 70 (overbought) with bearish trend alignment and volume spike.
+# Exits when RSI reverses or trend deteriorates. Designed to work in both bull and bear markets
+# by capturing mean-reversion moves within the prevailing trend. Discrete sizing (0.25) minimizes
+# churn. Target: 25-40 trades/year. Works in bull markets by buying pullbacks in uptrends and
+# in bear markets by selling rallies in downtrends.
