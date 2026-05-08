@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using weekly Donchian breakout with daily RSI filter and volume confirmation.
-# Uses weekly price structure for trend context and daily momentum for entry timing.
-# Long when price breaks above weekly Donchian high (20) and daily RSI > 55 with volume confirmation.
-# Short when price breaks below weekly Donchian low (20) and daily RSI < 45 with volume confirmation.
-# Exit when price returns to weekly Donchian midpoint or RSI reverses.
-# Designed for low trade frequency (10-20/year) to avoid fee decay. Works in trending markets via trend filter.
+# Hypothesis: 6h strategy using Camarilla pivot levels from daily timeframe with 6h volume confirmation.
+# Camarilla levels (R3/S3 for reversal, R4/S4 for breakout) provide institutional support/resistance.
+# Long when price breaks above R4 with volume confirmation, short when breaks below S4.
+# Reverse entries at R3/S3 for mean reversion in ranging markets.
+# Trend filter using 6h EMA(50) to align with intermediate trend.
+# Designed for low trade frequency (15-25/year) to minimize fee drag while capturing both breakout and reversal opportunities.
 
-name = "1d_20wDonchian_RSI_Volume"
-timeframe = "1d"
+name = "6h_Camarilla_R3S4_Breakout_Reverse_TrendFilter"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,104 +24,103 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Donchian channels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    
-    # Calculate 20-week Donchian channels
-    highest_high = np.full_like(high_1w, np.nan)
-    lowest_low = np.full_like(low_1w, np.nan)
-    
-    for i in range(19, len(high_1w)):
-        highest_high[i] = np.max(high_1w[i-19:i+1])
-        lowest_low[i] = np.min(low_1w[i-19:i+1])
-    
-    # Calculate midpoint
-    donchian_mid = (highest_high + lowest_low) / 2
-    
-    # Get daily data for RSI
+    # Get daily data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 14-day RSI
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate Camarilla levels from previous day's range
+    camarilla_r4 = np.zeros_like(close_1d)
+    camarilla_r3 = np.zeros_like(close_1d)
+    camarilla_s3 = np.zeros_like(close_1d)
+    camarilla_s4 = np.zeros_like(close_1d)
     
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
+    for i in range(1, len(close_1d)):
+        # Previous day's high, low, close
+        ph = high_1d[i-1]
+        pl = low_1d[i-1]
+        pc = close_1d[i-1]
+        
+        # Range
+        rng = ph - pl
+        
+        # Camarilla levels
+        camarilla_r4[i] = pc + (rng * 1.1 / 2)
+        camarilla_r3[i] = pc + (rng * 1.1 / 4)
+        camarilla_s3[i] = pc - (rng * 1.1 / 4)
+        camarilla_s4[i] = pc - (rng * 1.1 / 2)
     
-    for i in range(len(gain)):
-        if i < 14:
-            if i == 0:
-                avg_gain[i] = np.mean(gain[:1]) if len(gain[:1]) > 0 else 0
-                avg_loss[i] = np.mean(loss[:1]) if len(loss[:1]) > 0 else 0
-            else:
-                avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-                avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-        else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # First day has no previous data
+    camarilla_r4[0] = camarilla_r3[0] = camarilla_s3[0] = camarilla_s4[0] = np.nan
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    rsi[:13] = np.nan  # Not enough data for first 14 periods
+    # Align Camarilla levels to 6h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
-    # Align indicators to daily timeframe
-    highest_high_aligned = align_htf_to_ltf(prices, df_1w, highest_high)
-    lowest_low_aligned = align_htf_to_ltf(prices, df_1w, lowest_low)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_1w, donchian_mid)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # 6h EMA(50) for trend filter
+    close_series = pd.Series(close)
+    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Volume confirmation: daily volume > 1.5x 20-day EMA
+    # Volume confirmation: 6h volume > 1.5x 20-period EMA
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     vol_confirm = volume > (vol_ema * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # Ensure enough data for indicators
+    start_idx = 50  # Ensure enough data for EMA(50)
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(highest_high_aligned[i]) or 
-            np.isnan(lowest_low_aligned[i]) or 
-            np.isnan(rsi_aligned[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(ema_50[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above weekly Donchian high and RSI > 55 with volume confirmation
-            if (close[i] > highest_high_aligned[i] and 
-                rsi_aligned[i] > 55 and 
-                vol_confirm[i]):
-                signals[i] = 0.25
-                position = 1
-            # Enter short: price breaks below weekly Donchian low and RSI < 45 with volume confirmation
-            elif (close[i] < lowest_low_aligned[i] and 
-                  rsi_aligned[i] < 45 and 
-                  vol_confirm[i]):
-                signals[i] = -0.25
-                position = -1
+            # Breakout entries: price breaks R4 or S4 with volume confirmation
+            if close[i] > r4_aligned[i] and vol_confirm[i]:
+                # Only take long breakout if above EMA50 (uptrend)
+                if close[i] > ema_50[i]:
+                    signals[i] = 0.25
+                    position = 1
+            elif close[i] < s4_aligned[i] and vol_confirm[i]:
+                # Only take short breakout if below EMA50 (downtrend)
+                if close[i] < ema_50[i]:
+                    signals[i] = -0.25
+                    position = -1
+            # Reverse entries at R3/S3 for mean reversion
+            elif close[i] < r3_aligned[i] and close[i] > s3_aligned[i]:
+                # In range: sell near R3, buy near S3
+                if close[i] > (r3_aligned[i] + s3_aligned[i]) / 2:
+                    # Upper half of range - look for rejection at R3
+                    if i > 0 and close[i] < close[i-1] and high[i] >= r3_aligned[i]:
+                        signals[i] = -0.20
+                        position = -1
+                else:
+                    # Lower half of range - look for bounce at S3
+                    if i > 0 and close[i] > close[i-1] and low[i] <= s3_aligned[i]:
+                        signals[i] = 0.20
+                        position = 1
         elif position == 1:
-            # Exit long: price returns to weekly Donchian midpoint or RSI < 45
-            if close[i] < donchian_mid_aligned[i] or rsi_aligned[i] < 45:
+            # Long exit: break below S3 (mean reversion) or trend turns down
+            if close[i] < s3_aligned[i] or close[i] < ema_50[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to weekly Donchian midpoint or RSI > 55
-            if close[i] > donchian_mid_aligned[i] or rsi_aligned[i] > 55:
+            # Short exit: break above R3 (mean reversion) or trend turns up
+            if close[i] > r3_aligned[i] or close[i] > ema_50[i]:
                 signals[i] = 0.0
                 position = 0
             else:
