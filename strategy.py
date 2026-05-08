@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d trend filter and volume spike, designed to capture trend continuation in both bull and bear markets
-# Uses proven Donchian(20) structure - breaks above/below 20-period high/low with volume confirmation and 1d EMA50 trend alignment
-# Target: 25-35 trades/year to avoid fee drag. Discrete sizing 0.25.
-name = "4h_Donchian_Breakout_1dEMA50_Trend_Volume"
-timeframe = "4h"
+# Hypothesis: 12h Camarilla R1/S1 breakout with 1d trend filter and volume spike
+# Uses proven Camarilla structure from top performers. 1d EMA34 ensures trend alignment.
+# Volume spike >2.0 filters false breakouts. Works in bull via R1/S1 breaks, in bear via reversals at R3/S3.
+# Target: 12-37 trades/year to avoid fee drag. Discrete sizing 0.25.
+name = "12h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,19 +21,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 trend filter
+    # Calculate 1d EMA34 trend filter
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate Donchian channels (20-period high/low) on 4h
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels from previous day
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    
+    # Align to 12h
+    prev_close_aligned = align_htf_to_ltf(prices, df_1d, prev_close)
+    prev_high_aligned = align_htf_to_ltf(prices, df_1d, prev_high)
+    prev_low_aligned = align_htf_to_ltf(prices, df_1d, prev_low)
+    
+    # Calculate Camarilla levels for current day
+    range_ = prev_high_aligned - prev_low_aligned
+    # Camarilla R1, S1, R3, S3
+    r1 = prev_close_aligned + 1.1 * range_ * 1.0/12
+    s1 = prev_close_aligned - 1.1 * range_ * 1.0/12
+    r3 = prev_close_aligned + 1.1 * range_ * 1.1/2
+    s3 = prev_close_aligned - 1.1 * range_ * 1.1/2
     
     # Volume confirmation - 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -46,11 +61,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(60, 20, 50)  # warmup period
+    start_idx = max(60, 34)  # warmup period
     
     for i in range(start_idx, n):
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(r3[i]) or np.isnan(s3[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,28 +78,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long entry: break above 20-period high with trend alignment and volume spike
-            if (close[i] > high_20[i] and 
-                close[i] > ema50_1d_aligned[i] and
+            # Long entry: break above R1 with trend alignment and volume spike
+            if (close[i] > r1[i] and 
+                close[i] > ema34_1d_aligned[i] and
                 vol_ratio[i] > 2.0):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: break below 20-period low with trend alignment and volume spike
-            elif (close[i] < low_20[i] and 
-                  close[i] < ema50_1d_aligned[i] and
+            # Short entry: break below S1 with trend alignment and volume spike
+            elif (close[i] < s1[i] and 
+                  close[i] < ema34_1d_aligned[i] and
                   vol_ratio[i] > 2.0):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: break below 20-period low OR trend fails
-            if close[i] < low_20[i] or close[i] < ema50_1d_aligned[i]:
+            # Exit long: break below S3 (mean reversion) OR trend fails
+            if close[i] < s3[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: break above 20-period high OR trend fails
-            if close[i] > high_20[i] or close[i] > ema50_1d_aligned[i]:
+            # Exit short: break above R3 (mean reversion) OR trend fails
+            if close[i] > r3[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
