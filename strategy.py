@@ -1,16 +1,15 @@
+# 140556: 12h Camarilla R3/S3 Breakout with 1w Volume Spike and 1w ADX Trend Filter
+# Targets 15-25 trades per year (~60-100 total over 4 years) to minimize fee drag.
+# Uses weekly timeframe for structural levels and filters, 12h for execution.
+# Works in both bull and bear markets by requiring strong trends (ADX>25) and institutional participation (volume spike).
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Power (Bull/Bear) + 1d Volume Spike + 1d ADX Trend Filter
-# Elder Ray measures bull power (high - EMA) and bear power (low - EMA) to detect institutional buying/selling pressure.
-# Combines with 1d volume surge to confirm institutional participation and 1d ADX > 25 to ensure trending conditions.
-# Works in bull markets via bull power expansion and in bear markets via bear power expansion.
-# Targets 60-120 total trades over 4 years (15-30/year) to minimize fee drag.
-
-name = "6h_ElderRay_1dVolume_1dADX"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_1wVolume_1wADX"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,47 +22,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Elder Ray calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 1w data for calculations
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly high/low/close for Camarilla
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    vol_1w = df_1w['volume'].values
     
-    # Calculate EMA(13) on daily closes
-    close_1d_series = pd.Series(close_1d)
-    ema_13 = close_1d_series.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Camarilla multipliers
+    R3 = close_1w + 1.1 * (high_1w - low_1w) / 6
+    S3 = close_1w - 1.1 * (high_1w - low_1w) / 6
     
-    # Elder Ray: Bull Power = High - EMA, Bear Power = Low - EMA
-    bull_power = high_1d - ema_13
-    bear_power = low_1d - ema_13
+    # Align weekly Camarilla levels to 12h (use previous week's levels)
+    R3_12h = align_htf_to_ltf(prices, df_1w, R3)
+    S3_12h = align_htf_to_ltf(prices, df_1w, S3)
     
-    # Align Elder Ray to 6h timeframe
-    bull_power_6h = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_6h = align_htf_to_ltf(prices, df_1d, bear_power)
+    # Volume spike detection on 1w (2-week MA)
+    vol_ma = pd.Series(vol_1w).rolling(window=2, min_periods=2).mean()
+    vol_spike_1w = vol_1w > (vol_ma.values * 2.0)
+    vol_spike_12h = align_htf_to_ltf(prices, df_1w, vol_spike_1w)
     
-    # Volume spike detection on 1d (need ~2 days for MA)
-    vol_ma_1d = pd.Series(volume).rolling(window=48, min_periods=48).mean()  # 48 * 6h = 12d approx
-    vol_spike = volume > (vol_ma_1d.values * 2.0)
+    # ADX calculation on 1w
+    # Calculate +DM, -DM, TR
+    plus_dm = np.zeros_like(high_1w)
+    minus_dm = np.zeros_like(high_1w)
+    tr = np.zeros_like(high_1w)
     
-    # ADX trend filter on 1d
-    # Calculate ADX(14) on daily
-    plus_dm = np.zeros_like(high_1d)
-    minus_dm = np.zeros_like(high_1d)
-    tr = np.zeros_like(high_1d)
-    
-    for i in range(1, len(high_1d)):
-        plus_dm[i] = max(high_1d[i] - high_1d[i-1], 0)
-        minus_dm[i] = max(low_1d[i-1] - low_1d[i], 0)
+    for i in range(1, len(high_1w)):
+        plus_dm[i] = max(high_1w[i] - high_1w[i-1], 0)
+        minus_dm[i] = max(low_1w[i-1] - low_1w[i], 0)
         if plus_dm[i] == minus_dm[i]:
             plus_dm[i] = 0
             minus_dm[i] = 0
         tr[i] = max(
-            high_1d[i] - low_1d[i],
-            abs(high_1d[i] - close_1d[i-1]),
-            abs(low_1d[i] - close_1d[i-1])
+            high_1w[i] - low_1w[i],
+            abs(high_1w[i] - close_1w[i-1]),
+            abs(low_1w[i] - close_1w[i-1])
         )
     
     # Wilder smoothing
@@ -89,44 +87,41 @@ def generate_signals(prices):
     adx = wilder_smooth(dx, 14)
     
     adx_strong = adx > 25
-    adx_weak = adx < 20
-    adx_strong_6h = align_htf_to_ltf(prices, df_1d, adx_strong)
-    adx_weak_6h = align_htf_to_ltf(prices, df_1d, adx_weak)
+    adx_strong_12h = align_htf_to_ltf(prices, df_1w, adx_strong)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 48  # Ensure sufficient data for volume MA
+    start_idx = 16  # Minimum for Wilder smoothing stability
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(bull_power_6h[i]) or np.isnan(bear_power_6h[i]) or 
-            np.isnan(vol_spike[i]) or 
-            np.isnan(adx_strong_6h[i]) or np.isnan(adx_weak_6h[i])):
+        if (np.isnan(R3_12h[i]) or np.isnan(S3_12h[i]) or 
+            np.isnan(vol_spike_12h[i]) or np.isnan(adx_strong_12h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: bull power expansion, volume spike, strong trend
-            if bull_power_6h[i] > 0 and vol_spike[i] and adx_strong_6h[i]:
+            # Enter long: price breaks above R3, volume spike, strong trend
+            if close[i] > R3_12h[i] and vol_spike_12h[i] and adx_strong_12h[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: bear power expansion, volume spike, strong trend
-            elif bear_power_6h[i] < 0 and vol_spike[i] and adx_strong_6h[i]:
+            # Enter short: price breaks below S3, volume spike, strong trend
+            elif close[i] < S3_12h[i] and vol_spike_12h[i] and adx_strong_12h[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: bull power contraction or trend weakens
-            if bull_power_6h[i] <= 0 or adx_weak_6h[i]:
+            # Exit long: price returns to S3 or trend weakens
+            if close[i] < S3_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: bear power contraction or trend weakens
-            if bear_power_6h[i] >= 0 or adx_weak_6h[i]:
+            # Exit short: price returns to R3 or trend weakens
+            if close[i] > R3_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
