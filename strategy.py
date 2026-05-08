@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_Camarilla_R3S3_Breakout_4hTrend_1dVolume"
-timeframe = "1h"
+name = "6h_WilliamsFractal_Breakout_1wTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,90 +17,93 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get weekly data for trend filter (1w)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    # Calculate EMA(20) on 4h close for trend filter
-    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    close_1w = df_1w['close'].values
+    # Calculate EMA(50) on weekly close for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Get 1d data for Camarilla levels and volume filter
+    # Get daily data for Williams Fractals
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 5:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate Camarilla levels for each daily bar
-    high_low_range = high_1d - low_1d
-    camarilla_high = high_1d + 1.1 * high_low_range
-    camarilla_low = low_1d - 1.1 * high_low_range
-    camarilla_range = camarilla_high - camarilla_low
+    # Williams Fractals: bearish (high) and bullish (low)
+    n1 = len(high_1d)
+    bearish_fractal = np.zeros(n1, dtype=bool)
+    bullish_fractal = np.zeros(n1, dtype=bool)
     
-    R3 = camarilla_low + camarilla_range * 1.1000
-    S3 = camarilla_high - camarilla_range * 1.1000
+    for i in range(2, n1 - 2):
+        # Bearish fractal: middle bar highest of 5
+        if (high_1d[i] > high_1d[i-1] and high_1d[i] > high_1d[i-2] and
+            high_1d[i] > high_1d[i+1] and high_1d[i] > high_1d[i+2]):
+            bearish_fractal[i] = True
+        # Bullish fractal: middle bar lowest of 5
+        if (low_1d[i] < low_1d[i-1] and low_1d[i] < low_1d[i-2] and
+            low_1d[i] < low_1d[i+1] and low_1d[i] < low_1d[i+2]):
+            bullish_fractal[i] = True
     
-    # Align Camarilla levels to 1h timeframe (wait for daily close)
-    R3_1h = align_htf_to_ltf(prices, df_1d, R3)
-    S3_1h = align_htf_to_ltf(prices, df_1d, S3)
+    # Convert to float arrays for alignment
+    bearish_fractal_float = bearish_fractal.astype(float)
+    bullish_fractal_float = bullish_fractal.astype(float)
     
-    # Volume filter: 1d volume > 1.5x 20-day average
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_1d = volume_1d / vol_ma_20
-    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
+    # Align fractals to 6h timeframe with 2-bar delay for confirmation
+    bearish_fractal_6h = align_htf_to_ltf(prices, df_1d, bearish_fractal_float, additional_delay_bars=2)
+    bullish_fractal_6h = align_htf_to_ltf(prices, df_1d, bullish_fractal_float, additional_delay_bars=2)
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Volume confirmation: 20-period average on 6h
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Ensure enough data for indicators
+    start_idx = 200  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
-        # Skip if any critical data is NaN or outside session
-        if (np.isnan(R3_1h[i]) or np.isnan(S3_1h[i]) or np.isnan(ema_20_4h_aligned[i]) or 
-            np.isnan(vol_ratio_1d_aligned[i]) or not in_session[i]):
+        # Skip if any critical data is NaN
+        if (np.isnan(bearish_fractal_6h[i]) or np.isnan(bullish_fractal_6h[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above R3 + above 4h EMA20 + high volume day
-            if (close[i] > R3_1h[i] and
-                close[i] > ema_20_4h_aligned[i] and
-                vol_ratio_1d_aligned[i] > 1.5):
-                signals[i] = 0.20
+            # Long: Bullish fractal + above weekly EMA50 + volume
+            if (bullish_fractal_6h[i] > 0.5 and
+                close[i] > ema_50_1w_aligned[i] and
+                vol_ratio[i] > 1.5):
+                signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S3 + below 4h EMA20 + high volume day
-            elif (close[i] < S3_1h[i] and
-                  close[i] < ema_20_4h_aligned[i] and
-                  vol_ratio_1d_aligned[i] > 1.5):
-                signals[i] = -0.20
+            # Short: Bearish fractal + below weekly EMA50 + volume
+            elif (bearish_fractal_6h[i] > 0.5 and
+                  close[i] < ema_50_1w_aligned[i] and
+                  vol_ratio[i] > 1.5):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Price falls back below S3 or below 4h EMA20
-            if (close[i] < S3_1h[i] or
-                close[i] < ema_20_4h_aligned[i]):
+            # Long exit: Bearish fractal or below weekly EMA50
+            if (bearish_fractal_6h[i] > 0.5 or
+                close[i] < ema_50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price rises back above R3 or above 4h EMA20
-            if (close[i] > R3_1h[i] or
-                close[i] > ema_20_4h_aligned[i]):
+            # Short exit: Bullish fractal or above weekly EMA50
+            if (bullish_fractal_6h[i] > 0.5 or
+                close[i] > ema_50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
