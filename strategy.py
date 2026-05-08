@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour KAMA trend with daily volatility filter and volume confirmation
-# We go long when KAMA turns upward (bullish trend) with low volatility regime and volume above average.
-# We go short when KAMA turns downward (bearish trend) with low volatility regime and volume above average.
-# Uses 4h timeframe targeting 20-50 trades/year. KAMA adapts to market noise, reducing false signals in chop.
-# Daily volatility filter (low volatility regime) ensures we trade during calmer periods to avoid whipsaw.
-# Volume confirmation ensures institutional participation in the move.
+# Hypothesis: Daily ADX(14) > 25 trend filter with weekly EMA(34) alignment for stronger trend confirmation.
+# We go long when daily ADX > 25 (trending market) AND price > weekly EMA(34) (bullish trend).
+# We go short when daily ADX > 25 AND price < weekly EMA(34) (bearish trend).
+# Uses 1d timeframe to target 7-25 trades/year, avoiding excessive frequency.
+# ADX filters out ranging markets, improving win rate in both bull and bear regimes.
+# Weekly EMA ensures we trade with higher timeframe momentum, reducing whipsaws.
 
-name = "4h_KAMA_Trend_DailyVol_Filter_Volume"
-timeframe = "4h"
+name = "1d_ADX25_WeeklyEMA34_Trend"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,73 +19,69 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # Get daily data once for volatility filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data once for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate daily ATR(14) for volatility filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly EMA(34) for trend filter
+    weekly_close = df_1w['close'].values
+    ema34_1w = pd.Series(weekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    # Calculate ADX(14) on daily data
+    # +DM = max(high - prev_high, 0) if high - prev_high > prev_low - low else 0
+    # -DM = max(prev_low - low, 0) if prev_low - low > high - prev_high else 0
+    # TR = max(high - low, high - prev_close, prev_close - low)
+    # +DM14 = smoothed +DM over 14 periods
+    # -DM14 = smoothed -DM over 14 periods
+    # +DI14 = 100 * smoothed +DM14 / ATR14
+    # -DI14 = 100 * smoothed -DM14 / ATR14
+    # DX = 100 * |+DI14 - -DI14| / (+DI14 + -DI14)
+    # ADX = smoothed DX over 14 periods
+    
+    # Calculate directional movements
+    high_diff = high[1:] - high[:-1]
+    low_diff = low[:-1] - low[1:]
+    
+    plus_dm = np.where((high_diff > low_diff) & (high_diff > 0), high_diff, 0.0)
+    minus_dm = np.where((low_diff > high_diff) & (low_diff > 0), low_diff, 0.0)
+    
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - low[:-1])
+    tr3 = np.abs(low[1:] - high[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # Align with 1d index
     
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma50 = pd.Series(atr14).rolling(window=50, min_periods=50).mean().values
+    # Wilder's smoothing (alpha = 1/period)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        alpha = 1.0 / period
+        # First value is simple average
+        if len(data) >= period:
+            result[period-1] = np.nanmean(data[:period])
+            for i in range(period, len(data)):
+                result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
+        return result
     
-    # Low volatility regime: current ATR < 50-period ATR average
-    low_vol_regime = atr14 < atr_ma50
+    # Pad arrays to match original length (first element has no previous)
+    plus_dm_padded = np.concatenate([[0.0], plus_dm])
+    minus_dm_padded = np.concatenate([[0.0], minus_dm])
+    tr_padded = np.concatenate([[0.0], tr])
     
-    # Align daily low volatility regime to 4h
-    low_vol_aligned = align_htf_to_ltf(prices, df_1d, low_vol_regime.astype(float))
+    # Smooth with Wilder's method
+    atr14 = wilders_smoothing(tr_padded, 14)
+    plus_di14 = 100 * wilders_smoothing(plus_dm_padded, 14) / atr14
+    minus_di14 = 100 * wilders_smoothing(minus_dm_padded, 14) / atr14
     
-    # Calculate KAMA on 4h data
-    # Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close, n=10))
-    abs_change = np.abs(np.diff(close, n=1))
-    
-    # Pad arrays for alignment
-    change = np.concatenate([[np.nan]*10, change])
-    abs_change = np.concatenate([[np.nan], abs_change])
-    
-    # Sum of absolute changes over 10 periods
-    sum_abs_change = pd.Series(abs_change).rolling(window=10, min_periods=10).sum().values
-    
-    # Efficiency Ratio
-    er = np.divide(change, sum_abs_change, out=np.zeros_like(change), where=sum_abs_change!=0)
-    
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # Fast=2, Slow=30
-    
-    # KAMA calculation
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    
-    for i in range(1, len(close)):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
-    
-    # KAMA direction: upward if current > previous, downward if current < previous
-    kama_up = kama > np.roll(kama, 1)
-    kama_down = kama < np.roll(kama, 1)
-    kama_up[0] = False
-    kama_down[0] = False
-    
-    # Volume confirmation: current volume > 1.5 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_conf = volume > (1.5 * vol_ma)
+    # Avoid division by zero
+    di_sum = plus_di14 + minus_di14
+    dx = np.where(di_sum > 0, 100 * np.abs(plus_di14 - minus_di14) / di_sum, 0.0)
+    adx = wilders_smoothing(dx, 14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -94,37 +90,34 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(low_vol_aligned[i]) or np.isnan(kama[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(adx[i]) or np.isnan(ema34_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        low_vol = low_vol_aligned[i] > 0.5
-        vol_conf = volume_conf[i]
-        kama_up_val = kama_up[i]
-        kama_down_val = kama_down[i]
+        adx_val = adx[i]
+        ema34_1w_val = ema34_1w_aligned[i]
         
         if position == 0:
-            # Enter long: KAMA turning up + low volatility regime + volume confirmation
-            if kama_up_val and low_vol and vol_conf:
+            # Enter long: ADX > 25 (trending) AND price > weekly EMA (bullish)
+            if adx_val > 25.0 and close[i] > ema34_1w_val:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: KAMA turning down + low volatility regime + volume confirmation
-            elif kama_down_val and low_vol and vol_conf:
+            # Enter short: ADX > 25 (trending) AND price < weekly EMA (bearish)
+            elif adx_val > 25.0 and close[i] < ema34_1w_val:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: KAMA turns down OR volatility regime becomes high
-            if kama_down_val or not low_vol:
+            # Exit long: ADX drops below 20 (losing trend) OR price crosses below weekly EMA
+            if adx_val < 20.0 or close[i] < ema34_1w_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: KAMA turns up OR volatility regime becomes high
-            if kama_up_val or not low_vol:
+            # Exit short: ADX drops below 20 (losing trend) OR price crosses above weekly EMA
+            if adx_val < 20.0 or close[i] > ema34_1w_val:
                 signals[i] = 0.0
                 position = 0
             else:
