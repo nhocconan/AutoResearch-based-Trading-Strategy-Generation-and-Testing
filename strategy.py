@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_WeeklyKeltner_Breakout_DailyTrend_Volume"
-timeframe = "12h"
+name = "6h_KAMA_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,47 +17,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Keltner Channel (20-period)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Keltner Channel: 20-period EMA of close ± 2*ATR(10)
-    close_1w_series = pd.Series(close_1w)
-    ema_20 = close_1w_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # ATR(10): True Range
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
-    
-    # Upper and Lower Bands
-    upper_band = ema_20 + 2 * atr_10
-    lower_band = ema_20 - 2 * atr_10
-    
-    # Align Keltner bands to 12h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_1w, upper_band)
-    lower_aligned = align_htf_to_ltf(prices, df_1w, lower_band)
-    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20)
-    
-    # Daily trend filter: EMA(34)
+    # Get daily data for trend and volume
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
+    
+    # 1d trend: EMA(34)
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / vol_ma
+    # 1d volume ratio
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_1d = volume_1d / vol_ma_1d
+    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
+    
+    # 6h KAMA (ER=10, fast=2, slow=30)
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.abs(np.diff(close, n=10, prepend=close[:10]))
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # 6h volume ratio
+    vol_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_6h = volume / vol_ma_6h
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -66,38 +55,39 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
-            np.isnan(ema_20_aligned[i]) or np.isnan(ema_34_aligned[i]) or 
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(kama[i]) or np.isnan(ema_34_aligned[i]) or 
+            np.isnan(vol_ratio_aligned[i]) or np.isnan(vol_ratio_6h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Close above upper band + price > daily EMA34 + volume confirmation
-            if (close[i] > upper_aligned[i] and
+            # Long: price > KAMA + daily trend up + volume spike
+            if (close[i] > kama[i] and
                 close[i] > ema_34_aligned[i] and
-                vol_ratio[i] > 1.5):
+                vol_ratio_6h[i] > 1.5 and
+                vol_ratio_aligned[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: Close below lower band + price < daily EMA34 + volume confirmation
-            elif (close[i] < lower_aligned[i] and
+            # Short: price < KAMA + daily trend down + volume spike
+            elif (close[i] < kama[i] and
                   close[i] < ema_34_aligned[i] and
-                  vol_ratio[i] > 1.5):
+                  vol_ratio_6h[i] > 1.5 and
+                  vol_ratio_aligned[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Close below EMA(20) or daily trend reverses
-            if (close[i] < ema_20_aligned[i] or
+            # Long exit: price < KAMA or daily trend down
+            if (close[i] < kama[i] or
                 close[i] < ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Close above EMA(20) or daily trend reverses
-            if (close[i] > ema_20_aligned[i] or
+            # Short exit: price > KAMA or daily trend up
+            if (close[i] > kama[i] or
                 close[i] > ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
