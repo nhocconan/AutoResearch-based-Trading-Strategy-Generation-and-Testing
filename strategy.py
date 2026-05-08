@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+name = "4h_ADX_Trend_Filter_VolumeBreakout"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,32 +17,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla pivot and trend filter
+    # Calculate ADX for trend strength
+    # TR
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first value
+    
+    # DM+
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_plus[0] = 0
+    # DM-
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    dm_minus[0] = 0
+    
+    # Smooth with Wilder's smoothing (alpha = 1/period)
+    period = 14
+    alpha = 1.0 / period
+    
+    atr = np.zeros(n)
+    atr[0] = tr[0]
+    for i in range(1, n):
+        atr[i] = (1 - alpha) * atr[i-1] + alpha * tr[i]
+    
+    dm_plus_smooth = np.zeros(n)
+    dm_minus_smooth = np.zeros(n)
+    dm_plus_smooth[0] = dm_plus[0]
+    dm_minus_smooth[0] = dm_minus[0]
+    for i in range(1, n):
+        dm_plus_smooth[i] = (1 - alpha) * dm_plus_smooth[i-1] + alpha * dm_plus[i]
+        dm_minus_smooth[i] = (1 - alpha) * dm_minus_smooth[i-1] + alpha * dm_minus[i]
+    
+    # DI+ and DI-
+    di_plus = np.where(atr > 0, 100 * dm_plus_smooth / atr, 0)
+    di_minus = np.where(atr > 0, 100 * dm_minus_smooth / atr, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = np.zeros(n)
+    adx[0] = dx[0]
+    for i in range(1, n):
+        adx[i] = (1 - alpha) * adx[i-1] + alpha * dx[i]
+    
+    # Daily trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Camarilla pivot levels (R1, S1) from previous day
-    # Pivot = (H + L + C) / 3
-    # R1 = Pivot + (H - L) * 1.1 / 12
-    # S1 = Pivot - (H - L) * 1.1 / 12
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = pivot_1d + (high_1d - low_1d) * 1.1 / 12.0
-    s1_1d = pivot_1d - (high_1d - low_1d) * 1.1 / 12.0
-    
-    # Align Camarilla levels to 4h timeframe
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    
-    # Daily EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume spike: current volume > 2.0x 20-period average
+    # Volume spike: current volume > 2x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma20)
     
@@ -53,22 +82,22 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(adx[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R1, uptrend, volume spike
-            long_cond = (close[i] > r1_1d_aligned[i] and 
-                        ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and
+            # Long: ADX > 25 (strong trend), price above daily EMA50, volume spike
+            long_cond = (adx[i] > 25 and 
+                        close[i] > ema_50_1d_aligned[i] and
                         volume_spike[i])
             
-            # Short: price breaks below S1, downtrend, volume spike
-            short_cond = (close[i] < s1_1d_aligned[i] and 
-                         ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and
+            # Short: ADX > 25 (strong trend), price below daily EMA50, volume spike
+            short_cond = (adx[i] > 25 and 
+                         close[i] < ema_50_1d_aligned[i] and
                          volume_spike[i])
             
             if long_cond:
@@ -78,15 +107,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price closes below S1 (reversal)
-            if close[i] < s1_1d_aligned[i]:
+            # Long exit: ADX drops below 20 (weakening trend) or price crosses below daily EMA50
+            if adx[i] < 20 or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price closes above R1 (reversal)
-            if close[i] > r1_1d_aligned[i]:
+            # Short exit: ADX drops below 20 (weakening trend) or price crosses above daily EMA50
+            if adx[i] < 20 or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
