@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_WickReversal_VolumeTrend"
-timeframe = "6h"
+name = "12h_PivotBreakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,67 +17,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w data for trend filter (weekly EMA50)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # 1d data for ATR (volatility filter)
+    # 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
+    close_1d = df_1d['close'].values
+    
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Daily data for Pivot Points (PP, R1, S1)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate ATR(14) on 1d
-    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
-    tr2 = np.maximum(np.abs(low_1d[1:] - close_1d[:-1]), tr1)
-    tr = np.concatenate([[np.inf], tr2])  # first tr is inf
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    n1d = len(close_1d)
+    pivot_pp = np.full(n1d, np.nan)
+    pivot_r1 = np.full(n1d, np.nan)
+    pivot_s1 = np.full(n1d, np.nan)
     
-    # Wick rejection strength: (high-low) - |close-open| (upper/lower wick size)
-    body_size = np.abs(close - prices['open'].values)
-    total_range = high - low
-    upper_wick = high - np.maximum(close, prices['open'].values)
-    lower_wick = np.minimum(close, prices['open'].values) - low
+    for i in range(1, n1d):
+        PH = high_1d[i-1]
+        PL = low_1d[i-1]
+        PC = close_1d[i-1]
+        
+        PP = (PH + PL + PC) / 3.0
+        R1 = 2 * PP - PL
+        S1 = 2 * PP - PH
+        
+        pivot_pp[i] = PP
+        pivot_r1[i] = R1
+        pivot_s1[i] = S1
     
-    # Volume filter: current volume > 1.5x 24-period average (4 days on 6h)
-    vol_ma24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_filter = volume > (1.5 * vol_ma24)
+    # Align Pivot levels to 12h timeframe
+    pivot_pp_aligned = align_htf_to_ltf(prices, df_1d, pivot_pp)
+    pivot_r1_aligned = align_htf_to_ltf(prices, df_1d, pivot_r1)
+    pivot_s1_aligned = align_htf_to_ltf(prices, df_1d, pivot_s1)
+    
+    # Volume spike: current volume > 2.0x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
-            np.isnan(volume_filter[i]) or np.isnan(upper_wick[i]) or np.isnan(lower_wick[i])):
+        if (np.isnan(pivot_pp_aligned[i]) or np.isnan(pivot_r1_aligned[i]) or 
+            np.isnan(pivot_s1_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: strong lower wick rejection + above weekly EMA + volume
-            lower_wick_ratio = lower_wick[i] / total_range[i] if total_range[i] > 0 else 0
-            long_cond = (lower_wick_ratio > 0.6 and  # strong lower wick
-                        close[i] > ema_50_1w_aligned[i] and
-                        volume_filter[i])
+            # Long: price breaks above R1 with 1d uptrend + volume spike
+            long_cond = (close[i] > pivot_r1_aligned[i] and 
+                        ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1] and
+                        volume_spike[i])
             
-            # Short: strong upper wick rejection + below weekly EMA + volume
-            upper_wick_ratio = upper_wick[i] / total_range[i] if total_range[i] > 0 else 0
-            short_cond = (upper_wick_ratio > 0.6 and  # strong upper wick
-                         close[i] < ema_50_1w_aligned[i] and
-                         volume_filter[i])
+            # Short: price breaks below S1 with 1d downtrend + volume spike
+            short_cond = (close[i] < pivot_s1_aligned[i] and 
+                         ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1] and
+                         volume_spike[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -86,17 +93,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price closes below weekly EMA or strong upper wick rejection
-            upper_wick_ratio = upper_wick[i] / total_range[i] if total_range[i] > 0 else 0
-            if close[i] < ema_50_1w_aligned[i] or upper_wick_ratio > 0.5:
+            # Long exit: price breaks below PP (reversion to mean)
+            if close[i] < pivot_pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price closes above weekly EMA or strong lower wick rejection
-            lower_wick_ratio = lower_wick[i] / total_range[i] if total_range[i] > 0 else 0
-            if close[i] > ema_50_1w_aligned[i] or lower_wick_ratio > 0.5:
+            # Short exit: price breaks above PP (reversion to mean)
+            if close[i] > pivot_pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
