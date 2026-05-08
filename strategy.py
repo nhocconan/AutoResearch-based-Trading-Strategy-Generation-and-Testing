@@ -1,15 +1,18 @@
-# 140561: 4h Donchian breakout with volume confirmation and ATR-based stoploss
-# Target: 20-50 trades/year (~80-200 total over 4 years) on BTC/ETH/SOL
-# Uses Donchian(20) for trend structure, volume spike for confirmation, ATR for risk management
-# Works in bull/bear markets by filtering breakouts with volume and volatility
+# 12h_Camarilla_R3S3_1wVolume_1wADX
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1w volume spike and 1w ADX trend filter
+# Camarilla levels identify key support/resistance. Breakouts above R3 or below S3
+# indicate strong momentum. 1w volume spike confirms institutional participation.
+# 1w ADX > 25 ensures we only trade in strong trends, avoiding whipsaws in ranges.
+# This combination works in both bull and bear markets by filtering for strong trends only.
+# Targets 15-25 trades per year (~60-100 total over 4 years) to minimize fee drag.
 
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Donchian20_Volume_ATR"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_1wVolume_1wADX"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,80 +25,114 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for volume confirmation (more stable than lower timeframes)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 1w data for Camarilla calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate Donchian channels (20-period) on 4h data
-    lookback = 20
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
+    # Calculate Camarilla levels for each week
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    for i in range(lookback-1, n):
-        highest_high[i] = np.max(high[i-lookback+1:i+1])
-        lowest_low[i] = np.min(low[i-lookback+1:i+1])
+    # Camarilla multipliers
+    R3 = close_1w + 1.1 * (high_1w - low_1w) / 6
+    S3 = close_1w - 1.1 * (high_1w - low_1w) / 6
+    R4 = close_1w + 1.382 * (high_1w - low_1w) / 2
+    S4 = close_1w - 1.382 * (high_1w - low_1w) / 2
     
-    # Volume spike detection on 1d (20-period average)
-    volume_1d = df_1d['volume'].values
-    vol_ma_1d = np.full(len(volume_1d), np.nan)
-    for i in range(19, len(volume_1d)):
-        vol_ma_1d[i] = np.mean(volume_1d[i-19:i+1])
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    vol_spike = volume > (vol_ma_1d_aligned * 2.0)
+    # Align Camarilla levels to 12h timeframe (use previous week's levels)
+    R3_12h = align_htf_to_ltf(prices, df_1w, R3)
+    S3_12h = align_htf_to_ltf(prices, df_1w, S3)
+    R4_12h = align_htf_to_ltf(prices, df_1w, R4)
+    S4_12h = align_htf_to_ltf(prices, df_1w, S4)
     
-    # ATR for volatility filtering and stop calculation
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]  # First TR
-    atr = np.full(n, np.nan)
-    atr_period = 14
-    for i in range(atr_period-1, n):
-        if i == atr_period-1:
-            atr[i] = np.mean(tr[:atr_period])
-        else:
-            atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
+    # Volume spike detection on 1w (need ~2 weeks for MA)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean()  # 24 * 12h = 12d approx
+    vol_spike = volume > (vol_ma.values * 2.0)
+    
+    # ADX trend filter on 1w
+    # Calculate ADX(14) on weekly
+    plus_dm = np.zeros_like(high_1w)
+    minus_dm = np.zeros_like(high_1w)
+    tr = np.zeros_like(high_1w)
+    
+    for i in range(1, len(high_1w)):
+        plus_dm[i] = max(high_1w[i] - high_1w[i-1], 0)
+        minus_dm[i] = max(low_1w[i-1] - low_1w[i], 0)
+        if plus_dm[i] == minus_dm[i]:
+            plus_dm[i] = 0
+            minus_dm[i] = 0
+        tr[i] = max(
+            high_1w[i] - low_1w[i],
+            abs(high_1w[i] - close_1w[i-1]),
+            abs(low_1w[i] - close_1w[i-1])
+        )
+    
+    # Wilder smoothing
+    def wilder_smooth(arr, period):
+        result = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return result
+        result[period-1] = np.nansum(arr[:period])
+        for i in range(period, len(arr)):
+            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
+        return result
+    
+    tr14 = wilder_smooth(tr, 14)
+    plus_dm14 = wilder_smooth(plus_dm, 14)
+    minus_dm14 = wilder_smooth(minus_dm, 14)
+    
+    # Avoid division by zero
+    plus_di14 = np.where(tr14 != 0, 100 * (plus_dm14 / tr14), 0)
+    minus_di14 = np.where(tr14 != 0, 100 * (minus_dm14 / tr14), 0)
+    
+    dx = np.where((plus_di14 + minus_di14) != 0, 
+                  100 * np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14), 0)
+    adx = wilder_smooth(dx, 14)
+    
+    adx_strong = adx > 25
+    adx_weak = adx < 20
+    adx_strong_12h = align_htf_to_ltf(prices, df_1w, adx_strong)
+    adx_weak_12h = align_htf_to_ltf(prices, df_1w, adx_weak)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(lookback-1, 19, atr_period-1) + 1  # Ensure all indicators ready
+    start_idx = 24  # Ensure sufficient data for volume MA
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_spike[i]) or np.isnan(atr[i])):
+        if (np.isnan(R3_12h[i]) or np.isnan(S3_12h[i]) or np.isnan(R4_12h[i]) or 
+            np.isnan(S4_12h[i]) or np.isnan(vol_spike[i]) or 
+            np.isnan(adx_strong_12h[i]) or np.isnan(adx_weak_12h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: break above Donchian high + volume spike
-            if close[i] > highest_high[i] and vol_spike[i]:
+            # Enter long: price breaks above R3, volume spike, strong trend
+            if close[i] > R3_12h[i] and vol_spike[i] and adx_strong_12h[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below Donchian low + volume spike
-            elif close[i] < lowest_low[i] and vol_spike[i]:
+            # Enter short: price breaks below S3, volume spike, strong trend
+            elif close[i] < S3_12h[i] and vol_spike[i] and adx_strong_12h[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: break below Donchian low or ATR-based stop
-            if close[i] < lowest_low[i] or close[i] < (entry_price - 2.0 * atr[i]):
+            # Exit long: price returns to S3 or trend weakens
+            if close[i] < S3_12h[i] or adx_weak_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: break above Donchian high or ATR-based stop
-            if close[i] > highest_high[i] or close[i] > (entry_price + 2.0 * atr[i]):
+            # Exit short: price returns to R3 or trend weakens
+            if close[i] > R3_12h[i] or adx_weak_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
-
-# Note: entry_price tracking would require additional state management
-# For simplicity, using Donchian breakout/reversal as exit mechanism
-# In practice, would track entry price when position is opened for ATR stops
-# This version focuses on clear entry/exit rules with proper risk control
