@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w volume spike and 1w ADX trend filter
-# Donchian channels identify breakouts from 20-day highs/lows, capturing strong momentum.
-# Volume spike on weekly timeframe confirms institutional participation. 1w ADX > 25
-# ensures we only trade in strong trends, avoiding whipsaws in ranges. This combination
-# works in both bull and bear markets by filtering for strong trends only.
-# Targets 10-20 trades per year (~40-80 total over 4 years) to minimize fee drag.
+# Hypothesis: 12h Williams Alligator with 1d volume confirmation and trend filter
+# Williams Alligator identifies trend direction using smoothed SMAs (Jaw, Teeth, Lips).
+# In strong trends, the Alligator lines are aligned and separated (Jaw > Teeth > Lips for uptrend).
+# We add 1d volume confirmation to ensure institutional participation and 1d ADX > 25
+# to filter for trending markets only, avoiding whipsaws in ranges.
+# This combination works in both bull and bear markets by capturing strong trends.
+# Targets 20-30 trades per year (~80-120 total over 4 years) to minimize fee drag.
 
-name = "1d_Donchian20_1wVolume_1wADX"
-timeframe = "1d"
+name = "12h_WilliamsAlligator_1dVolume_1dADX"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,39 +25,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for Donchian calculation, volume, and ADX
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for Alligator calculation and filters
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:  # Need enough data for SMAs
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Donchian channels (20-period high/low)
-    high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # Williams Alligator: Three SMAs with different periods and shifts
+    # Jaw (Blue): 13-period SMMA, shifted 8 bars forward
+    # Teeth (Red): 8-period SMMA, shifted 5 bars forward  
+    # Lips (Green): 5-period SMMA, shifted 3 bars forward
+    # We calculate on median price (HL/2) as per Williams
     
-    # Calculate weekly volume spike (20-period average)
-    vol_ma_20 = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1w = volume_1w > (vol_ma_20 * 2.0)
+    median_price = (high_1d + low_1d) / 2
     
-    # Calculate ADX(14) on weekly
-    plus_dm = np.zeros_like(high_1w)
-    minus_dm = np.zeros_like(high_1w)
-    tr = np.zeros_like(high_1w)
+    # Smoothed Moving Average (SMMA) - same as RMA/Wilder's smoothing
+    def smma(arr, period):
+        result = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: SMMA = (PREV * (N-1) + CURRENT) / N
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    for i in range(1, len(high_1w)):
-        plus_dm[i] = max(high_1w[i] - high_1w[i-1], 0)
-        minus_dm[i] = max(low_1w[i-1] - low_1w[i], 0)
+    jaw = smma(median_price, 13)  # 13-period SMMA
+    teeth = smma(median_price, 8)  # 8-period SMMA
+    lips = smma(median_price, 5)   # 5-period SMMA
+    
+    # Apply shifts (Williams Alligator shifts the lines forward)
+    # Jaw shifted 8 bars, Teeth shifted 5 bars, Lips shifted 3 bars
+    jaw_shifted = np.roll(jaw, 8)
+    teeth_shifted = np.roll(teeth, 5)
+    lips_shifted = np.roll(lips, 3)
+    
+    # After shifting, the first few values become invalid (rolled from end)
+    # Set them to NaN
+    jaw_shifted[:8] = np.nan
+    teeth_shifted[:5] = np.nan
+    lips_shifted[:3] = np.nan
+    
+    # Align Alligator lines to 12h timeframe
+    jaw_12h = align_htf_to_ltf(prices, df_1d, jaw_shifted)
+    teeth_12h = align_htf_to_ltf(prices, df_1d, teeth_shifted)
+    lips_12h = align_htf_to_ltf(prices, df_1d, lips_shifted)
+    
+    # Trend condition: Alligator lines aligned and separated
+    # Uptrend: Lips > Teeth > Jaw (green > red > blue)
+    # Downtrend: Jaw > Teeth > Lips (blue > red > green)
+    uptrend_aligned = (lips_12h > teeth_12h) & (teeth_12h > jaw_12h)
+    downtrend_aligned = (jaw_12h > teeth_12h) & (teeth_12h > lips_12h)
+    
+    # Volume confirmation: 1d volume > 1.5x 20-day average
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean()
+    volume_confirm = volume_1d > (vol_ma_20.values * 1.5)
+    volume_confirm_12h = align_htf_to_ltf(prices, df_1d, volume_confirm)
+    
+    # ADX trend filter on 1d
+    # Calculate ADX(14) on daily
+    plus_dm = np.zeros_like(high_1d)
+    minus_dm = np.zeros_like(high_1d)
+    tr = np.zeros_like(high_1d)
+    
+    for i in range(1, len(high_1d)):
+        plus_dm[i] = max(high_1d[i] - high_1d[i-1], 0)
+        minus_dm[i] = max(low_1d[i-1] - low_1d[i], 0)
         if plus_dm[i] == minus_dm[i]:
             plus_dm[i] = 0
             minus_dm[i] = 0
         tr[i] = max(
-            high_1w[i] - low_1w[i],
-            abs(high_1w[i] - close_1w[i-1]),
-            abs(low_1w[i] - close_1w[i-1])
+            high_1d[i] - low_1d[i],
+            abs(high_1d[i] - close_1d[i-1]),
+            abs(low_1d[i] - close_1d[i-1])
         )
     
     # Wilder smoothing
@@ -82,49 +128,41 @@ def generate_signals(prices):
     adx = wilder_smooth(dx, 14)
     
     adx_strong = adx > 25
-    adx_weak = adx < 20
-    
-    # Align weekly indicators to daily timeframe
-    high_20_d = align_htf_to_ltf(prices, df_1w, high_20)
-    low_20_d = align_htf_to_ltf(prices, df_1w, low_20)
-    vol_spike_d = align_htf_to_ltf(prices, df_1w, vol_spike_1w)
-    adx_strong_d = align_htf_to_ltf(prices, df_1w, adx_strong)
-    adx_weak_d = align_htf_to_ltf(prices, df_1w, adx_weak)
+    adx_strong_12h = align_htf_to_ltf(prices, df_1d, adx_strong)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure sufficient data for Donchian channels
+    start_idx = 34  # Ensure sufficient data for Alligator calculation
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(high_20_d[i]) or np.isnan(low_20_d[i]) or 
-            np.isnan(vol_spike_d[i]) or np.isnan(adx_strong_d[i]) or 
-            np.isnan(adx_weak_d[i])):
+        if (np.isnan(jaw_12h[i]) or np.isnan(teeth_12h[i]) or np.isnan(lips_12h[i]) or 
+            np.isnan(volume_confirm_12h[i]) or np.isnan(adx_strong_12h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above 20-day high, volume spike, strong trend
-            if close[i] > high_20_d[i] and vol_spike_d[i] and adx_strong_d[i]:
+            # Enter long: Uptrend aligned, volume confirmation, strong ADX
+            if uptrend_aligned[i] and volume_confirm_12h[i] and adx_strong_12h[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below 20-day low, volume spike, strong trend
-            elif close[i] < low_20_d[i] and vol_spike_d[i] and adx_strong_d[i]:
+            # Enter short: Downtrend aligned, volume confirmation, strong ADX
+            elif downtrend_aligned[i] and volume_confirm_12h[i] and adx_strong_12h[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to 20-day low or trend weakens
-            if close[i] < low_20_d[i] or adx_weak_d[i]:
+            # Exit long: Trend breaks down or loses confirmation
+            if not uptrend_aligned[i] or not volume_confirm_12h[i] or not adx_strong_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to 20-day high or trend weakens
-            if close[i] > high_20_d[i] or adx_weak_d[i]:
+            # Exit short: Trend breaks up or loses confirmation
+            if not downtrend_aligned[i] or not volume_confirm_12h[i] or not adx_strong_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
