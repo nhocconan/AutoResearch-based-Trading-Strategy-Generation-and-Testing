@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_VolumeTrend"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,66 +17,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Camarilla pivot levels once before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Load 12h data for trend and volume context (once before loop)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 12h EMA50 for trend direction
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate Camarilla levels (R1, S1)
-    H_prev = np.roll(high_1d, 1)
-    L_prev = np.roll(low_1d, 1)
-    C_prev = np.roll(close_1d, 1)
-    H_prev[0] = np.nan
-    L_prev[0] = np.nan
-    C_prev[0] = np.nan
+    # 12h volume average for spike detection
+    vol_12h = df_12h['volume'].values
+    vol_avg_20_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_avg_20_12h)
     
-    pivot = (H_prev + L_prev + C_prev) / 3
-    range_hl = H_prev - L_prev
-    
-    R1 = pivot + (range_hl * 1.1 / 12)
-    S1 = pivot - (range_hl * 1.1 / 12)
-    
-    # Align Camarilla levels to 12h timeframe (wait for daily bar close)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    
-    # 1d trend: EMA34
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume spike: current volume > 2.0x 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma20)
+    # 4h Donchian channel (20-period)
+    high_roll_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Sufficient warmup
+    start_idx = 50  # Sufficient warmup for all indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(pivot_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_avg_20_12h_aligned[i]) or
+            np.isnan(high_roll_max[i]) or np.isnan(low_roll_min[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above R1 + uptrend + volume spike
-            long_cond = (close[i] > R1_aligned[i]) and \
-                        (close[i] > ema_34_1d_aligned[i]) and \
-                        volume_spike[i]
-            # Short: break below S1 + downtrend + volume spike
-            short_cond = (close[i] < S1_aligned[i]) and \
-                         (close[i] < ema_34_1d_aligned[i]) and \
-                         volume_spike[i]
+            # Volume spike condition (current 4h volume > 1.5x 12h volume average)
+            volume_spike = volume[i] > (1.5 * vol_avg_20_12h_aligned[i])
+            
+            # Long: break above Donchian high + uptrend + volume spike
+            long_cond = (close[i] > high_roll_max[i]) and \
+                        (close[i] > ema_50_12h_aligned[i]) and \
+                        volume_spike
+            
+            # Short: break below Donchian low + downtrend + volume spike
+            short_cond = (close[i] < low_roll_min[i]) and \
+                         (close[i] < ema_50_12h_aligned[i]) and \
+                         volume_spike
             
             if long_cond:
                 signals[i] = 0.25
@@ -85,15 +71,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: close below pivot (mean reversion to mean)
-            if close[i] < pivot_aligned[i]:
+            # Long exit: close below Donchian low (reversal signal)
+            if close[i] < low_roll_min[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: close above pivot (mean reversion to mean)
-            if close[i] > pivot_aligned[i]:
+            # Short exit: close above Donchian high (reversal signal)
+            if close[i] > high_roll_max[i]:
                 signals[i] = 0.0
                 position = 0
             else:
