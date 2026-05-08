@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and ADX trend filter
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and ADX trend filter.
 # Uses 4h price channel breakouts confirmed by daily volume > 1.5x 20-day average.
 # In trending markets (ADX > 25), follows breakout direction.
 # In ranging markets (ADX < 20), uses mean reversion at channel boundaries.
@@ -117,8 +117,6 @@ def generate_signals(prices):
     # Calculate 4h Donchian channels (20-period)
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
-    high_max = np.full(n, np.nan)
-    low_min = np.full(n, np.nan)
     
     for i in range(n):
         if i >= 19:
