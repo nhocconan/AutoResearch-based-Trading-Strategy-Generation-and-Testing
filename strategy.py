@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_KAMA_Trend_RSI_Filter"
-timeframe = "12h"
+name = "4h_EquiVolume_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,72 +17,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for trend filter
+    # 1d close for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     
-    # Daily KAMA for trend direction
-    close_1d_series = pd.Series(close_1d)
-    delta = close_1d_series.diff().abs()
-    direction = abs(close_1d_series.diff(10))
-    volatility = delta.rolling(window=10, min_periods=10).sum()
-    er = direction / volatility.replace(0, np.nan)
-    er = er.fillna(0)
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2
-    kama = [close_1d[0]]
-    for i in range(1, len(close_1d)):
-        kama.append(kama[-1] + sc[i] * (close_1d[i] - kama[-1]))
-    kama = np.array(kama)
-    kama_1d = kama
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Align KAMA to 12h timeframe
-    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
-    
-    # Daily RSI for mean reversion filter
-    delta_rsi = pd.Series(close_1d).diff()
-    gain = delta_rsi.where(delta_rsi > 0, 0)
-    loss = -delta_rsi.where(delta_rsi < 0, 0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50)
-    rsi_1d = rsi.values
-    
-    # Align RSI to 12h timeframe
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    
-    # Volume spike: current volume > 1.5x 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma20)
+    # EquiVolume: volume-weighted average price over 10 periods
+    vwap_num = np.convolve(close * volume, np.ones(10), 'full')[:n]
+    vwap_den = np.convolve(volume, np.ones(10), 'full')[:n]
+    vwap = np.divide(vwap_num, vwap_den, out=np.zeros_like(vwap_num), where=vwap_den!=0)
+    vwap = np.concatenate([np.full(9, np.nan), vwap[9:]])  # align with original index
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 40  # need EMA34(34) + VWAP(10)
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(kama_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(vwap[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above KAMA (uptrend), RSI oversold, volume spike
-            long_cond = (close[i] > kama_1d_aligned[i] and 
-                        rsi_1d_aligned[i] < 30 and
-                        volume_spike[i])
-            
-            # Short: price below KAMA (downtrend), RSI overbought, volume spike
-            short_cond = (close[i] < kama_1d_aligned[i] and 
-                         rsi_1d_aligned[i] > 70 and
-                         volume_spike[i])
+            # Long: price above VWAP and daily uptrend
+            long_cond = (close[i] > vwap[i] and ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1])
+            # Short: price below VWAP and daily downtrend
+            short_cond = (close[i] < vwap[i] and ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1])
             
             if long_cond:
                 signals[i] = 0.25
@@ -91,15 +60,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below KAMA or RSI overbought
-            if close[i] < kama_1d_aligned[i] or rsi_1d_aligned[i] > 70:
+            # Long exit: price crosses below VWAP
+            if close[i] < vwap[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above KAMA or RSI oversold
-            if close[i] > kama_1d_aligned[i] or rsi_1d_aligned[i] < 30:
+            # Short exit: price crosses above VWAP
+            if close[i] > vwap[i]:
                 signals[i] = 0.0
                 position = 0
             else:
