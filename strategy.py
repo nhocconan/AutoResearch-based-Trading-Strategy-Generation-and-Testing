@@ -1,11 +1,9 @@
-# SPDX-FileCopyrightText: 2024 CryptoQuant Team
-# SPDX-License-Identifier: MIT
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_v2"
+name = "4h_1d_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
 
@@ -51,19 +49,14 @@ def generate_signals(prices):
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (vol_ma20 * 2.0)
     
-    # Additional volume filter: require volume > 50th percentile of last 50 bars
-    vol_median50 = pd.Series(volume).rolling(window=50, min_periods=50).median().values
-    vol_filter = volume > vol_median50
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for volume filters
+    start_idx = 20  # warmup for volume MA
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or np.isnan(ema_34_4h[i]) or 
-            np.isnan(vol_ma20[i]) or np.isnan(vol_median50[i])):
+        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or np.isnan(ema_34_4h[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,18 +64,16 @@ def generate_signals(prices):
         
         if position == 0:
             # Long entry: price breaks above R3 with volume spike and above daily EMA34 (uptrend)
-            long_cond = (close[i] > r3_4h[i] and vol_spike[i] and 
-                        close[i] > ema_34_4h[i] and vol_filter[i])
+            long_cond = (close[i] > r3_4h[i] and vol_spike[i] and close[i] > ema_34_4h[i])
             
             # Short entry: price breaks below S3 with volume spike and below daily EMA34 (downtrend)
-            short_cond = (close[i] < s3_4h[i] and vol_spike[i] and 
-                         close[i] < ema_34_4h[i] and vol_filter[i])
+            short_cond = (close[i] < s3_4h[i] and vol_spike[i] and close[i] < ema_34_4h[i])
             
             if long_cond:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             elif short_cond:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
             # Long exit: price breaks below S3 (reversal signal)
@@ -90,20 +81,20 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
             # Short exit: price reverses back above R3 (reversal signal)
             if close[i] > r3_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
 # Hypothesis: Camarilla R3/S3 breakout strategy with volume spike confirmation and daily EMA34 trend filter on 4h timeframe.
-# Enhanced with median volume filter to reduce whipsaws. Enters long when price breaks above R3 with volume spike 
-# and price above daily EMA34 (uptrend). Enters short when price breaks below S3 with volume spike and price below 
-# daily EMA34 (downtrend). Exits when price reverses back through S3/R3 respectively.
-# Uses reduced position size (0.25) and stricter volume filters to target 15-25 trades/year on 4h timeframe.
+# Enters long when price breaks above R3 with volume spike and price above daily EMA34 (uptrend).
+# Enters short when price breaks below S3 with volume spike and price below daily EMA34 (downtrend).
+# Exits when price reverses back through S3/R3 respectively.
+# Uses discrete sizing (0.30) to minimize churn. Targets 25-40 trades/year on 4h timeframe.
 # Works in bull markets (trend-following breakouts) and bear markets (reversal breakouts from overextended levels).
