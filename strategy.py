@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_R1S1_Breakout_Trend_Volume"
-timeframe = "12h"
+name = "4h_1d_Camarilla_R1S1_Breakout_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,15 +38,15 @@ def generate_signals(prices):
     r1 = pivot + (range_val * 1.1 / 12)
     s1 = pivot - (range_val * 1.1 / 12)
     
-    # Align Camarilla levels to 12h timeframe
-    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
+    # Align Camarilla levels to 4h timeframe
+    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
     
     # 1d EMA34 for trend filter
     close_1d = df_1d['close'].values
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_34_4h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume spike detection: current volume > 2.0 * 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -59,7 +59,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or np.isnan(ema_34_12h[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or np.isnan(ema_34_4h[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,10 +67,10 @@ def generate_signals(prices):
         
         if position == 0:
             # Long entry: price breaks above R1 with volume spike and above daily EMA34 (uptrend)
-            long_cond = (close[i] > r1_12h[i] and vol_spike[i] and close[i] > ema_34_12h[i])
+            long_cond = (close[i] > r1_4h[i] and vol_spike[i] and close[i] > ema_34_4h[i])
             
             # Short entry: price breaks below S1 with volume spike and below daily EMA34 (downtrend)
-            short_cond = (close[i] < s1_12h[i] and vol_spike[i] and close[i] < ema_34_12h[i])
+            short_cond = (close[i] < s1_4h[i] and vol_spike[i] and close[i] < ema_34_4h[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -80,14 +80,14 @@ def generate_signals(prices):
                 position = -1
         elif position == 1:
             # Long exit: price breaks below S1 (reversal signal)
-            if close[i] < s1_12h[i]:
+            if close[i] < s1_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short exit: price reverses back above R1 (reversal signal)
-            if close[i] > r1_12h[i]:
+            if close[i] > r1_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -95,9 +95,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R1/S1 breakout strategy with volume spike confirmation and daily EMA34 trend filter on 12h timeframe.
+# Hypothesis: Camarilla R1/S1 breakout strategy with volume spike confirmation and daily EMA34 trend filter on 4h timeframe.
 # Enters long when price breaks above R1 with volume spike and price above daily EMA34 (uptrend).
 # Enters short when price breaks below S1 with volume spike and price below daily EMA34 (downtrend).
 # Exits when price reverses back through S1/R1 respectively.
-# Uses discrete sizing (0.25) to minimize churn. Targets 12-37 trades/year on 12h timeframe.
+# Uses discrete sizing (0.25) to minimize churn. Targets 20-50 trades/year on 4h timeframe.
 # Works in bull markets (trend-following breakouts) and bear markets (reversal breakouts from overextended levels).
