@@ -3,20 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily KAMA direction + RSI + Chop filter + Weekly trend confirmation
-# Long when KAMA rising, RSI < 50 (pullback in uptrend), Chop > 61.8 (range), weekly uptrend
-# Short when KAMA falling, RSI > 50 (pullback in downtrend), Chop > 61.8 (range), weekly downtrend
-# KAMA adapts to market noise, RSI captures mean reversion in range, Chop filters trending markets
-# Weekly trend ensures alignment with higher timeframe momentum
-# Targets 30-100 total trades over 4 years (7-25/year) to minimize fee drag
+# Hypothesis: Weekly Bollinger Band squeeze breakout with daily volume confirmation
+# Long when price breaks above upper BB(20,2) on weekly chart + daily volume > 1.5x 20-day average
+# Short when price breaks below lower BB(20,2) on weekly chart + daily volume > 1.5x 20-day average
+# Bollinger Band squeeze identifies low volatility periods that often precede explosive moves
+# Volume confirmation ensures institutional participation in the breakout
+# Weekly timeframe reduces noise and false signals, targeting 30-100 trades over 4 years
+# Works in both bull and bear markets as it captures volatility expansion regardless of direction
 
-name = "1d_KAMA_RSI_Chop_WeeklyTrend"
+name = "1d_WeeklyBB_Squeeze_Breakout_Volume"
 timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,108 +25,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data once for trend filter
+    # Get weekly data once for Bollinger Bands
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate weekly EMA(34) for trend filter
     weekly_close = df_1w['close'].values
-    ema34_1w = pd.Series(weekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Calculate Bollinger Bands(20,2) on weekly data
+    bb_length = 20
+    bb_mult = 2.0
     
-    # KAMA(14, 2, 30) - Kaufman Adaptive Moving Average
-    # ER = Efficiency Ratio, SC = Smoothing Constant
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # needs correction
-    # Recalculate volatility properly
-    volatility = np.zeros_like(close)
-    for i in range(len(close)):
-        if i == 0:
-            volatility[i] = 0
-        else:
-            volatility[i] = np.sum(np.abs(np.diff(close[max(0, i-14):i+1])))
-    # Simplified approach using rolling sum
-    price_change = np.abs(np.diff(close, prepend=close[0]))
-    volatility_sum = np.zeros_like(close)
-    for i in range(len(close)):
-        start = max(0, i-14)
-        volatility_sum[i] = np.sum(np.abs(np.diff(close[start:i+1])) if i > start else 0)
-    er = np.where(volatility_sum != 0, price_change / volatility_sum, 0)
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Basis (SMA)
+    basis = pd.Series(weekly_close).rolling(window=bb_length, min_periods=bb_length).mean().values
+    # Standard deviation
+    dev = bb_mult * pd.Series(weekly_close).rolling(window=bb_length, min_periods=bb_length).std().values
+    # Upper and lower bands
+    upper = basis + dev
+    lower = basis - dev
     
-    # RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Align weekly Bollinger Bands to daily timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_1w, upper)
+    lower_aligned = align_htf_to_ltf(prices, df_1w, lower)
+    basis_aligned = align_htf_to_ltf(prices, df_1w, basis)
     
-    # Chopiness Index(14)
-    atr = np.zeros_like(close)
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(np.diff(close, prepend=close[0]))
-    tr3 = np.abs(np.diff(close, prepend=close[0]))  # duplicate, will fix
-    tr2 = np.abs(np.diff(close, prepend=close[0]))
-    tr3 = np.abs(np.roll(close, 1) - close)
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    atr_sum = np.zeros_like(close)
-    for i in range(len(close)):
-        start = max(0, i-14)
-        atr_sum[i] = np.sum(atr[start:i+1]) if i >= start else 0
-    chop = np.where(atr_sum != 0, 100 * np.log10(atr_sum / (max_high - min_low)) / np.log10(14), 50)
-    chop = np.where((max_high - min_low) == 0, 50, chop)
+    # Daily volume confirmation: volume > 1.5x 20-day average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_threshold = 1.5 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for calculations
+    start_idx = 30  # warmup for calculations
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or 
-            np.isnan(ema34_1w_aligned[i])):
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
+            np.isnan(basis_aligned[i]) or np.isnan(volume_threshold[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        kama_val = kama[i]
-        kama_prev = kama[i-1]
-        rsi_val = rsi[i]
-        chop_val = chop[i]
-        ema34_1w_val = ema34_1w_aligned[i]
+        price = close[i]
+        vol = volume[i]
+        upper_band = upper_aligned[i]
+        lower_band = lower_aligned[i]
+        vol_ma_val = volume_threshold[i]
         
         if position == 0:
-            # Enter long: KAMA rising, RSI < 50, Chop > 61.8 (range), weekly uptrend
-            if kama_val > kama_prev and rsi_val < 50 and chop_val > 61.8 and ema34_1w_val > 0:
+            # Enter long: price breaks above upper weekly BB + volume confirmation
+            if price > upper_band and vol > vol_ma_val:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: KAMA falling, RSI > 50, Chop > 61.8 (range), weekly downtrend
-            elif kama_val < kama_prev and rsi_val > 50 and chop_val > 61.8 and ema34_1w_val < 0:
+            # Enter short: price breaks below lower weekly BB + volume confirmation
+            elif price < lower_band and vol > vol_ma_val:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: KAMA falling or Chop < 38.2 (trending) or weekly trend down
-            if kama_val < kama_prev or chop_val < 38.2 or ema34_1w_val < 0:
+            # Exit long: price returns to weekly BB basis or volume drops
+            if price < basis_aligned[i] or vol < vol_ma_val * 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: KAMA rising or Chop < 38.2 (trending) or weekly trend up
-            if kama_val > kama_prev or chop_val < 38.2 or ema34_1w_val > 0:
+            # Exit short: price returns to weekly BB basis or volume drops
+            if price > basis_aligned[i] or vol < vol_ma_val * 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
