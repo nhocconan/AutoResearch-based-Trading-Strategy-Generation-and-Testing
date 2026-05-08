@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Donchian_Breakout_Volume_Trend_1d"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,52 +19,60 @@ def generate_signals(prices):
     
     # Get daily data once
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Daily Donchian channels (20-period)
+    # Calculate Camarilla levels from previous day
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    donchian_high = np.full_like(high_1d, np.nan)
-    donchian_low = np.full_like(low_1d, np.nan)
     
-    for i in range(20, len(high_1d)):
-        donchian_high[i] = np.max(high_1d[i-20:i])
-        donchian_low[i] = np.min(low_1d[i-20:i])
+    # Camarilla R1, S1, R3, S3 (based on previous day's range)
+    # R1 = close + (high - low) * 1.12 / 12
+    # S1 = close - (high - low) * 1.12 / 12
+    # R3 = close + (high - low) * 1.12 / 4
+    # S3 = close - (high - low) * 1.12 / 4
+    range_1d = high_1d - low_1d
+    r1 = close_1d + range_1d * 1.12 / 12
+    s1 = close_1d - range_1d * 1.12 / 12
+    r3 = close_1d + range_1d * 1.12 / 4
+    s3 = close_1d - range_1d * 1.12 / 4
     
-    # Align to 12h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # Align Camarilla levels to 4h timeframe
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    r3_4h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_4h = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Daily trend: EMA50
-    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_4h = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume spike: current volume > 2x 20-period average volume (12h)
-    vol_ma = np.convolve(volume, np.ones(20)/20, mode='same')
-    vol_ma[:10] = vol_ma[10]  # fill beginning
-    vol_ma[-10:] = vol_ma[-11]  # fill end
-    vol_spike = volume > (2 * vol_ma)
+    # Calculate volume spike filter (20-period volume MA)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # warmup for all indicators
+    start_idx = 34  # warmup for EMA34
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or np.isnan(ema50_aligned[i]):
+        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or 
+            np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or 
+            np.isnan(ema34_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long breakout: price > Donchian high AND above daily EMA50 AND volume spike
-            long_cond = (close[i] > donchian_high_aligned[i]) and (close[i] > ema50_aligned[i]) and vol_spike[i]
+            # Long entry: Price breaks above R1 with volume spike AND price > EMA34 (uptrend)
+            long_cond = (close[i] > r1_4h[i]) and vol_spike[i] and (close[i] > ema34_4h[i])
             
-            # Short breakdown: price < Donchian low AND below daily EMA50 AND volume spike
-            short_cond = (close[i] < donchian_low_aligned[i]) and (close[i] < ema50_aligned[i]) and vol_spike[i]
+            # Short entry: Price breaks below S1 with volume spike AND price < EMA34 (downtrend)
+            short_cond = (close[i] < s1_4h[i]) and vol_spike[i] and (close[i] < ema34_4h[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -73,15 +81,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below Donchian low OR below daily EMA50
-            if (close[i] < donchian_low_aligned[i]) or (close[i] < ema50_aligned[i]):
+            # Long exit: Price crosses below S1 (reversion to mean)
+            if close[i] < s1_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above Donchian high OR above daily EMA50
-            if (close[i] > donchian_high_aligned[i]) or (close[i] > ema50_aligned[i]):
+            # Short exit: Price crosses above R1 (reversion to mean)
+            if close[i] > r1_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -89,11 +97,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Daily Donchian breakouts with volume confirmation and trend filter (EMA50).
-# Long when price breaks above 20-day high with volume spike and above daily EMA50.
-# Short when price breaks below 20-day low with volume spike and below daily EMA50.
-# Exits when price returns inside the channel or crosses the EMA50.
-# Works in trending markets (breakouts continue) and ranging markets (mean reversion at channel extremes).
-# Uses daily timeframe for structure, 12h for execution to avoid look-ahead.
-# Volume spike ensures breakouts have conviction, reducing false signals.
-# Target: 50-150 total trades over 4 years = 12-37/year to minimize fee decay.
+# Hypothesis: Camarilla R1/S1 levels act as intraday support/resistance with mean reversion properties.
+# Long when price breaks above R1 with volume confirmation in an uptrend (price > EMA34).
+# Short when price breaks below S1 with volume confirmation in a downtrend (price < EMA34).
+# Exits when price reverts to opposite S1/R1 levels.
+# Works in both bull and bear markets by following the daily trend filter.
+# Volume spike ensures institutional participation and reduces false breakouts.
+# Target: 20-50 trades per year to minimize fee decay while capturing meaningful moves.
