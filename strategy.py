@@ -3,54 +3,40 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour TRIX momentum with daily volume spike and choppiness regime filter
-# Long when TRIX crosses above zero, volume spike, and market is trending (CHOP < 38.2)
-# Short when TRIX crosses below zero, volume spike, and market is trending (CHOP < 38.2)
-# TRIX filters noise and captures sustained momentum
-# Volume spike confirms institutional participation in the move
-# Choppiness regime filter avoids whipsaws in ranging markets
-# Targets 80-160 total trades over 4 years (20-40/year) for optimal balance
+# Hypothesis: 4-hour Donchian(20) breakout with weekly trend filter and volume confirmation
+# Long when price breaks above 20-period high, weekly EMA(34) uptrend, and volume spike
+# Short when price breaks below 20-period low, weekly EMA(34) downtrend, and volume spike
+# Weekly EMA filter ensures alignment with higher timeframe trend
+# Volume spike confirms breakout strength; avoids false signals
+# Targets 80-180 total trades over 4 years (20-45/year) to balance opportunity and cost
 
-name = "4h_TRIX_ZeroCross_VolumeSpike_ChopFilter"
+name = "4h_Donchian20_1wTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data once for choppiness filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Get weekly data once for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate TRIX(12) - triple exponential moving average rate of change
-    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean()
-    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
-    trix = 100 * (ema3.pct_change())
-    trix_values = trix.values
+    # Calculate weekly EMA(34) for trend filter
+    weekly_close = df_1w['close'].values
+    ema34_1w = pd.Series(weekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Calculate choppiness index from daily data
-    # CHOP = 100 * log10(sum(ATR(14)) / (log10(n) * (max(high) - min(low))))
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = pd.DataFrame({'tr1': tr1, 'tr2': tr2, 'tr3': tr3}).max(axis=1)
-    atr14 = tr.rolling(window=14, min_periods=14).sum()
-    
-    highest_high = df_1d['high'].rolling(window=14, min_periods=14).max()
-    lowest_low = df_1d['low'].rolling(window=14, min_periods=14).min
-    
-    chop = 100 * np.log10(atr14 / (np.log10(14) * (highest_high - lowest_low)))
-    chop_values = chop.values
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_values)
+    # Calculate 20-period Donchian channels
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -59,42 +45,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # warmup for calculations
+    start_idx = 20  # warmup for Donchian calculation
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(trix_values[i]) or np.isnan(chop_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        trix_val = trix_values[i]
-        chop_val = chop_aligned[i]
+        ema34_1w_val = ema34_1w_aligned[i]
+        price = close[i]
+        upper_band = donchian_high[i]
+        lower_band = donchian_low[i]
         vol_spike = volume_spike[i]
         
-        # TRIX zero cross signals with volume and chop filter
-        if i > 0 and not np.isnan(trix_values[i-1]):
-            trix_prev = trix_values[i-1]
-            # Enter long: TRIX crosses above zero, volume spike, trending market (CHOP < 38.2)
-            if trix_prev <= 0 and trix_val > 0 and vol_spike and chop_val < 38.2:
+        if position == 0:
+            # Enter long: price breaks above upper band, weekly uptrend, volume spike
+            if price > upper_band and price > ema34_1w_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: TRIX crosses below zero, volume spike, trending market (CHOP < 38.2)
-            elif trix_prev >= 0 and trix_val < 0 and vol_spike and chop_val < 38.2:
+            # Enter short: price breaks below lower band, weekly downtrend, volume spike
+            elif price < lower_band and price < ema34_1w_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
-        
-        # Exit conditions: TRIX returns to zero or chop increases (ranging market)
-        if position == 1:
-            if trix_val <= 0 or chop_val >= 61.8:  # exit when momentum fades or market ranges
+        elif position == 1:
+            # Exit long: price falls below lower band or weekly trend turns down
+            if price < lower_band or price < ema34_1w_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            if trix_val >= 0 or chop_val >= 61.8:  # exit when momentum fades or market ranges
+            # Exit short: price rises above upper band or weekly trend turns up
+            if price > upper_band or price > ema34_1w_val:
                 signals[i] = 0.0
                 position = 0
             else:
