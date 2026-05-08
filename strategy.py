@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1d Elder Ray (Bull/Bear Power) with EMA13 filter and volume confirmation.
-# Long when 1d Bull Power > 0, EMA13 rising, and volume > 1.5x average.
-# Short when 1d Bear Power < 0, EMA13 falling, and volume > 1.5x average.
-# Works in bull (Bull Power positive) and bear (Bear Power negative) markets by measuring power relative to EMA.
-# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and fee drag.
+# Hypothesis: 12h strategy combining 1w EMA trend filter, 1d KAMA trend, and volume confirmation.
+# Long when 1w trend up, price above 1d KAMA, and volume > 1.3x average.
+# Short when 1w trend down, price below 1d KAMA, and volume > 1.3x average.
+# Uses discrete position sizing (0.25) to minimize churn and manage drawdown.
+# Designed to work in both bull and bear markets by following the higher timeframe trend.
 
-name = "6h_ElderRay_EMA13_Volume"
-timeframe = "6h"
+name = "12h_1wEMA_1dKAMA_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,45 +23,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Elder Ray and EMA
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Get 1d data for KAMA
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
     close_1d = df_1d['close'].values
     
-    # 1d EMA13
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema13_rising = ema13_1d > np.roll(ema13_1d, 1)
-    ema13_falling = ema13_1d < np.roll(ema13_1d, 1)
-    ema13_rising = np.where(np.isnan(ema13_rising), False, ema13_rising)
-    ema13_falling = np.where(np.isnan(ema13_falling), False, ema13_falling)
+    # 1w EMA(34) for trend
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_1w_up = ema_34_1w > np.roll(ema_34_1w, 1)
+    trend_1w_up = np.where(np.isnan(trend_1w_up), False, trend_1w_up)
     
-    # 1d Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high_1d - ema13_1d
-    bear_power = low_1d - ema13_1d
+    # 1d KAMA(30, 2, 30)
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0)
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
     
-    # Align 1d indicators to 6h
-    ema13_rising_aligned = align_htf_to_ltf(prices, df_1d, ema13_rising.astype(float))
-    ema13_falling_aligned = align_htf_to_ltf(prices, df_1d, ema13_falling.astype(float))
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    # Align 1w trend to 12h
+    trend_1w_up_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_up.astype(float))
+    # Align 1d KAMA to 12h
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
     
-    # Volume average (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume average (30-period)
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     vol_ratio = volume / vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 13  # Ensure enough data for indicators
+    start_idx = 34  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema13_rising_aligned[i]) or np.isnan(ema13_falling_aligned[i]) or
-            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
+        if (np.isnan(trend_1w_up_aligned[i]) or np.isnan(kama_aligned[i]) or
             np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -69,28 +76,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Bull Power > 0, EMA13 rising, volume spike
-            if (bull_power_aligned[i] > 0 and
-                ema13_rising_aligned[i] and
-                vol_ratio[i] > 1.5):
+            # Long: 1w trend up, price above 1d KAMA, volume spike
+            if (trend_1w_up_aligned[i] and
+                close[i] > kama_aligned[i] and
+                vol_ratio[i] > 1.3):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0, EMA13 falling, volume spike
-            elif (bear_power_aligned[i] < 0 and
-                  ema13_falling_aligned[i] and
-                  vol_ratio[i] > 1.5):
+            # Short: 1w trend down, price below 1d KAMA, volume spike
+            elif (not trend_1w_up_aligned[i] and
+                  close[i] < kama_aligned[i] and
+                  vol_ratio[i] > 1.3):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Bull Power <= 0 or EMA13 not rising
-            if (bull_power_aligned[i] <= 0 or not ema13_rising_aligned[i]):
+            # Long exit: trend break or price below KAMA
+            if (not trend_1w_up_aligned[i] or close[i] < kama_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Bear Power >= 0 or EMA13 not falling
-            if (bear_power_aligned[i] >= 0 or not ema13_falling_aligned[i]):
+            # Short exit: trend break or price above KAMA
+            if (trend_1w_up_aligned[i] or close[i] > kama_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
