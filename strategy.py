@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_05"
-timeframe = "4h"
+name = "6h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,9 +38,9 @@ def generate_signals(prices):
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Volume spike: current volume > 3x 20-period average (stricter to reduce trades)
+    # Volume spike: current volume > 2.5x 20-period average (stricter to reduce trades)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (3.0 * vol_ma20)
+    volume_spike = volume > (2.5 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
