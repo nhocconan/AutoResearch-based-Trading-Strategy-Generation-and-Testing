@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot reversal with 12h EMA trend filter and volume confirmation.
-# Camarilla levels identify key support/resistance where reversals occur.
-# EMA(50) on 12h determines trend direction (only trade in trend direction).
-# Volume > 1.5x average confirms participation. Works in both bull and bear markets by
-# taking reversals in the direction of the higher timeframe trend.
+# Hypothesis: 4h RSI mean reversion with 12h EMA trend filter and volume confirmation.
+# RSI(14) < 30 for long, > 70 for short in the direction of 12h EMA(50) trend.
+# Volume > 1.5x 20-period average confirms participation. Works in both bull and bear markets
+# by taking mean reversions in the direction of the higher timeframe trend.
 # Target: 25-40 trades/year with disciplined entries to minimize fee drag.
 
-name = "4h_Camarilla_Reversal_12hEMA50_Volume"
+name = "4h_RSI_MeanReversion_12hEMA50_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -44,17 +43,28 @@ def generate_signals(prices):
     for i in range(20, len(volume_12h)):
         vol_avg_20_12h[i] = np.mean(volume_12h[i-20:i])
     
-    # Calculate Camarilla levels on 4h data (using previous bar's OHLC)
-    camarilla_H4 = np.full(n, np.nan)  # Resistance level
-    camarilla_L4 = np.full(n, np.nan)  # Support level
-    for i in range(1, n):
-        # Use previous bar's OHLC to calculate today's levels
-        ph = high[i-1]
-        pl = low[i-1]
-        pc = close[i-1]
-        range_val = ph - pl
-        camarilla_H4[i] = pc + (range_val * 1.1 / 2)  # H4 level
-        camarilla_L4[i] = pc - (range_val * 1.1 / 2)  # L4 level
+    # Calculate RSI(14) on 4h data
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
+    rsi = np.full(n, np.nan)
+    
+    for i in range(14, n):
+        if i == 14:
+            avg_gain[i] = np.mean(gain[1:15])
+            avg_loss[i] = np.mean(loss[1:15])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+        
+        if avg_loss[i] != 0:
+            rs = avg_gain[i] / avg_loss[i]
+            rsi[i] = 100 - (100 / (1 + rs))
+        else:
+            rsi[i] = 100
     
     # Align all indicators to 4h timeframe
     ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
@@ -67,7 +77,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # warmup for indicators
+    start_idx = max(50, 20, 14)  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if outside trading session
@@ -78,8 +88,7 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if np.isnan(camarilla_H4[i]) or np.isnan(camarilla_L4[i]) or \
-           np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_avg_20_12h_aligned[i]):
+        if np.isnan(rsi[i]) or np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_avg_20_12h_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -99,13 +108,11 @@ def generate_signals(prices):
                 vol_filter = vol_12h_current > 1.5 * vol_avg_20_12h_aligned[i]
         
         if position == 0:
-            # Look for entry: Camarilla level touch + EMA trend + volume
-            # Long when price touches L4 support in uptrend (price > EMA)
-            long_condition = (low[i] <= camarilla_L4[i] * 1.001) and \
-                             (close[i] > ema_50_12h_aligned[i]) and vol_filter
-            # Short when price touches H4 resistance in downtrend (price < EMA)
-            short_condition = (high[i] >= camarilla_H4[i] * 0.999) and \
-                              (close[i] < ema_50_12h_aligned[i]) and vol_filter
+            # Look for entry: RSI extreme + EMA trend + volume
+            # Long when RSI < 30 in uptrend (price > EMA)
+            long_condition = (rsi[i] < 30) and (close[i] > ema_50_12h_aligned[i]) and vol_filter
+            # Short when RSI > 70 in downtrend (price < EMA)
+            short_condition = (rsi[i] > 70) and (close[i] < ema_50_12h_aligned[i]) and vol_filter
             
             if long_condition:
                 signals[i] = 0.25
@@ -114,15 +121,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price touches H4 resistance or trend changes
-            if (high[i] >= camarilla_H4[i] * 0.999) or (close[i] < ema_50_12h_aligned[i]):
+            # Exit long: RSI > 50 or trend changes
+            if (rsi[i] > 50) or (close[i] < ema_50_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price touches L4 support or trend changes
-            if (low[i] <= camarilla_L4[i] * 1.001) or (close[i] > ema_50_12h_aligned[i]):
+            # Exit short: RSI < 50 or trend changes
+            if (rsi[i] < 50) or (close[i] > ema_50_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
