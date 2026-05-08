@@ -3,100 +3,107 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Chaikin Money Flow with 12h trend filter and volatility filter
-# Chaikin Money Flow (CMF) measures money flow volume over a period.
-# We go long when CMF > 0.1 (bullish accumulation) and short when CMF < -0.1 (bearish distribution),
-# confirmed by 12h EMA(50) trend direction and low volatility (ATR ratio < 1.2) to avoid whipsaws.
-# Designed for low trade frequency in both bull and bear markets.
-# Target: 50-150 total trades over 4 years = 12-37/year
+# Hypothesis: 1h momentum strategy using 4h RSI and 1d trend filter with volume confirmation.
+# Uses 4h RSI(14) for momentum extremes (oversold/overbought) and 1d EMA(50) for trend direction.
+# Volume spike filters entries to avoid low-conviction moves.
+# Designed for low trade frequency in both bull and bear markets by using higher timeframes for direction.
+# Target: 60-150 total trades over 4 years = 15-37/year
 
-name = "4h_CMF_12hTrend_VolatilityFilter"
-timeframe = "4h"
+name = "1h_RSI4h_1dTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data once
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 4h data once for RSI
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 14:
         return np.zeros(n)
     
-    # Calculate 12h EMA(50) for trend direction
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Calculate 4h RSI(14)
+    close_4h = df_4h['close'].values
+    delta = np.diff(close_4h, prepend=close_4h[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_4h = 100 - (100 / (1 + rs))
+    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
     
-    # Calculate ATR(14) for volatility
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])],
-                         np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Get 1d data once for trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Calculate ATR ratio: current ATR / 50-period average ATR
-    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-    atr_ratio = np.where(atr_ma > 0, atr / atr_ma, 1.0)
+    # Calculate 1d EMA(50)
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate Chaikin Money Flow (CMF) over 20 periods
-    mfm = ((close - low) - (high - close)) / (high - low)
-    mfm = np.where((high - low) != 0, mfm, 0.0)
-    mfv = mfm * volume
-    cmf = pd.Series(mfv).rolling(window=20, min_periods=20).sum().values / \
-          pd.Series(volume).rolling(window=20, min_periods=20).sum().values
+    # Volume spike: current volume > 2.0 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
+    
+    # Session filter: 8-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for calculations
+    start_idx = 100  # warmup for calculations
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(cmf[i]) or 
-            np.isnan(atr_ratio[i]) or np.isnan(atr_ma[i])):
+        if (np.isnan(rsi_4h_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema50_12h_val = ema50_12h_aligned[i]
-        cmf_val = cmf[i]
-        vol_filter = atr_ratio[i] < 1.2  # Low volatility filter
+        rsi_val = rsi_4h_aligned[i]
+        ema50_val = ema50_1d_aligned[i]
+        vol_spike = volume_spike[i]
+        in_session = session_filter[i]
         
         if position == 0:
-            # Enter long: CMF > 0.1 (accumulation) + uptrend + low volatility
-            if (cmf_val > 0.1 and 
-                close[i] > ema50_12h_val and 
-                vol_filter):
-                signals[i] = 0.25
+            # Enter long: RSI < 30 (oversold) + uptrend + volume spike + session
+            if (rsi_val < 30 and 
+                close[i] > ema50_val and 
+                vol_spike and 
+                in_session):
+                signals[i] = 0.20
                 position = 1
-            # Enter short: CMF < -0.1 (distribution) + downtrend + low volatility
-            elif (cmf_val < -0.1 and 
-                  close[i] < ema50_12h_val and 
-                  vol_filter):
-                signals[i] = -0.25
+            # Enter short: RSI > 70 (overbought) + downtrend + volume spike + session
+            elif (rsi_val > 70 and 
+                  close[i] < ema50_val and 
+                  vol_spike and 
+                  in_session):
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: CMF turns negative OR price breaks below trend
-            if cmf_val < 0 or close[i] < ema50_12h_val:
+            # Exit long: RSI > 50 (momentum fading) OR price breaks below trend
+            if rsi_val > 50 or close[i] < ema50_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: CMF turns positive OR price breaks above trend
-            if cmf_val > 0 or close[i] > ema50_12h_val:
+            # Exit short: RSI < 50 (momentum fading) OR price breaks above trend
+            if rsi_val < 50 or close[i] > ema50_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
