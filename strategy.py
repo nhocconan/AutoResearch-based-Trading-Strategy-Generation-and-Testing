@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Ichimoku_TenkanKijun_Cross_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_12hTrend_VolumeSpike_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,80 +17,92 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data once for trend filter and volume average
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 26:
+    # Get 12h data once for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # 1d EMA26 trend filter
-    close_1d = df_1d['close'].values
-    ema26_1d = pd.Series(close_1d).ewm(span=26, adjust=False, min_periods=26).mean().values
-    trend_1d = (close_1d > ema26_1d).astype(float)
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    # 12h EMA50 trend filter
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_12h = (close_12h > ema50_12h).astype(float)
+    trend_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_12h)
     
-    # 1d volume average for spike detection
-    vol_ma20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
+    # Get 1d data once for Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Ichimoku Cloud components (Tenkan-sen and Kijun-sen) on 12h data
-    # Tenkan-sen: (9-period high + 9-period low) / 2
-    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan = (high_9 + low_9) / 2.0
+    # Previous day's OHLC for Camarilla calculation (R3/S3 levels)
+    prev_high = np.roll(df_1d['high'].values, 1)
+    prev_low = np.roll(df_1d['low'].values, 1)
+    prev_close = np.roll(df_1d['close'].values, 1)
+    prev_high[0] = df_1d['high'].values[0]
+    prev_low[0] = df_1d['low'].values[0]
+    prev_close[0] = df_1d['close'].values[0]
     
-    # Kijun-sen: (26-period high + 26-period low) / 2
-    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun = (high_26 + low_26) / 2.0
+    # Camarilla pivot levels calculation (R3 and S3)
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_val = prev_high - prev_low
+    r3 = pivot + (range_val * 1.1 / 2)  # R3 level
+    s3 = pivot - (range_val * 1.1 / 2)  # S3 level
+    
+    # Align Camarilla levels to 4h timeframe
+    r3_4h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_4h = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Volume spike detection: current volume > 3.0 * 20-period average (even more stringent)
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (vol_ma20 * 3.0)
+    
+    # Price distance filter: require breakout to be at least 1.0% above/below level
+    price_above_r3 = close > r3_4h * 1.01
+    price_below_s3 = close < s3_4h * 0.99
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 26  # warmup for Ichimoku
+    start_idx = 20  # warmup for volume MA
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
-            np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ma20_1d_aligned[i])):
+        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or np.isnan(trend_12h_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume spike: current volume > 2.0 * 20-period 1d average
-        vol_spike = volume[i] > (vol_ma20_1d_aligned[i] * 2.0)
-        
         if position == 0:
-            # Long entry: Tenkan crosses above Kijun with volume spike and 1d uptrend
-            if (tenkan[i] > kijun[i] and tenkan[i-1] <= kijun[i-1] and 
-                vol_spike and trend_1d_aligned[i] > 0.5):
-                signals[i] = 0.25
+            # Long entry: price breaks above R3 with volume spike and 12h uptrend
+            long_cond = (price_above_r3[i] and vol_spike[i] and trend_12h_aligned[i] > 0.5)
+            
+            # Short entry: price breaks below S3 with volume spike and 12h downtrend
+            short_cond = (price_below_s3[i] and vol_spike[i] and trend_12h_aligned[i] < 0.5)
+            
+            if long_cond:
+                signals[i] = 0.20
                 position = 1
-            # Short entry: Tenkan crosses below Kijun with volume spike and 1d downtrend
-            elif (tenkan[i] < kijun[i] and tenkan[i-1] >= kijun[i-1] and 
-                  vol_spike and trend_1d_aligned[i] < 0.5):
-                signals[i] = -0.25
+            elif short_cond:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Long exit: Tenkan crosses below Kijun
-            if tenkan[i] < kijun[i] and tenkan[i-1] >= kijun[i-1]:
+            # Long exit: price reverses back below R3 (mean reversion)
+            if close[i] < r3_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: Tenkan crosses above Kijun
-            if tenkan[i] > kijun[i] and tenkan[i-1] <= kijun[i-1]:
+            # Short exit: price reverses back above S3 (mean reversion)
+            if close[i] > s3_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-# Hypothesis: Ichimoku Tenkan/Kijun cross on 12h with 1d trend filter and volume confirmation.
-# Works in bull markets (trend following) and bear markets (counter-trend bounces at cloud).
-# Tenkan/Kijun cross provides clear entry/exit signals with low latency.
-# Volume spike (2x 20-period 1d average) confirms institutional participation.
-# 1d EMA26 trend filter ensures alignment with higher timeframe momentum.
-# Target: 20-40 trades/year to minimize fee drag while capturing significant moves.
+# Hypothesis: Camarilla R3/S3 breakout with very strict volume confirmation (3.0x 20-period MA) and price distance filter (1.0%).
+# Uses 12h EMA50 trend filter for multi-timeframe alignment.
+# Reduced position size to 0.20 to lower drawdown and tightened entry conditions to reduce trade frequency.
+# Target: 10-20 trades/year to avoid fee drag while maintaining edge in both bull and bear markets.
