@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using weekly pivot levels and daily volatility regime.
-# Weekly pivots provide key institutional levels; daily ATR regime filters for trending vs ranging.
-# Long when price breaks above weekly R1 with daily ATR expansion (trending).
-# Short when price breaks below weekly S1 with daily ATR expansion.
-# In low volatility regime (ATR contraction), fade at weekly R2/S2 for mean reversion.
-# Designed for low trade frequency (15-25/year) to work in both bull and bear markets.
+# Hypothesis: 4h strategy combining 1d Supertrend for trend direction with 4h volume confirmation and ATR-based volatility filter.
+# Supertrend (ATR=10, multiplier=3) on daily timeframe provides robust trend identification.
+# Entry only in trend direction when 4h volume exceeds 2x its 20-period average.
+# Exit when price closes below/above Supertrend or when volatility drops (ATR < 0.5 * ATR(20)).
+# Designed for low trade frequency (<25/year) to minimize fee drag while capturing major trends.
+# Works in both bull and bear markets by following the trend direction.
 
-name = "6h_WeeklyPivot_ATRRegime"
-timeframe = "6h"
+name = "4h_Supertrend_Volume_VolatilityFilter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,133 +24,120 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation
-    df_w = get_htf_data(prices, '1w')
-    if len(df_w) < 2:
+    # Get daily data for Supertrend calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_w = df_w['high'].values
-    low_w = df_w['low'].values
-    close_w = df_w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot points (standard floor trader's method)
-    pivot_w = np.zeros_like(close_w)
-    r1_w = np.zeros_like(close_w)
-    s1_w = np.zeros_like(close_w)
-    r2_w = np.zeros_like(close_w)
-    s2_w = np.zeros_like(close_w)
+    # Calculate ATR for Supertrend (period=10)
+    tr1 = np.zeros(len(high_1d))
+    tr1[0] = high_1d[0] - low_1d[0]
+    for i in range(1, len(high_1d)):
+        tr1[i] = max(high_1d[i] - low_1d[i], 
+                     abs(high_1d[i] - close_1d[i-1]), 
+                     abs(low_1d[i] - close_1d[i-1]))
     
-    for i in range(1, len(close_w)):
-        # Previous week's high, low, close
-        ph = high_w[i-1]
-        pl = low_w[i-1]
-        pc = close_w[i-1]
-        
-        # Pivot point and support/resistance levels
-        pivot_w[i] = (ph + pl + pc) / 3.0
-        r1_w[i] = 2 * pivot_w[i] - pl
-        s1_w[i] = 2 * pivot_w[i] - ph
-        r2_w[i] = pivot_w[i] + (ph - pl)
-        s2_w[i] = pivot_w[i] - (ph - pl)
+    atr = np.zeros(len(high_1d))
+    atr[:9] = np.nan
+    atr[9] = np.mean(tr1[0:10])
+    for i in range(10, len(high_1d)):
+        atr[i] = (atr[i-1] * 9 + tr1[i]) / 10
     
-    # First week has no previous data
-    pivot_w[0] = r1_w[0] = s1_w[0] = r2_w[0] = s2_w[0] = np.nan
+    # Calculate Supertrend
+    upper_band = np.zeros(len(high_1d))
+    lower_band = np.zeros(len(high_1d))
+    supertrend = np.zeros(len(high_1d))
+    trend = np.ones(len(high_1d))  # 1 for uptrend, -1 for downtrend
     
-    # Align weekly pivots to 6h timeframe
-    pivot_w_aligned = align_htf_to_ltf(prices, df_w, pivot_w)
-    r1_w_aligned = align_htf_to_ltf(prices, df_w, r1_w)
-    s1_w_aligned = align_htf_to_ltf(prices, df_w, s1_w)
-    r2_w_aligned = align_htf_to_ltf(prices, df_w, r2_w)
-    s2_w_aligned = align_htf_to_ltf(prices, df_w, s2_w)
-    
-    # Get daily data for ATR (volatility regime)
-    df_d = get_htf_data(prices, '1d')
-    if len(df_d) < 14:
-        return np.zeros(n)
-    
-    high_d = df_d['high'].values
-    low_d = df_d['low'].values
-    close_d = df_d['close'].values
-    
-    # Calculate True Range and ATR(14)
-    tr1 = high_d[1:] - low_d[1:]
-    tr2 = np.abs(high_d[1:] - close_d[:-1])
-    tr3 = np.abs(low_d[1:] - close_d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # Align with same length
-    
-    atr_14 = np.full_like(close_d, np.nan)
-    for i in range(14, len(tr)):
-        if np.isnan(tr[i-13:i+1]).any():
-            atr_14[i] = np.nan
+    for i in range(len(high_1d)):
+        if i < 9:
+            upper_band[i] = np.nan
+            lower_band[i] = np.nan
+            supertrend[i] = np.nan
+            trend[i] = np.nan
         else:
-            atr_14[i] = np.mean(tr[i-13:i+1])
+            upper_band[i] = (high_1d[i] + low_1d[i]) / 2 + 3 * atr[i]
+            lower_band[i] = (high_1d[i] + low_1d[i]) / 2 - 3 * atr[i]
+            
+            if i == 9:
+                supertrend[i] = upper_band[i]
+                trend[i] = -1  # start in downtrend
+            else:
+                if close_1d[i-1] > upper_band[i-1]:
+                    trend[i] = 1
+                elif close_1d[i-1] < lower_band[i-1]:
+                    trend[i] = -1
+                else:
+                    trend[i] = trend[i-1]
+                
+                if trend[i] == 1:
+                    supertrend[i] = max(lower_band[i], supertrend[i-1])
+                else:
+                    supertrend[i] = min(upper_band[i], supertrend[i-1])
     
-    # Align ATR to 6h timeframe
-    atr_14_aligned = align_htf_to_ltf(prices, df_d, atr_14)
+    # Align Supertrend to 4h timeframe
+    supertrend_aligned = align_htf_to_ltf(prices, df_1d, supertrend)
+    trend_aligned = align_htf_to_ltf(prices, df_1d, trend)
     
-    # Calculate ATR ratio (current vs 20-period average) for regime detection
-    atr_ma_20 = np.full_like(atr_14_aligned, np.nan)
-    for i in range(20, len(atr_14_aligned)):
-        if np.isnan(atr_14_aligned[i-20:i]).any():
-            atr_ma_20[i] = np.nan
-        else:
-            atr_ma_20[i] = np.mean(atr_14_aligned[i-20:i])
+    # 4h volume confirmation: volume > 2x 20-period EMA
+    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ema * 2.0)
     
-    atr_ratio = atr_14_aligned / atr_ma_20
-    # High volatility (trending) when ATR ratio > 1.2
-    # Low volatility (ranging) when ATR ratio < 0.8
-    vol_expanding = atr_ratio > 1.2
-    vol_contracting = atr_ratio < 0.8
+    # 4h ATR for volatility filter (period=14)
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], 
+                    abs(high[i] - close[i-1]), 
+                    abs(low[i] - close[i-1]))
+    
+    atr_4h = np.zeros(n)
+    atr_4h[:13] = np.nan
+    atr_4h[13] = np.mean(tr[0:14])
+    for i in range(14, n):
+        atr_4h[i] = (atr_4h[i-1] * 13 + tr[i]) / 14
+    
+    # ATR volatility filter: current ATR > 0.5 * ATR(20)
+    atr_ma = pd.Series(atr_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_filter = (~np.isnan(atr_4h)) & (~np.isnan(atr_ma)) & (atr_4h > 0.5 * atr_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for ATR calculations
+    start_idx = 50  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(pivot_w_aligned[i]) or np.isnan(r1_w_aligned[i]) or 
-            np.isnan(s1_w_aligned[i]) or np.isnan(r2_w_aligned[i]) or
-            np.isnan(s2_w_aligned[i]) or np.isnan(atr_ratio[i])):
+        if (np.isnan(supertrend_aligned[i]) or np.isnan(trend_aligned[i]) or
+            np.isnan(atr_4h[i]) or np.isnan(atr_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Expanding volatility: trend following breakouts
-            if vol_expanding[i]:
-                if close[i] > r1_w_aligned[i]:
-                    signals[i] = 0.25
-                    position = 1
-                elif close[i] < s1_w_aligned[i]:
-                    signals[i] = -0.25
-                    position = -1
-            # Contracting volatility: mean reversion at wider levels
-            elif vol_contracting[i]:
-                if close[i] > r2_w_aligned[i]:
-                    signals[i] = -0.20
-                    position = -1
-                elif close[i] < s2_w_aligned[i]:
-                    signals[i] = 0.20
-                    position = 1
+            # Long entry: uptrend + volume confirmation + volatility filter
+            if trend_aligned[i] == 1 and vol_confirm[i] and vol_filter[i]:
+                signals[i] = 0.25
+                position = 1
+            # Short entry: downtrend + volume confirmation + volatility filter
+            elif trend_aligned[i] == -1 and vol_confirm[i] and vol_filter[i]:
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Long exit: volatility contraction and price at S1, or volatility expansion below pivot
-            if vol_contracting[i] and close[i] < s1_w_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            elif vol_expanding[i] and close[i] < pivot_w_aligned[i]:
+            # Long exit: trend turns down OR volatility drops
+            if trend_aligned[i] == -1 or not vol_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: volatility contraction and price at R1, or volatility expansion above pivot
-            if vol_contracting[i] and close[i] > r1_w_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            elif vol_expanding[i] and close[i] > pivot_w_aligned[i]:
+            # Short exit: trend turns up OR volatility drops
+            if trend_aligned[i] == 1 or not vol_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
