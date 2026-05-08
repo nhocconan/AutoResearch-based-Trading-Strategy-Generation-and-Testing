@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R1/S1 breakout with 1-day EMA34 trend filter and volume spike.
-# Uses proven price channel (Camarilla) breakouts with trend alignment and volume confirmation.
+# Hypothesis: 1d weekly Donchian breakout with weekly trend filter and volume confirmation.
+# Uses weekly Donchian channels (20-period) for breakout signals, aligned with weekly trend (price > weekly EMA20).
+# Volume confirmation requires current volume > 1.5x 20-period average.
 # Designed to work in both bull and bear markets by requiring trend alignment and volume confirmation.
-# Target: 20-50 trades/year to minimize fee drag.
+# Target: 10-25 trades/year to minimize fee drift on daily timeframe.
 
-name = "4h_Camarilla_R1S1_Breakout_12hEMA34_Trend_Volume"
-timeframe = "4h"
+name = "1d_Donchian_Breakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,64 +23,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h trend: EMA34
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # Weekly trend: EMA20
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # 12h high-low range for Camarilla calculation
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Weekly high-low for Donchian calculation (based on previous weekly candle)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Camarilla levels (based on previous 12h candle)
-    typical_price = (high_12h + low_12h + close_12h) / 3.0
-    range_12h = high_12h - low_12h
-    R4 = typical_price + 1.1 * range_12h / 2
-    R3 = typical_price + 1.1 * range_12h / 4
-    R2 = typical_price + 1.1 * range_12h / 6
-    R1 = typical_price + 1.1 * range_12h / 12
-    S1 = typical_price - 1.1 * range_12h / 12
-    S2 = typical_price - 1.1 * range_12h / 6
-    S3 = typical_price - 1.1 * range_12h / 4
-    S4 = typical_price - 1.1 * range_12h / 2
+    # Donchian channels (20-period high/low of weekly data)
+    # Using rolling window on weekly high/low
+    dh_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    dl_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    # Align Camarilla levels to 4h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_12h, R1)
-    R2_aligned = align_htf_to_ltf(prices, df_12h, R2)
-    S1_aligned = align_htf_to_ltf(prices, df_12h, S1)
-    S2_aligned = align_htf_to_ltf(prices, df_12h, S2)
+    # Align Donchian levels to daily timeframe
+    dh_20_aligned = align_htf_to_ltf(prices, df_1w, dh_20)
+    dl_20_aligned = align_htf_to_ltf(prices, df_1w, dl_20)
     
-    # Volume spike: current volume > 2.0x 20-period average
+    # Volume spike: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma20)
+    volume_spike = volume > (1.5 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(R1_aligned[i]) or 
-            np.isnan(R2_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(S2_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(dh_20_aligned[i]) or 
+            np.isnan(dl_20_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above R1 + uptrend (price > 12h EMA34) + volume spike
-            long_cond = (close[i] > R1_aligned[i]) and \
-                        (close[i] > ema_34_12h_aligned[i]) and \
+            # Long: break above weekly Donchian high + uptrend (price > weekly EMA20) + volume spike
+            long_cond = (close[i] > dh_20_aligned[i]) and \
+                        (close[i] > ema_20_1w_aligned[i]) and \
                         volume_spike[i]
-            # Short: break below S1 + downtrend (price < 12h EMA34) + volume spike
-            short_cond = (close[i] < S1_aligned[i]) and \
-                         (close[i] < ema_34_12h_aligned[i]) and \
+            # Short: break below weekly Donchian low + downtrend (price < weekly EMA20) + volume spike
+            short_cond = (close[i] < dl_20_aligned[i]) and \
+                         (close[i] < ema_20_1w_aligned[i]) and \
                          volume_spike[i]
             
             if long_cond:
@@ -89,15 +80,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: close below S1 (mean reversion to support)
-            if close[i] < S1_aligned[i]:
+            # Long exit: close below weekly Donchian low (mean reversion)
+            if close[i] < dl_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: close above R1 (mean reversion to resistance)
-            if close[i] > R1_aligned[i]:
+            # Short exit: close above weekly Donchian high (mean reversion)
+            if close[i] > dh_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
