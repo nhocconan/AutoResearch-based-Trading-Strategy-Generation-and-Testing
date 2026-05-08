@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour ADX + Directional Movement with 12-hour Supertrend filter and volume confirmation
-# Long when ADX > 25 + +DI > -DI + price > 12h Supertrend + volume spike
-# Short when ADX > 25 + -DI > +DI + price < 12h Supertrend + volume spike
-# ADX filters weak trends, reducing whipsaw in ranging markets
-# Supertrend provides dynamic support/resistance from higher timeframe
-# Volume spike confirms institutional participation
-# Targets 50-150 total trades over 4 years (12-37/year) to avoid fee drag
+# Hypothesis: 4-hour Camarilla Pivot Level Touch with 1-day Volume Confirmation and 1-day Trend Filter
+# Long when price touches S1/S2 pivot levels + daily EMA(34) uptrend + daily volume spike
+# Short when price touches R1/R2 pivot levels + daily EMA(34) downtrend + daily volume spike
+# Camarilla levels provide clear support/resistance from prior day's range
+# Volume spike confirms institutional participation in the reversal/trend
+# Trend filter ensures we trade with higher timeframe momentum
+# Targets 20-50 total trades per year to minimize fee drag
 
-name = "6h_ADX_Supertrend_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_Pivot_Touch_DailyTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,75 +25,42 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data once for Supertrend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 10:
+    # Get daily data once for pivot levels, trend filter, and volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 12h Supertrend (ATR=10, mult=3.0)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate daily EMA(34) for trend filter
+    daily_close = df_1d['close'].values
+    ema34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # True Range and ATR for 12h
-    tr1 = np.abs(high_12h[1:] - low_12h[1:])
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
-    tr_12h = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_12h = np.concatenate([[np.nan], tr_12h])  # align with close_12h
+    # Calculate daily volume average for volume confirmation
+    daily_volume = df_1d['volume'].values
+    vol_avg_1d = pd.Series(daily_volume).rolling(window=20, min_periods=20).mean().values
+    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
-    atr_12h = pd.Series(tr_12h).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Calculate Camarilla pivot levels from previous day's range
+    # Standard Camarilla: H4 = C + ((H-L) * 1.5), L4 = C - ((H-L) * 1.5)
+    # We use S1, S2 for longs and R1, R2 for shorts
+    # S1 = C - ((H-L) * 1.125), S2 = C - ((H-L) * 1.25)
+    # R1 = C + ((H-L) * 1.125), R2 = C + ((H-L) * 1.25)
     
-    # Supertrend calculation
-    hl2_12h = (high_12h + low_12h) / 2
-    upper_12h = hl2_12h + (3.0 * atr_12h)
-    lower_12h = hl2_12h - (3.0 * atr_12h)
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    supertrend_12h = np.full_like(close_12h, np.nan)
-    direction_12h = np.full_like(close_12h, 1)  # 1 for uptrend, -1 for downtrend
+    # Calculate pivot levels
+    s1 = prev_close - ((prev_high - prev_low) * 1.125)
+    s2 = prev_close - ((prev_high - prev_low) * 1.25)
+    r1 = prev_close + ((prev_high - prev_low) * 1.125)
+    r2 = prev_close + ((prev_high - prev_low) * 1.25)
     
-    for i in range(1, len(close_12h)):
-        if np.isnan(supertrend_12h[i-1]):
-            supertrend_12h[i] = lower_12h[i]
-            direction_12h[i] = 1
-        else:
-            if close_12h[i] > supertrend_12h[i-1]:
-                supertrend_12h[i] = max(lower_12h[i], supertrend_12h[i-1])
-                direction_12h[i] = 1
-            else:
-                supertrend_12h[i] = min(upper_12h[i], supertrend_12h[i-1])
-                direction_12h[i] = -1
-    
-    supertrend_12h_val = supertrend_12h * direction_12h  # positive for uptrend, negative for downtrend
-    supertrend_12h_signal = direction_12h  # 1 = uptrend, -1 = downtrend
-    supertrend_12h_aligned = align_htf_to_ltf(prices, df_12h, supertrend_12h_signal)
-    
-    # Calculate ADX, +DI, -DI (14-period)
-    # True Range
-    tr1 = np.abs(high[1:] - low[1:])
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
-    
-    # Directional Movement
-    up_move = high[1:] - high[:-1]
-    down_move = low[:-1] - low[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    
-    # Smoothed values
-    atr_6h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_6h
-    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_6h
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Volume spike: current volume > 2.0 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # Align pivot levels to 4h timeframe
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -102,38 +69,51 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(adx[i]) or np.isnan(plus_di[i]) or np.isnan(minus_di[i]) or 
-            np.isnan(supertrend_12h_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_avg_1d_aligned[i]) or
+            np.isnan(s1_aligned[i]) or np.isnan(s2_aligned[i]) or
+            np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        adx_val = adx[i]
-        plus_di_val = plus_di[i]
-        minus_di_val = minus_di[i]
-        supertrend_dir = supertrend_12h_aligned[i]
-        vol_spike = volume_spike[i]
+        ema34_val = ema34_1d_aligned[i]
+        vol_avg_val = vol_avg_1d_aligned[i]
+        s1_val = s1_aligned[i]
+        s2_val = s2_aligned[i]
+        r1_val = r1_aligned[i]
+        r2_val = r2_aligned[i]
+        
+        # Volume spike: current daily volume > 1.5 * 20-day average
+        daily_vol_idx = i // 96  # 96 4h bars in a day (24*60/15)
+        # We need to get the actual daily volume value for today
+        # Since we're on 4h timeframe, we check if current 4h bar's time corresponds to a new day
+        # Instead, we use the aligned daily volume average which is already mapped to each 4h bar
+        vol_spike = volume[i] > (1.5 * vol_avg_val) if not np.isnan(vol_avg_val) else False
         
         if position == 0:
-            # Enter long: ADX > 25 + +DI > -DI + 12h uptrend + volume spike
-            if adx_val > 25 and plus_di_val > minus_di_val and supertrend_dir > 0 and vol_spike:
+            # Enter long: price touches S1 or S2 + daily uptrend + volume spike
+            if ((low[i] <= s1_val and close[i] > s1_val) or 
+                (low[i] <= s2_val and close[i] > s2_val)) and \
+               close[i] > ema34_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: ADX > 25 + -DI > +DI + 12h downtrend + volume spike
-            elif adx_val > 25 and minus_di_val > plus_di_val and supertrend_dir < 0 and vol_spike:
+            # Enter short: price touches R1 or R2 + daily downtrend + volume spike
+            elif ((high[i] >= r1_val and close[i] < r1_val) or 
+                  (high[i] >= r2_val and close[i] < r2_val)) and \
+                 close[i] < ema34_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: ADX < 20 OR trend reversal
-            if adx_val < 20 or plus_di_val < minus_di_val:
+            # Exit long: price touches R1 or daily trend turns down
+            if high[i] >= r1_val or close[i] < ema34_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: ADX < 20 OR trend reversal
-            if adx_val < 20 or minus_di_val < plus_di_val:
+            # Exit short: price touches S1 or daily trend turns up
+            if low[i] <= s1_val or close[i] > ema34_val:
                 signals[i] = 0.0
                 position = 0
             else:
