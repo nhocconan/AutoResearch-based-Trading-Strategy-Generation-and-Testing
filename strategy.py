@@ -3,15 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h TRIX momentum with 1d volume spike filter and 1d trend filter (EMA34)
-# Long when TRIX crosses above zero + volume > 1.5x 20-day average + close > daily EMA34
-# Short when TRIX crosses below zero + volume > 1.5x 20-day average + close < daily EMA34
-# Exit when TRIX crosses back through zero
-# TRIX (triple exponential smoothing) filters noise and catches momentum shifts
-# Volume spike confirms institutional interest; EMA34 filter ensures trend alignment
+# Hypothesis: 4h Donchian(20) breakout with 1d trend filter (EMA34) and volume confirmation (volume > 1.5x 20-period MA)
+# Long when price breaks above upper band + price > daily EMA34 + volume > 1.5x 20-period average volume
+# Short when price breaks below lower band + price < daily EMA34 + volume > 1.5x 20-period average volume
+# Exit when price returns to middle band (mean of upper and lower)
 # Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag
 
-name = "4h_TRIX_Momentum_1dEMA34_VolumeSpike"
+name = "4h_Donchian_Breakout_1dEMA34_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -33,24 +31,22 @@ def generate_signals(prices):
     # Calculate daily EMA34 for trend filter
     ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate 20-day average volume for volume spike filter
-    vol_ma_20 = df_1d['volume'].rolling(window=20, min_periods=20).mean().values
+    # Calculate daily 20-period average volume for volume filter
+    vol_ma_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
     
     # Align daily indicators to 4h timeframe
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
-    # Calculate TRIX on 4h close: triple EMA of close, then % change
-    # EMA1 = EMA(close, 12)
-    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
-    # EMA2 = EMA(EMA1, 12)
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    # EMA3 = EMA(EMA2, 12)
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
-    # TRIX = (EMA3 - prev EMA3) / prev EMA3 * 100
-    trix = np.zeros_like(close)
-    trix[1:] = (ema3[1:] - ema3[:-1]) / ema3[:-1] * 100
-    # First value remains 0 (no previous)
+    # Calculate Donchian channels (20-period)
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    middle = np.full(n, np.nan)
+    
+    for i in range(20, n):
+        upper[i] = np.max(high[i-20:i])
+        lower[i] = np.min(low[i-20:i])
+        middle[i] = (upper[i] + lower[i]) / 2
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -59,7 +55,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # warmup for indicators
+    start_idx = 35  # warmup for Donchian (20) + EMA34 (34)
     
     for i in range(start_idx, n):
         # Skip if outside trading session
@@ -70,14 +66,14 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or np.isnan(trix[i]):
+        if np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or \
+           np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(middle[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume filter: current daily volume > 1.5x 20-day average
-        # Find the most recent completed daily bar
+        # Find the most recent completed daily bar for volume filter
         idx_1d = 0
         while idx_1d < len(df_1d) and df_1d.iloc[idx_1d]['open_time'] <= prices.iloc[i]['open_time']:
             idx_1d += 1
@@ -87,12 +83,12 @@ def generate_signals(prices):
             vol_filter = False
         else:
             vol_1d_current = df_1d.iloc[idx_1d]['volume']
-            vol_filter = vol_1d_current > 1.5 * vol_ma_20_aligned[i] if not pd.isnan(vol_ma_20_aligned[i]) else False
+            vol_filter = vol_1d_current > 1.5 * vol_ma_20_aligned[i] if not np.isnan(vol_ma_20_aligned[i]) else False
         
         if position == 0:
-            # Look for entry: TRIX crossover + volume + trend
-            long_condition = trix[i] > 0 and trix[i-1] <= 0 and vol_filter and close[i] > ema_34_aligned[i]
-            short_condition = trix[i] < 0 and trix[i-1] >= 0 and vol_filter and close[i] < ema_34_aligned[i]
+            # Look for entry: Donchian breakout + trend + volume
+            long_condition = close[i] > upper[i] and close[i] > ema_34_aligned[i] and vol_filter
+            short_condition = close[i] < lower[i] and close[i] < ema_34_aligned[i] and vol_filter
             
             if long_condition:
                 signals[i] = 0.25
@@ -101,15 +97,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: TRIX crosses back below zero
-            if trix[i] < 0 and trix[i-1] >= 0:
+            # Exit long: price returns to middle band
+            if close[i] <= middle[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: TRIX crosses back above zero
-            if trix[i] > 0 and trix[i-1] <= 0:
+            # Exit short: price returns to middle band
+            if close[i] >= middle[i]:
                 signals[i] = 0.0
                 position = 0
             else:
