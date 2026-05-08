@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_KAMA_Reverse_EMA200_Trend_Filter"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,68 +17,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # KAMA direction on 4h
-    close_s = pd.Series(close)
-    change = abs(close_s.diff(10))
-    volatility = close_s.diff(1).abs().rolling(window=10).sum()
-    er = change / volatility.replace(0, 1e-10)
-    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    kama_up = kama > np.roll(kama, 1)
-    kama_down = kama < np.roll(kama, 1)
-    
-    # EMA200 trend filter from 1d
+    # Get 1d data once for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
+    # 1d EMA34 trend filter
     close_1d = df_1d['close'].values
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    trend_1d = (close_1d > ema200_1d).astype(float)
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_1d = (close_1d > ema34_1d).astype(float)
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # Volume filter: above 1.5x 20-period average
+    # Get 1d data once for Camarilla pivot levels (using previous day's OHLC)
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Previous day's OHLC for Camarilla calculation (R3/S3 levels)
+    prev_high = np.roll(df_1d['high'].values, 1)
+    prev_low = np.roll(df_1d['low'].values, 1)
+    prev_close = np.roll(df_1d['close'].values, 1)
+    prev_high[0] = df_1d['high'].values[0]
+    prev_low[0] = df_1d['low'].values[0]
+    prev_close[0] = df_1d['close'].values[0]
+    
+    # Camarilla pivot levels calculation (R3 and S3)
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_val = prev_high - prev_low
+    r3 = pivot + (range_val * 1.1 / 2)  # R3 level
+    s3 = pivot - (range_val * 1.1 / 2)  # S3 level
+    
+    # Align Camarilla levels to 12h timeframe
+    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Volume spike detection: current volume > 2.0 * 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (vol_ma20 * 1.5)
+    vol_spike = volume > (vol_ma20 * 2.0)
+    
+    # Price distance filter: require breakout to be at least 0.3% above/below level
+    price_above_r3 = close > r3_12h * 1.003
+    price_below_s3 = close < s3_12h * 0.997
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = 20  # warmup for volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(kama[i]) or np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ma20[i]):
+        # Skip if any critical data is NaN
+        if (np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long when KAMA turns up in uptrend with volume
-            if kama_up[i] and trend_1d_aligned[i] > 0.5 and vol_filter[i]:
+            # Long entry: price breaks above R3 with volume spike and 1d uptrend
+            long_cond = (price_above_r3[i] and vol_spike[i] and trend_1d_aligned[i] > 0.5)
+            
+            # Short entry: price breaks below S3 with volume spike and 1d downtrend
+            short_cond = (price_below_s3[i] and vol_spike[i] and trend_1d_aligned[i] < 0.5)
+            
+            if long_cond:
                 signals[i] = 0.25
                 position = 1
-            # Short when KAMA turns down in downtrend with volume
-            elif kama_down[i] and trend_1d_aligned[i] < 0.5 and vol_filter[i]:
+            elif short_cond:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long when KAMA turns down or trend fails
-            if kama_down[i] or trend_1d_aligned[i] < 0.5:
+            # Long exit: price reverses back below R3 (mean reversion)
+            if close[i] < r3_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short when KAMA turns up or trend fails
-            if kama_up[i] or trend_1d_aligned[i] > 0.5:
+            # Short exit: price reverses back above S3 (mean reversion)
+            if close[i] > s3_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
+
+# Hypothesis: Camarilla R3/S3 breakout on 12h timeframe with volume confirmation (2x 20-period MA) and 1d EMA34 trend filter.
+# Uses tighter volume confirmation and 0.3% price distance filter to reduce false breakouts.
+# Target: 20-40 trades/year to avoid fee drag while maintaining edge in both bull and bear markets.
+# Focus on BTC/ETH as primary targets with multi-timeframe alignment (1d trend + 12h execution).
