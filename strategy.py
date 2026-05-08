@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ADX_Alligator_Trend"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,74 +17,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for ADX trend filter
+    # Daily data for trend filter (1d EMA34)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # ADX calculation (14-period)
-    def calculate_adx(high, low, close, period=14):
-        plus_dm = np.zeros(len(high))
-        minus_dm = np.zeros(len(high))
-        tr = np.zeros(len(high))
-        
-        for i in range(1, len(high)):
-            high_diff = high[i] - high[i-1]
-            low_diff = low[i-1] - low[i]
-            
-            plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
-            minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
-            
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        atr = np.zeros(len(high))
-        atr[period-1] = np.mean(tr[:period])
-        for i in range(period, len(high)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        
-        plus_di = np.zeros(len(high))
-        minus_di = np.zeros(len(high))
-        for i in range(period, len(high)):
-            plus_di[i] = 100 * (plus_dm[i] / atr[i]) if atr[i] != 0 else 0
-            minus_di[i] = 100 * (minus_dm[i] / atr[i]) if atr[i] != 0 else 0
-        
-        dx = np.zeros(len(high))
-        for i in range(period, len(high)):
-            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i]) if (plus_di[i] + minus_di[i]) != 0 else 0
-        
-        adx = np.zeros(len(high))
-        adx[2*period-1] = np.mean(dx[period:2*period])
-        for i in range(2*period, len(high)):
-            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx
+    # Daily data for Camarilla levels
+    close_1d_vals = df_1d['close'].values
+    high_1d_vals = df_1d['high'].values
+    low_1d_vals = df_1d['low'].values
     
-    adx_14 = calculate_adx(high_1d, low_1d, close_1d, 14)
+    # Calculate Camarilla levels from previous day
+    R3 = np.zeros(len(close_1d_vals))
+    S3 = np.zeros(len(close_1d_vals))
     
-    # Williams Alligator (13,8,5 SMAs with 8,5,3 offsets)
-    def calculate_alligator(high, low, close):
-        # Jaw: 13-period SMA, 8 bars offset
-        jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values
-        # Teeth: 8-period SMA, 5 bars offset
-        teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values
-        # Lips: 5-period SMA, 3 bars offset
-        lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
-        return jaw, teeth, lips
+    for i in range(1, len(close_1d_vals)):
+        high_prev = high_1d_vals[i-1]
+        low_prev = low_1d_vals[i-1]
+        close_prev = close_1d_vals[i-1]
+        range_val = high_prev - low_prev
+        
+        C = close_prev + (range_val * 1.1 / 6)
+        R3[i] = C + (range_val * 1.1 / 2)
+        S3[i] = C - (range_val * 1.1 / 2)
     
-    jaw_1d, teeth_1d, lips_1d = calculate_alligator(high_1d, low_1d, close_1d)
+    # Align Camarilla levels to 4h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
-    # Align to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips_1d)
-    
-    # 6h momentum: price > 20-period EMA
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Volume spike: current volume > 1.8x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.8 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -93,26 +60,23 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(adx_aligned[i]) or np.isnan(jaw_aligned[i]) or 
-            np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or 
-            np.isnan(ema_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(R3_aligned[i]) or 
+            np.isnan(S3_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: ADX > 25 (strong trend), Alligator aligned (lips > teeth > jaw), price above EMA20
-            long_cond = (adx_aligned[i] > 25 and 
-                        lips_aligned[i] > teeth_aligned[i] and 
-                        teeth_aligned[i] > jaw_aligned[i] and
-                        close[i] > ema_20[i])
+            # Long: price breaks above R3, daily uptrend, volume spike
+            long_cond = (close[i] > R3_aligned[i] and 
+                        ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and
+                        volume_spike[i])
             
-            # Short: ADX > 25 (strong trend), Alligator aligned (jaw > teeth > lips), price below EMA20
-            short_cond = (adx_aligned[i] > 25 and 
-                         jaw_aligned[i] > teeth_aligned[i] and 
-                         teeth_aligned[i] > lips_aligned[i] and
-                         close[i] < ema_20[i])
+            # Short: price breaks below S3, daily downtrend, volume spike
+            short_cond = (close[i] < S3_aligned[i] and 
+                         ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and
+                         volume_spike[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -121,15 +85,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Alligator reverses (lips < teeth) or ADX weakens (< 20)
-            if lips_aligned[i] < teeth_aligned[i] or adx_aligned[i] < 20:
+            # Long exit: price crosses below S3
+            if close[i] < S3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Alligator reverses (jaw < teeth) or ADX weakens (< 20)
-            if jaw_aligned[i] < teeth_aligned[i] or adx_aligned[i] < 20:
+            # Short exit: price crosses above R3
+            if close[i] > R3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
