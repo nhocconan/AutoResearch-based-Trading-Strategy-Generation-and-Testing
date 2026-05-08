@@ -1,23 +1,17 @@
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+# 12h_KAMA_RSI_Chop_MeanReversion_v2
+# KAMA trend direction + RSI mean reversion + chop regime filter
+# Long when KAMA rising + RSI < 40 + chop > 61.8 (range)
+# Short when KAMA falling + RSI > 60 + chop > 61.8 (range)
+# Uses 1d trend filter to avoid counter-trend trades
+# Designed for 12h timeframe: targets 15-35 trades/year to avoid fee drag
 
-# Hypothesis: 6-hour Elder Ray (Bull/Bear Power) with 1-day trend filter and volume confirmation
-# Long when Bull Power > 0 (close > EMA13) + daily EMA(50) uptrend + volume spike
-# Short when Bear Power < 0 (close < EMA13) + daily EMA(50) downtrend + volume spike
-# Elder Ray measures bull/bear strength relative to EMA, effective in trending and ranging markets
-# Daily trend filter ensures alignment with higher timeframe momentum
-# Volume spike confirms institutional participation
-# Targets 50-150 total trades over 4 years (12-37/year) to avoid fee drag
-
-name = "6h_ElderRay_DailyTrend_Volume"
-timeframe = "6h"
+name = "12h_KAMA_RSI_Chop_MeanReversion_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -35,55 +29,78 @@ def generate_signals(prices):
     ema50_1d = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate EMA(13) for Elder Ray (6x timeframe: 6h * 13 = 78h ≈ 3.25 days)
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # KAMA calculation (12-period ER, 2-30 SC)
+    close_s = pd.Series(close)
+    change = abs(close_s - close_s.shift(10))
+    volatility = abs(close_s.diff()).rolling(window=10).sum()
+    er = change / volatility.replace(0, np.nan)
+    sc = (er * (0.3 - 0.06) + 0.06) ** 2
+    kama = [np.nan] * len(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        if np.isnan(sc.iloc[i]) or sc.iloc[i] == 0:
+            kama[i] = kama[i-1]
+        else:
+            kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
+    kama = np.array(kama)
     
-    # Elder Ray components
-    bull_power = high - ema13  # Bull Power: high - EMA13
-    bear_power = low - ema13   # Bear Power: low - EMA13
+    # RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
     
-    # Volume spike: current volume > 2.0 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # Choppiness Index(14)
+    atr = pd.Series(np.maximum(high - low, np.maximum(abs(high - close_s.shift()), abs(low - close_s.shift()))))
+    tr14 = atr.rolling(window=14, min_periods=14).sum()
+    hh14 = pd.Series(high).rolling(window=14, min_periods=14).max()
+    ll14 = pd.Series(low).rolling(window=14, min_periods=14).min()
+    chop = 100 * np.log10(tr14 / (hh14 - ll14)) / np.log10(14)
+    chop = chop.fillna(50).values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # warmup for calculations
+    start_idx = 50  # warmup
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(kama[i]) or 
+            np.isnan(rsi[i]) or np.isnan(chop[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         ema50_1d_val = ema50_1d_aligned[i]
-        bull = bull_power[i]
-        bear = bear_power[i]
-        vol_spike = volume_spike[i]
+        kama_now = kama[i]
+        kama_prev = kama[i-1]
+        rsi_val = rsi[i]
+        chop_val = chop[i]
         
         if position == 0:
-            # Enter long: Bull Power > 0 + daily uptrend + volume spike
-            if bull > 0 and close[i] > ema50_1d_val and vol_spike:
+            # Enter long: KAMA rising + RSI oversold + choppy market
+            if kama_now > kama_prev and rsi_val < 40 and chop_val > 61.8:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Bear Power < 0 + daily downtrend + volume spike
-            elif bear < 0 and close[i] < ema50_1d_val and vol_spike:
+            # Enter short: KAMA falling + RSI overbought + choppy market
+            elif kama_now < kama_prev and rsi_val > 60 and chop_val > 61.8:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Bull Power <= 0 OR daily trend turns down
-            if bull <= 0 or close[i] < ema50_1d_val:
+            # Exit long: KAMA falling OR RSI overbought
+            if kama_now <= kama_prev or rsi_val > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Bear Power >= 0 OR daily trend turns up
-            if bear >= 0 or close[i] > ema50_1d_val:
+            # Exit short: KAMA rising OR RSI oversold
+            if kama_now >= kama_prev or rsi_val < 30:
                 signals[i] = 0.0
                 position = 0
             else:
