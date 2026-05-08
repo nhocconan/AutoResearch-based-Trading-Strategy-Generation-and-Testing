@@ -3,17 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-hour RSI(14) with 4-hour trend filter and volume confirmation
-# Long when RSI < 30 (oversold) and 4-hour EMA(50) uptrend and volume spike
-# Short when RSI > 70 (overbought) and 4-hour EMA(50) downtrend and volume spike
-# Uses 4-hour EMA for trend direction (aligned properly), 1-hour RSI for entry timing
-# Volume spike confirms momentum; avoids counter-trend entries in chop
-# Session filter (08-20 UTC) reduces noise trades outside active hours
-# Targets 60-150 total trades over 4 years (15-37/year) to balance opportunity and cost
-# Works in bull via mean reversion in uptrend, works in bear via mean reversion in downtrend
+# Hypothesis: 6-hour SuperTrend with weekly trend filter and volume confirmation
+# Long when price > SuperTrend and weekly EMA(34) uptrend and volume spike
+# Short when price < SuperTrend and weekly EMA(34) downtrend and volume spike
+# SuperTrend adapts to volatility; weekly EMA provides higher timeframe bias
+# Volume spike confirms institutional participation; avoids choppy false breakouts
+# Targets 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost
 
-name = "1h_RSI_4hTrend_Volume_Session"
-timeframe = "1h"
+name = "6h_SuperTrend_WeeklyTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,32 +24,68 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4-hour data once for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get weekly data once for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate 4-hour EMA(50) for trend filter
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Calculate weekly EMA(34) for trend filter
+    weekly_close = df_1w['close'].values
+    ema34_1w = pd.Series(weekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Calculate 1-hour RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate SuperTrend
+    # ATR calculation
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    
+    # Basic upper and lower bands
+    basic_upper = (high + low) / 2 + 3.0 * atr
+    basic_lower = (high + low) / 2 - 3.0 * atr
+    
+    # Final upper and lower bands
+    final_upper = np.zeros(n)
+    final_lower = np.zeros(n)
+    final_upper[0] = basic_upper[0]
+    final_lower[0] = basic_lower[0]
+    
+    for i in range(1, n):
+        if basic_upper[i] < final_upper[i-1] or close[i-1] > final_upper[i-1]:
+            final_upper[i] = basic_upper[i]
+        else:
+            final_upper[i] = final_upper[i-1]
+            
+        if basic_lower[i] > final_lower[i-1] or close[i-1] < final_lower[i-1]:
+            final_lower[i] = basic_lower[i]
+        else:
+            final_lower[i] = final_lower[i-1]
+    
+    # SuperTrend
+    supertrend = np.zeros(n)
+    direction = np.ones(n)  # 1 for uptrend, -1 for downtrend
+    supertrend[0] = final_lower[0]
+    direction[0] = 1
+    
+    for i in range(1, n):
+        if close[i] > final_upper[i-1]:
+            direction[i] = 1
+        elif close[i] < final_lower[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+        
+        if direction[i] == 1:
+            supertrend[i] = final_lower[i]
+        else:
+            supertrend[i] = final_upper[i]
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -59,40 +93,41 @@ def generate_signals(prices):
     start_idx = 100  # warmup for calculations
     
     for i in range(start_idx, n):
-        # Skip if any critical data is NaN or outside session
-        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(vol_ma[i]) or not in_session[i]):
+        # Skip if any critical data is NaN
+        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(supertrend[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema50_4h_val = ema50_4h_aligned[i]
-        rsi_val = rsi[i]
+        ema34_1w_val = ema34_1w_aligned[i]
+        price = close[i]
+        st = supertrend[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: RSI < 30 (oversold) and 4h uptrend and volume spike
-            if rsi_val < 30 and close[i] > ema50_4h_val and vol_spike:
-                signals[i] = 0.20
+            # Enter long: price > SuperTrend and weekly uptrend and volume spike
+            if price > st and ema34_1w_val > ema34_1w_aligned[i-1] and vol_spike:
+                signals[i] = 0.25
                 position = 1
-            # Enter short: RSI > 70 (overbought) and 4h downtrend and volume spike
-            elif rsi_val > 70 and close[i] < ema50_4h_val and vol_spike:
-                signals[i] = -0.20
+            # Enter short: price < SuperTrend and weekly downtrend and volume spike
+            elif price < st and ema34_1w_val < ema34_1w_aligned[i-1] and vol_spike:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: RSI > 50 (mean reversion complete) or 4h trend turns down
-            if rsi_val > 50 or close[i] < ema50_4h_val:
+            # Exit long: price < SuperTrend or weekly trend turns down
+            if price < st or ema34_1w_val < ema34_1w_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: RSI < 50 (mean reversion complete) or 4h trend turns up
-            if rsi_val < 50 or close[i] > ema50_4h_val:
+            # Exit short: price > SuperTrend or weekly trend turns up
+            if price > st or ema34_1w_val > ema34_1w_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
