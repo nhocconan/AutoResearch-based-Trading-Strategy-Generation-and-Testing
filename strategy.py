@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with daily trend filter and volume spike
-# Uses Donchian(20) on 12h for breakout signals, filtered by daily EMA50 trend and volume spike (>2x 20-period average).
-# Designed to capture trends in both bull and bear markets with strict entry conditions to limit trades.
-# Target: 12-37 trades/year (50-150 total over 4 years). Uses price channel breakouts for clear structure.
+# Hypothesis: 12h Choppiness Index regime filter + 12h Donchian breakout with volume confirmation
+# Uses Choppiness Index (14) to filter trending vs ranging markets, Donchian(20) breakout for entry,
+# and volume spike (>2x 20-period average) for confirmation. Designed to capture trends in both
+# bull and bear markets with strict entry conditions to limit trades to 12-37/year.
 
-name = "12h_Donchian20_DailyTrend_VolumeSpike"
+name = "12h_ChopFilter_Donchian20_VolumeSpike"
 timeframe = "12h"
 leverage = 1.0
 
@@ -22,18 +22,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for EMA50 trend
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 50:
-        return np.zeros(n)
+    # Calculate 12h Choppiness Index (14)
+    atr = np.full(n, np.nan)
+    if n >= 14:
+        tr = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])))
+        tr = np.concatenate([[np.nan], tr])
+        atr_sum = np.full(n, np.nan)
+        if n >= 14:
+            atr_sum[13] = np.nansum(tr[1:15])
+            for i in range(14, n):
+                atr_sum[i] = atr_sum[i-1] - tr[i-13] + tr[i]
+            atr[13:] = atr_sum[13:] / 14
     
-    # Calculate daily EMA50 for trend
-    close_daily = df_daily['close'].values
-    ema50_daily = np.full(len(close_daily), np.nan)
-    if len(close_daily) >= 50:
-        ema50_daily[49] = np.mean(close_daily[:50])
-        for i in range(50, len(close_daily)):
-            ema50_daily[i] = (close_daily[i] * 2 + ema50_daily[i-1] * 48) / 50
+    max_high = np.full(n, np.nan)
+    min_low = np.full(n, np.nan)
+    if n >= 14:
+        for i in range(14, n):
+            max_high[i] = np.max(high[i-13:i+1])
+            min_low[i] = np.min(low[i-13:i+1])
+    
+    chop = np.full(n, np.nan)
+    if n >= 14:
+        for i in range(14, n):
+            if not np.isnan(atr[i]) and not np.isnan(max_high[i]) and not np.isnan(min_low[i]):
+                if max_high[i] > min_low[i]:
+                    chop[i] = 100 * np.log10(atr[i] / (max_high[i] - min_low[i])) / np.log10(14)
     
     # Calculate 12h Donchian(20)
     donchian_high = np.full(n, np.nan)
@@ -49,9 +62,6 @@ def generate_signals(prices):
         for i in range(20, n):
             vol_avg_20[i] = np.mean(volume[i-20:i])
     
-    # Align daily EMA50 to 12h timeframe
-    ema50_daily_aligned = align_htf_to_ltf(prices, df_daily, ema50_daily)
-    
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
@@ -59,7 +69,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # warmup for indicators
+    start_idx = max(20, 14)  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if outside trading session
@@ -70,54 +80,35 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(ema50_daily_aligned[i]) or np.isnan(vol_avg_20[i]):
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(chop[i]) or np.isnan(vol_avg_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Find current daily bar's close
-        close_daily_current = np.nan
-        if not np.isnan(ema50_daily_aligned[i]):
-            idx_daily = 0
-            while idx_daily < len(df_daily) and df_daily.iloc[idx_daily]['open_time'] <= prices.iloc[i]['open_time']:
-                idx_daily += 1
-            idx_daily -= 1  # last completed daily bar
-            
-            if idx_daily >= 0:
-                close_daily_current = df_daily.iloc[idx_daily]['close']
-        
-        if np.isnan(close_daily_current):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Check conditions
-        price_above_ema = close_daily_current > ema50_daily_aligned[i]
-        price_below_ema = close_daily_current < ema50_daily_aligned[i]
-        vol_spike = volume[i] > 2.0 * vol_avg_20[i]
+        # Chop regime: < 38.2 = trending, > 61.8 = ranging
+        is_trending = chop[i] < 38.2
+        is_ranging = chop[i] > 61.8
         
         if position == 0:
-            # Look for entry: Donchian breakout with trend and volume confirmation
-            if close[i] > donchian_high[i] and price_above_ema and vol_spike:
-                signals[i] = 0.25
-                position = 1
-            elif close[i] < donchian_low[i] and price_below_ema and vol_spike:
-                signals[i] = -0.25
-                position = -1
+            # Look for entry: Donchian breakout in trending market with volume confirmation
+            if is_trending:
+                if close[i] > donchian_high[i] and volume[i] > 2.0 * vol_avg_20[i]:
+                    signals[i] = 0.25
+                    position = 1
+                elif close[i] < donchian_low[i] and volume[i] > 2.0 * vol_avg_20[i]:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Exit long: price retrace to Donchian midpoint or trend fails or volume drops
-            midpoint = (donchian_high[i] + donchian_low[i]) / 2
-            if close[i] < midpoint or not price_above_ema or not vol_spike:
+            # Exit long: trend ends or price retrace to Donchian midpoint
+            if not is_trending or close[i] < (donchian_high[i] + donchian_low[i]) / 2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price retrace to Donchian midpoint or trend fails or volume drops
-            midpoint = (donchian_high[i] + donchian_low[i]) / 2
-            if close[i] > midpoint or not price_below_ema or not vol_spike:
+            # Exit short: trend ends or price retrace to Donchian midpoint
+            if not is_trending or close[i] > (donchian_high[i] + donchian_low[i]) / 2:
                 signals[i] = 0.0
                 position = 0
             else:
