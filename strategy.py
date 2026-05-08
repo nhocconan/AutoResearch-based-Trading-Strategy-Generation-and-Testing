@@ -3,14 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d trend filter and volume spike
-# Uses 4h primary timeframe for better trade frequency control (target: 20-50/year)
-# Combines price breakout (Camarilla levels), trend filter (1d EMA34), and volume confirmation
-# Works in bull markets (breakouts continue) and bear markets (fades at pivot levels)
-# Conservative sizing (0.25) to manage drawdown during 2022-like crashes
-
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,7 +26,7 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels (R3, S3) using prior day's data
+    # Calculate Camarilla levels (R3, S3)
     H_prev = np.roll(high_1d, 1)
     L_prev = np.roll(low_1d, 1)
     C_prev = np.roll(close_1d, 1)
@@ -46,7 +40,7 @@ def generate_signals(prices):
     R3 = pivot + (range_hl * 1.1 / 4)
     S3 = pivot - (range_hl * 1.1 / 4)
     
-    # Align Camarilla levels to 4h timeframe (wait for daily bar close)
+    # Align Camarilla levels to 12h timeframe (wait for daily bar close)
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
