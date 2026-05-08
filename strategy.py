@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h price channel breakout with 1d volume surge confirmation and ADX trend filter.
-# Long when price breaks above 12h Donchian(10) high AND 1d volume > 2.0x 20-period average AND ADX(14) > 25.
-# Short when price breaks below 12h Donchian(10) low AND 1d volume > 2.0x 20-period average AND ADX(14) > 25.
-# Exit when price crosses back inside the Donchian channel.
-# Uses stricter volume threshold (2.0x) and shorter Donchian period (10) to reduce trade frequency.
-# Designed to work in both bull (trend continuation) and bear (trend reversal) markets via ADX filter.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d volume confirmation and ADX trend filter.
+# Long when price breaks above Camarilla R3 AND 1d volume > 1.3x 20-period average AND ADX(14) > 25.
+# Short when price breaks below Camarilla S3 AND 1d volume > 1.3x 20-period average AND ADX(14) > 25.
+# Exit when price crosses back inside the Camarilla (H4-L4) range.
+# Uses 4h timeframe as specified, with 1d volume and ADX for higher timeframe context.
+# Target: 75-200 total trades over 4 years (19-50/year) with controlled frequency to avoid fee drag.
 
-name = "12h_Donchian_10_1dVolumeSurge_ADX"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dVolume_ADX"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,23 +28,42 @@ def generate_signals(prices):
     if len(df_d) < 2:
         return np.zeros(n)
     
-    # Donchian(10) on 12h data for more sensitive breakouts
-    donchian_period = 10
-    upper_dc = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    lower_dc = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
-    
-    # Daily volume filter: current volume > 2.0x 20-period average (stricter threshold)
-    volume_d = df_d['volume'].values
-    vol_ma20_d = pd.Series(volume_d).rolling(window=20, min_periods=20).mean().values
-    volume_filter_d = volume_d > (2.0 * vol_ma20_d)
-    volume_filter = align_htf_to_ltf(prices, df_d, volume_filter_d)
-    
-    # Daily ADX(14) for trend strength
+    # Calculate Camarilla levels for each 4h bar using prior 1d OHLC
+    # We'll compute daily Camarilla levels first, then align to 4h
+    # Camarilla levels based on prior day's OHLC
+    open_d = df_d['open'].values
     high_d = df_d['high'].values
     low_d = df_d['low'].values
     close_d = df_d['close'].values
     
-    # True Range
+    # Typical price for Camarilla calculation
+    # Using (high + low + close) / 3 as pivot
+    typical_price = (high_d + low_d + close_d) / 3.0
+    range_d = high_d - low_d
+    
+    # Camarilla levels
+    # R4 = close + range * 1.1/2
+    # R3 = close + range * 1.1/4
+    # S3 = close - range * 1.1/4
+    # S4 = close - range * 1.1/2
+    r3_d = close_d + range_d * 1.1 / 4.0
+    s3_d = close_d - range_d * 1.1 / 4.0
+    h4_d = close_d + range_d * 1.1 / 6.0  # H4 level
+    l4_d = close_d - range_d * 1.1 / 6.0  # L4 level
+    
+    # Align Camarilla levels to 4h timeframe (using prior day's close)
+    r3 = align_htf_to_ltf(prices, df_d, r3_d)
+    s3 = align_htf_to_ltf(prices, df_d, s3_d)
+    h4 = align_htf_to_ltf(prices, df_d, h4_d)
+    l4 = align_htf_to_ltf(prices, df_d, l4_d)
+    
+    # Daily volume filter: current volume > 1.3x 20-period average
+    volume_d = df_d['volume'].values
+    vol_ma20_d = pd.Series(volume_d).rolling(window=20, min_periods=20).mean().values
+    volume_filter_d = volume_d > (1.3 * vol_ma20_d)
+    volume_filter = align_htf_to_ltf(prices, df_d, volume_filter_d)
+    
+    # Daily ADX(14) for trend strength
     tr1 = high_d - low_d
     tr2 = np.abs(high_d - np.roll(close_d, 1))
     tr3 = np.abs(low_d - np.roll(close_d, 1))
@@ -73,7 +92,7 @@ def generate_signals(prices):
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     adx[np.isnan(adx)] = 0
     
-    # Align ADX to 12h timeframe
+    # Align ADX to 4h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_d, adx)
     
     # Trend filter: ADX > 25
@@ -82,11 +101,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(donchian_period, 20)  # Sufficient warmup
+    start_idx = 20  # Need at least 20 days for volume MA and ADX
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(upper_dc[i]) or np.isnan(lower_dc[i]) or 
+        if (np.isnan(r3[i]) or np.isnan(s3[i]) or np.isnan(h4[i]) or np.isnan(l4[i]) or 
             np.isnan(volume_filter[i]) or np.isnan(trend_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -94,10 +113,10 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: price breaks above Donchian upper, volume surge, trending market
-            long_cond = (close[i] > upper_dc[i]) and volume_filter[i] and trend_filter[i]
-            # Short conditions: price breaks below Donchian lower, volume surge, trending market
-            short_cond = (close[i] < lower_dc[i]) and volume_filter[i] and trend_filter[i]
+            # Long conditions: price breaks above Camarilla R3, volume filter, trending market
+            long_cond = (close[i] > r3[i]) and volume_filter[i] and trend_filter[i]
+            # Short conditions: price breaks below Camarilla S3, volume filter, trending market
+            short_cond = (close[i] < s3[i]) and volume_filter[i] and trend_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -106,15 +125,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses back below Donchian lower
-            if close[i] < lower_dc[i]:
+            # Long exit: price crosses back below H4 level (or S3 for tighter stop)
+            if close[i] < h4[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses back above Donchian upper
-            if close[i] > upper_dc[i]:
+            # Short exit: price crosses back above L4 level (or R3 for tighter stop)
+            if close[i] > l4[i]:
                 signals[i] = 0.0
                 position = 0
             else:
