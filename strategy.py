@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume spike
-# Uses tighter R3/S3 levels (mean reversion targets) for higher probability entries.
-# 12h EMA50 ensures trend alignment. Volume spike >1.8 filters false breakouts.
-# Works in bull via breakouts, in bear via reversals at R3/S3.
-# Target: 25-35 trades/year to avoid fee drag. Discrete sizing 0.28.
-name = "4h_Camarilla_R3S3_Breakout_12hEMA50_Trend_VolumeSpike"
-timeframe = "4h"
+# Hypothesis: 1h momentum with 4h trend filter and volume confirmation
+# Uses 1h RSI(14) for momentum entry, 4h EMA(50) for trend direction, volume spike >1.5 for confirmation
+# Works in bull via trend continuation, in bear via pullbacks to EMA with momentum confirmation
+# Target: 20-30 trades/year to avoid fee drag. Discrete sizing 0.20.
+name = "1h_RSI_Momentum_4hEMA50_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,36 +21,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 trend filter
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Calculate 4h EMA50 trend filter
+    close_4h = df_4h['close'].values
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
-    # Get 1d data for Camarilla levels (previous day)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Calculate 1h RSI(14) for momentum
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate Camarilla levels from previous day
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    
-    # Align to 4h
-    prev_close_aligned = align_htf_to_ltf(prices, df_1d, prev_close)
-    prev_high_aligned = align_htf_to_ltf(prices, df_1d, prev_high)
-    prev_low_aligned = align_htf_to_ltf(prices, df_1d, prev_low)
-    
-    # Calculate Camarilla levels for current day
-    range_ = prev_high_aligned - prev_low_aligned
-    # Camarilla R3, S3 (wider bands for mean reversion)
-    r3 = prev_close_aligned + 1.1 * range_ * 1.1/2
-    s3 = prev_close_aligned - 1.1 * range_ * 1.1/2
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
     # Volume confirmation - 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -65,11 +53,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(60, 50)  # warmup period
+    start_idx = max(30, 20)  # warmup period
     
     for i in range(start_idx, n):
-        if (np.isnan(r3[i]) or np.isnan(s3[i]) or np.isnan(ema50_12h_aligned[i]) or 
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -82,31 +69,31 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long entry: break above R3 with trend alignment and volume spike
-            if (close[i] > r3[i] and 
-                close[i] > ema50_12h_aligned[i] and
-                vol_ratio[i] > 1.8):
-                signals[i] = 0.28
+            # Long entry: RSI > 55 (bullish momentum) + above 4h EMA50 + volume spike
+            if (rsi[i] > 55 and 
+                close[i] > ema50_4h_aligned[i] and
+                vol_ratio[i] > 1.5):
+                signals[i] = 0.20
                 position = 1
-            # Short entry: break below S3 with trend alignment and volume spike
-            elif (close[i] < s3[i] and 
-                  close[i] < ema50_12h_aligned[i] and
-                  vol_ratio[i] > 1.8):
-                signals[i] = -0.28
+            # Short entry: RSI < 45 (bearish momentum) + below 4h EMA50 + volume spike
+            elif (rsi[i] < 45 and 
+                  close[i] < ema50_4h_aligned[i] and
+                  vol_ratio[i] > 1.5):
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: break below S3 (mean reversion) OR trend fails
-            if close[i] < s3[i] or close[i] < ema50_12h_aligned[i]:
+            # Exit long: RSI < 40 (loss of momentum) OR price below 4h EMA50
+            if rsi[i] < 40 or close[i] < ema50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.28
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: break above R3 (mean reversion) OR trend fails
-            if close[i] > r3[i] or close[i] > ema50_12h_aligned[i]:
+            # Exit short: RSI > 60 (loss of bearish momentum) OR price above 4h EMA50
+            if rsi[i] > 60 or close[i] > ema50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.28
+                signals[i] = -0.20
     
     return signals
