@@ -3,19 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Donchian breakout with 4h trend filter, volume confirmation, and session filter (08-20 UTC).
-# Uses 4h EMA(50) for trend direction and 1h Donchian channels (20-period) for breakout signals.
-# Volume spike (>1.5x 20-period average) confirms breakout strength.
-# Designed for low trade frequency in both bull and bear markets by requiring multiple confluences.
-# Target: 60-150 total trades over 4 years = 15-37/year for 1h timeframe.
+# Hypothesis: 6h Donchian breakout with weekly pivot direction and volume confirmation
+# Uses weekly Camarilla pivots (from Monday open) to determine trend direction:
+# - Price above weekly R3: bullish bias (look for long breakouts)
+# - Price below weekly S3: bearish bias (look for short breakouts)
+# Entry: 6h Donchian(20) breakout in direction of weekly bias + volume spike (>2x 20-period avg)
+# Exit: opposite Donchian breakout or loss of weekly bias
+# Designed to capture strong trends with low frequency in both bull and bear markets.
+# Target: 50-150 total trades over 4 years = 12-37/year
 
-name = "1h_Donchian_4hTrend_Volume_Session"
-timeframe = "1h"
+name = "6h_Donchian_WeeklyPivot_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,76 +26,96 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data once for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get weekly data once (for Camarilla pivots)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
         return np.zeros(n)
     
-    # Calculate 4h EMA(50) for trend direction
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Calculate weekly Camarilla pivots from previous week's OHLC
+    # Based on weekly open, high, low, close
+    weekly_open = df_1w['open'].values
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Calculate 1h Donchian channels (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Camarilla levels: R3/S3 and R4/S4
+    # R3 = close + (high - low) * 1.1/2
+    # S3 = close - (high - low) * 1.1/2
+    # R4 = close + (high - low) * 1.1
+    # S4 = close - (high - low) * 1.1
+    rng = weekly_high - weekly_low
+    r3 = weekly_close + rng * 1.1 / 2.0
+    s3 = weekly_close - rng * 1.1 / 2.0
+    r4 = weekly_close + rng * 1.1
+    s4 = weekly_close - rng * 1.1
     
-    # Volume spike: current volume > 1.5 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    # Align weekly levels to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
     
-    # Session filter: 08-20 UTC (pre-compute for efficiency)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Calculate 6h Donchian channels (20-period)
+    # Upper band: highest high of last 20 periods
+    # Lower band: lowest low of last 20 periods
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    
+    # Volume spike: current volume > 2.0 * 20-period average
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for calculations
+    start_idx = 60  # warmup for calculations
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(high_roll[i]) or 
-            np.isnan(low_roll[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema50_4h_val = ema50_4h_aligned[i]
-        upper_channel = high_roll[i]
-        lower_channel = low_roll[i]
-        vol_spike = volume_spike[i]
-        in_session = session_filter[i]
+        # Determine weekly bias based on price relative to S3/R3
+        # Bullish bias: price > weekly R3
+        # Bearish bias: price < weekly S3
+        # Neutral: between S3 and R3 (no new entries)
+        bullish_bias = close[i] > r3_aligned[i]
+        bearish_bias = close[i] < s3_aligned[i]
         
         if position == 0:
-            # Enter long: price breaks above upper channel + uptrend + volume spike + session
-            if (close[i] > upper_channel and 
-                close[i] > ema50_4h_val and 
-                vol_spike and 
-                in_session):
-                signals[i] = 0.20
+            # Enter long: Donchian breakout up + bullish bias + volume spike
+            if (close[i] > donchian_high[i] and 
+                bullish_bias and 
+                volume_spike[i]):
+                signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below lower channel + downtrend + volume spike + session
-            elif (close[i] < lower_channel and 
-                  close[i] < ema50_4h_val and 
-                  vol_spike and 
-                  in_session):
-                signals[i] = -0.20
+            # Enter short: Donchian breakout down + bearish bias + volume spike
+            elif (close[i] < donchian_low[i] and 
+                  bearish_bias and 
+                  volume_spike[i]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below lower channel OR trend reverses
-            if (close[i] < lower_channel or close[i] < ema50_4h_val):
+            # Exit long: Donchian breakout down OR loss of bullish bias
+            if (close[i] < donchian_low[i] or not bullish_bias):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above upper channel OR trend reverses
-            if (close[i] > upper_channel or close[i] > ema50_4h_val):
+            # Exit short: Donchian breakout up OR loss of bearish bias
+            if (close[i] > donchian_high[i] or not bearish_bias):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
