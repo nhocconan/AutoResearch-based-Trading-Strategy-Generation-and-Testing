@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_TRIX_ZeroLine_Cross_1wTrend_Volume"
-timeframe = "1d"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,41 +17,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # TRIX calculation: EMA of EMA of EMA of log returns
-    def ema(arr, span):
-        return pd.Series(arr).ewm(span=span, adjust=False, min_periods=span).mean().values
-    
-    # Log returns
-    log_returns = np.diff(np.log(close), prepend=np.log(close[0]))
-    # Triple EMA
-    ema1 = ema(log_returns, 15)
-    ema2 = ema(ema1, 15)
-    ema3 = ema(ema2, 15)
-    trix = 100 * (ema3 / np.roll(ema3, 1) - 1)
-    trix[0] = 0  # First value has no previous
-    
-    # 1-week trend: EMA50 on weekly closes
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Calculate 12h trend: EMA50
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_50_1w = ema(close_1w, 50)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Volume spike: current volume > 2.0x 20-day average
+    # Calculate 1d Camarilla pivot levels (R1, S1)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    H_prev = np.roll(high_1d, 1)
+    L_prev = np.roll(low_1d, 1)
+    C_prev = np.roll(close_1d, 1)
+    H_prev[0] = np.nan
+    L_prev[0] = np.nan
+    C_prev[0] = np.nan
+    
+    pivot = (H_prev + L_prev + C_prev) / 3
+    range_hl = H_prev - L_prev
+    
+    R1 = pivot + (range_hl * 1.1 / 6)
+    S1 = pivot - (range_hl * 1.1 / 6)
+    
+    # Align Camarilla levels to 4h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    
+    # Volume spike: current volume > 1.8x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma20)
+    volume_spike = volume > (1.8 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Sufficient warmup for TRIX
+    start_idx = 50  # Sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(trix[i]) or np.isnan(trix[i-1]) or 
-            np.isnan(ema_50_1w_aligned[i]) or 
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(ema_50_12h_aligned[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -59,13 +73,13 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: TRIX crosses above zero + uptrend (price > 1w EMA50) + volume spike
-            long_cond = (trix[i-1] <= 0) and (trix[i] > 0) and \
-                        (close[i] > ema_50_1w_aligned[i]) and \
+            # Long: break above R1 + uptrend (price > 12h EMA50) + volume spike
+            long_cond = (close[i] > R1_aligned[i]) and \
+                        (close[i] > ema_50_12h_aligned[i]) and \
                         volume_spike[i]
-            # Short: TRIX crosses below zero + downtrend (price < 1w EMA50) + volume spike
-            short_cond = (trix[i-1] >= 0) and (trix[i] < 0) and \
-                         (close[i] < ema_50_1w_aligned[i]) and \
+            # Short: break below S1 + downtrend (price < 12h EMA50) + volume spike
+            short_cond = (close[i] < S1_aligned[i]) and \
+                         (close[i] < ema_50_12h_aligned[i]) and \
                          volume_spike[i]
             
             if long_cond:
@@ -75,15 +89,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: TRIX crosses below zero
-            if trix[i] < 0:
+            # Long exit: close below pivot (mean reversion to mean)
+            if close[i] < pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: TRIX crosses above zero
-            if trix[i] > 0:
+            # Short exit: close above pivot (mean reversion to mean)
+            if close[i] > pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
