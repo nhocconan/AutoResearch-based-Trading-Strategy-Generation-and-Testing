@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_WeeklyPivot_R1_S1_Breakout_WeeklyTrend_Volume"
+name = "12h_DailyPivot_R1_S1_Breakout_1wTrend_Volume"
 timeframe = "12h"
 leverage = 1.0
 
@@ -17,26 +17,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1w Pivot Points (R1, S1) once before loop
+    # Calculate 1d Pivot Points (R1, S1) once before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Classic pivot point calculation: P = (H+L+C)/3
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # R1 = 2*P - L, S1 = 2*P - H
+    r1_1d = 2 * pivot_1d - low_1d
+    s1_1d = 2 * pivot_1d - high_1d
+    
+    # Align Pivot levels to 12h timeframe (wait for daily bar close)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    
+    # Weekly EMA34 for trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 2:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    
-    # Classic pivot point calculation: P = (H+L+C)/3
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    # R1 = 2*P - L, S1 = 2*P - H
-    r1_1w = 2 * pivot_1w - low_1w
-    s1_1w = 2 * pivot_1w - high_1w
-    
-    # Align Pivot levels to 12h timeframe (wait for weekly bar close)
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    
-    # Weekly EMA34 for trend filter
     ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
@@ -51,7 +56,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or 
+        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
             np.isnan(ema_34_1w_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -60,11 +65,11 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: break above R1 + uptrend + volume spike
-            long_cond = (close[i] > r1_1w_aligned[i]) and \
+            long_cond = (close[i] > r1_1d_aligned[i]) and \
                         (close[i] > ema_34_1w_aligned[i]) and \
                         volume_spike[i]
             # Short: break below S1 + downtrend + volume spike
-            short_cond = (close[i] < s1_1w_aligned[i]) and \
+            short_cond = (close[i] < s1_1d_aligned[i]) and \
                          (close[i] < ema_34_1w_aligned[i]) and \
                          volume_spike[i]
             
@@ -76,14 +81,14 @@ def generate_signals(prices):
                 position = -1
         elif position == 1:
             # Long exit: close below S1 (mean reversion to support)
-            if close[i] < s1_1w_aligned[i]:
+            if close[i] < s1_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short exit: close above R1 (mean reversion to resistance)
-            if close[i] > r1_1w_aligned[i]:
+            if close[i] > r1_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
