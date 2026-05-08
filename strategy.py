@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_RSI_Pullback_MultiTrend_VolumeFilter"
-timeframe = "4h"
+name = "12h_Donchian20_Breakout_1wTrend_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,52 +17,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data once for RSI calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Get 1w data once for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 14-period RSI on daily closes
-    close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # 1w EMA100 trend filter
+    close_1w = df_1w['close'].values
+    ema100_1w = pd.Series(close_1w).ewm(span=100, adjust=False, min_periods=100).mean().values
+    trend_1w = (close_1w > ema100_1w).astype(float)
+    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
     
-    # Get 4h data for trend filters (EMA20 and EMA50)
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_ema20 = (close > ema20).astype(float)
-    trend_ema50 = (close > ema50).astype(float)
-    trend_combined = (trend_ema20 + trend_ema50) / 2.0  # Average of both trends
+    # Get 12h data once for Donchian calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
     
-    # Volume filter: current volume > 1.5 * 20-period average
+    # Donchian(20) channels on 12h timeframe
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    
+    # Upper band: highest high of last 20 bars
+    upper_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    # Lower band: lowest low of last 20 bars
+    lower_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    
+    # Align Donchian levels to 12h timeframe (no additional delay needed)
+    upper_aligned = align_htf_to_ltf(prices, df_12h, upper_12h)
+    lower_aligned = align_htf_to_ltf(prices, df_12h, lower_12h)
+    
+    # Volume filter: current volume > 2.0 * 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (vol_ma20 * 1.5)
+    vol_filter = volume > (vol_ma20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for EMA50 and RSI
+    start_idx = 20  # warmup for Donchian
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(trend_combined[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
+            np.isnan(trend_1w_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: RSI pullback from oversold (<30) with bullish alignment and volume
-            long_cond = (rsi_1d_aligned[i] < 30 and trend_combined[i] > 0.5 and vol_filter[i])
+            # Long entry: price breaks above upper band with volume filter and 1w uptrend
+            long_cond = (close[i] > upper_aligned[i] and vol_filter[i] and trend_1w_aligned[i] > 0.5)
             
-            # Short entry: RSI pullback from overbought (>70) with bearish alignment and volume
-            short_cond = (rsi_1d_aligned[i] > 70 and trend_combined[i] < 0.5 and vol_filter[i])
+            # Short entry: price breaks below lower band with volume filter and 1w downtrend
+            short_cond = (close[i] < lower_aligned[i] and vol_filter[i] and trend_1w_aligned[i] < 0.5)
             
             if long_cond:
                 signals[i] = 0.25
@@ -71,15 +78,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: RSI reaches overbought (>70) or trend turns bearish
-            if rsi_1d_aligned[i] > 70 or trend_combined[i] < 0.5:
+            # Long exit: price breaks below lower band (reversal signal)
+            if close[i] < lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI reaches oversold (<30) or trend turns bullish
-            if rsi_1d_aligned[i] < 30 or trend_combined[i] > 0.5:
+            # Short exit: price breaks above upper band (reversal signal)
+            if close[i] > upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -87,11 +94,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: RSI pullback strategy on 4h timeframe using daily RSI for overbought/oversold signals.
-# Uses dual EMA trend filter (20/50) for multi-timeframe alignment and volume confirmation.
-# Enters long when daily RSI < 30 (oversold) with bullish trend alignment and volume spike.
-# Enters short when daily RSI > 70 (overbought) with bearish trend alignment and volume spike.
-# Exits when RSI reverses or trend deteriorates. Designed to work in both bull and bear markets
-# by capturing mean-reversion moves within the prevailing trend. Discrete sizing (0.25) minimizes
-# churn. Target: 25-40 trades/year. Works in bull markets by buying pullbacks in uptrends and
-# in bear markets by selling rallies in downtrends.
+# Hypothesis: 12h Donchian(20) breakout strategy with volume filter and 1w EMA100 trend filter.
+# Uses 1w trend filter for multi-timeframe alignment to avoid counter-trend trades.
+# Donchian breakouts capture strong momentum moves in both bull and bear markets.
+# Volume filter (2x 20-period average) reduces false breakouts.
+# Designed for low trade frequency (target: 15-30 trades/year) to minimize fee drag.
+# Works in bull markets (trend-following breakouts) and bear markets (mean reversion from extremes).
