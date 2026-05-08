@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_Tight"
-timeframe = "4h"
+name = "6h_ElderRay_BullBearPower_1wTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,58 +17,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data once for trend filter and Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 1w data once for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # 1d EMA34 trend filter
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_1d = (close_1d > ema34_1d).astype(float)
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    # 1w EMA34 trend filter (using close)
+    close_1w = df_1w['close'].values
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_1w = (close_1w > ema34_1w).astype(float)
+    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
     
-    # Previous day's OHLC for Camarilla calculation (R3/S3 levels)
-    prev_high = np.roll(df_1d['high'].values, 1)
-    prev_low = np.roll(df_1d['low'].values, 1)
-    prev_close = np.roll(df_1d['close'].values, 1)
-    prev_high[0] = df_1d['high'].values[0]
-    prev_low[0] = df_1d['low'].values[0]
-    prev_close[0] = df_1d['close'].values[0]
+    # Elder Ray indicators on 6h data
+    # Bull Power = High - EMA13
+    # Bear Power = Low - EMA13
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    # Camarilla pivot levels calculation (R3 and S3)
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_val = prev_high - prev_low
-    r3 = pivot + (range_val * 1.1 / 2)  # R3 level
-    s3 = pivot - (range_val * 1.1 / 2)  # S3 level
-    
-    # Align Camarilla levels to 4h timeframe
-    r3_4h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_4h = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # Volume spike detection: current volume > 3.0 * 40-period average (more selective)
-    vol_ma40 = pd.Series(volume).rolling(window=40, min_periods=40).mean().values
-    vol_spike = volume > (vol_ma40 * 3.0)
+    # Volume spike detection: current volume > 2.5 * 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (vol_ma20 * 2.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # warmup for volume MA
+    start_idx = 20  # warmup for EMA13 and volume MA
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ma40[i])):
+        if (np.isnan(ema13[i]) or np.isnan(trend_1w_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: price breaks above R3 with volume spike and 1d uptrend
-            long_cond = (close[i] > r3_4h[i] and vol_spike[i] and trend_1d_aligned[i] > 0.5)
+            # Long entry: Bull Power > 0 (bullish momentum) with volume spike and 1w uptrend
+            long_cond = (bull_power[i] > 0 and vol_spike[i] and trend_1w_aligned[i] > 0.5)
             
-            # Short entry: price breaks below S3 with volume spike and 1d downtrend
-            short_cond = (close[i] < s3_4h[i] and vol_spike[i] and trend_1d_aligned[i] < 0.5)
+            # Short entry: Bear Power < 0 (bearish momentum) with volume spike and 1w downtrend
+            short_cond = (bear_power[i] < 0 and vol_spike[i] and trend_1w_aligned[i] < 0.5)
             
             if long_cond:
                 signals[i] = 0.25
@@ -77,15 +66,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below S3 (reversal signal)
-            if close[i] < s3_4h[i]:
+            # Long exit: Bear Power < 0 (momentum shifts bearish)
+            if bear_power[i] < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price reverses back above R3 (reversal signal)
-            if close[i] > r3_4h[i]:
+            # Short exit: Bull Power > 0 (momentum shifts bullish)
+            if bull_power[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -93,7 +82,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R3/S3 breakout strategy with volume spike confirmation and 1d EMA34 trend filter on 4h timeframe.
-# Uses tighter volume filter (3.0x 40-period MA) to reduce trades and avoid overtrading. Targets 15-25 trades/year.
-# Works in bull markets (trend-following breakouts) and bear markets (reversal breakouts from extreme levels). 
-# Uses discrete sizing (0.25) to minimize churn. Focus on BTC/ETH performance.
+# Hypothesis: Elder Ray (Bull/Bear Power) strategy with 1-week trend filter and volume spike confirmation on 6h timeframe.
+# Bull Power > 0 indicates bullish momentum (high > EMA13), Bear Power < 0 indicates bearish momentum (low < EMA13).
+# Volume spike confirms institutional participation. 1w trend filter ensures alignment with higher timeframe trend.
+# Works in both bull and bear markets by following the 1w trend direction with momentum confirmation.
+# Target: 15-25 trades/year (60-100 total over 4 years) to avoid excessive trading.
+# Uses discrete sizing (0.25) to minimize churn from frequent signal changes. Focus on BTC/ETH performance.
