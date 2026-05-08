@@ -3,20 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d trend filter and volume spike
-# Elder Ray calculates Bull Power (High - EMA) and Bear Power (Low - EMA)
-# Long when Bull Power > 0 and rising + price > 1d EMA200 + volume spike
-# Short when Bear Power < 0 and falling + price < 1d EMA200 + volume spike
-# Uses 13-period EMA for Elder Ray (standard) and 200-period EMA for 1d trend filter
-# Designed for low-frequency trades to work in both bull and bear markets via trend alignment
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA21 trend and volume spike
+# Uses proven Camarilla levels (R3/S3) for high-probability breakouts in both bull/bear markets.
+# Requires alignment with 1d EMA21 trend and volume spike to filter false signals.
+# Designed for low-frequency trades (<150 total) to minimize fee drag.
 
-name = "6h_ElderRay_1dEMA200_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_1dEMA21_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 210:  # Need enough data for 200 EMA
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,68 +22,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 13-period EMA for Elder Ray calculation
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Bull Power = High - EMA13
-    bull_power = high - ema13
-    # Bear Power = Low - EMA13
-    bear_power = low - ema13
-    
-    # Get 1d data for trend filter (EMA200)
+    # Get 1d data for EMA21 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    ema21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema21_1d)
     
-    # Volume spike (2.0x 20-period EMA)
+    # Get 1d data for Camarilla pivot levels (same timeframe)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Previous day's values for today's Camarilla levels
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
+    
+    # Camarilla calculations for R3/S3 (inner bands)
+    R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    
+    # Align Camarilla levels to 4h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    
+    # Volume spike (1.8x 20-period EMA)
     vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 2.0)
+    vol_spike = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # Ensure EMA200 has enough data
+    start_idx = 50  # Ensure EMA21 has enough data
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(ema200_1d_aligned[i]) or np.isnan(vol_spike[i])):
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
+            np.isnan(ema21_1d_aligned[i]) or np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: Bull Power > 0 AND rising + price > 1d EMA200 + volume spike
-            if (bull_power[i] > 0 and 
-                bull_power[i] > bull_power[i-1] and 
-                close[i] > ema200_1d_aligned[i] and 
-                vol_spike[i]):
+            # Enter long: price breaks above R3 with 1d uptrend and volume spike
+            if (close[i] > R3_aligned[i] and 
+                close[i] > ema21_1d_aligned[i] and vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Bear Power < 0 AND falling + price < 1d EMA200 + volume spike
-            elif (bear_power[i] < 0 and 
-                  bear_power[i] < bear_power[i-1] and 
-                  close[i] < ema200_1d_aligned[i] and 
-                  vol_spike[i]):
+            # Enter short: price breaks below S3 with 1d downtrend and volume spike
+            elif (close[i] < S3_aligned[i] and 
+                  close[i] < ema21_1d_aligned[i] and vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Bull Power <= 0 or price < 1d EMA200
-            if (bull_power[i] <= 0 or 
-                close[i] < ema200_1d_aligned[i]):
+            # Exit long: price breaks below S3 or trend fails
+            if (close[i] < S3_aligned[i] or 
+                close[i] < ema21_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Bear Power >= 0 or price > 1d EMA200
-            if (bear_power[i] >= 0 or 
-                close[i] > ema200_1d_aligned[i]):
+            # Exit short: price breaks above R3 or trend fails
+            if (close[i] > R3_aligned[i] or 
+                close[i] > ema21_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
