@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ElderRay_Swing_Double_EMA"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_Dyn"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,42 +17,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate EMA13 and EMA48 for 6h trend
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema_48 = pd.Series(close).ewm(span=48, adjust=False, min_periods=48).mean().values
-    
-    # Get 1d data for Elder Ray calculations
+    # Calculate 1d EMA34 trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate 1d Camarilla pivot levels (R1, S1)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate EMA13 on 1d close for Elder Ray
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    H_prev = np.roll(high_1d, 1)
+    L_prev = np.roll(low_1d, 1)
+    C_prev = np.roll(close_1d, 1)
+    H_prev[0] = np.nan
+    L_prev[0] = np.nan
+    C_prev[0] = np.nan
     
-    # Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high_1d - ema13_1d
-    bear_power = low_1d - ema13_1d
+    pivot = (H_prev + L_prev + C_prev) / 3
+    range_hl = H_prev - L_prev
     
-    # Align Elder Ray components to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    R1 = pivot + (range_hl * 1.1 / 6)
+    S1 = pivot - (range_hl * 1.1 / 6)
     
-    # Swing detection: swing high when bear power turns negative after positive
-    # swing low when bull power turns negative after positive
-    swing_high = (bull_power_aligned > 0) & (np.roll(bull_power_aligned, 1) <= 0)
-    swing_low = (bear_power_aligned < 0) & (np.roll(bear_power_aligned, 1) >= 0)
+    # Align Camarilla levels to 4h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
-    # Handle first element
-    swing_high[0] = False
-    swing_low[0] = False
-    
-    # Volume filter: current volume > 1.5x 20-period average
+    # Volume spike: current volume > 2.0x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma20)
+    volume_spike = volume > (2.0 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -61,39 +60,43 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(ema_13[i]) or np.isnan(ema_48[i]) or 
-            np.isnan(volume_filter[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: bull power turning positive (swing low) + EMA13 > EMA48 + volume filter
-            long_cond = swing_low[i] and (ema_13[i] > ema_48[i]) and volume_filter[i]
-            # Short: bear power turning negative (swing high) + EMA13 < EMA48 + volume filter
-            short_cond = swing_high[i] and (ema_13[i] < ema_48[i]) and volume_filter[i]
+            # Long: break above R1 + uptrend (price > 1d EMA34) + volume spike
+            long_cond = (close[i] > R1_aligned[i]) and \
+                        (close[i] > ema_34_1d_aligned[i]) and \
+                        volume_spike[i]
+            # Short: break below S1 + downtrend (price < 1d EMA34) + volume spike
+            short_cond = (close[i] < S1_aligned[i]) and \
+                         (close[i] < ema_34_1d_aligned[i]) and \
+                         volume_spike[i]
             
             if long_cond:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             elif short_cond:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Long exit: bear power turning negative or EMA13 < EMA48
-            if bear_power_aligned[i] < 0 or ema_13[i] < ema_48[i]:
+            # Long exit: close below pivot (mean reversion to mean)
+            if close[i] < pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Short exit: bull power turning positive or EMA13 > EMA48
-            if bull_power_aligned[i] > 0 or ema_13[i] > ema_48[i]:
+            # Short exit: close above pivot (mean reversion to mean)
+            if close[i] > pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
