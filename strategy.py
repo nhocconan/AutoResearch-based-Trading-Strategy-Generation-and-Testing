@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_WeeklyBreakout_Volume_Trend_v3"
-timeframe = "1d"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Confirm"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,33 +17,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter and breakout levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get daily data for trend filter and volatility
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly Donchian channels (20-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Get 12h data for price action
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
     
-    # Upper band: highest high of last 20 weekly bars
-    upper_1w = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    # Lower band: lowest low of last 20 weekly bars
-    lower_1w = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # Calculate daily EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Weekly EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate daily ATR for volatility filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
+    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Align weekly indicators to daily timeframe
-    upper_1w_aligned = align_htf_to_ltf(prices, df_1w, upper_1w)
-    lower_1w_aligned = align_htf_to_ltf(prices, df_1w, lower_1w)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 12h volatility (ATR) for position sizing adjustment
+    tr1_12h = high - low
+    tr2_12h = np.abs(high - np.roll(close, 1))
+    tr3_12h = np.abs(low - np.roll(close, 1))
+    tr_12h = np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))
+    tr_12h[0] = tr1_12h[0]
+    atr_12h = pd.Series(tr_12h).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Volume confirmation - 20-day average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1.0)
-    vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
+    # Calculate 12h average volume for confirmation
+    vol_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_12h = volume / np.where(vol_ma_12h > 0, vol_ma_12h, 1.0)
+    vol_ratio_12h = np.nan_to_num(vol_ratio_12h, nan=1.0)
     
     signals = np.zeros(n)
     position = 0
@@ -51,36 +63,39 @@ def generate_signals(prices):
     start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(upper_1w_aligned[i]) or np.isnan(lower_1w_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or
+            np.isnan(vol_ratio_12h[i]) or np.isnan(atr_12h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Volatility filter: only trade when volatility is above average
+        vol_filter = atr_12h[i] > (atr_12h[i-20:i].mean() * 0.8) if i >= 20 else True
+        
         if position == 0:
-            # Long: price breaks above weekly upper band + above weekly EMA50 + volume confirmation
-            if (close[i] > upper_1w_aligned[i] and 
-                close[i] > ema_50_1w_aligned[i] and
-                vol_ratio[i] > 1.5):
+            # Long: price above daily EMA34 + volume confirmation + volatility filter
+            if (close[i] > ema_34_1d_aligned[i] and 
+                vol_ratio_12h[i] > 1.3 and
+                vol_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly lower band + below weekly EMA50 + volume confirmation
-            elif (close[i] < lower_1w_aligned[i] and 
-                  close[i] < ema_50_1w_aligned[i] and
-                  vol_ratio[i] > 1.5):
+            # Short: price below daily EMA34 + volume confirmation + volatility filter
+            elif (close[i] < ema_34_1d_aligned[i] and 
+                  vol_ratio_12h[i] > 1.3 and
+                  vol_filter):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price falls back below weekly lower band OR below weekly EMA50
-            if close[i] < lower_1w_aligned[i] or close[i] < ema_50_1w_aligned[i]:
+            # Exit long: price crosses below daily EMA34
+            if close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price rises back above weekly upper band OR above weekly EMA50
-            if close[i] > upper_1w_aligned[i] or close[i] > ema_50_1w_aligned[i]:
+            # Exit short: price crosses above daily EMA34
+            if close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
