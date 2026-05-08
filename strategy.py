@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI(14) momentum with 4h EMA(50) trend filter and volume confirmation
-# Long when RSI > 50 crossing up + price > 4h EMA50 + volume > 1.5x 20-period EMA of volume
-# Short when RSI < 50 crossing down + price < 4h EMA50 + volume > 1.5x 20-period EMA of volume
-# Uses 4h for trend direction and volume confirmation, 1h only for entry timing via RSI momentum
-# Designed for 1h timeframe to target 20-40 trades/year (80-160 total over 4 years)
-# RSI momentum captures short-term swings while higher timeframe filters prevent counter-trend trades
+# Hypothesis: 12h Williams Alligator (13,8,13) with 1d EMA34 trend filter and volume spike confirmation
+# Long when Jaw > Teeth > Lips (bullish alignment) + price > 1d EMA34 + volume > 2x 20-period EMA of volume
+# Short when Jaw < Teeth < Lips (bearish alignment) + price < 1d EMA34 + volume > 2x 20-period EMA of volume
+# Williams Alligator identifies trend alignment; 1d EMA34 filters counter-trend trades; volume spike confirms strength
+# Designed for 12h timeframe to target 15-25 trades/year (60-100 total over 4 years)
+# Alligator's smooth lines reduce whipsaw vs. single MA crossovers
 
-name = "1h_RSI_Momentum_4hEMA50_Volume"
-timeframe = "1h"
+name = "12h_Williams_Alligator_1dEMA34_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,30 +24,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend and volume filters
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1d data for trend and volume filters
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 4h EMA50 for trend filter
-    ema_50 = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1d EMA34 for trend filter
+    ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate 4h volume EMA (20-period) for volume filter
-    vol_ema_20 = pd.Series(df_4h['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate 1d volume EMA (20-period) for volume filter
+    vol_ema_20 = pd.Series(df_1d['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align 4h indicators to 1h timeframe
-    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50)
-    vol_ema_20_aligned = align_htf_to_ltf(prices, df_4h, vol_ema_20)
+    # Align 1d indicators to 12h timeframe
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    vol_ema_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ema_20)
     
-    # Calculate 1h RSI(14) for momentum signals
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Calculate Williams Alligator on 12h timeframe
+    # Jaw: 13-period SMMA of median price, shifted 8 bars forward
+    # Teeth: 8-period SMMA of median price, shifted 5 bars forward
+    # Lips: 5-period SMMA of median price, shifted 3 bars forward
+    median_price = (high + low) / 2
+    
+    def smma(arr, period):
+        """Smoothed Moving Average (SMMA)"""
+        result = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return result
+        # First value is SMA
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: SMMA = (prev_SMMA * (period-1) + current) / period
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
+    
+    jaw_raw = smma(median_price, 13)
+    teeth_raw = smma(median_price, 8)
+    lips_raw = smma(median_price, 5)
+    
+    # Shift forward: Jaw +8, Teeth +5, Lips +3
+    jaw = np.full_like(jaw_raw, np.nan)
+    teeth = np.full_like(teeth_raw, np.nan)
+    lips = np.full_like(lips_raw, np.nan)
+    
+    if len(jaw) > 8:
+        jaw[8:] = jaw_raw[:-8]
+    if len(teeth) > 5:
+        teeth[5:] = teeth_raw[:-5]
+    if len(lips) > 3:
+        lips[3:] = lips_raw[:-3]
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -56,7 +80,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for EMA50
+    start_idx = 13  # warmup for Alligator (max shift is 8)
     
     for i in range(start_idx, n):
         # Skip if outside trading session
@@ -67,55 +91,54 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if np.isnan(ema_50_aligned[i]) or np.isnan(vol_ema_20_aligned[i]) or \
-           np.isnan(rsi_values[i]) or np.isnan(rsi_values[i-1]):
+        if np.isnan(ema_34_aligned[i]) or np.isnan(vol_ema_20_aligned[i]) or \
+           np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume filter: current 4h volume > 1.5x 20-period EMA
-        # Find the most recent completed 4h bar
-        idx_4h = 0
-        while idx_4h < len(df_4h) and df_4h.iloc[idx_4h]['open_time'] <= prices.iloc[i]['open_time']:
-            idx_4h += 1
-        idx_4h -= 1  # last completed 4h bar
+        # Volume filter: current 1d volume > 2x 20-period EMA
+        # Find the most recent completed 1d bar
+        idx_1d = 0
+        while idx_1d < len(df_1d) and df_1d.iloc[idx_1d]['open_time'] <= prices.iloc[i]['open_time']:
+            idx_1d += 1
+        idx_1d -= 1  # last completed 1d bar
         
-        if idx_4h < 0:
+        if idx_1d < 0:
             vol_filter = False
         else:
-            vol_4h_current = df_4h.iloc[idx_4h]['volume']
-            vol_filter = vol_4h_current > 1.5 * vol_ema_20_aligned[i]
+            vol_1d_current = df_1d.iloc[idx_1d]['volume']
+            vol_filter = vol_1d_current > 2.0 * vol_ema_20_aligned[i]
+        
+        # Alligator alignment conditions
+        bullish_alignment = jaw[i] > teeth[i] and teeth[i] > lips[i]
+        bearish_alignment = jaw[i] < teeth[i] and teeth[i] < lips[i]
         
         if position == 0:
-            # Look for entry: RSI crossing 50 + trend + volume
-            rsi_cross_up = rsi_values[i-1] < 50 and rsi_values[i] >= 50
-            rsi_cross_down = rsi_values[i-1] > 50 and rsi_values[i] <= 50
-            
-            long_condition = rsi_cross_up and close[i] > ema_50_aligned[i] and vol_filter
-            short_condition = rsi_cross_down and close[i] < ema_50_aligned[i] and vol_filter
+            # Look for entry: Alligator alignment + trend + volume
+            long_condition = bullish_alignment and close[i] > ema_34_aligned[i] and vol_filter
+            short_condition = bearish_alignment and close[i] < ema_34_aligned[i] and vol_filter
             
             if long_condition:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
             elif short_condition:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: RSI crosses below 50 or price crosses below EMA50
-            rsi_cross_down = rsi_values[i-1] >= 50 and rsi_values[i] < 50
-            if rsi_cross_down or close[i] < ema_50_aligned[i]:
+            # Exit long: bearish alignment or price crosses below EMA34
+            if bearish_alignment or close[i] < ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: RSI crosses above 50 or price crosses above EMA50
-            rsi_cross_up = rsi_values[i-1] <= 50 and rsi_values[i] > 50
-            if rsi_cross_up or close[i] > ema_50_aligned[i]:
+            # Exit short: bullish alignment or price crosses above EMA34
+            if bullish_alignment or close[i] > ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
