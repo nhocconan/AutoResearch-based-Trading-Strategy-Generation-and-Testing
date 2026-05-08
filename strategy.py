@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Trend_1dVolatilityFilter"
-timeframe = "4h"
+name = "12h_Camarilla_Pivot_R3S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,69 +17,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for volatility filter
+    # Get daily data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate ATR on daily data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Camarilla pivot levels for previous day
+    high_prev = df_1d['high'].shift(1).values
+    low_prev = df_1d['low'].shift(1).values
+    close_prev = df_1d['close'].shift(1).values
     
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[0.0], tr])  # align length
+    pivot = (high_prev + low_prev + close_prev) / 3
+    range_val = high_prev - low_prev
     
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Camarilla R3 and S3 levels
+    r3 = close_prev + (range_val * 1.1 / 2)
+    s3 = close_prev - (range_val * 1.1 / 2)
     
-    # Normalize ATR by price to get relative volatility
-    atr_pct = atr / close_1d
-    atr_pct_ma = pd.Series(atr_pct).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = atr_pct / atr_pct_ma  # current volatility vs average
+    # Align pivot levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Daily EMA34 for trend filter
+    ema34_1d = pd.Series(close_prev).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Volume spike detection on daily
+    vol_ma = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = df_1d['volume'].values / vol_ma
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
-    
     vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio)
-    
-    # Calculate EMA on 4h data for trend
-    ema_fast = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
-    ema_slow = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Ensure enough data for indicators
+    start_idx = 50  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]) or 
-            np.isnan(vol_ratio_aligned[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema34_aligned[i]) or np.isnan(vol_ratio_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Fast EMA above slow EMA + volatility above average
-            if (ema_fast[i] > ema_slow[i] and vol_ratio_aligned[i] > 1.1):
+            # Long: Price breaks above R3 + daily uptrend + volume spike
+            if (close[i] > r3_aligned[i] and 
+                close[i] > ema34_aligned[i] and 
+                vol_ratio_aligned[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: Fast EMA below slow EMA + volatility above average
-            elif (ema_fast[i] < ema_slow[i] and vol_ratio_aligned[i] > 1.1):
+            # Short: Price breaks below S3 + daily downtrend + volume spike
+            elif (close[i] < s3_aligned[i] and 
+                  close[i] < ema34_aligned[i] and 
+                  vol_ratio_aligned[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Fast EMA crosses below slow EMA
-            if ema_fast[i] < ema_slow[i]:
+            # Long exit: Price breaks below S3 or trend reverses
+            if (close[i] < s3_aligned[i] or close[i] < ema34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Fast EMA crosses above slow EMA
-            if ema_fast[i] > ema_slow[i]:
+            # Short exit: Price breaks above R3 or trend reverses
+            if (close[i] > r3_aligned[i] or close[i] > ema34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
