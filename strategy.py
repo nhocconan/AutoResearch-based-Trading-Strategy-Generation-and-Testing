@@ -1,8 +1,4 @@
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
+# Your task is to write a new strategy.py that follows the rules and learning from this experiment.
 # Hypothesis: 12h Donchian channel breakout with 1d volume confirmation and ADX trend filter.
 # Uses 12h price breaking above/below 20-period Donchian channels for entry.
 # Confirmed by 1d volume > 1.5x 20-period average and 1d ADX > 25 for trend strength.
@@ -10,6 +6,10 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # In ranging markets (ADX < 20), uses mean reversion at Donchian mid-point.
 # Designed to work in both bull and bear markets by adapting to trend strength.
 # Target: 15-35 trades/year (60-140 total over 4 years).
+
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 name = "12h_DonchianBreakout_1dVolume_ADX"
 timeframe = "12h"
