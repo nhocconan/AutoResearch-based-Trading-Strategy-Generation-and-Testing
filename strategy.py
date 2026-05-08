@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_3ATR_Squeeze_Breakout_1dTrend_VolumeFilter"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,18 +19,18 @@ def generate_signals(prices):
     
     # 1d data for trend filter and volatility
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # 1d EMA100 for trend filter
-    ema100_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
-    ema100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema100_1d)
+    # 1d EMA200 for trend filter
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # 1d ATR for volatility filter
+    # 1d ATR for volatility filter (optional, can be removed if not needed)
     tr = np.maximum(high_1d - low_1d, 
                     np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), 
                                np.abs(low_1d - np.roll(close_1d, 1))))
@@ -38,50 +38,52 @@ def generate_signals(prices):
     atr14_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     atr14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
     
-    # 6h ATR for squeeze detection
-    tr_6h = np.maximum(high - low, 
-                       np.maximum(np.abs(high - np.roll(close, 1)), 
-                                  np.abs(low - np.roll(close, 1))))
-    tr_6h[0] = high[0] - low[0]
-    atr10_6h = pd.Series(tr_6h).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # 1d data for Camarilla pivot (previous day)
+    # Use previous day's data to avoid look-ahead
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d[0] = high_1d[0]  # first bar uses current
+    prev_low_1d[0] = low_1d[0]
+    prev_close_1d[0] = close_1d[0]
     
-    # Squeeze condition: 6h ATR < 3 * 1d ATR (low volatility breakout setup)
-    squeeze = atr10_6h < (3 * atr14_1d_aligned)
+    pivot = (prev_high_1d + prev_low_1d + prev_close_1d) / 3.0
+    range_1d = prev_high_1d - prev_low_1d
+    r3 = pivot + (range_1d * 1.1 / 4)   # R3 level
+    s3 = pivot - (range_1d * 1.1 / 4)   # S3 level
     
-    # Donchian breakout levels (20-period)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Volume filter: 6h volume > 30-period average
-    vol_ma30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Volume filter: 12h volume > 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # warmup for EMA100 and Donchian
+    start_idx = 200  # warmup for EMA200
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(ema100_1d_aligned[i]) or np.isnan(atr14_1d_aligned[i]) or
-            np.isnan(vol_ma30[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema200_1d_aligned[i]) or
+            np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Breakout above Donchian high during low volatility squeeze, with uptrend filter
-            long_cond = (close[i] > donch_high[i] and 
-                        squeeze[i] and
-                        close[i] > ema100_1d_aligned[i] and
-                        volume[i] > vol_ma30[i])
+            # Long: Price breaks above R3, price above 1d EMA200, volume above average
+            long_cond = (close[i] > r3_aligned[i] and 
+                        close[i] > ema200_1d_aligned[i] and
+                        volume[i] > vol_ma20[i])
             
-            # Short: Breakdown below Donchian low during low volatility squeeze, with downtrend filter
-            short_cond = (close[i] < donch_low[i] and 
-                         squeeze[i] and
-                         close[i] < ema100_1d_aligned[i] and
-                         volume[i] > vol_ma30[i])
+            # Short: Price breaks below S3, price below 1d EMA200, volume above average
+            short_cond = (close[i] < s3_aligned[i] and 
+                         close[i] < ema200_1d_aligned[i] and
+                         volume[i] > vol_ma20[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -90,15 +92,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Price closes below Donchian low OR trend reverses
-            if close[i] < donch_low[i] or close[i] < ema100_1d_aligned[i]:
+            # Long exit: Price closes below S3 OR price crosses below 1d EMA200
+            if close[i] < s3_aligned[i] or close[i] < ema200_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price closes above Donchian high OR trend reverses
-            if close[i] > donch_high[i] or close[i] > ema100_1d_aligned[i]:
+            # Short exit: Price closes above R3 OR price crosses above 1d EMA200
+            if close[i] > r3_aligned[i] or close[i] > ema200_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,6 +108,8 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Low volatility breakout strategy using 6-hour ATR squeeze (< 3x daily ATR) combined with Donchian(20) breakouts.
-# Works in both bull and bear markets: squeeze identifies compression before explosive moves, trend filter ensures 
-# alignment with higher timeframe direction. Volume confirmation avoids false breakouts. Targets 15-35 trades/year.
+# Hypothesis: Camarilla R3/S3 breakout with 1d EMA200 trend filter and volume confirmation.
+# R3/S3 are stronger reversal levels than R1/S1, reducing false breakouts and trade frequency.
+# Works in bull markets via breakout continuation at strong levels, in bear via mean reversion at S3/R3.
+# 12h timeframe targets 12-37 trades/year to avoid fee drag. Volume filter ensures participation.
+# Discrete sizing (0.25) minimizes churn. Works on BTC/ETH/SOL via institutional pivot levels.
