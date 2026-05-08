@@ -1,15 +1,24 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
+"""
+Hypothesis: 6h timeframe with 1d pivot-based mean reversion in ranging markets.
+Uses Camarilla pivot levels (H3/L3) as mean reversion zones, filtered by 1d trend
+and volume spikes to avoid false signals in strong trends. Designed for 50-150
+trades over 4 years (12-37/year) with discrete position sizing to minimize fee drag.
+Works in both bull/bear by adapting to 1d trend direction.
+"""
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_Weekly_Donchian_Breakout_Trend_Filter"
-timeframe = "1d"
+name = "6h_Camarilla_H3L3_MeanReversion_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,54 +26,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly Donchian channels (20-week lookback)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 20-period high/low for Donchian channels
-    high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d Camarilla pivot levels: H3/L3 (mean reversion zones)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    h3 = close_1d + (range_1d * 1.1 / 4)
+    l3 = close_1d - (range_1d * 1.1 / 4)
     
-    # Align to daily timeframe
-    donchian_high = align_htf_to_ltf(prices, df_1w, high_20)
-    donchian_low = align_htf_to_ltf(prices, df_1w, low_20)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     
-    # Weekly trend: 50-period EMA on weekly close
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Daily volume confirmation: volume > 1.5x 20-day average
+    # Volume spike: current volume > 2x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma20)
+    volume_spike = volume > (2.0 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(h3_aligned[i]) or 
+            np.isnan(l3_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above weekly Donchian high + uptrend (close > weekly EMA50) + volume filter
-            long_cond = (close[i] > donchian_high[i]) and \
-                        (close[i] > ema_50_aligned[i]) and \
-                        volume_filter[i]
-            # Short: break below weekly Donchian low + downtrend (close < weekly EMA50) + volume filter
-            short_cond = (close[i] < donchian_low[i]) and \
-                         (close[i] < ema_50_aligned[i]) and \
-                         volume_filter[i]
+            # Long: price near L3 (support) + uptrend + volume spike
+            long_cond = (close[i] <= l3_aligned[i] * 1.005) and \
+                        (close[i] > ema_34_1d_aligned[i]) and \
+                        volume_spike[i]
+            # Short: price near H3 (resistance) + downtrend + volume spike
+            short_cond = (close[i] >= h3_aligned[i] * 0.995) and \
+                         (close[i] < ema_34_1d_aligned[i]) and \
+                         volume_spike[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -73,15 +83,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: close below weekly Donchian low (mean reversion)
-            if close[i] < donchian_low[i]:
+            # Long exit: price moves to midpoint or H3 (take profit)
+            if close[i] >= (l3_aligned[i] + h3_aligned[i]) / 2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: close above weekly Donchian high (mean reversion)
-            if close[i] > donchian_high[i]:
+            # Short exit: price moves to midpoint or L3 (take profit)
+            if close[i] <= (l3_aligned[i] + h3_aligned[i]) / 2:
                 signals[i] = 0.0
                 position = 0
             else:
