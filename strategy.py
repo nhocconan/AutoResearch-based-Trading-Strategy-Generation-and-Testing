@@ -1,17 +1,18 @@
+#38
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Williams %R with daily trend filter and volume confirmation
-# Long when Williams %R crosses above -20 (oversold bounce), daily trend up, volume spike
-# Short when Williams %R crosses below -80 (overbought rejection), daily trend down, volume spike
-# Williams %R identifies momentum exhaustion; daily trend filters for higher timeframe direction
+# Hypothesis: Daily Williams %R with weekly trend filter and volume confirmation
+# Long when Williams %R crosses above -20 (oversold bounce), weekly trend up, volume spike
+# Short when Williams %R crosses below -80 (overbought rejection), weekly trend down, volume spike
+# Williams %R identifies momentum exhaustion; weekly trend filters for higher timeframe direction
 # Volume spike confirms institutional participation; avoids false signals
-# Targets 75-200 total trades over 4 years (19-50/year) for 4h timeframe
+# Targets 30-100 total trades over 4 years (7-25/year) for 1d timeframe
 
-name = "4h_WilliamsR_DailyTrend_Volume"
-timeframe = "4h"
+name = "1d_WilliamsR_WeeklyTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,15 +25,15 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data once for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data once for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate daily EMA(50) for trend filter
-    daily_close = df_1d['close'].values
-    ema50_1d = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate weekly EMA(50) for trend filter
+    weekly_close = df_1w['close'].values
+    ema50_1w = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     # Williams %R(14): (Highest High - Close) / (Highest High - Lowest Low) * -100
     # Using 14-period lookback
@@ -53,36 +54,36 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(williams_r[i]) or 
+        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(williams_r[i]) or 
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema50_1d_val = ema50_1d_aligned[i]
+        ema50_1w_val = ema50_1w_aligned[i]
         wr = williams_r[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: Williams %R crosses above -20 (oversold bounce), daily uptrend, volume spike
-            if wr > -20 and williams_r[i-1] <= -20 and ema50_1d_val > 0 and vol_spike:
+            # Enter long: Williams %R crosses above -20 (oversold bounce), weekly uptrend, volume spike
+            if wr > -20 and williams_r[i-1] <= -20 and ema50_1w_val > 0 and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Williams %R crosses below -80 (overbought rejection), daily downtrend, volume spike
-            elif wr < -80 and williams_r[i-1] >= -80 and ema50_1d_val < 0 and vol_spike:
+            # Enter short: Williams %R crosses below -80 (overbought rejection), weekly downtrend, volume spike
+            elif wr < -80 and williams_r[i-1] >= -80 and ema50_1w_val < 0 and vol_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R falls below -80 or daily trend turns down
-            if wr < -80 or ema50_1d_val < 0:
+            # Exit long: Williams %R falls below -80 or weekly trend turns down
+            if wr < -80 or ema50_1w_val < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R rises above -20 or daily trend turns up
-            if wr > -20 or ema50_1d_val > 0:
+            # Exit short: Williams %R rises above -20 or weekly trend turns up
+            if wr > -20 or ema50_1w_val > 0:
                 signals[i] = 0.0
                 position = 0
             else:
