@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_KAMA_Trend_With_VolumeSpike"
-timeframe = "4h"
+name = "1d_Camarilla_R1_S1_Breakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,42 +17,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate KAMA trend (4h)
-    close_s = pd.Series(close)
-    change = np.abs(close_s.diff(1).values)
-    abs_change = np.abs(close_s.diff(1).values)
-    er = np.zeros(n)
-    for i in range(10, n):
-        if close_s.iloc[i-10] != 0:
-            er[i] = np.abs(close_s.iloc[i] - close_s.iloc[i-10]) / np.sum(abs_change[i-9:i+1])
-        else:
-            er[i] = 0
-    sc = (er * (0.6665 - 0.0645) + 0.0645) ** 2
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # Calculate 1d trend: EMA34
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Calculate 1w trend: EMA34
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume spike: current volume > 2.5x 20-period average
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Calculate daily Camarilla pivot levels (R1, S1)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    H_prev = np.roll(high_1d, 1)
+    L_prev = np.roll(low_1d, 1)
+    C_prev = np.roll(close_1d, 1)
+    H_prev[0] = np.nan
+    L_prev[0] = np.nan
+    C_prev[0] = np.nan
+    
+    pivot = (H_prev + L_prev + C_prev) / 3
+    range_hl = H_prev - L_prev
+    
+    R1 = pivot + (range_hl * 1.1 / 6)
+    S1 = pivot - (range_hl * 1.1 / 6)
+    
+    # Align Camarilla levels to 1d timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    
+    # Volume spike: current volume > 2.0x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.5 * vol_ma20)
+    volume_spike = volume > (2.0 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Sufficient warmup
+    start_idx = 50  # Sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(kama[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(ema_34_1w_aligned[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -60,13 +73,13 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price above KAMA (uptrend) + above 1d EMA34 + volume spike
-            long_cond = (close[i] > kama[i]) and \
-                        (close[i] > ema_34_1d_aligned[i]) and \
+            # Long: break above R1 + uptrend (price > 1w EMA34) + volume spike
+            long_cond = (close[i] > R1_aligned[i]) and \
+                        (close[i] > ema_34_1w_aligned[i]) and \
                         volume_spike[i]
-            # Short: price below KAMA (downtrend) + below 1d EMA34 + volume spike
-            short_cond = (close[i] < kama[i]) and \
-                         (close[i] < ema_34_1d_aligned[i]) and \
+            # Short: break below S1 + downtrend (price < 1w EMA34) + volume spike
+            short_cond = (close[i] < S1_aligned[i]) and \
+                         (close[i] < ema_34_1w_aligned[i]) and \
                          volume_spike[i]
             
             if long_cond:
@@ -76,15 +89,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below KAMA
-            if close[i] < kama[i]:
+            # Long exit: close below pivot (mean reversion to mean)
+            if close[i] < pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above KAMA
-            if close[i] > kama[i]:
+            # Short exit: close above pivot (mean reversion to mean)
+            if close[i] > pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
