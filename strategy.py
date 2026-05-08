@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
-timeframe = "4h"
+name = "1d_Weekly_Donchian_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,77 +17,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data once
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data once
+    df_weekly = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 30:
+    if len(df_weekly) < 50:
         return np.zeros(n)
     
-    # === 1d Previous day's pivot points (HLC/3) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Weekly Donchian channel (20-period)
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
     
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d[0] = high_1d[0]
-    prev_low_1d[0] = low_1d[0]
-    prev_close_1d[0] = close_1d[0]
+    # Calculate 20-period high and low for weekly
+    donchian_high = pd.Series(weekly_high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(weekly_low).rolling(window=20, min_periods=20).min().values
     
-    pivot = (prev_high_1d + prev_low_1d + prev_close_1d) / 3.0
-    range_1d = prev_high_1d - prev_low_1d
+    # Align to daily timeframe
+    donchian_high_daily = align_htf_to_ltf(prices, df_weekly, donchian_high)
+    donchian_low_daily = align_htf_to_ltf(prices, df_weekly, donchian_low)
     
-    # Pivot support/resistance levels
-    r1 = pivot + (range_1d * 1.1 / 12)
-    s1 = pivot - (range_1d * 1.1 / 12)
-    r2 = pivot + (range_1d * 1.1 / 6)
-    s2 = pivot - (range_1d * 1.1 / 6)
+    # Weekly trend: EMA34 on weekly close
+    weekly_close = df_weekly['close'].values
+    ema34_weekly = pd.Series(weekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_weekly_daily = align_htf_to_ltf(prices, df_weekly, ema34_weekly)
     
-    # Align pivot levels to 4h timeframe
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
-    r2_4h = align_htf_to_ltf(prices, df_1d, r2)
-    s2_4h = align_htf_to_ltf(prices, df_1d, s2)
-    
-    # === 4h Volume filter: current volume > 20-period average ===
+    # Daily volume filter: volume > 20-day average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # === 1d EMA34 for trend filter ===
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
+    # ATR for position sizing (optional - using fixed size per rules)
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # warmup for EMA34
+    start_idx = 50  # warmup
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or np.isnan(r2_4h[i]) or np.isnan(s2_4h[i]) or
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(donchian_high_daily[i]) or np.isnan(donchian_low_daily[i]) or
+            np.isnan(ema34_weekly_daily[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Trend filter: 1d EMA34
-            uptrend = close[i] > ema34_1d_aligned[i]
-            downtrend = close[i] < ema34_1d_aligned[i]
+            # Long: price breaks above weekly Donchian high + above weekly EMA34 + volume surge
+            long_cond = (close[i] > donchian_high_daily[i] and 
+                        close[i] > ema34_weekly_daily[i] and
+                        volume[i] > vol_ma20[i])
             
-            if uptrend:
-                # Uptrend: long on break above R1
-                long_cond = (close[i] > r1_4h[i] and 
-                            volume[i] > vol_ma20[i])
-            elif downtrend:
-                # Downtrend: short on break below S1
-                short_cond = (close[i] < s1_4h[i] and 
-                             volume[i] > vol_ma20[i])
-            else:
-                # Around EMA: no trades
-                long_cond = False
-                short_cond = False
+            # Short: price breaks below weekly Donchian low + below weekly EMA34 + volume surge
+            short_cond = (close[i] < donchian_low_daily[i] and 
+                         close[i] < ema34_weekly_daily[i] and
+                         volume[i] > vol_ma20[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -96,19 +76,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: break below S1 or trend reversal
-            exit_cond = (close[i] < s1_4h[i] or 
-                        close[i] < ema34_1d_aligned[i])
-            if exit_cond:
+            # Long exit: price breaks below weekly Donchian low
+            if close[i] < donchian_low_daily[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: break above R1 or trend reversal
-            exit_cond = (close[i] > r1_4h[i] or 
-                        close[i] > ema34_1d_aligned[i])
-            if exit_cond:
+            # Short exit: price breaks above weekly Donchian high
+            if close[i] > donchian_high_daily[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -116,9 +92,14 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R1/S1 breakout strategy with 1d EMA34 trend filter and volume confirmation.
-# In uptrend (price > 1d EMA34): long on break above R1, exit on break below S1 or trend reversal.
-# In downtrend (price < 1d EMA34): short on break below S1, exit on break above R1 or trend reversal.
-# Uses volume confirmation to avoid false breakouts. Designed for 4h timeframe with institutional
-# pivot levels that work in both bull and bear markets. Targets 50-150 trades over 4 years
-# (12-37/year) to minimize fee drag. Uses discrete sizing (0.25) to reduce churn.
+# Hypothesis: Weekly Donchian breakout with trend filter and volume confirmation.
+# Enters long when daily price breaks above weekly Donchian high (20-period) 
+# while above weekly EMA34 (trend filter) with volume confirmation.
+# Enters short when price breaks below weekly Donchian low while below weekly EMA34.
+# Exits on opposite Donchian break. Designed to capture major trends while
+# avoiding false breakouts in low volume/ranging markets. Weekly timeframe
+# reduces noise and false signals. Target: 15-30 trades/year to minimize fee drag.
+# Works in both bull (trend following) and bear (trend following) markets by
+# capturing significant breakdowns as well as breakouts. Uses discrete sizing (0.25) 
+# to reduce churn. Weekly Donchian provides structural support/resistance levels
+# that institutions watch. Volume surge confirms institutional participation.
