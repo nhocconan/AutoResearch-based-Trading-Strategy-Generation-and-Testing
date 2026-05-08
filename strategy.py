@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Modified Donchian Breakout with 1d Volume Confirmation and 1w Trend Filter.
-# Long when price breaks above 6h Donchian(20) high AND 1d volume > 1.5x 20-period average AND price > 1w EMA50.
-# Short when price breaks below 6h Donchian(20) low AND 1d volume > 1.5x 20-period average AND price < 1w EMA50.
-# Exit when price crosses back below/above 6h Donchian(10) mid-point to capture mean reversion in ranging markets.
-# Uses Donchian breakouts for trend continuation with volume confirmation to avoid false breakouts.
-# Target: 50-150 total trades over 4 years (12-37/year) for low fee drift.
+# Hypothesis: 4h Donchian channel breakout with 1d EMA50 trend filter and volume confirmation.
+# Long when price breaks above Donchian high (20) AND 4h volume > 2x 20-period average AND price > 1d EMA50.
+# Short when price breaks below Donchian low (20) AND 4h volume > 2x 20-period average AND price < 1d EMA50.
+# Exit when price returns to Donchian middle (mean of high/low over 20) to capture mean reversion.
+# Uses Donchian for breakout in trending markets with trend filter to avoid counter-trend trades.
+# Target: 80-160 total trades over 4 years (20-40/year) for low fee drift.
 
-name = "6h_Donchian20_1dVolume_1wEMA50"
-timeframe = "6h"
+name = "4h_Donchian20_1dEMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,53 +24,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for volume filter
+    # 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # Donchian channel (20-period) on 4h data
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (highest_high + lowest_low) / 2
     
-    # 6h Donchian channels (20-period for breakout, 10-period for exit)
-    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    highest_high_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values
-    lowest_low_10 = pd.Series(low).rolling(window=10, min_periods=10).min().values
-    donchian_mid_10 = (highest_high_10 + lowest_low_10) / 2.0
+    # 4h volume filter: current volume > 2x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (2.0 * vol_ma20)
     
-    # 1d volume filter: current volume > 1.5x 20-period average
-    vol_ma20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
-    volume_filter = volume > (1.5 * vol_ma20_1d_aligned)
-    
-    # 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Sufficient warmup for Donchian and EMA
+    start_idx = 50  # Sufficient warmup for Donchian and EMA50
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i]) or 
-            np.isnan(volume_filter[i]) or np.isnan(ema50_1w_aligned[i]) or
-            np.isnan(donchian_mid_10[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(volume_filter[i]) or np.isnan(ema50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: breakout above Donchian(20) high, volume spike, above 1w EMA50
-            long_cond = (close[i] > highest_high_20[i]) and volume_filter[i] and (close[i] > ema50_1w_aligned[i])
-            # Short conditions: breakout below Donchian(20) low, volume spike, below 1w EMA50
-            short_cond = (close[i] < lowest_low_20[i]) and volume_filter[i] and (close[i] < ema50_1w_aligned[i])
+            # Long conditions: price breaks above Donchian high, volume spike, above 1d EMA50
+            long_cond = (close[i] > highest_high[i]) and volume_filter[i] and (close[i] > ema50_1d_aligned[i])
+            # Short conditions: price breaks below Donchian low, volume spike, below 1d EMA50
+            short_cond = (close[i] < lowest_low[i]) and volume_filter[i] and (close[i] < ema50_1d_aligned[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -79,15 +70,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses back below Donchian(10) mid-point
-            if close[i] < donchian_mid_10[i] and close[i-1] >= donchian_mid_10[i-1]:
+            # Long exit: price returns to Donchian middle (mean reversion)
+            if close[i] > donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses back above Donchian(10) mid-point
-            if close[i] > donchian_mid_10[i] and close[i-1] <= donchian_mid_10[i-1]:
+            # Short exit: price returns to Donchian middle (mean reversion)
+            if close[i] < donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
