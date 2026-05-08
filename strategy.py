@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Choppiness Index regime filter + 1d RSI mean reversion
-# Long when CHOP(14) > 61.8 (range) and RSI(14) < 30 (oversold)
-# Short when CHOP(14) > 61.8 (range) and RSI(14) > 70 (overbought)
-# Exit when CHOP(14) < 38.2 (trending) or RSI reverts to neutral (40-60)
-# Uses 1d RSI for mean reversion signals and 12h Choppiness Index for regime filtering
-# Works in both bull and bear markets by only taking mean-reversion trades in ranging markets
-# Targets 12-37 trades per year (50-150 over 4 years) for low fee drag
+# Hypothesis: 6h Camarilla R3/S3 reversal with 12h EMA34 trend filter and volume confirmation
+# Long when price breaks below S3 in a 12h uptrend with volume spike (mean reversion in uptrend)
+# Short when price breaks above R3 in a 12h downtrend with volume spike (mean reversion in downtrend)
+# Uses Camarilla levels for mean reversion zones, EMA34 for trend filter, volume for confirmation
+# Designed for ranging markets with clear trend context to avoid counter-trend traps
+# Targets 12-37 trades per year (50-150 over 4 years) for low fee drift
 
-name = "12h_Chop618_RSI14_MeanRev"
-timeframe = "12h"
+name = "6h_Camarilla_R3S3_Reversion_12hEMA34_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,74 +22,85 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for RSI calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Get 12h data for Camarilla levels and trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 34:
         return np.zeros(n)
     
-    # Calculate RSI(14) on 1d close
-    close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Previous 12h bar's OHLC (to avoid look-ahead)
+    prev_high = np.roll(high_12h, 1)
+    prev_low = np.roll(low_12h, 1)
+    prev_close = np.roll(close_12h, 1)
+    prev_open = np.roll(df_12h['open'].values, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
+    prev_open[0] = np.nan
     
-    # Calculate Choppiness Index on 12h data
-    atr_period = 14
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], 
-                         np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate Camarilla levels for previous 12h bar
+    # R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low)
+    # S3 = close - 1.1*(high-low), S4 = close - 1.5*(high-low)
+    rng = prev_high - prev_low
+    r3 = prev_close + 1.1 * rng
+    s3 = prev_close - 1.1 * rng
     
-    atr = pd.Series(tr).ewm(alpha=1/atr_period, adjust=False, min_periods=atr_period).mean().values
+    # Align Camarilla levels to 6h timeframe
+    r3_6h = align_htf_to_ltf(prices, df_12h, r3)
+    s3_6h = align_htf_to_ltf(prices, df_12h, s3)
     
-    highest_high = pd.Series(high).rolling(window=atr_period, min_periods=atr_period).max().values
-    lowest_low = pd.Series(low).rolling(window=atr_period, min_periods=atr_period).min().values
+    # Calculate EMA34 on 12h close for trend filter
+    ema34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
     
-    chop = 100 * np.log10((atr * atr_period) / (highest_high - lowest_low)) / np.log10(atr_period)
+    # Volume confirmation: current volume > 2.0x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_conf = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(14, atr_period)
+    start_idx = 34  # Need at least 34 bars for EMA
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(chop[i]) or np.isnan(rsi_1d_aligned[i])):
+        if (np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or 
+            np.isnan(ema34_12h_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        chop_val = chop[i]
-        rsi_val = rsi_1d_aligned[i]
+        close_val = close[i]
+        r3_val = r3_6h[i]
+        s3_val = s3_6h[i]
+        ema34_val = ema34_12h_aligned[i]
+        vol_conf_val = vol_conf[i]
         
         if position == 0:
-            # Enter long: ranging market (CHOP > 61.8) and oversold (RSI < 30)
-            if chop_val > 61.8 and rsi_val < 30:
+            # Enter long: price breaks below S3 in 12h uptrend with volume spike
+            if close_val < s3_val and ema34_val > 0 and vol_conf_val:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: ranging market (CHOP > 61.8) and overbought (RSI > 70)
-            elif chop_val > 61.8 and rsi_val > 70:
+            # Enter short: price breaks above R3 in 12h downtrend with volume spike
+            elif close_val > r3_val and ema34_val < 0 and vol_conf_val:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: trending market (CHOP < 38.2) or RSI returns to neutral (> 40)
-            if chop_val < 38.2 or rsi_val > 40:
+            # Exit long: price crosses above S3 (mean reversion complete) or trend turns down
+            if close_val > s3_val or ema34_val < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: trending market (CHOP < 38.2) or RSI returns to neutral (< 60)
-            if chop_val < 38.2 or rsi_val < 60:
+            # Exit short: price crosses below R3 (mean reversion complete) or trend turns up
+            if close_val < r3_val or ema34_val > 0:
                 signals[i] = 0.0
                 position = 0
             else:
