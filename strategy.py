@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 12h volume spike + 1d ADX trend filter
+# Hypothesis: 4h Donchian(20) breakout + 4h volume spike + 1d ADX trend filter
 # Donchian breakouts capture momentum in trending markets. Volume spike confirms institutional participation.
 # 1d ADX > 25 ensures we only trade in strong trends, avoiding whipsaws in ranges.
 # Exits occur when price returns to the Donchian midpoint or trend weakens (ADX < 20).
-# Targets 12-37 trades per year (~50-150 total over 4 years) to minimize fee drag.
+# Targets 20-30 trades per year (~80-120 total over 4 years) to minimize fee drag.
 # Works in both bull and bear markets by filtering for strong trends only.
 
-name = "12h_Donchian20_12hVolume_1dADX"
-timeframe = "12h"
+name = "4h_Donchian20_4hVolume_1dADX"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,7 +24,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels on 12h
+    # Donchian channels on 4h
     lookback = 20
     dc_high = np.full_like(high, np.nan)
     dc_low = np.full_like(low, np.nan)
@@ -35,7 +35,7 @@ def generate_signals(prices):
         dc_low[i] = np.min(low[i-lookback:i])
         dc_mid[i] = (dc_high[i] + dc_low[i]) / 2.0
     
-    # 12h volume spike
+    # Volume confirmation on 4h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     vol_spike = volume > (vol_ma.values * 2.0)
     
