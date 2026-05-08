@@ -1,22 +1,17 @@
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mdf_data import get_htf_data, align_htf_to_ltf
+# 3/4/2025
+# Hypothesis: 6h strategy combining 1d Ichimoku cloud filter with 6h Tenkan-Kijun cross and volume confirmation.
+# Uses Ichimoku cloud from daily timeframe for trend direction (price above/below cloud),
+# Tenkan-Kijun crossover on 6h for entry timing, and volume spike for momentum confirmation.
+# Designed for low trade frequency (~20-40/year) to avoid fee drag while capturing trends in both bull and bear markets.
+# Ichimoku cloud acts as dynamic support/resistance, reducing whipsaws in ranging markets.
 
-# Hypothesis: 4h strategy using daily Exponential Moving Average (EMA) trend filter,
-# 4-hour Donchian channel breakout, and 4-hour volume spike confirmation.
-# Trend direction from daily EMA(34) avoids whipsaw in sideways markets.
-# Breakouts are taken only in direction of daily trend with volume confirmation
-# to filter false breakouts. Designed for low trade frequency (~25-40/year) to
-# minimize fee drag while capturing strong momentum moves in both bull and bear markets.
-
-name = "4h_EMA34Trend_Donchian20_Volume"
-timeframe = "4h"
+name = "6h_Ichimoku_TK_Cross_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,27 +19,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for EMA trend filter
+    # Get daily data for Ichimoku cloud
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    if len(df_1d) < 52:  # Need at least 52 periods for Senkou Span B
         return np.zeros(n)
     
-    # Daily EMA(34) for trend direction
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Get 4h data for Donchian and volume
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
-    
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
-    
-    # 4h Donchian channel (20-period)
+    # Calculate Ichimoku components
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
     def rolling_max(arr, window):
         res = np.full_like(arr, np.nan)
         for i in range(window - 1, len(arr)):
@@ -57,53 +42,78 @@ def generate_signals(prices):
             res[i] = np.min(arr[i - window + 1:i + 1])
         return res
     
-    donchian_high = rolling_max(high_4h, 20)
-    donchian_low = rolling_min(low_4h, 20)
+    tenkan_sen = (rolling_max(high_1d, 9) + rolling_min(low_1d, 9)) / 2
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    kijun_sen = (rolling_max(high_1d, 26) + rolling_min(low_1d, 26)) / 2
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    senkou_span_b = (rolling_max(high_1d, 52) + rolling_min(low_1d, 52)) / 2
     
-    # 4h volume spike: 1.5x 20-period EMA
-    vol_ema = pd.Series(volume_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike = volume_4h > (vol_ema * 1.5)
+    # Shift Senkou spans forward by 26 periods
+    senkou_span_a_shifted = np.roll(senkou_span_a, 26)
+    senkou_span_b_shifted = np.roll(senkou_span_b, 26)
+    senkou_span_a_shifted[:26] = np.nan
+    senkou_span_b_shifted[:26] = np.nan
     
-    # Align 4h indicators to lower timeframe (4h to 4h is identity, but use for consistency)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_4h, vol_spike)
+    # Align Ichimoku components to 6h timeframe
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a_shifted)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b_shifted)
+    
+    # Get 6h data for volume and TK cross
+    # Volume spike: 2x 20-period EMA
+    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_spike = volume > (vol_ema * 2.0)
+    
+    # TK cross signals
+    tk_cross_up = (tenkan_sen_aligned > kijun_sen_aligned) & (tenkan_sen_aligned <= kijun_sen_aligned)
+    tk_cross_down = (tenkan_sen_aligned < kijun_sen_aligned) & (tenkan_sen_aligned >= kijun_sen_aligned)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for indicators
+    start_idx = 100  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(vol_spike_aligned[i])):
+        if (np.isnan(tenkan_sen_aligned[i]) or 
+            np.isnan(kijun_sen_aligned[i]) or 
+            np.isnan(senkou_span_a_aligned[i]) or 
+            np.isnan(senkou_span_b_aligned[i]) or 
+            np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Determine cloud color and position
+        green_cloud = senkou_span_a_aligned[i] > senkou_span_b_aligned[i]
+        red_cloud = senkou_span_a_aligned[i] < senkou_span_b_aligned[i]
+        above_cloud = close[i] > max(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        below_cloud = close[i] < min(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        in_cloud = not above_cloud and not below_cloud
+        
         if position == 0:
-            # Enter long: price above daily EMA34 + breaks above 4h Donchian high + volume spike
-            if close[i] > ema_34_1d_aligned[i] and close[i] > donchian_high_aligned[i] and vol_spike_aligned[i]:
+            # Enter long: price above green cloud + TK cross up + volume spike
+            if above_cloud and green_cloud and tk_cross_up[i] and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price below daily EMA34 + breaks below 4h Donchian low + volume spike
-            elif close[i] < ema_34_1d_aligned[i] and close[i] < donchian_low_aligned[i] and vol_spike_aligned[i]:
+            # Enter short: price below red cloud + TK cross down + volume spike
+            elif below_cloud and red_cloud and tk_cross_down[i] and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below 4h Donchian low
-            if close[i] < donchian_low_aligned[i]:
+            # Exit long: price crosses below cloud or TK cross down
+            if below_cloud or tk_cross_down[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above 4h Donchian high
-            if close[i] > donchian_high_aligned[i]:
+            # Exit short: price crosses above cloud or TK cross up
+            if above_cloud or tk_cross_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
