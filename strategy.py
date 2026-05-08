@@ -1,14 +1,15 @@
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
+# State your hypothesis in a comment at the top (strategy type, timeframe, why it should work in BOTH bull AND bear)
 # Hypothesis: 4h Donchian breakout with 1d ADX trend filter and 4h volume confirmation.
 # Long when price breaks above Donchian(20) upper band AND 1d ADX > 25 (trending) AND 4h volume > 1.5x 20-period average.
 # Short when price breaks below Donchian(20) lower band AND 1d ADX > 25 AND 4h volume > 1.5x 20-period average.
 # Exit when price crosses back below Donchian middle (for long) or above Donchian middle (for short).
 # Uses Donchian breakouts for trend capture with ADX filter to avoid ranging markets.
 # Target: 80-150 total trades over 4 years (20-38/year) for low fee drift.
+
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 name = "4h_Donchian_1dADX_Volume"
 timeframe = "4h"
