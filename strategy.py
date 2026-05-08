@@ -35,7 +35,7 @@ def generate_signals(prices):
         dc_low[i] = np.min(low[i-lookback:i])
         dc_mid[i] = (dc_high[i] + dc_low[i]) / 2.0
     
-    # Volume spike on 4h
+    # 4h volume confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     vol_spike = volume > (vol_ma.values * 2.0)
     
