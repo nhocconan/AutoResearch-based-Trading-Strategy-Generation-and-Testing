@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeFilter"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeFilter_v5"
 timeframe = "4h"
 leverage = 1.0
 
@@ -39,11 +39,10 @@ def generate_signals(prices):
     atr14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
     
     # 1d data for Camarilla pivot (previous day)
-    # Use previous day's data to avoid look-ahead
     prev_high_1d = np.roll(high_1d, 1)
     prev_low_1d = np.roll(low_1d, 1)
     prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d[0] = high_1d[0]  # first bar uses current
+    prev_high_1d[0] = high_1d[0]
     prev_low_1d[0] = low_1d[0]
     prev_close_1d[0] = close_1d[0]
     
@@ -52,7 +51,6 @@ def generate_signals(prices):
     r1 = pivot + (range_1d * 1.1 / 12)
     s1 = pivot - (range_1d * 1.1 / 12)
     
-    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
