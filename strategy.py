@@ -1,17 +1,19 @@
+# -*- mode: python; coding: utf-8 -*-
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using Williams Alligator (13,8,5 SMAs) as trend filter, 4h Donchian(20) breakout, and volume confirmation.
-# Long when Alligator jaws < teeth < lips (bullish alignment), price breaks above 4h Donchian upper band, volume > 1.8x average.
-# Short when Alligator jaws > teeth > lips (bearish alignment), price breaks below 4h Donchian lower band, volume > 1.8x average.
-# Includes ATR-based stop loss via signal=0 when price moves against position by 2.5x ATR.
+# Hypothesis: 6h strategy using 1w pivot levels as structural bias, 6h Donchian(20) breakout, and volume confirmation.
+# Long when price breaks above 6h Donchian upper band with price above weekly pivot and volume > 1.5x average.
+# Short when price breaks below 6h Donchian lower band with price below weekly pivot and volume > 1.5x average.
+# Weekly pivot provides trend bias from higher timeframe, reducing false breakouts in ranging markets.
+# Works in bull (breakouts with upward bias) and bear (breakouts with downward bias).
 # Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and fee drag.
-# Williams Alligator identifies strong trends, Donchian captures breakouts, volume confirms conviction.
 
-name = "4h_Alligator_Donchian_Volume"
-timeframe = "4h"
+name = "6h_1wPivot_6hDonchian_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,103 +26,102 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Williams Alligator (SMAs)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 13:
+    # Get 1w data for pivot levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:  # Need at least one full week for pivot calculation
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Williams Alligator: Jaw (13-period), Teeth (8-period), Lips (5-period) SMAs
-    jaw = pd.Series(close_4h).rolling(window=13, min_periods=13).mean().values
-    teeth = pd.Series(close_4h).rolling(window=8, min_periods=8).mean().values
-    lips = pd.Series(close_4h).rolling(window=5, min_periods=5).mean().values
-    
-    # Bullish alignment: jaws < teeth < lips
-    # Bearish alignment: jaws > teeth > lips
-    bullish_aligned = (jaw < teeth) & (teeth < lips)
-    bearish_aligned = (jaw > teeth) & (teeth > lips)
-    
-    # Get 4h data for Donchian bands (same timeframe, but we still use get_htf_data for correctness)
-    df_4h_dc = get_htf_data(prices, '4h')
-    if len(df_4h_dc) < 20:
+    # Get 6h data for Donchian bands
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 20:
         return np.zeros(n)
     
-    high_4h = df_4h_dc['high'].values
-    low_4h = df_4h_dc['low'].values
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
     
-    # 4h Donchian(20) bands
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Calculate weekly pivot points (standard formula)
+    # Pivot = (H + L + C) / 3
+    # R1 = 2*P - L, S1 = 2*P - H
+    # R2 = P + (H - L), S2 = P - (H - L)
+    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
+    r2_1w = pivot_1w + (high_1w - low_1w)
+    s2_1w = pivot_1w - (high_1w - low_1w)
+    r3_1w = high_1w + 2 * (pivot_1w - low_1w)
+    s3_1w = low_1w - 2 * (high_1w - pivot_1w)
     
-    # Align 4h indicators to 4h (no actual alignment needed since same TF, but using helper for consistency)
-    bullish_aligned = align_htf_to_ltf(prices, df_4h, bullish_aligned.astype(float))
-    bearish_aligned = align_htf_to_ltf(prices, df_4h, bearish_aligned.astype(float))
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h_dc, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h_dc, donchian_low)
+    # 6h Donchian(20) bands
+    donchian_high = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
+    
+    # Align weekly pivot levels to 6h
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
+    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
+    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    
+    # Align 6h Donchian bands to 6h
+    donchian_high_aligned = align_htf_to_ltf(prices, df_6h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_6h, donchian_low)
     
     # Volume average (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     
-    # ATR for stop loss and position sizing
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Position sizing: base 0.25, scaled by volatility (ATR/price)
-    vol_factor = np.clip(atr / (close * 0.01), 0.5, 2.0)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_bar = 0
     
-    start_idx = 34  # Ensure enough data for indicators
+    start_idx = 40  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(bullish_aligned[i]) or np.isnan(bearish_aligned[i]) or
-            np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(vol_factor[i])):
+        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(r3_1w_aligned[i]) or np.isnan(s3_1w_aligned[i]) or
+            np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Bullish Alligator alignment, price breaks above Donchian upper band, volume spike
-            if (bullish_aligned[i] > 0.5 and
-                close[i] > donchian_high_aligned[i] and
-                vol_ratio[i] > 1.8):
-                signals[i] = 0.25 * vol_factor[i]
+            # Long: price breaks above 6h Donchian upper band with price above weekly S3 (bullish bias) and volume spike
+            if (close[i] > donchian_high_aligned[i] and
+                close[i] > s3_1w_aligned[i] and  # Price above weekly support level 3
+                vol_ratio[i] > 1.5):
+                signals[i] = 0.25
                 position = 1
                 entry_bar = i
-            # Short: Bearish Alligator alignment, price breaks below Donchian lower band, volume spike
-            elif (bearish_aligned[i] > 0.5 and
-                  close[i] < donchian_low_aligned[i] and
-                  vol_ratio[i] > 1.8):
-                signals[i] = -0.25 * vol_factor[i]
+            # Short: price breaks below 6h Donchian lower band with price below weekly R3 (bearish bias) and volume spike
+            elif (close[i] < donchian_low_aligned[i] and
+                  close[i] < r3_1w_aligned[i] and  # Price below weekly resistance level 3
+                  vol_ratio[i] > 1.5):
+                signals[i] = -0.25
                 position = -1
                 entry_bar = i
         elif position == 1:
-            # Long exit: Bearish flip, price breaks below Donchian lower band, or stop loss (2.5*ATR)
-            if (bearish_aligned[i] > 0.5 or 
-                close[i] < donchian_low_aligned[i] or
-                close[i] < close[entry_bar] - 2.5 * atr[i]):
+            # Long exit: price breaks below 6h Donchian lower band or max 40 bars held (~10 days)
+            if (close[i] < donchian_low_aligned[i] or
+                i - entry_bar >= 40):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25 * vol_factor[i]
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: Bullish flip, price breaks above Donchian upper band, or stop loss (2.5*ATR)
-            if (bullish_aligned[i] > 0.5 or 
-                close[i] > donchian_high_aligned[i] or
-                close[i] > close[entry_bar] + 2.5 * atr[i]):
+            # Short exit: price breaks above 6h Donchian upper band or max 40 bars held (~10 days)
+            if (close[i] > donchian_high_aligned[i] or
+                i - entry_bar >= 40):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25 * vol_factor[i]
+                signals[i] = -0.25
     
     return signals
