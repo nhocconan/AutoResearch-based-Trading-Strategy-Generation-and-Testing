@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d ADX trend filter and 12h volume confirmation.
-# Long when price breaks above 12h Donchian high (20) AND 1d ADX > 25 (trending) AND 12h volume > 2x 20-period average.
-# Short when price breaks below 12h Donchian low (20) AND 1d ADX > 25 (trending) AND 12h volume > 2x 20-period average.
-# Exit when price crosses back below/above 12h Donchian midline (mean of high/low channel).
-# Uses trend-following breakout with ADX to avoid ranging markets, volume to confirm breakout strength.
-# Target: 100-150 total trades over 4 years (25-37/year) for low fee drift.
+# Hypothesis: 4h Supertrend (ATR=10, mult=3) with 1d ADX filter and 4h volume confirmation.
+# Long when Supertrend turns green, 1d ADX > 25 (trending), and 4h volume > 2x 20-period average.
+# Short when Supertrend turns red, 1d ADX > 25, and 4h volume > 2x 20-period average.
+# Exit when Supertrend reverses (opposite color).
+# Uses Supertrend for trend following, ADX to avoid ranging markets, volume to confirm strength.
+# Target: 80-160 total trades over 4 years (20-40/year) for low fee drag.
 
-name = "12h_Donchian20_1dADX25_Volume"
-timeframe = "12h"
+name = "4h_Supertrend_1dADX_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -29,26 +29,54 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 12h Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (highest_high + lowest_low) / 2.0
+    # Calculate ATR (10-period) for Supertrend
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = high[0] - low[0]
+    tr2[0] = high[0] - close[0]
+    tr3[0] = low[0] - close[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
-    # 12h volume filter: current volume > 2x 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (2.0 * vol_ma20)
+    # Supertrend calculation
+    hl2 = (high + low) / 2
+    upperband = hl2 + (3 * atr)
+    lowerband = hl2 - (3 * atr)
     
-    # 1d ADX (14-period) for trend filter
+    # Initialize Supertrend arrays
+    supetrend = np.zeros(n)
+    supetrend_dir = np.ones(n)  # 1 for uptrend, -1 for downtrend
+    
+    for i in range(1, n):
+        if close[i] > supetrend[i-1]:
+            supetrend[i] = lowerband[i]
+            supetrend_dir[i] = 1
+        else:
+            supetrend[i] = upperband[i]
+            supetrend_dir[i] = -1
+        
+        # Adjust bands
+        if supetrend[i] < supetrend[i-1]:
+            supetrend[i] = supetrend[i-1]
+        if close[i] > supetrend[i]:
+            supetrend[i] = lowerband[i]
+        if close[i] < supetrend[i]:
+            supetrend[i] = upperband[i]
+    
+    # 1d ADX (14-period) for trend strength
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
     # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
+    tr1_1d = high_1d - low_1d
+    tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1_1d[0] = high_1d[0] - low_1d[0]
+    tr2_1d[0] = high_1d[0] - close_1d[0]
+    tr3_1d[0] = low_1d[0] - close_1d[0]
+    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
     
     # Directional Movement
     dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
@@ -59,65 +87,64 @@ def generate_signals(prices):
     dm_minus[0] = 0
     
     # Smoothed values
-    def WilderSmooth(data, period):
-        result = np.zeros_like(data)
-        result[period-1] = np.mean(data[:period])
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    tr_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
+    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
+    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
     
-    atr = WilderSmooth(tr, 14)
-    dm_plus_smooth = WilderSmooth(dm_plus, 14)
-    dm_minus_smooth = WilderSmooth(dm_minus, 14)
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_14 / tr_14
+    di_minus = 100 * dm_minus_14 / tr_14
     
-    # DI and DX
-    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
-    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = WilderSmooth(dx, 14)
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align 1d ADX to 4h
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # 4h volume filter: current volume > 2x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (2 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Sufficient warmup for Donchian and ADX
+    start_idx = 30  # Sufficient warmup for ADX
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(volume_filter[i]) or np.isnan(adx_1d_aligned[i]) or
-            np.isnan(donchian_mid[i])):
+        if (np.isnan(supetrend[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: breakout above Donchian high, ADX > 25, volume spike
-            long_cond = (close[i] > highest_high[i]) and (adx_1d_aligned[i] > 25) and volume_filter[i]
-            # Short conditions: breakdown below Donchian low, ADX > 25, volume spike
-            short_cond = (close[i] < lowest_low[i]) and (adx_1d_aligned[i] > 25) and volume_filter[i]
+            # Long conditions: Supertrend uptrend, ADX > 25, volume spike
+            long_cond = (supetrend_dir[i] == 1) and (adx_aligned[i] > 25) and volume_filter[i]
+            # Short conditions: Supertrend downtrend, ADX > 25, volume spike
+            short_cond = (supetrend_dir[i] == -1) and (adx_aligned[i] > 25) and volume_filter[i]
             
             if long_cond:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             elif short_cond:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below Donchian midline
-            if close[i] < donchian_mid[i]:
+            # Long exit: Supertrend turns down
+            if supetrend_dir[i] == -1:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Short exit: price crosses above Donchian midline
-            if close[i] > donchian_mid[i]:
+            # Short exit: Supertrend turns up
+            if supetrend_dir[i] == 1:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
