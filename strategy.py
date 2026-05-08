@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA trend with RSI(14) pullback and 1w volume confirmation.
-# Long when KAMA rising, RSI < 30, and weekly volume > 1.5x 4-week average.
-# Short when KAMA falling, RSI > 70, and weekly volume > 1.5x 4-week average.
-# Exit when RSI crosses back above 50 (long) or below 50 (short).
-# KAMA adapts to market noise, reducing whipsaws in sideways markets.
-# RSI overbought/oversold provides entry timing during pullbacks.
-# Weekly volume filter ensures institutional participation. Target: 30-70 total trades over 4 years (7-18/year).
+# Hypothesis: 12h Donchian channel breakout with 1d EMA50 trend filter and volume confirmation.
+# Long when price breaks above 20-period high AND price > EMA50(1d) AND volume > 1.5x 20-period average.
+# Short when price breaks below 20-period low AND price < EMA50(1d) AND volume > 1.5x 20-period average.
+# Exit when price crosses back below the 20-period moving average (for long) or above it (for short).
+# Donchian provides clear breakout levels. EMA50 filters trend direction on higher timeframe.
+# Volume confirmation ensures institutional participation. Target: 50-150 total trades over 4 years.
 
-name = "1d_KAMA_RSI_Volume"
-timeframe = "1d"
+name = "12h_Donchian_1dEMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,96 +24,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # KAMA calculation (adaptive moving average)
-    # ER = Efficiency Ratio, SC = Smoothing Constant
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0) if False else None  # placeholder
+    # 12h Donchian channel (20-period)
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    avg_roll = pd.Series(close).rolling(window=20, min_periods=20).mean().values
     
-    # Proper KAMA implementation
-    dir = np.abs(np.diff(close, 10))  # direction over 10 periods
-    vol = np.sum(np.abs(np.diff(close, 1)), axis=0) if False else None  # placeholder
+    # 12h volume filter: current volume > 1.5x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma20)
     
-    # Simplified but correct KAMA using pandas
-    close_series = pd.Series(close)
-    # Calculate ER (Efficiency Ratio) over 10 periods
-    change_10 = np.abs(close_series.diff(10))
-    volatility_10 = close_series.diff(1).abs().rolling(window=10, min_periods=1).sum()
-    er = change_10 / volatility_10.replace(0, np.nan)
-    er = er.fillna(0).values
-    
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Calculate KAMA
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values  # neutral when undefined
-    
-    # 1w data for volume filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 4:
+    # 1d data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    vol_1w = df_1w['volume'].values
-    vol_ma4 = pd.Series(vol_1w).rolling(window=4, min_periods=4).mean().values
-    volume_filter = vol_1w > (1.5 * vol_ma4)
+    # EMA50 on 1d close
+    ema_50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1w volume filter to daily
-    volume_filter_aligned = align_htf_to_ltf(prices, df_1w, volume_filter)
+    # Align 1d EMA50 to 12h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Sufficient warmup for KAMA and RSI
+    start_idx = 50  # Sufficient warmup for EMA50
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or 
-            np.isnan(volume_filter_aligned[i])):
+        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or np.isnan(avg_roll[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        kama_rising = kama[i] > kama[i-1]
-        kama_falling = kama[i] < kama[i-1]
-        rsi_oversold = rsi[i] < 30
-        rsi_overbought = rsi[i] > 70
-        rsi_exit_long = rsi[i] > 50
-        rsi_exit_short = rsi[i] < 50
-        
         if position == 0:
-            # Long conditions: KAMA rising, RSI oversold, volume confirmation
-            if kama_rising and rsi_oversold and volume_filter_aligned[i]:
+            # Long conditions: break above Donchian high, price > EMA50, volume filter
+            long_cond = (close[i] > high_roll[i]) and (close[i] > ema_50_aligned[i]) and volume_filter[i]
+            # Short conditions: break below Donchian low, price < EMA50, volume filter
+            short_cond = (close[i] < low_roll[i]) and (close[i] < ema_50_aligned[i]) and volume_filter[i]
+            
+            if long_cond:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: KAMA falling, RSI overbought, volume confirmation
-            elif kama_falling and rsi_overbought and volume_filter_aligned[i]:
+            elif short_cond:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: RSI crosses back above 50
-            if rsi_exit_long:
+            # Long exit: cross below 20-period average
+            if close[i] < avg_roll[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI crosses back below 50
-            if rsi_exit_short:
+            # Short exit: cross above 20-period average
+            if close[i] > avg_roll[i]:
                 signals[i] = 0.0
                 position = 0
             else:
