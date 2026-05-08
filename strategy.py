@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with weekly trend filter and volume confirmation.
-# Bull Power = High - EMA13, Bear Power = EMA13 - Low (EMA13 on 6h closes).
-# Long when Bull Power > 0 AND Bear Power < 0 AND weekly EMA50 trend up (close > weekly EMA50) AND volume > 1.5x 20-period average.
-# Short when Bear Power > 0 AND Bull Power < 0 AND weekly EMA50 trend down (close < weekly EMA50) AND volume > 1.5x 20-period average.
-# Exit when Bull Power and Bear Power have same sign (both positive or both negative) indicating loss of momentum.
-# Uses 6h timeframe with 1w EMA for trend filter. Target: 50-150 total trades over 4 years (12-37/year).
+# Hypothesis: 12h Williams Fractal breakout with weekly volume confirmation and monthly ADX trend filter.
+# Long when price breaks above prior bearish fractal AND weekly volume > 1.2x 4-week average AND monthly ADX > 25.
+# Short when price breaks below prior bullish fractal AND weekly volume > 1.2x 4-week average AND monthly ADX > 25.
+# Exit when price crosses back inside the prior fractal pair (between bullish and bearish fractal).
+# Williams Fractals provide natural support/resistance levels, volume confirms conviction, ADX ensures trending environment.
+# Target: 50-150 total trades over 4 years (12-37/year) with controlled frequency to avoid fee drag.
 
-name = "6h_ElderRay_WeeklyTrend_Volume"
-timeframe = "6h"
+name = "12h_Williams_Fractal_Volume_ADX"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,44 +24,130 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for trend filter
+    # Weekly data for volume filter
     df_w = get_htf_data(prices, '1w')
-    if len(df_w) < 2:
+    if len(df_w) < 4:
         return np.zeros(n)
     
-    # Weekly EMA50 for trend direction
-    close_w = df_w['close'].values
-    ema50_w = pd.Series(close_w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_w_aligned = align_htf_to_ltf(prices, df_w, ema50_w)
+    # Daily data for Williams Fractal calculation
+    df_d = get_htf_data(prices, '1d')
+    if len(df_d) < 5:
+        return np.zeros(n)
     
-    # Elder Ray components on 6h data
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = ema13 - low
+    # Monthly data for ADX trend filter
+    df_m = get_htf_data(prices, '1M')
+    if len(df_m) < 14:
+        return np.zeros(n)
     
-    # Volume filter: current volume > 1.5x 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma20)
+    # Williams Fractal calculation (5-bar window: bar is fractal if two lower highs on each side and two higher lows)
+    # Bearish fractal: high[n-2] < high[n] and high[n-1] < high[n] and high[n+1] < high[n] and high[n+2] < high[n]
+    # Bullish fractal: low[n-2] > low[n] and low[n-1] > low[n] and low[n+1] > low[n] and low[n+2] > low[n]
+    high_arr = df_d['high'].values
+    low_arr = df_d['low'].values
+    
+    bearish_fractal = np.full(len(high_arr), np.nan)
+    bullish_fractal = np.full(len(low_arr), np.nan)
+    
+    # Calculate fractals (need 2 bars on each side)
+    for i in range(2, len(high_arr) - 2):
+        # Bearish fractal: current high is highest among 5 bars
+        if (high_arr[i] > high_arr[i-2] and high_arr[i] > high_arr[i-1] and 
+            high_arr[i] > high_arr[i+1] and high_arr[i] > high_arr[i+2]):
+            bearish_fractal[i] = high_arr[i]
+        # Bullish fractal: current low is lowest among 5 bars
+        if (low_arr[i] < low_arr[i-2] and low_arr[i] < low_arr[i-1] and 
+            low_arr[i] < low_arr[i+1] and low_arr[i] < low_arr[i+2]):
+            bullish_fractal[i] = low_arr[i]
+    
+    # Williams fractals need 2 extra bars for confirmation (pattern complete after 2nd bar after center)
+    bearish_fractal_confirmed = align_htf_to_ltf(prices, df_d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_confirmed = align_htf_to_ltf(prices, df_d, bullish_fractal, additional_delay_bars=2)
+    
+    # Weekly volume filter: current volume > 1.2x 4-week average
+    vol_ma4w = pd.Series(df_w['volume'].values).rolling(window=4, min_periods=4).mean().values
+    # Align weekly volume MA to 12h timeframe
+    vol_ma4w_aligned = align_htf_to_ltf(prices, df_w, vol_ma4w)
+    volume_filter = volume > (1.2 * vol_ma4w_aligned)
+    
+    # Monthly ADX trend filter
+    high_m = df_m['high'].values
+    low_m = df_m['low'].values
+    close_m = df_m['close'].values
+    
+    # True Range
+    tr1 = high_m - low_m
+    tr2 = np.abs(high_m - np.roll(close_m, 1))
+    tr3 = np.abs(low_m - np.roll(close_m, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # First TR is just high-low (no previous close)
+    tr[0] = high_m[0] - low_m[0]
+    
+    # Directional Movement
+    dm_plus = np.where((high_m - np.roll(high_m, 1)) > (np.roll(low_m, 1) - low_m), 
+                       np.maximum(high_m - np.roll(high_m, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_m, 1) - low_m) > (high_m - np.roll(high_m, 1)), 
+                        np.maximum(np.roll(low_m, 1) - low_m, 0), 0)
+    # First DM values are 0 (no previous period)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed values (Wilder's smoothing: alpha = 1/period)
+    period = 14
+    alpha = 1.0 / period
+    
+    atr = np.zeros_like(tr)
+    dm_plus_smooth = np.zeros_like(dm_plus)
+    dm_minus_smooth = np.zeros_like(dm_minus)
+    
+    # Initial values (simple average of first period)
+    atr[period-1] = np.mean(tr[:period])
+    dm_plus_smooth[period-1] = np.mean(dm_plus[:period])
+    dm_minus_smooth[period-1] = np.mean(dm_minus[:period])
+    
+    # Wilder's smoothing for remaining values
+    for i in range(period, len(tr)):
+        atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
+        dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (period - 1) + dm_plus[i]) / period
+        dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (period - 1) + dm_minus[i]) / period
+    
+    # Directional Indicators
+    plus_di = 100 * dm_plus_smooth / np.where(atr != 0, atr, 1e-10)
+    minus_di = 100 * dm_minus_smooth / np.where(atr != 0, atr, 1e-10)
+    
+    # DX and ADX
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    
+    # ADX: smoothed DX
+    adx = np.zeros_like(dx)
+    adx[2*period-1] = np.mean(dx[period-1:2*period-1])  # First ADX after 2*period
+    for i in range(2*period, len(dx)):
+        adx[i] = (adx[i-1] * (period - 1) + dx[i]) / period
+    
+    # Align monthly ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_m, adx)
+    
+    # Trend filter: ADX > 25 indicates strong trend
+    trend_filter = adx_aligned > 25
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 13, 50)  # Sufficient warmup for all indicators
+    start_idx = max(30, 4*4, 2*14)  # Sufficient warmup for all indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(ema50_w_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(bearish_fractal_confirmed[i]) or np.isnan(bullish_fractal_confirmed[i]) or 
+            np.isnan(volume_filter[i]) or np.isnan(trend_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: Bull Power > 0, Bear Power < 0, weekly uptrend, volume filter
-            long_cond = (bull_power[i] > 0) and (bear_power[i] < 0) and (close[i] > ema50_w_aligned[i]) and volume_filter[i]
-            # Short conditions: Bear Power > 0, Bull Power < 0, weekly downtrend, volume filter
-            short_cond = (bear_power[i] > 0) and (bull_power[i] < 0) and (close[i] < ema50_w_aligned[i]) and volume_filter[i]
+            # Long conditions: price breaks above bearish fractal, volume filter, trend filter
+            long_cond = (close[i] > bearish_fractal_confirmed[i]) and volume_filter[i] and trend_filter[i]
+            # Short conditions: price breaks below bullish fractal, volume filter, trend filter
+            short_cond = (close[i] < bullish_fractal_confirmed[i]) and volume_filter[i] and trend_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -70,15 +156,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: loss of momentum (both powers positive or both negative)
-            if (bull_power[i] > 0 and bear_power[i] > 0) or (bull_power[i] < 0 and bear_power[i] < 0):
+            # Long exit: price crosses back below bullish fractal
+            if close[i] < bullish_fractal_confirmed[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: loss of momentum (both powers positive or both negative)
-            if (bull_power[i] > 0 and bear_power[i] > 0) or (bull_power[i] < 0 and bear_power[i] < 0):
+            # Short exit: price crosses back above bearish fractal
+            if close[i] > bearish_fractal_confirmed[i]:
                 signals[i] = 0.0
                 position = 0
             else:
