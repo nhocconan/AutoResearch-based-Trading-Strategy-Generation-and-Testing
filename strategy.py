@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_WeeklyPivot_Volume_Squeeze"
-timeframe = "12h"
+name = "1d_Weekly_Pullback_RSI"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,49 +17,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot levels and Bollinger Bands
+    # Get weekly data for pivot levels
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
-    # Weekly pivot points
+    # Calculate weekly pivot points
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
+    # Pivot = (H + L + C) / 3
     pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    r1_1w = (2 * pivot_1w) - low_1w
+    # Support 1 = (2 * Pivot) - High
     s1_1w = (2 * pivot_1w) - high_1w
-    r2_1w = pivot_1w + (high_1w - low_1w)
+    # Resistance 1 = (2 * Pivot) - Low
+    r1_1w = (2 * pivot_1w) - low_1w
+    # Support 2 = Pivot - (High - Low)
     s2_1w = pivot_1w - (high_1w - low_1w)
+    # Resistance 2 = Pivot + (High - Low)
+    r2_1w = pivot_1w + (high_1w - low_1w)
     
-    # Align weekly pivots to 12h timeframe
+    # Align weekly pivots to daily timeframe
     pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
     s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
     s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
     
-    # Daily EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Weekly Bollinger Bands (20, 2) for squeeze detection
-    close_1w_series = pd.Series(close_1w)
-    bb_middle = close_1w_series.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_1w_series.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
-    bb_width = (bb_upper - bb_lower) / bb_middle
-    
-    # Align Bollinger width to 12h timeframe
-    bb_width_aligned = align_htf_to_ltf(prices, df_1w, bb_width)
+    # RSI(14) on daily close
+    close_series = pd.Series(close)
+    delta = close_series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
     
     # Volume confirmation - 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -72,48 +67,42 @@ def generate_signals(prices):
     start_idx = 200
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(pivot_1w_aligned[i]) or 
-            np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or
-            np.isnan(r2_1w_aligned[i]) or np.isnan(s2_1w_aligned[i]) or
-            np.isnan(bb_width_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or 
+            np.isnan(s2_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or
+            np.isnan(r2_1w_aligned[i]) or np.isnan(rsi[i]) or
+            np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above weekly pivot + above daily EMA34 + low volatility (squeeze) + volume confirmation
-            if (close[i] > pivot_1w_aligned[i] and 
-                close[i] > ema_34_1d_aligned[i] and
-                bb_width_aligned[i] < 0.02 and  # Bollinger squeeze
+            # Long: pullback to S1 in uptrend (price above pivot)
+            if (close[i] > pivot_1w_aligned[i] and
+                low[i] <= s1_1w_aligned[i] * 1.02 and  # allow small penetration
+                high[i] >= s1_1w_aligned[i] * 0.98 and
+                rsi[i] < 40 and  # oversold
                 vol_ratio[i] > 1.5):
-                # Avoid extreme extension beyond R2
-                if close[i] <= r2_1w_aligned[i] * 1.02:
-                    signals[i] = 0.25
-                    position = 1
-            # Short: price below weekly pivot + below daily EMA34 + low volatility + volume confirmation
-            elif (close[i] < pivot_1w_aligned[i] and 
-                  close[i] < ema_34_1d_aligned[i] and
-                  bb_width_aligned[i] < 0.02 and  # Bollinger squeeze
+                signals[i] = 0.25
+                position = 1
+            # Short: pullback to R1 in downtrend (price below pivot)
+            elif (close[i] < pivot_1w_aligned[i] and
+                  high[i] >= r1_1w_aligned[i] * 0.98 and  # allow small penetration
+                  low[i] <= r1_1w_aligned[i] * 1.02 and
+                  rsi[i] > 60 and  # overbought
                   vol_ratio[i] > 1.5):
-                # Avoid extreme extension beyond S2
-                if close[i] >= s2_1w_aligned[i] * 0.98:
-                    signals[i] = -0.25
-                    position = -1
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Exit long: price below weekly pivot OR below daily EMA34 OR high volatility
-            if (close[i] < pivot_1w_aligned[i] or 
-                close[i] < ema_34_1d_aligned[i] or
-                bb_width_aligned[i] > 0.05):  # Exit squeeze
+            # Exit long: price below S2 or RSI overbought
+            if close[i] < s2_1w_aligned[i] or rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price above weekly pivot OR above daily EMA34 OR high volatility
-            if (close[i] > pivot_1w_aligned[i] or 
-                close[i] > ema_34_1d_aligned[i] or
-                bb_width_aligned[i] > 0.05):  # Exit squeeze
+            # Exit short: price above R2 or RSI oversold
+            if close[i] > r2_1w_aligned[i] or rsi[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
