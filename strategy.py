@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_Camarilla_R1_S1_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "6h_WilliamsAlligator_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,47 +17,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1w trend: EMA34
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Calculate daily Camarilla pivot levels (R1, S1)
-    high_1d = df_1w['high'].values  # Using 1w data for weekly pivot? No, need daily data for Camarilla
-    # Actually, we need daily data for Camarilla levels. Let's get daily data separately.
-    # But according to the experiment, we should use 1d as primary and 1w as HTF.
-    # For Camarilla, we need daily OHLC. We'll get 1d data for pivot calculation.
+    # Get 1d data once
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # 1d Williams Alligator: Jaw (13), Teeth (8), Lips (5)
+    # Jaw: 13-period SMMA (smoothed moving average) - shifted by 8 bars
     close_1d = df_1d['close'].values
+    sma_13 = pd.Series(close_1d).rolling(window=13, min_periods=13).mean().values
+    sma_8 = pd.Series(close_1d).rolling(window=8, min_periods=8).mean().values
+    sma_5 = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().values
     
-    H_prev = np.roll(high_1d, 1)
-    L_prev = np.roll(low_1d, 1)
-    C_prev = np.roll(close_1d, 1)
-    H_prev[0] = np.nan
-    L_prev[0] = np.nan
-    C_prev[0] = np.nan
+    # Shift for Alligator: Jaw=8, Teeth=5, Lips=3
+    jaw = np.roll(sma_13, 8)
+    teeth = np.roll(sma_8, 5)
+    lips = np.roll(sma_5, 3)
     
-    pivot = (H_prev + L_prev + C_prev) / 3
-    range_hl = H_prev - L_prev
+    # Fill NaN from roll
+    jaw[:8] = np.nan
+    teeth[:5] = np.nan
+    lips[:3] = np.nan
     
-    R1 = pivot + (range_hl * 1.1 / 6)
-    S1 = pivot - (range_hl * 1.1 / 6)
+    # Align Alligator lines to 6h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
     
-    # Align Camarilla levels to daily timeframe (same as primary)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    # 1d trend: EMA34 for filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume spike: current volume > 2.0x 20-period average (daily)
+    # Volume spike: current volume > 2.0x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma20)
     
@@ -68,23 +59,24 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(pivot_aligned[i]) or np.isnan(ema_34_1w_aligned[i]) or 
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Alligator signals: Lips above Teeth above Jaw = uptrend
+        # Lips below Teeth below Jaw = downtrend
         if position == 0:
-            # Long: break above R1 + uptrend (price > 1w EMA34) + volume spike
-            long_cond = (close[i] > R1_aligned[i]) and \
-                        (close[i] > ema_34_1w_aligned[i]) and \
-                        volume_spike[i]
-            # Short: break below S1 + downtrend (price < 1w EMA34) + volume spike
-            short_cond = (close[i] < S1_aligned[i]) and \
-                         (close[i] < ema_34_1w_aligned[i]) and \
-                         volume_spike[i]
+            # Long: Lips > Teeth > Jaw (bullish alignment) + price > EMA34 + volume spike
+            bullish = (lips_aligned[i] > teeth_aligned[i]) and (teeth_aligned[i] > jaw_aligned[i])
+            long_cond = bullish and (close[i] > ema_34_1d_aligned[i]) and volume_spike[i]
+            
+            # Short: Lips < Teeth < Jaw (bearish alignment) + price < EMA34 + volume spike
+            bearish = (lips_aligned[i] < teeth_aligned[i]) and (teeth_aligned[i] < jaw_aligned[i])
+            short_cond = bearish and (close[i] < ema_34_1d_aligned[i]) and volume_spike[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -93,15 +85,17 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: close below pivot (mean reversion to mean)
-            if close[i] < pivot_aligned[i]:
+            # Long exit: bearish alignment (Lips < Teeth < Jaw) or price < EMA34
+            bearish = (lips_aligned[i] < teeth_aligned[i]) and (teeth_aligned[i] < jaw_aligned[i])
+            if bearish or (close[i] < ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: close above pivot (mean reversion to mean)
-            if close[i] > pivot_aligned[i]:
+            # Short exit: bullish alignment (Lips > Teeth > Jaw) or price > EMA34
+            bullish = (lips_aligned[i] > teeth_aligned[i]) and (teeth_aligned[i] > jaw_aligned[i])
+            if bullish or (close[i] > ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
