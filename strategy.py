@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+name = "4h_CCI_Trend_Filter_With_Volume"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,58 +17,53 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1D data for Camarilla pivot levels and trend filter
+    # Daily data for trend filter and CCI
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels (R1, S1) from previous day
-    # Pivot = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
-    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
+    # Calculate daily CCI(20)
+    tp = (high_1d + low_1d + close_1d) / 3
+    sma_tp = pd.Series(tp).rolling(window=20, min_periods=20).mean()
+    mad = pd.Series(tp).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
+    cci = (tp - sma_tp) / (0.015 * mad)
+    cci = cci.fillna(0).values
     
-    # Align to 4h timeframe (use previous day's levels)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Daily EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 1D EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume spike: current volume > 1.8x 20-period average
+    # Volume spike: current volume > 2x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ma20)
+    volume_spike = volume > (2.0 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need enough data for volume MA
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(cci[i-1]) if i-1 >= 0 else True or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R1, uptrend, volume spike
-            long_cond = (close[i] > r1_1d_aligned[i] and 
-                        ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and
+            # Long: CCI > 100, price above EMA50, volume spike
+            long_cond = (cci[i-1] > 100 and 
+                        close[i] > ema_50_1d_aligned[i] and
                         volume_spike[i])
             
-            # Short: price breaks below S1, downtrend, volume spike
-            short_cond = (close[i] < s1_1d_aligned[i] and 
-                         ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and
+            # Short: CCI < -100, price below EMA50, volume spike
+            short_cond = (cci[i-1] < -100 and 
+                         close[i] < ema_50_1d_aligned[i] and
                          volume_spike[i])
             
             if long_cond:
@@ -78,15 +73,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below S1 (reversal) or trend changes
-            if close[i] < s1_1d_aligned[i] or ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]:
+            # Long exit: CCI < 0 or price crosses below EMA50
+            if cci[i-1] < 0 or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above R1 (reversal) or trend changes
-            if close[i] > r1_1d_aligned[i] or ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]:
+            # Short exit: CCI > 0 or price crosses above EMA50
+            if cci[i-1] > 0 or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
