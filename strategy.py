@@ -3,47 +3,55 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with 1d trend filter and volume confirmation
-# Uses Donchian(20) breakouts as entry signals, confirmed by 1d EMA(34) trend and volume spikes
-# Designed for low trade frequency (12-37/year) to minimize fee drag and work in both bull/bear markets
-# Target: 50-150 total trades over 4 years
+# Hypothesis: 4h Chaikin Money Flow with 12h trend filter and volatility filter
+# Chaikin Money Flow (CMF) measures money flow volume over a period.
+# We go long when CMF > 0.1 (bullish accumulation) and short when CMF < -0.1 (bearish distribution),
+# confirmed by 12h EMA(50) trend direction and low volatility (ATR ratio < 1.2) to avoid whipsaws.
+# Designed for low trade frequency in both bull and bear markets.
+# Target: 50-150 total trades over 4 years = 12-37/year
 
-name = "12h_Donchian20_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_CMF_12hTrend_VolatilityFilter"
+timeframe = "4h"
 leverage = 1.0
-
-def donchian_channels(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data once
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 12h data once
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate daily EMA(34) for trend direction
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate 12h EMA(50) for trend direction
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Donchian channels on 12h data
-    upper, lower = donchian_channels(high, low, 20)
+    # Calculate ATR(14) for volatility
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])],
+                         np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Volume spike: current volume > 2.0 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # Calculate ATR ratio: current ATR / 50-period average ATR
+    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+    atr_ratio = np.where(atr_ma > 0, atr / atr_ma, 1.0)
+    
+    # Calculate Chaikin Money Flow (CMF) over 20 periods
+    mfm = ((close - low) - (high - close)) / (high - low)
+    mfm = np.where((high - low) != 0, mfm, 0.0)
+    mfv = mfm * volume
+    cmf = pd.Series(mfv).rolling(window=20, min_periods=20).sum().values / \
+          pd.Series(volume).rolling(window=20, min_periods=20).sum().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -52,41 +60,40 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(upper[i]) or 
-            np.isnan(lower[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(cmf[i]) or 
+            np.isnan(atr_ratio[i]) or np.isnan(atr_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema34_1d_val = ema34_1d_aligned[i]
-        upper_val = upper[i]
-        lower_val = lower[i]
-        vol_spike = volume_spike[i]
+        ema50_12h_val = ema50_12h_aligned[i]
+        cmf_val = cmf[i]
+        vol_filter = atr_ratio[i] < 1.2  # Low volatility filter
         
         if position == 0:
-            # Enter long: price breaks above Donchian upper + uptrend + volume spike
-            if (close[i] > upper_val and 
-                close[i] > ema34_1d_val and 
-                vol_spike):
+            # Enter long: CMF > 0.1 (accumulation) + uptrend + low volatility
+            if (cmf_val > 0.1 and 
+                close[i] > ema50_12h_val and 
+                vol_filter):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below Donchian lower + downtrend + volume spike
-            elif (close[i] < lower_val and 
-                  close[i] < ema34_1d_val and 
-                  vol_spike):
+            # Enter short: CMF < -0.1 (distribution) + downtrend + low volatility
+            elif (cmf_val < -0.1 and 
+                  close[i] < ema50_12h_val and 
+                  vol_filter):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below Donchian lower OR trend reverses
-            if close[i] < lower_val or close[i] < ema34_1d_val:
+            # Exit long: CMF turns negative OR price breaks below trend
+            if cmf_val < 0 or close[i] < ema50_12h_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above Donchian upper OR trend reverses
-            if close[i] > upper_val or close[i] > ema34_1d_val:
+            # Exit short: CMF turns positive OR price breaks above trend
+            if cmf_val > 0 or close[i] > ema50_12h_val:
                 signals[i] = 0.0
                 position = 0
             else:
