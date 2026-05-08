@@ -3,124 +3,98 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily ADX(14) > 25 trend filter with weekly EMA(34) alignment for stronger trend confirmation.
-# We go long when daily ADX > 25 (trending market) AND price > weekly EMA(34) (bullish trend).
-# We go short when daily ADX > 25 AND price < weekly EMA(34) (bearish trend).
-# Uses 1d timeframe to target 7-25 trades/year, avoiding excessive frequency.
-# ADX filters out ranging markets, improving win rate in both bull and bear regimes.
-# Weekly EMA ensures we trade with higher timeframe momentum, reducing whipsaws.
+# Hypothesis: 6-hour 13-period CCI with 12-hour trend filter and volume confirmation
+# Long when CCI crosses above -100 (oversold recovery) with 12h EMA(50) uptrend and volume spike
+# Short when CCI crosses below +100 (overbought rejection) with 12h EMA(50) downtrend and volume spike
+# CCI identifies turning points in both trending and ranging markets. The 12h EMA(50) filter ensures
+# we trade with intermediate-term momentum, reducing whipsaw. Volume spike confirms conviction.
+# Targets 12-37 trades/year on 6h timeframe to minimize fee drag while capturing meaningful moves.
 
-name = "1d_ADX25_WeeklyEMA34_Trend"
-timeframe = "1d"
+name = "6h_CCI_OversoldOverbought_12hTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get weekly data once for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Get 12h data once for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate weekly EMA(34) for trend filter
-    weekly_close = df_1w['close'].values
-    ema34_1w = pd.Series(weekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Calculate 12h EMA(50) for trend filter
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Calculate ADX(14) on daily data
-    # +DM = max(high - prev_high, 0) if high - prev_high > prev_low - low else 0
-    # -DM = max(prev_low - low, 0) if prev_low - low > high - prev_high else 0
-    # TR = max(high - low, high - prev_close, prev_close - low)
-    # +DM14 = smoothed +DM over 14 periods
-    # -DM14 = smoothed -DM over 14 periods
-    # +DI14 = 100 * smoothed +DM14 / ATR14
-    # -DI14 = 100 * smoothed -DM14 / ATR14
-    # DX = 100 * |+DI14 - -DI14| / (+DI14 + -DI14)
-    # ADX = smoothed DX over 14 periods
+    # Calculate CCI(14) on 6h data
+    typical_price = (high + low + close) / 3.0
+    tp_mean = pd.Series(typical_price).rolling(window=14, min_periods=14).mean()
+    tp_mad = pd.Series(typical_price).rolling(window=14, min_periods=14).apply(
+        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
+    )
+    cci = (typical_price - tp_mean.values) / (0.015 * tp_mad.values)
     
-    # Calculate directional movements
-    high_diff = high[1:] - high[:-1]
-    low_diff = low[:-1] - low[1:]
-    
-    plus_dm = np.where((high_diff > low_diff) & (high_diff > 0), high_diff, 0.0)
-    minus_dm = np.where((low_diff > high_diff) & (low_diff > 0), low_diff, 0.0)
-    
-    # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - low[:-1])
-    tr3 = np.abs(low[1:] - high[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Wilder's smoothing (alpha = 1/period)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        alpha = 1.0 / period
-        # First value is simple average
-        if len(data) >= period:
-            result[period-1] = np.nanmean(data[:period])
-            for i in range(period, len(data)):
-                result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
-        return result
-    
-    # Pad arrays to match original length (first element has no previous)
-    plus_dm_padded = np.concatenate([[0.0], plus_dm])
-    minus_dm_padded = np.concatenate([[0.0], minus_dm])
-    tr_padded = np.concatenate([[0.0], tr])
-    
-    # Smooth with Wilder's method
-    atr14 = wilders_smoothing(tr_padded, 14)
-    plus_di14 = 100 * wilders_smoothing(plus_dm_padded, 14) / atr14
-    minus_di14 = 100 * wilders_smoothing(minus_dm_padded, 14) / atr14
-    
-    # Avoid division by zero
-    di_sum = plus_di14 + minus_di14
-    dx = np.where(di_sum > 0, 100 * np.abs(plus_di14 - minus_di14) / di_sum, 0.0)
-    adx = wilders_smoothing(dx, 14)
+    # Volume spike: current volume > 2.0 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # warmup for calculations
+    start_idx = 50  # warmup for CCI and EMA
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(adx[i]) or np.isnan(ema34_1w_aligned[i])):
+        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(cci[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        adx_val = adx[i]
-        ema34_1w_val = ema34_1w_aligned[i]
+        ema50_12h_val = ema50_12h_aligned[i]
+        cci_val = cci[i]
+        vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: ADX > 25 (trending) AND price > weekly EMA (bullish)
-            if adx_val > 25.0 and close[i] > ema34_1w_val:
-                signals[i] = 0.25
-                position = 1
-            # Enter short: ADX > 25 (trending) AND price < weekly EMA (bearish)
-            elif adx_val > 25.0 and close[i] < ema34_1w_val:
-                signals[i] = -0.25
-                position = -1
+            # Enter long: CCI crosses above -100 (from oversold) + 12h uptrend + volume spike
+            if i > start_idx:
+                prev_cci = cci[i-1]
+                if (not np.isnan(prev_cci) and prev_cci <= -100 and cci_val > -100 and
+                    close[i] > ema50_12h_val and vol_spike):
+                    signals[i] = 0.25
+                    position = 1
+            # Enter short: CCI crosses below +100 (from overbought) + 12h downtrend + volume spike
+            elif i > start_idx:
+                prev_cci = cci[i-1]
+                if (not np.isnan(prev_cci) and prev_cci >= 100 and cci_val < 100 and
+                    close[i] < ema50_12h_val and vol_spike):
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Exit long: ADX drops below 20 (losing trend) OR price crosses below weekly EMA
-            if adx_val < 20.0 or close[i] < ema34_1w_val:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
+            # Exit long: CCI crosses below +100 (overbought) OR 12h trend turns down
+            if i > start_idx:
+                prev_cci = cci[i-1]
+                if (not np.isnan(prev_cci) and prev_cci >= 100 and cci_val < 100) or close[i] < ema50_12h_val:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
         elif position == -1:
-            # Exit short: ADX drops below 20 (losing trend) OR price crosses above weekly EMA
-            if adx_val < 20.0 or close[i] > ema34_1w_val:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+            # Exit short: CCI crosses above -100 (oversold) OR 12h trend turns up
+            if i > start_idx:
+                prev_cci = cci[i-1]
+                if (not np.isnan(prev_cci) and prev_cci <= -100 and cci_val > -100) or close[i] > ema50_12h_val:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
