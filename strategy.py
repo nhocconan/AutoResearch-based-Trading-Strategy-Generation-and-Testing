@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
+name = "4h_Advanced_Channel_Breakout_with_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -40,18 +40,17 @@ def generate_signals(prices):
     atr14 = pd.Series(tr1).ewm(span=14, adjust=False, min_periods=14).mean().values
     atr14_aligned = align_htf_to_ltf(prices, df_1d, atr14)
     
-    # Calculate 4h Camarilla levels from previous 4h bar
-    range_4h = high - low
-    camarilla_r3 = close + range_4h * 1.1 / 4
-    camarilla_s3 = close - range_4h * 1.1 / 4
-    camarilla_r4 = close + range_4h * 1.1 / 2
-    camarilla_s4 = close - range_4h * 1.1 / 2
+    # Calculate 4-hour Donchian channels (20-period)
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    upper_channel = high_roll
+    lower_channel = low_roll
     
-    # Shift to get previous bar's levels (no look-ahead)
-    camarilla_r3_prev = np.roll(camarilla_r3, 1)
-    camarilla_s3_prev = np.roll(camarilla_s3, 1)
-    camarilla_r3_prev[0] = np.nan
-    camarilla_s3_prev[0] = np.nan
+    # Shift to get previous bar's channels (no look-ahead)
+    upper_channel_prev = np.roll(upper_channel, 1)
+    lower_channel_prev = np.roll(lower_channel, 1)
+    upper_channel_prev[0] = np.nan
+    lower_channel_prev[0] = np.nan
     
     # Volume spike detection: current volume > 2 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -64,8 +63,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(camarilla_r3_prev[i]) or 
-            np.isnan(camarilla_s3_prev[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(upper_channel_prev[i]) or 
+            np.isnan(lower_channel_prev[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,26 +74,26 @@ def generate_signals(prices):
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: price breaks above R3 with volume spike, above 1d EMA
-            if (close[i] > camarilla_r3_prev[i] and vol_spike and 
+            # Enter long: price breaks above upper channel with volume spike, above 1d EMA
+            if (close[i] > upper_channel_prev[i] and vol_spike and 
                 close[i] > ema_val):
                 signals[i] = 0.30
                 position = 1
-            # Enter short: price breaks below S3 with volume spike, below 1d EMA
-            elif (close[i] < camarilla_s3_prev[i] and vol_spike and 
+            # Enter short: price breaks below lower channel with volume spike, below 1d EMA
+            elif (close[i] < lower_channel_prev[i] and vol_spike and 
                   close[i] < ema_val):
                 signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below S3 OR below 1d EMA
-            if (close[i] < camarilla_s3_prev[i] or close[i] < ema_val):
+            # Exit long: price breaks below lower channel OR below 1d EMA
+            if (close[i] < lower_channel_prev[i] or close[i] < ema_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.30
         elif position == -1:
-            # Exit short: price breaks above R3 OR above 1d EMA
-            if (close[i] > camarilla_r3_prev[i] or close[i] > ema_val):
+            # Exit short: price breaks above upper channel OR above 1d EMA
+            if (close[i] > upper_channel_prev[i] or close[i] > ema_val):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,13 +101,13 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Uses 4h Camarilla R3/S3 breakouts with volume confirmation and 1d EMA trend filter.
-# - Enters long when price breaks above R3 (previous bar) with volume spike and above 1d EMA
-# - Enters short when price breaks below S3 (previous bar) with volume spike and below 1d EMA
-# - Exits when price breaks back below S3 (long) or above R3 (short) OR crosses 1d EMA
+# Hypothesis: Uses 4-hour Donchian channel breakouts with volume confirmation and 1d EMA trend filter.
+# - Enters long when price breaks above upper Donchian channel (previous bar) with volume spike and above 1d EMA
+# - Enters short when price breaks below lower Donchian channel (previous bar) with volume spike and below 1d EMA
+# - Exits when price breaks back below lower channel (long) or above upper channel (short) OR crosses 1d EMA
 # - Volume spike filter ensures breakouts have conviction
 # - 1d EMA filter ensures trading with higher timeframe trend
-# - Camarilla levels provide natural support/resistance at key levels
+# - Donchian channels provide clear breakout levels for trend continuation
 # - Target: 80-160 total trades over 4 years (20-40/year) to minimize fee drag
 # - Position size: 0.30 for balanced risk/return
 # - Works in both bull and bear markets by following 1d trend direction
