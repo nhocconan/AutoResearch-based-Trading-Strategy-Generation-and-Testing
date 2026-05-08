@@ -3,18 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h timeframe using daily price channel breakout with volume confirmation and weekly trend filter.
-# Uses Donchian(20) from daily timeframe for structural breakouts, filtered by weekly EMA trend and volume spike.
-# Designed to work in both bull (breakouts continue) and bear (false breakouts filtered by trend/volume).
-# Target: 15-25 trades/year to stay under fee drag limits.
-
-name = "12h_DailyDonchian20_WeeklyEMA50_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,53 +17,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume filter: current volume > 2.0x 20-period average (12h periods)
+    # Volume filter: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (2.0 * vol_ma20)
+    volume_filter = volume > (1.5 * vol_ma20)
     
-    # Daily data for Donchian channel (breakout source)
+    # Daily data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Daily data for trend filter (EMA50)
+    df_1d_ema = get_htf_data(prices, '1d')
+    if len(df_1d_ema) < 50:
         return np.zeros(n)
     
-    # Daily Donchian(20): upper = max(high, 20), lower = min(low, 20)
+    # Calculate Camarilla levels using previous day's OHLC
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    close_1d = df_1d['close'].values
     
-    # Weekly EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Camarilla formula: Range = High - Low
+    # R3 = Close + Range * 1.1/2
+    # S3 = Close - Range * 1.1/2
+    range_1d = high_1d - low_1d
+    r3_1d = close_1d + (range_1d * 1.1 / 2)
+    s3_1d = close_1d - (range_1d * 1.1 / 2)
     
-    # Align daily and weekly indicators to 12h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Daily EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d_ema['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align daily indicators to 4h timeframe
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d_ema, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Sufficient warmup for weekly EMA50
+    start_idx = 50  # Sufficient warmup for EMA50
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above daily Donchian high, above weekly EMA50, volume spike
-            long_cond = (close[i] > donchian_high_aligned[i]) and (close[i] > ema_50_1w_aligned[i]) and volume_filter[i]
-            # Short: price breaks below daily Donchian low, below weekly EMA50, volume spike
-            short_cond = (close[i] < donchian_low_aligned[i]) and (close[i] < ema_50_1w_aligned[i]) and volume_filter[i]
+            # Long conditions: price above R3, above daily EMA50, volume filter
+            long_cond = (close[i] > r3_1d_aligned[i]) and (close[i] > ema_50_1d_aligned[i]) and volume_filter[i]
+            # Short conditions: price below S3, below daily EMA50, volume filter
+            short_cond = (close[i] < s3_1d_aligned[i]) and (close[i] < ema_50_1d_aligned[i]) and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -77,18 +78,23 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below daily Donchian low
-            if close[i] < donchian_low_aligned[i]:
+            # Long exit: price crosses below S3 (reversal level)
+            if close[i] < s3_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above daily Donchian high
-            if close[i] > donchian_high_aligned[i]:
+            # Short exit: price crosses above R3 (reversal level)
+            if close[i] > r3_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
+
+# Hypothesis: Camarilla R3/S3 levels act as strong reversal points in both bull and bear markets.
+# Using daily timeframe for pivot calculation and trend filter (EMA50) ensures alignment with institutional levels.
+# Volume confirmation filters out low-conviction breakouts. Exit at opposite S3/R3 levels captures mean reversion.
+# Designed for 4h timeframe to balance trade frequency (target: 20-50 trades/year) and capture significant moves.
