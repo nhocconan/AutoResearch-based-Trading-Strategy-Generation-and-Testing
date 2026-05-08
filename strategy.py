@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with weekly pivot direction and volume confirmation.
-# Long when price breaks above 6h Donchian upper band AND weekly pivot > previous weekly pivot AND volume > 1.5x 20-period average.
-# Short when price breaks below 6h Donchian lower band AND weekly pivot < previous weekly pivot AND volume > 1.5x 20-period average.
-# Exit when price crosses back inside the 6h Donchian channel (between upper and lower bands).
-# Weekly pivot provides institutional bias from higher timeframe. Donchian breakout captures momentum.
-# Volume filter confirms institutional participation. Target: 50-150 total trades over 4 years (12-37/year).
+# Hypothesis: 12h Donchian(20) breakout with 1w trend filter and volume confirmation.
+# Long when price breaks above 20-period Donchian high AND 1w EMA50 rising AND volume > 1.8x 20-period average.
+# Short when price breaks below 20-period Donchian low AND 1w EMA50 falling AND volume > 1.8x 20-period average.
+# Exit when price crosses back inside the Donchian channel.
+# Donchian channels capture volatility-based support/resistance. Weekly EMA50 filters long-term trend.
+# Volume surge confirms institutional participation. Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "6h_Donchian_20_1wPivot_Volume"
-timeframe = "6h"
+name = "12h_Donchian_20_1wEMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,60 +24,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w data for weekly pivot calculation
+    # 1w data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate weekly pivot point: (H + L + C) / 3 from previous week
-    weekly_high = df_1w['high'].shift(1).values
-    weekly_low = df_1w['low'].shift(1).values
-    weekly_close = df_1w['close'].shift(1).values
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    # 20-period Donchian channels
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Align weekly pivot to 6h timeframe
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    # 1w EMA50 for trend filter
+    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Weekly pivot direction: rising if current > previous, falling if current < previous
-    pivot_rising = np.zeros_like(weekly_pivot_aligned, dtype=bool)
-    pivot_falling = np.zeros_like(weekly_pivot_aligned, dtype=bool)
-    pivot_rising[1:] = weekly_pivot_aligned[1:] > weekly_pivot_aligned[:-1]
-    pivot_falling[1:] = weekly_pivot_aligned[1:] < weekly_pivot_aligned[:-1]
+    # 1w EMA50 direction
+    ema50_rising = np.zeros_like(ema50_1w_aligned, dtype=bool)
+    ema50_falling = np.zeros_like(ema50_1w_aligned, dtype=bool)
+    ema50_rising[1:] = ema50_1w_aligned[1:] > ema50_1w_aligned[:-1]
+    ema50_falling[1:] = ema50_1w_aligned[1:] < ema50_1w_aligned[:-1]
     
-    # 6h Donchian channel (20-period)
-    lookback = 20
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
-    
-    for i in range(lookback - 1, n):
-        upper[i] = np.max(high[i - lookback + 1:i + 1])
-        lower[i] = np.min(low[i - lookback + 1:i + 1])
-    
-    # Volume filter: current volume > 1.5x 20-period average
+    # Volume filter: current volume > 1.8x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma20)
+    volume_filter = volume > (1.8 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(lookback, 2)  # Sufficient warmup
+    start_idx = max(50, 2)  # Sufficient warmup for Donchian and EMA50
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(weekly_pivot_aligned[i]) or 
-            np.isnan(pivot_rising[i]) or np.isnan(pivot_falling[i]) or 
-            np.isnan(volume_filter[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(ema50_rising[i]) or 
+            np.isnan(ema50_falling[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price breaks above upper band, weekly pivot rising, volume filter
-            long_cond = (close[i] > upper[i]) and pivot_rising[i] and volume_filter[i]
-            # Short conditions: price breaks below lower band, weekly pivot falling, volume filter
-            short_cond = (close[i] < lower[i]) and pivot_falling[i] and volume_filter[i]
+            # Long conditions: price breaks above Donchian high, 1w EMA50 rising, volume filter
+            long_cond = (close[i] > donchian_high[i]) and ema50_rising[i] and volume_filter[i]
+            # Short conditions: price breaks below Donchian low, 1w EMA50 falling, volume filter
+            short_cond = (close[i] < donchian_low[i]) and ema50_falling[i] and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -86,15 +75,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses back below lower band (mean reversion)
-            if close[i] < lower[i]:
+            # Long exit: price crosses back below Donchian low
+            if close[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses back above upper band (mean reversion)
-            if close[i] > upper[i]:
+            # Short exit: price crosses back above Donchian high
+            if close[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
