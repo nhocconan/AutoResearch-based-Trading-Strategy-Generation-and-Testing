@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour 4-hour trend + 6-hour RSI mean reversion with volume confirmation
-# Long when 4h trend is up (EMA34 > EMA89), 6h RSI < 30, and volume spike
-# Short when 4h trend is down (EMA34 < EMA89), 6h RSI > 70, and volume spike
-# Uses 4h for trend direction (reduces whipsaw), 6s for entry timing
-# Volume spike avoids low-liquidity false signals
+# Hypothesis: 4-hour Camarilla R3/S3 breakout with weekly trend filter and volume spike
+# Long when price breaks above R3, weekly EMA(34) uptrend, and volume spike
+# Short when price breaks below S3, weekly EMA(34) downtrend, and volume spike
+# Weekly EMA filter ensures alignment with higher timeframe trend to avoid counter-trend trades
+# Volume spike confirms institutional participation; avoids false breakouts
 # Targets 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost
 
-name = "6h_RSI_MeanReversion_4hTrend_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Breakout_1wTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,31 +19,40 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data once for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 89:
+    # Get weekly data once for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate 4h EMAs for trend filter
-    close_4h = df_4h['close'].values
-    ema34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema89_4h = pd.Series(close_4h).ewm(span=89, adjust=False, min_periods=89).mean().values
-    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
-    ema89_4h_aligned = align_htf_to_ltf(prices, df_4h, ema89_4h)
+    # Calculate weekly EMA(34) for trend filter
+    weekly_close = df_1w['close'].values
+    ema34_1w = pd.Series(weekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Calculate 6h RSI for mean reversion
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Get daily data for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Calculate Camarilla levels from previous day's OHLC
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    
+    # Avoid division by zero and handle first bar
+    price_range = prev_high - prev_low
+    # Camarilla multipliers
+    r3 = prev_close + price_range * 1.1 / 6  # R3 = C + (H-L)*1.1/6
+    s3 = prev_close - price_range * 1.1 / 6  # S3 = C - (H-L)*1.1/6
+    
+    # Align Camarilla levels to 4h timeframe (available after daily close)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -56,37 +65,38 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema34_4h_aligned[i]) or np.isnan(ema89_4h_aligned[i]) or 
-            np.isnan(rsi[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema34_4h_val = ema34_4h_aligned[i]
-        ema89_4h_val = ema89_4h_aligned[i]
-        rsi_val = rsi[i]
+        ema34_1w_val = ema34_1w_aligned[i]
+        price = close[i]
+        r3_val = r3_aligned[i]
+        s3_val = s3_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: 4h uptrend, RSI oversold, volume spike
-            if ema34_4h_val > ema89_4h_val and rsi_val < 30 and vol_spike:
+            # Enter long: price breaks above R3, weekly uptrend, volume spike
+            if price > r3_val and price > ema34_1w_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: 4h downtrend, RSI overbought, volume spike
-            elif ema34_4h_val < ema89_4h_val and rsi_val > 70 and vol_spike:
+            # Enter short: price breaks below S3, weekly downtrend, volume spike
+            elif price < s3_val and price < ema34_1w_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: 4h trend turns down or RSI overbought
-            if ema34_4h_val < ema89_4h_val or rsi_val > 70:
+            # Exit long: price falls below R3 or weekly trend turns down
+            if price < r3_val or price < ema34_1w_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: 4h trend turns up or RSI oversold
-            if ema34_4h_val > ema89_4h_val or rsi_val < 30:
+            # Exit short: price rises above S3 or weekly trend turns up
+            if price > s3_val or price > ema34_1w_val:
                 signals[i] = 0.0
                 position = 0
             else:
