@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with weekly trend filter and volume confirmation
-# Long when price breaks above Camarilla R3 level + weekly EMA > 50-period EMA + volume spike
-# Short when price breaks below Camarilla S3 level + weekly EMA < 50-period EMA + volume spike
-# Exit when price crosses Camarilla H4/L4 level or weekly trend reverses
-# Uses Camarilla pivot levels for institutional support/resistance, weekly trend filter for direction bias
-# Targets 15-25 trades/year to minimize fee drag while capturing significant breakouts
+# Hypothesis: 12h Donchian channel breakout with weekly ADX trend filter and volume confirmation
+# Long when price breaks above 20-period Donchian high + weekly ADX > 25 + volume spike
+# Short when price breaks below 20-period Donchian low + weekly ADX > 25 + volume spike
+# Exit when price crosses opposite Donchian boundary or weekly ADX falls below 20
+# Uses Donchian channels for breakout signals, ADX for trend strength, volume for confirmation
+# Targets 20-30 trades/year to minimize fee drift while capturing strong directional moves
 
-name = "12h_Camarilla_R3S3_WeeklyTrend_Volume"
+name = "12h_Donchian_20_ADX25_Volume"
 timeframe = "12h"
 leverage = 1.0
 
@@ -24,54 +24,94 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
+    # Get weekly data for ADX trend filter
     df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 50:
+    if len(df_weekly) < 30:
         return np.zeros(n)
     
-    # Get daily data for Camarilla pivots and volume
+    # Get daily data for Donchian channels and volume
     df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 2:
+    if len(df_daily) < 20:
         return np.zeros(n)
     
-    # Calculate weekly EMA(50) for trend filter
+    # Calculate weekly ADX(14) for trend strength
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
     weekly_close = df_weekly['close'].values
-    weekly_ema_50 = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate daily Camarilla pivot levels (based on previous day's OHLC)
-    # Camarilla levels: H4 = close + 1.1*(high-low)/2, L4 = close - 1.1*(high-low)/2
-    # R3 = close + 1.1*(high-low)/4, S3 = close - 1.1*(high-low)/4
-    # H3 = close + 1.1*(high-low)/6, L3 = close - 1.1*(high-low)/6
-    # We'll use R3/S3 for breakout and H4/L4 for exit
-    daily_high = df_daily['high'].values
-    daily_low = df_daily['low'].values
-    daily_close = df_daily['close'].values
+    # True Range
+    tr1 = weekly_high - weekly_low
+    tr2 = np.abs(weekly_high - np.roll(weekly_close, 1))
+    tr3 = np.abs(weekly_low - np.roll(weekly_close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
     
-    # Calculate Camarilla levels for each day
-    camarilla_r3 = np.zeros(len(df_daily))
-    camarilla_s3 = np.zeros(len(df_daily))
-    camarilla_h4 = np.zeros(len(df_daily))
-    camarilla_l4 = np.zeros(len(df_daily))
+    # Directional Movement
+    dm_plus = np.where((weekly_high - np.roll(weekly_high, 1)) > (np.roll(weekly_low, 1) - weekly_low), 
+                       np.maximum(weekly_high - np.roll(weekly_high, 1), 0), 0)
+    dm_minus = np.where((np.roll(weekly_low, 1) - weekly_low) > (weekly_high - np.roll(weekly_high, 1)), 
+                        np.maximum(np.roll(weekly_low, 1) - weekly_low, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    for i in range(len(df_daily)):
-        high_low = daily_high[i] - daily_low[i]
-        camarilla_r3[i] = daily_close[i] + 1.1 * high_low / 4
-        camarilla_s3[i] = daily_close[i] - 1.1 * high_low / 4
-        camarilla_h4[i] = daily_close[i] + 1.1 * high_low / 2
-        camarilla_l4[i] = daily_close[i] - 1.1 * high_low / 2
+    # Smoothed values
+    def smooth_series(data, period):
+        result = np.full_like(data, np.nan, dtype=float)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(data[:period])
+        # Subsequent values: Wilder smoothing
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
     
-    # Align weekly EMA to 12h timeframe
-    weekly_ema_50_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ema_50)
+    atr = smooth_series(tr, 14)
+    dm_plus_smooth = smooth_series(dm_plus, 14)
+    dm_minus_smooth = smooth_series(dm_minus, 14)
     
-    # Align daily Camarilla levels to 12h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_daily, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_daily, camarilla_s3)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_daily, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_daily, camarilla_l4)
+    # DI values
+    di_plus = np.where(atr > 0, dm_plus_smooth / atr * 100, 0)
+    di_minus = np.where(atr > 0, dm_minus_smooth / atr * 100, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) > 0, np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
+    adx = smooth_series(dx, 14)
+    
+    # Calculate daily Donchian channels (20-period)
+    def rolling_max(arr, window):
+        result = np.full_like(arr, np.nan, dtype=float)
+        for i in range(len(arr)):
+            if i < window - 1:
+                result[i] = np.nan
+            else:
+                result[i] = np.max(arr[i-window+1:i+1])
+        return result
+    
+    def rolling_min(arr, window):
+        result = np.full_like(arr, np.nan, dtype=float)
+        for i in range(len(arr)):
+            if i < window - 1:
+                result[i] = np.nan
+            else:
+                result[i] = np.min(arr[i-window+1:i+1])
+        return result
+    
+    donchian_high = rolling_max(df_daily['high'].values, 20)
+    donchian_low = rolling_min(df_daily['low'].values, 20)
     
     # Calculate daily average volume for volume filter
     daily_volume = df_daily['volume'].values
-    vol_ma_20 = pd.Series(daily_volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_ma_20 = smooth_series(daily_volume, 20)
+    
+    # Align weekly ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_weekly, adx)
+    
+    # Align daily Donchian levels to 12h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_daily, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_daily, donchian_low)
+    
+    # Align daily volume MA to 12h timeframe
     vol_ma_20_aligned = align_htf_to_ltf(prices, df_daily, vol_ma_20)
     
     signals = np.zeros(n)
@@ -80,15 +120,14 @@ def generate_signals(prices):
     start_idx = 100  # warmup period
     
     for i in range(start_idx, n):
-        if (np.isnan(weekly_ema_50_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or np.isnan(camarilla_h4_aligned[i]) or 
-            np.isnan(camarilla_l4_aligned[i]) or np.isnan(vol_ma_20_aligned[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or np.isnan(vol_ma_20_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume filter: current daily volume > 1.5x 20-day EMA
+        # Volume filter: current daily volume > 1.5x 20-day SMA
         # Find the most recent completed daily bar
         idx_daily = len(df_daily) - 1
         while idx_daily >= 0 and df_daily.iloc[idx_daily]['open_time'] > prices.iloc[i]['open_time']:
@@ -99,27 +138,27 @@ def generate_signals(prices):
             vol_filter = vol_daily_current > 1.5 * vol_ma_20_aligned[i]
         
         if position == 0:
-            # Look for breakout with volume confirmation and trend alignment
-            # Long: price breaks above Camarilla R3 + weekly uptrend + volume spike
-            if close[i] > camarilla_r3_aligned[i] and weekly_ema_50_aligned[i] > weekly_ema_50_aligned[i-1]:
+            # Look for breakout with volume confirmation and strong trend (ADX > 25)
+            # Long: price breaks above Donchian high + ADX > 25 + volume spike
+            if close[i] > donchian_high_aligned[i] and adx_aligned[i] > 25:
                 if vol_filter:
                     signals[i] = 0.25
                     position = 1
-            # Short: price breaks below Camarilla S3 + weekly downtrend + volume spike
-            elif close[i] < camarilla_s3_aligned[i] and weekly_ema_50_aligned[i] < weekly_ema_50_aligned[i-1]:
+            # Short: price breaks below Donchian low + ADX > 25 + volume spike
+            elif close[i] < donchian_low_aligned[i] and adx_aligned[i] > 25:
                 if vol_filter:
                     signals[i] = -0.25
                     position = -1
         elif position == 1:
-            # Exit long: price crosses below Camarilla L4 or weekly trend turns down
-            if close[i] < camarilla_l4_aligned[i] or weekly_ema_50_aligned[i] < weekly_ema_50_aligned[i-1]:
+            # Exit long: price crosses below Donchian low or ADX falls below 20
+            if close[i] < donchian_low_aligned[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above Camarilla H4 or weekly trend turns up
-            if close[i] > camarilla_h4_aligned[i] or weekly_ema_50_aligned[i] > weekly_ema_50_aligned[i-1]:
+            # Exit short: price crosses above Donchian high or ADX falls below 20
+            if close[i] > donchian_high_aligned[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
