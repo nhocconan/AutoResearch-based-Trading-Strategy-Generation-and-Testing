@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_Enhanced"
+name = "4h_Trix_1dTrend_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,31 +17,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for daily calculations
+    # Get daily data for TRIX and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate EMA(34) on daily close for trend filter
+    # Calculate TRIX (12,12,12) on daily close: triple EMA
+    ema1 = pd.Series(close_1d).ewm(span=12, adjust=False, min_periods=12).mean()
+    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
+    trix_raw = ((ema3 / ema3.shift(1)) - 1) * 100
+    trix = trix_raw.fillna(0).values
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
+    
+    # Daily EMA(34) for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Calculate Camarilla levels for each daily bar
-    high_low_range = high_1d - low_1d
-    camarilla_high = high_1d + 1.1 * high_low_range
-    camarilla_low = low_1d - 1.1 * high_low_range
-    camarilla_range = camarilla_high - camarilla_low
-    
-    R3 = camarilla_low + camarilla_range * 1.1000
-    S3 = camarilla_high - camarilla_range * 1.1000
-    
-    # Align Camarilla levels to 4h timeframe (wait for daily close)
-    R3_4h = align_htf_to_ltf(prices, df_1d, R3)
-    S3_4h = align_htf_to_ltf(prices, df_1d, S3)
     
     # Volume confirmation: 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -54,7 +47,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(R3_4h[i]) or np.isnan(S3_4h[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+        if (np.isnan(trix_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -62,30 +55,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above R3 + above daily EMA34 + volume
-            if (close[i] > R3_4h[i] and
+            # Long: TRIX crosses above zero + above daily EMA34 + volume spike
+            if (trix_aligned[i] > 0 and trix_aligned[i-1] <= 0 and
                 close[i] > ema_34_1d_aligned[i] and
-                vol_ratio[i] > 1.5):
+                vol_ratio[i] > 2.0):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S3 + below daily EMA34 + volume
-            elif (close[i] < S3_4h[i] and
+            # Short: TRIX crosses below zero + below daily EMA34 + volume spike
+            elif (trix_aligned[i] < 0 and trix_aligned[i-1] >= 0 and
                   close[i] < ema_34_1d_aligned[i] and
-                  vol_ratio[i] > 1.5):
+                  vol_ratio[i] > 2.0):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Price falls back below S3 or below daily EMA34
-            if (close[i] < S3_4h[i] or
-                close[i] < ema_34_1d_aligned[i]):
+            # Long exit: TRIX crosses below zero or below daily EMA34
+            if (trix_aligned[i] < 0 and trix_aligned[i-1] >= 0) or \
+               (close[i] < ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price rises back above R3 or above daily EMA34
-            if (close[i] > R3_4h[i] or
-                close[i] > ema_34_1d_aligned[i]):
+            # Short exit: TRIX crosses above zero or above daily EMA34
+            if (trix_aligned[i] > 0 and trix_aligned[i-1] <= 0) or \
+               (close[i] > ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
