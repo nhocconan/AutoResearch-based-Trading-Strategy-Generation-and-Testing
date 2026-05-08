@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_Weekly_RSI_Trend_Filter"
-timeframe = "1d"
+name = "12h_Donchian_Breakout_Volume_Trend_1d"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,55 +17,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data once for RSI and MA
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get daily data once
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Weekly RSI (14-period)
-    close_1w = df_1w['close'].values
-    delta = np.diff(close_1w, prepend=close_1w[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Daily Donchian channels (20-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    donchian_high = np.full_like(high_1d, np.nan)
+    donchian_low = np.full_like(low_1d, np.nan)
     
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
-    for i in range(14, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    for i in range(20, len(high_1d)):
+        donchian_high[i] = np.max(high_1d[i-20:i])
+        donchian_low[i] = np.min(low_1d[i-20:i])
     
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi_1w = 100 - (100 / (1 + rs))
+    # Align to 12h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # Weekly 50-period SMA for trend
-    sma50_1w = np.convolve(close_1w, np.ones(50)/50, mode='same')
+    # Daily trend: EMA50
+    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Align weekly indicators to daily timeframe
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
-    sma50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma50_1w)
+    # Volume spike: current volume > 2x 20-period average volume (12h)
+    vol_ma = np.convolve(volume, np.ones(20)/20, mode='same')
+    vol_ma[:10] = vol_ma[10]  # fill beginning
+    vol_ma[-10:] = vol_ma[-11]  # fill end
+    vol_spike = volume > (2 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # warmup for indicators
+    start_idx = 60  # warmup for all indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(rsi_1w_aligned[i]) or np.isnan(sma50_1w_aligned[i])):
+        if np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or np.isnan(ema50_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: RSI > 50 and price above weekly SMA50 (bullish bias)
-            long_cond = (rsi_1w_aligned[i] > 50) and (close[i] > sma50_1w_aligned[i])
+            # Long breakout: price > Donchian high AND above daily EMA50 AND volume spike
+            long_cond = (close[i] > donchian_high_aligned[i]) and (close[i] > ema50_aligned[i]) and vol_spike[i]
             
-            # Short: RSI < 50 and price below weekly SMA50 (bearish bias)
-            short_cond = (rsi_1w_aligned[i] < 50) and (close[i] < sma50_1w_aligned[i])
+            # Short breakdown: price < Donchian low AND below daily EMA50 AND volume spike
+            short_cond = (close[i] < donchian_low_aligned[i]) and (close[i] < ema50_aligned[i]) and vol_spike[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -74,15 +73,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: RSI < 40 (momentum loss) or price below SMA50
-            if (rsi_1w_aligned[i] < 40) or (close[i] < sma50_1w_aligned[i]):
+            # Long exit: price crosses below Donchian low OR below daily EMA50
+            if (close[i] < donchian_low_aligned[i]) or (close[i] < ema50_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: RSI > 60 (momentum loss) or price above SMA50
-            if (rsi_1w_aligned[i] > 60) or (close[i] > sma50_1w_aligned[i]):
+            # Short exit: price crosses above Donchian high OR above daily EMA50
+            if (close[i] > donchian_high_aligned[i]) or (close[i] > ema50_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -90,13 +89,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Weekly RSI > 50 indicates bullish momentum bias, < 50 bearish.
-# Price relative to weekly SMA50 confirms trend alignment.
-# Long when RSI > 50 and price above weekly SMA50.
-# Short when RSI < 50 and price below weekly SMA50.
-# Exits when RSI shows momentum exhaustion (RSI < 40 for longs, > 60 for shorts)
-# or price crosses weekly SMA50 in opposite direction.
-# Weekly timeframe filters noise, daily execution provides timely entries.
-# Works in bull markets (follow RSI > 50) and bear markets (follow RSI < 50).
-# Conservative position sizing (0.25) limits drawdown in volatile markets.
-# Target: 20-60 trades over 4 years = 5-15/year to minimize fee decay.
+# Hypothesis: Daily Donchian breakouts with volume confirmation and trend filter (EMA50).
+# Long when price breaks above 20-day high with volume spike and above daily EMA50.
+# Short when price breaks below 20-day low with volume spike and below daily EMA50.
+# Exits when price returns inside the channel or crosses the EMA50.
+# Works in trending markets (breakouts continue) and ranging markets (mean reversion at channel extremes).
+# Uses daily timeframe for structure, 12h for execution to avoid look-ahead.
+# Volume spike ensures breakouts have conviction, reducing false signals.
+# Target: 50-150 total trades over 4 years = 12-37/year to minimize fee decay.
