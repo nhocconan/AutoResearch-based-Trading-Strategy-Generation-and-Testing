@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1-day Donchian breakouts with volume confirmation and 1-week trend filter.
-# Long when price breaks above prior day's Donchian high with volume and weekly uptrend.
-# Short when price breaks below prior day's Donchian low with volume and weekly downtrend.
-# Exit when price reverts to prior day's Donchian median or trend reverses.
-# Designed for 20-30 trades/year to minimize fee drag and capture multi-day trends.
+# Hypothesis: Daily strategy using weekly Bollinger Bands with daily RSI and volume confirmation.
+# In weekly uptrend (price above weekly BB middle), buy dips to lower BB with RSI < 40 and volume spike.
+# In weekly downtrend (price below weekly BB middle), sell rallies to upper BB with RSI > 60 and volume spike.
+# Weekly trend filter ensures alignment with higher timeframe momentum, reducing whipsaw.
+# Designed for low trade frequency (10-25/year) to minimize fee drag and capture high-probability mean reversion within trend.
 
-name = "4h_DonchianBreakout_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_WeeklyBB_RSI_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,88 +23,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Donchian channels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
-        return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Prior day's Donchian channels (20-period)
-    donch_high = np.zeros_like(close_1d)
-    donch_low = np.zeros_like(close_1d)
-    donch_mid = np.zeros_like(close_1d)
-    
-    for i in range(20, len(close_1d)):
-        donch_high[i] = np.max(high_1d[i-20:i])
-        donch_low[i] = np.min(low_1d[i-20:i])
-        donch_mid[i] = (donch_high[i] + donch_low[i]) / 2
-    
-    # First 20 days have insufficient data
-    donch_high[:20] = np.nan
-    donch_low[:20] = np.nan
-    donch_mid[:20] = np.nan
-    
-    # Align daily Donchian levels to 4h timeframe
-    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
-    donch_mid_aligned = align_htf_to_ltf(prices, df_1d, donch_mid)
-    
-    # Get weekly trend filter
+    # Get weekly data for Bollinger Bands
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
     close_1w = df_1w['close'].values
-    # Weekly EMA(34) for trend filter
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    weekly_trend_up = ema_34_1w[1:] > ema_34_1w[:-1]  # Rising weekly EMA
-    weekly_trend_up = np.concatenate([[False], weekly_trend_up])  # Align with daily index
-    weekly_trend_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_up.astype(float))
+    # Weekly Bollinger Bands (20, 2)
+    close_series_1w = pd.Series(close_1w)
+    bb_middle = close_series_1w.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_series_1w.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2 * bb_std
+    bb_lower = bb_middle - 2 * bb_std
     
-    # Volume confirmation: current volume > 1.5x 20-period EMA
+    # Align weekly BB to daily timeframe
+    bb_middle_aligned = align_htf_to_ltf(prices, df_1w, bb_middle)
+    bb_upper_aligned = align_htf_to_ltf(prices, df_1w, bb_upper)
+    bb_lower_aligned = align_htf_to_ltf(prices, df_1w, bb_lower)
+    
+    # Daily RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume confirmation: current volume > 2.0x 20-period EMA
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ema * 1.5)
+    vol_confirm = volume > (vol_ema * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure enough data for Donchian calculation
+    start_idx = 20  # Ensure enough data for BB
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or
-            np.isnan(donch_mid_aligned[i]) or np.isnan(weekly_trend_aligned[i])):
+        if (np.isnan(bb_middle_aligned[i]) or np.isnan(bb_upper_aligned[i]) or
+            np.isnan(bb_lower_aligned[i]) or np.isnan(rsi[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long setup: break above prior day's Donchian high with volume and weekly uptrend
-            if (weekly_trend_aligned[i] > 0.5 and  # Weekly uptrend
-                close[i] > donch_high_aligned[i] and  # Break above Donchian high
+            # Long setup: weekly uptrend (price above weekly BB middle), dip to lower BB with RSI < 40 and volume spike
+            if (close[i] > bb_middle_aligned[i] and  # Weekly uptrend
+                close[i] <= bb_lower_aligned[i] * 1.01 and  # Near lower BB (allow 1% slack)
+                rsi[i] < 40 and
                 vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short setup: break below prior day's Donchian low with volume and weekly downtrend
-            elif (weekly_trend_aligned[i] <= 0.5 and  # Weekly downtrend
-                  close[i] < donch_low_aligned[i] and  # Break below Donchian low
+            # Short setup: weekly downtrend (price below weekly BB middle), rally to upper BB with RSI > 60 and volume spike
+            elif (close[i] < bb_middle_aligned[i] and  # Weekly downtrend
+                  close[i] >= bb_upper_aligned[i] * 0.99 and  # Near upper BB (allow 1% slack)
+                  rsi[i] > 60 and
                   vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price reverts to Donchian mid or weekly trend turns down
-            if close[i] < donch_mid_aligned[i] or weekly_trend_aligned[i] <= 0.5:
+            # Long exit: price crosses above weekly BB middle or RSI > 70
+            if close[i] >= bb_middle_aligned[i] or rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price reverts to Donchian mid or weekly trend turns up
-            if close[i] > donch_mid_aligned[i] or weekly_trend_aligned[i] > 0.5:
+            # Short exit: price crosses below weekly BB middle or RSI < 30
+            if close[i] <= bb_middle_aligned[i] or rsi[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
