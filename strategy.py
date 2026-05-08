@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h mean reversion with 4h Bollinger Squeeze + 1d trend filter.
-# Uses Bollinger Band width contraction (squeeze) on 4h as volatility regime filter.
-# Enters long when price < lower BB + RSI < 30, short when price > upper BB + RSI > 70.
-# 1d EMA50 determines long-only/short-only bias to avoid counter-trend trades.
-# Session filter (08-20 UTC) reduces noise. Target: 15-30 trades/year.
+# Hypothesis: 6s Weekly Pivot Reversal with 1d Trend Filter and Volume Confirmation
+# Uses weekly pivot points (calculated from prior week) to identify potential reversal zones.
+# In bullish weekly trend (price > 1d EMA34), look for long entries near weekly S1/S2 with volume confirmation.
+# In bearish weekly trend (price < 1d EMA34), look for short entries near weekly R1/R2 with volume confirmation.
+# Weekly trend defined by 1d EMA34 to avoid whipsaws. Volume > 1.5x 20-period average confirms participation.
+# Target: 15-30 trades/year (60-120 over 4 years) to minimize fee drag.
 
-name = "1h_BB_Squeeze_RSI_4hVol_1dTrend"
-timeframe = "1h"
+name = "6h_WeeklyPivot_Reversal_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,88 +24,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Bollinger Bands
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Get weekly data for pivot points
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 2:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # Calculate weekly pivot points from prior week's OHLC
+    # Standard formula: P = (H + L + C)/3, R1 = 2P - L, S1 = 2P - H, etc.
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    # Calculate Bollinger Bands (20, 2) on 4h
-    bb_period = 20
-    bb_std = 2
+    # Calculate pivot levels for each week
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    weekly_s1 = 2 * weekly_pivot - weekly_high
+    weekly_r2 = weekly_pivot + (weekly_high - weekly_low)
+    weekly_s2 = weekly_pivot - (weekly_high - weekly_low)
     
-    sma_20 = np.full(len(close_4h), np.nan)
-    std_20 = np.full(len(close_4h), np.nan)
-    for i in range(bb_period, len(close_4h)):
-        sma_20[i] = np.mean(close_4h[i-bb_period:i])
-        std_20[i] = np.std(close_4h[i-bb_period:i])
-    
-    upper_bb = sma_20 + bb_std * std_20
-    lower_bb = sma_20 - bb_std * std_20
-    bb_width = (upper_bb - lower_bb) / sma_20  # normalized width
-    
-    # Bollinger Squeeze: width < 20th percentile of last 50 bars
-    squeeze = np.full(len(bb_width), False)
-    for i in range(50, len(bb_width)):
-        if not np.isnan(bb_width[i]):
-            historical_widths = bb_width[i-50:i]
-            valid_widths = historical_widths[~np.isnan(historical_widths)]
-            if len(valid_widths) >= 10:
-                p20 = np.percentile(valid_widths, 20)
-                squeeze[i] = bb_width[i] < p20
-    
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get daily data for trend filter (EMA34)
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 34:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    daily_close = df_daily['close'].values
+    # Calculate EMA34 on daily data
+    ema34_daily = np.full(len(daily_close), np.nan)
+    if len(daily_close) >= 34:
+        ema34_daily[33] = np.mean(daily_close[:34])
+        for i in range(34, len(daily_close)):
+            ema34_daily[i] = (daily_close[i] * 2 + ema34_daily[i-1] * 32) / 34
     
-    # EMA50 on 1d
-    ema_50_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema_50_1d[49] = np.mean(close_1d[:50])
-        for i in range(50, len(close_1d)):
-            ema_50_1d[i] = (close_1d[i] * 2 + ema_50_1d[i-1] * 49) / 50
+    # Calculate 20-period average volume on daily data
+    vol_avg_20_daily = np.full(len(df_daily['volume'].values), np.nan)
+    daily_volume = df_daily['volume'].values
+    if len(daily_volume) >= 20:
+        for i in range(20, len(daily_volume)):
+            vol_avg_20_daily[i] = np.mean(daily_volume[i-20:i])
     
-    # Trend: close > EMA50 = uptrend bias (long only), close < EMA50 = downtrend bias (short only)
-    uptrend_bias = np.full(len(close_1d), False)
-    downtrend_bias = np.full(len(close_1d), False)
-    for i in range(len(close_1d)):
-        if not np.isnan(ema_50_1d[i]):
-            uptrend_bias[i] = close_1d[i] > ema_50_1d[i]
-            downtrend_bias[i] = close_1d[i] < ema_50_1d[i]
+    # Align weekly pivot levels to 6h timeframe
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_weekly, weekly_pivot)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s1)
+    weekly_r2_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r2)
+    weekly_s2_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s2)
     
-    # RSI(14) on 1h
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.full(n, np.nan)
-    avg_loss = np.full(n, np.nan)
-    rsi = np.full(n, np.nan)
-    
-    for i in range(14, n):
-        if i == 14:
-            avg_gain[i] = np.mean(gain[1:15])
-            avg_loss[i] = np.mean(loss[1:15])
-        else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-        
-        if avg_loss[i] != 0:
-            rs = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100 - (100 / (1 + rs))
-        else:
-            rsi[i] = 100
-    
-    # Align all indicators to 1h timeframe
-    squeeze_aligned = align_htf_to_ltf(prices, df_4h, squeeze)
-    uptrend_bias_aligned = align_htf_to_ltf(prices, df_1d, uptrend_bias)
-    downtrend_bias_aligned = align_htf_to_ltf(prices, df_1d, downtrend_bias)
+    # Align daily indicators to 6h timeframe
+    ema34_daily_aligned = align_htf_to_ltf(prices, df_daily, ema34_daily)
+    vol_avg_20_daily_aligned = align_htf_to_ltf(prices, df_daily, vol_avg_20_daily)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -113,7 +80,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 50, 14)  # warmup for indicators
+    start_idx = max(34, 20)  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if outside trading session
@@ -124,38 +91,63 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if np.isnan(rsi[i]) or np.isnan(squeeze_aligned[i]) or np.isnan(uptrend_bias_aligned[i]) or np.isnan(downtrend_bias_aligned[i]):
+        if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_r1_aligned[i]) or 
+            np.isnan(weekly_s1_aligned[i]) or np.isnan(weekly_r2_aligned[i]) or
+            np.isnan(weekly_s2_aligned[i]) or np.isnan(ema34_daily_aligned[i]) or
+            np.isnan(vol_avg_20_daily_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Volume filter: current daily volume > 1.5x 20-period average
+        vol_filter = False
+        if not np.isnan(vol_avg_20_daily_aligned[i]):
+            # Find current daily bar's volume
+            idx_daily = 0
+            while idx_daily < len(df_daily) and df_daily.iloc[idx_daily]['open_time'] <= prices.iloc[i]['open_time']:
+                idx_daily += 1
+            idx_daily -= 1  # last completed daily bar
+            
+            if idx_daily >= 0:
+                vol_daily_current = df_daily.iloc[idx_daily]['volume']
+                vol_filter = vol_daily_current > 1.5 * vol_avg_20_daily_aligned[i]
+        
         if position == 0:
-            # Look for entry: BB squeeze + RSI extreme + trend bias
-            # Long when RSI < 30 in uptrend bias + squeeze
-            long_condition = (rsi[i] < 30) and squeeze_aligned[i] and uptrend_bias_aligned[i]
-            # Short when RSI > 70 in downtrend bias + squeeze
-            short_condition = (rsi[i] > 70) and squeeze_aligned[i] and downtrend_bias_aligned[i]
+            # Determine weekly trend based on price vs daily EMA34
+            weekly_uptrend = close[i] > ema34_daily_aligned[i]
+            weekly_downtrend = close[i] < ema34_daily_aligned[i]
+            
+            # Look for entry: near weekly support/resistance + volume
+            # Long when near weekly S1/S2 in uptrend with volume
+            near_s1 = abs(close[i] - weekly_s1_aligned[i]) / close[i] < 0.005  # within 0.5%
+            near_s2 = abs(close[i] - weekly_s2_aligned[i]) / close[i] < 0.005  # within 0.5%
+            long_condition = weekly_uptrend and (near_s1 or near_s2) and vol_filter
+            
+            # Short when near weekly R1/R2 in downtrend with volume
+            near_r1 = abs(close[i] - weekly_r1_aligned[i]) / close[i] < 0.005  # within 0.5%
+            near_r2 = abs(close[i] - weekly_r2_aligned[i]) / close[i] < 0.005  # within 0.5%
+            short_condition = weekly_downtrend and (near_r1 or near_r2) and vol_filter
             
             if long_condition:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
             elif short_condition:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: RSI > 50 or no longer in uptrend bias
-            if (rsi[i] > 50) or not uptrend_bias_aligned[i]:
+            # Exit long: price crosses weekly pivot or trend changes
+            if close[i] > weekly_pivot_aligned[i] or close[i] < ema34_daily_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: RSI < 50 or no longer in downtrend bias
-            if (rsi[i] < 50) or not downtrend_bias_aligned[i]:
+            # Exit short: price crosses weekly pivot or trend changes
+            if close[i] < weekly_pivot_aligned[i] or close[i] > ema34_daily_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
