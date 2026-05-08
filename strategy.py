@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Stochastic_Pullback_1dTrend"
+name = "4h_RSI_Divergence_Trend_Confirmation"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,6 +17,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
     # 1d trend: EMA34
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
@@ -26,41 +35,53 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 4h Stochastic %K (14,3) - overbought/oversold
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    stoch_k = ((close - lowest_low_14) / (highest_high_14 - lowest_low_14 + 1e-10)) * 100
-    
-    # 4h SMA of %K for signal smoothing
-    stoch_k_sma = pd.Series(stoch_k).rolling(window=3, min_periods=3).mean().values
-    
-    # Volume spike: current volume > 2.0x 20-period average
+    # Volume filter: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma20)
+    volume_filter = volume > (1.5 * vol_ma20)
+    
+    # RSI divergence detection
+    rsi_peak = np.zeros(n, dtype=bool)
+    rsi_trough = np.zeros(n, dtype=bool)
+    
+    for i in range(2, n-2):
+        # RSI peak: higher high in price, lower high in RSI
+        if (high[i] > high[i-1] and high[i] > high[i+1] and
+            rsi[i] > rsi[i-1] and rsi[i] > rsi[i+1] and
+            rsi[i] < rsi[i-2]):  # lower RSI high
+            rsi_peak[i] = True
+        # RSI trough: lower low in price, higher low in RSI
+        if (low[i] < low[i-1] and low[i] < low[i+1] and
+            rsi[i] < rsi[i-1] and rsi[i] < rsi[i+1] and
+            rsi[i] > rsi[i-2]):  # higher RSI low
+            rsi_trough[i] = True
+    
+    # Align divergence signals
+    rsi_peak_aligned = align_htf_to_ltf(prices, df_1d, rsi_peak.astype(float))
+    rsi_trough_aligned = align_htf_to_ltf(prices, df_1d, rsi_trough.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(stoch_k_sma[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(rsi_peak_aligned[i]) or 
+            np.isnan(rsi_trough_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Stochastic oversold (<20) + uptrend (price > 1d EMA34) + volume spike
-            long_cond = (stoch_k_sma[i] < 20) and \
+            # Long: RSI bullish divergence + uptrend (price > 1d EMA34) + volume
+            long_cond = rsi_trough_aligned[i] > 0.5 and \
                         (close[i] > ema_34_1d_aligned[i]) and \
-                        volume_spike[i]
-            # Short: Stochastic overbought (>80) + downtrend (price < 1d EMA34) + volume spike
-            short_cond = (stoch_k_sma[i] > 80) and \
+                        volume_filter[i]
+            # Short: RSI bearish divergence + downtrend (price < 1d EMA34) + volume
+            short_cond = rsi_peak_aligned[i] > 0.5 and \
                          (close[i] < ema_34_1d_aligned[i]) and \
-                         volume_spike[i]
+                         volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -69,15 +90,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Stochastic overbought (>80) or trend reversal
-            if stoch_k_sma[i] > 80 or close[i] < ema_34_1d_aligned[i]:
+            # Long exit: RSI bearish divergence or price below EMA
+            if (rsi_peak_aligned[i] > 0.5) or (close[i] < ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Stochastic oversold (<20) or trend reversal
-            if stoch_k_sma[i] < 20 or close[i] > ema_34_1d_aligned[i]:
+            # Short exit: RSI bullish divergence or price above EMA
+            if (rsi_trough_aligned[i] > 0.5) or (close[i] > ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
