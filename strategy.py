@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ElderRay_Trend_1dVolume_Spike"
-timeframe = "6h"
+name = "4h_PivotReversal_1dTrend_Volume_137933"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,57 +17,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d EMA13 for Elder Ray
+    # 1d trend: EMA50
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 1d volume spike: current volume > 1.5x 20-period average
-    vol_1d = df_1d['volume'].values
-    vol_ma20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = vol_1d > (1.5 * vol_ma20_1d)
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
+    # 1d Pivot Points
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = pivot * 2 - low_1d
+    s1 = pivot * 2 - high_1d
+    
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Volume spike: current volume > 1.8x 24-period average
+    vol_ma24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > (1.8 * vol_ma24)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema13_1d_aligned[i]) or np.isnan(vol_spike_1d_aligned[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Elder Ray components
-        bull_power = high[i] - ema13_1d_aligned[i]
-        bear_power = low[i] - ema13_1d_aligned[i]
-        
         if position == 0:
-            # Long: bull power > 0 AND volume spike
-            if bull_power > 0 and vol_spike_1d_aligned[i]:
+            # Long: break above R1 + uptrend (price > 1d EMA50) + volume spike
+            long_cond = (close[i] > r1_aligned[i]) and \
+                        (close[i] > ema_50_1d_aligned[i]) and \
+                        volume_spike[i]
+            # Short: break below S1 + downtrend (price < 1d EMA50) + volume spike
+            short_cond = (close[i] < s1_aligned[i]) and \
+                         (close[i] < ema_50_1d_aligned[i]) and \
+                         volume_spike[i]
+            
+            if long_cond:
                 signals[i] = 0.25
                 position = 1
-            # Short: bear power < 0 AND volume spike
-            elif bear_power < 0 and vol_spike_1d_aligned[i]:
+            elif short_cond:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: bull power <= 0 (momentum fading)
-            if bull_power <= 0:
+            # Long exit: close below pivot (mean reversion)
+            if close[i] < pivot[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: bear power >= 0 (momentum fading)
-            if bear_power >= 0:
+            # Short exit: close above pivot (mean reversion)
+            if close[i] > pivot[i]:
                 signals[i] = 0.0
                 position = 0
             else:
