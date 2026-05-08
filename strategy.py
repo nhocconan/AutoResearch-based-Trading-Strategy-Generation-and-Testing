@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_Donchian_20_WeeklyTrend_Volume_Filter"
-timeframe = "1d"
+name = "6h_Angle_of_Attack_V1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,47 +17,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data once for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get daily data once for angle of attack and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Daily Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Daily close for calculations
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # Weekly trend filter: price above/below 20-week EMA
-    close_1w = df_1w['close'].values
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    weekly_trend = (close_1w > ema20_1w).astype(float)  # 1 = uptrend, 0 = downtrend
-    weekly_trend_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend)
+    # Angle of attack: 45-degree angle from 10-period low
+    # Calculate lowest low of last 10 days
+    low_min10 = pd.Series(low_1d).rolling(window=10, min_periods=10).min().values
+    # Calculate the angle from that low to current close
+    # Angle = arctan((close - low_min10) / 10) * 180/pi
+    # We use tangent directly to avoid trig functions: (close - low_min10) / 10
+    angle_of_attack = (close_1d - low_min10) / 10.0
     
-    # Weekly volume confirmation: current weekly volume > 1.5 * 10-week average
-    volume_1w = df_1w['volume'].values
-    vol_ma10w = pd.Series(volume_1w).rolling(window=10, min_periods=10).mean().values
-    vol_conf_1w = volume_1w > (vol_ma10w * 1.5)
-    vol_conf_aligned = align_htf_to_ltf(prices, df_1w, vol_conf_1w)
+    # Daily trend filter: EMA50
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_1d = (close_1d > ema50_1d).astype(float)
+    
+    # Daily volume spike: current volume > 2.0 * 20-day average
+    vol_ma20d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume_1d > (vol_ma20d * 2.0)
+    
+    # Align all daily indicators to 6h timeframe
+    angle_aligned = align_htf_to_ltf(prices, df_1d, angle_of_attack)
+    trend_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # warmup for Donchian and weekly indicators
+    start_idx = 50  # warmup for all indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(weekly_trend_aligned[i]) or np.isnan(vol_conf_aligned[i])):
+        if (np.isnan(angle_aligned[i]) or np.isnan(trend_aligned[i]) or 
+            np.isnan(vol_spike_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: price breaks above 20-day high with weekly uptrend and volume confirmation
-            long_cond = (close[i] > high_20[i] and weekly_trend_aligned[i] > 0.5 and vol_conf_aligned[i])
+            # Long entry: strong upward angle (>0.5) with volume spike and daily uptrend
+            long_cond = (angle_aligned[i] > 0.5 and vol_spike_aligned[i] and trend_aligned[i] > 0.5)
             
-            # Short entry: price breaks below 20-day low with weekly downtrend and volume confirmation
-            short_cond = (close[i] < low_20[i] and weekly_trend_aligned[i] < 0.5 and vol_conf_aligned[i])
+            # Short entry: strong downward angle (<-0.5) with volume spike and daily downtrend
+            short_cond = (angle_aligned[i] < -0.5 and vol_spike_aligned[i] and trend_aligned[i] < 0.5)
             
             if long_cond:
                 signals[i] = 0.25
@@ -66,15 +77,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price closes below 20-day low (mean reversion)
-            if close[i] < low_20[i]:
+            # Long exit: angle turns negative or volume dries up
+            if angle_aligned[i] < 0.0 or not vol_spike_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price closes above 20-day high (mean reversion)
-            if close[i] > high_20[i]:
+            # Short exit: angle turns positive or volume dries up
+            if angle_aligned[i] > 0.0 or not vol_spike_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -82,8 +93,7 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Donchian(20) breakout on daily timeframe with weekly trend and volume filters.
-# Works in bull markets (trend-following breakouts) and bear markets (mean reversion at opposite band).
-# Weekly EMA20 ensures alignment with longer-term trend, reducing counter-trend trades.
-# Weekly volume confirmation (1.5x 10-week average) ensures institutional participation.
-# Target: 15-25 trades/year to minimize fee decay while capturing significant moves.
+# Hypothesis: Angle of attack measures the steepness of the daily trend from recent lows.
+# In bull markets: strong upward angles signal continuation; in bear markets: strong downward angles signal continuation.
+# Volume spike confirms institutional participation; daily EMA50 ensures alignment with longer-term trend.
+# Target: 15-30 trades/year to minimize fee decay while capturing strong trending moves.
