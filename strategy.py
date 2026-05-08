@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend and volume spike
-# Uses proven Camarilla levels (R3/S3) for high-probability breakouts in both bull/bear markets.
-# Requires alignment with 12h EMA50 trend and volume spike to filter false signals.
-# Designed for low-frequency trades (<150 total) to minimize fee drag.
+# Hypothesis: 1h CCI(20) mean reversion with 4h ADX filter and volume confirmation
+# Uses CCI for overbought/oversold conditions, filtered by 4h ADX (>25) for trending markets
+# and volume spikes to confirm reversals. Designed for low-frequency trades (15-30/year)
+# to work in both bull and bear markets by fading extremes in trending conditions.
 
-name = "4h_Camarilla_R3S3_12hEMA50_Volume"
-timeframe = "4h"
+name = "1h_CCI20_4hADX25_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,84 +22,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Calculate CCI(20) on 1h data
+    typical_price = (high + low + close) / 3.0
+    sma_tp = pd.Series(typical_price).rolling(window=20, min_periods=20).mean().values
+    mad = pd.Series(typical_price).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
+    cci = (typical_price - sma_tp) / (0.015 * mad)
+    
+    # Get 4h data for ADX filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Get 1d data for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
+    # Calculate ADX(14) on 4h data
+    plus_dm = np.zeros_like(high_4h)
+    minus_dm = np.zeros_like(low_4h)
+    tr = np.zeros_like(high_4h)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    for i in range(1, len(high_4h)):
+        high_diff = high_4h[i] - high_4h[i-1]
+        low_diff = low_4h[i-1] - low_4h[i]
+        plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
+        minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
+        tr[i] = max(high_4h[i] - low_4h[i], abs(high_4h[i] - close_4h[i-1]), abs(low_4h[i] - close_4h[i-1]))
     
-    # Previous day's values for today's Camarilla levels
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # Wilder's smoothing for ADX
+    def wilder_smooth(x, period):
+        result = np.full_like(x, np.nan, dtype=float)
+        if len(x) < period:
+            return result
+        result[period-1] = np.nansum(x[:period])
+        for i in range(period, len(x)):
+            result[i] = result[i-1] - (result[i-1] / period) + x[i]
+        return result
     
-    # Camarilla calculations for R3/S3 (inner bands)
-    R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
-    S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    tr14 = wilder_smooth(tr, 14)
+    plus_di14 = 100 * wilder_smooth(plus_dm, 14) / tr14
+    minus_di14 = 100 * wilder_smooth(minus_dm, 14) / tr14
+    dx = np.where((plus_di14 + minus_di14) > 0, 100 * np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14), 0)
+    adx = wilder_smooth(dx, 14)
     
-    # Align Camarilla levels to 4h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    # Align ADX to 1h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_4h, adx)
     
-    # Volume spike (1.8x 20-period EMA)
-    vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 1.8)
+    # Volume spike (2.0x 20-period EMA)
+    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_spike = volume > (vol_ema * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure EMA50 has enough data
+    start_idx = 50  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_spike[i])):
+        if (np.isnan(cci[i]) or np.isnan(adx_aligned[i]) or np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above R3 with 12h uptrend and volume spike
-            if (close[i] > R3_aligned[i] and 
-                close[i] > ema50_12h_aligned[i] and vol_spike[i]):
-                signals[i] = 0.25
+            # Enter long: CCI < -100 (oversold) with 4h trending (ADX>25) and volume spike
+            if (cci[i] < -100 and adx_aligned[i] > 25 and vol_spike[i]):
+                signals[i] = 0.20
                 position = 1
-            # Enter short: price breaks below S3 with 12h downtrend and volume spike
-            elif (close[i] < S3_aligned[i] and 
-                  close[i] < ema50_12h_aligned[i] and vol_spike[i]):
-                signals[i] = -0.25
+            # Enter short: CCI > 100 (overbought) with 4h trending (ADX>25) and volume spike
+            elif (cci[i] > 100 and adx_aligned[i] > 25 and vol_spike[i]):
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below S3 or trend fails
-            if (close[i] < S3_aligned[i] or 
-                close[i] < ema50_12h_aligned[i]):
+            # Exit long: CCI > -100 (exit oversold) or trend weakens
+            if (cci[i] > -100 or adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: price breaks above R3 or trend fails
-            if (close[i] > R3_aligned[i] or 
-                close[i] > ema50_12h_aligned[i]):
+            # Exit short: CCI < 100 (exit overbought) or trend weakens
+            if (cci[i] < 100 or adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
