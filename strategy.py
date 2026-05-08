@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1w Ichimoku cloud for trend direction, 6h price action for entry timing, and volume confirmation.
-# Uses weekly Tenkan-sen/Kijun-sen cross as primary signal with cloud as filter.
-# Enters long when Tenkan > Kijun AND price above cloud AND volume spike.
-# Enters short when Tenkan < Kijun AND price below cloud AND volume spike.
-# Exits when Tenkan/Kijun cross reverses.
-# Designed for low trade frequency (15-30/year) to avoid fee drag. Ichimoku works in both trending and ranging markets.
+# Hypothesis: 4h strategy using 1d ATR-based volatility breakout with volume confirmation and 1d EMA34 trend filter.
+# Breakouts occur when price moves beyond the prior day's ATR range. This captures volatility expansion.
+# Long when price breaks above prior day's close + ATR(14) with volume spike and above EMA34.
+# Short when price breaks below prior day's close - ATR(14) with volume spike and below EMA34.
+# Exit when price returns to the prior day's close.
+# Designed for low trade frequency (20-40/year) to avoid fee drag. Works in both trending and ranging markets.
 
-name = "6h_1wIchimoku_TK_Cross_CloudFilter_Volume"
-timeframe = "6h"
+name = "4h_1dATRBreakout_VolumeTrend"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,92 +24,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for Ichimoku calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 52:
+    # Get 1d data for ATR and close
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Ichimoku components (weekly)
-    # Tenkan-sen (Conversion Line): (9-period high + low)/2
-    # Kijun-sen (Base Line): (26-period high + low)/2
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2
-    # Senkou Span B (Leading Span B): (52-period high + low)/2
+    # Calculate 1d ATR(14)
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_14_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Tenkan-sen (9-period)
-    high_9 = pd.Series(high_1w).rolling(window=9, min_periods=9).max().values
-    low_9 = pd.Series(low_1w).rolling(window=9, min_periods=9).min().values
-    tenkan = (high_9 + low_9) / 2.0
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Kijun-sen (26-period)
-    high_26 = pd.Series(high_1w).rolling(window=26, min_periods=26).max().values
-    low_26 = pd.Series(low_1w).rolling(window=26, min_periods=26).min().values
-    kijun = (high_26 + low_26) / 2.0
+    # Align 1d indicators to 4h timeframe
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Senkou Span B (52-period)
-    high_52 = pd.Series(high_1w).rolling(window=52, min_periods=52).max().values
-    low_52 = pd.Series(low_1w).rolling(window=52, min_periods=52).min().values
-    senkou_b = (high_52 + low_52) / 2.0
-    
-    # Senkou Span A = (Tenkan + Kijun)/2
-    senkou_a = (tenkan + kijun) / 2.0
-    
-    # Align Ichimoku components to 6h timeframe
-    tenkan_aligned = align_htf_to_ltf(prices, df_1w, tenkan)
-    kijun_aligned = align_htf_to_ltf(prices, df_1w, kijun)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_1w, senkou_a)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_1w, senkou_b)
-    
-    # Volume confirmation: 6h volume spike (2x 20-period EMA)
+    # Volume confirmation: 4h volume spike (2x 20-period EMA)
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     vol_spike = volume > (vol_ema * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 52  # Ensure enough data for Senkou B
+    start_idx = 34  # Ensure enough data for EMA
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(tenkan_aligned[i]) or 
-            np.isnan(kijun_aligned[i]) or 
-            np.isnan(senkou_a_aligned[i]) or 
-            np.isnan(senkou_b_aligned[i])):
+        if (np.isnan(atr_14_aligned[i]) or 
+            np.isnan(close_1d_aligned[i]) or 
+            np.isnan(ema_34_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine cloud top and bottom
-        cloud_top = max(senkou_a_aligned[i], senkou_b_aligned[i])
-        cloud_bottom = min(senkou_a_aligned[i], senkou_b_aligned[i])
+        upper_break = close_1d_aligned[i] + atr_14_aligned[i]
+        lower_break = close_1d_aligned[i] - atr_14_aligned[i]
         
         if position == 0:
-            # Enter long: Tenkan > Kijun AND price above cloud AND volume spike
-            if (tenkan_aligned[i] > kijun_aligned[i] and 
-                close[i] > cloud_top and 
-                vol_spike[i]):
+            # Enter long: price breaks above prior day close + ATR + volume spike + above EMA34
+            if close[i] > upper_break and vol_spike[i] and close[i] > ema_34_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Tenkan < Kijun AND price below cloud AND volume spike
-            elif (tenkan_aligned[i] < kijun_aligned[i] and 
-                  close[i] < cloud_bottom and 
-                  vol_spike[i]):
+            # Enter short: price breaks below prior day close - ATR + volume spike + below EMA34
+            elif close[i] < lower_break and vol_spike[i] and close[i] < ema_34_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Tenkan/Kijun cross reverses (Tenkan < Kijun)
-            if tenkan_aligned[i] < kijun_aligned[i]:
+            # Exit long: price returns to prior day close
+            if close[i] < close_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Tenkan/Kijun cross reverses (Tenkan > Kijun)
-            if tenkan_aligned[i] > kijun_aligned[i]:
+            # Exit short: price returns to prior day close
+            if close[i] > close_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
