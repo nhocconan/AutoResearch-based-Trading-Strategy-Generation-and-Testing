@@ -3,20 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using daily Camarilla pivot levels (R3/S3) for breakout entries, 
-# with 1d volume confirmation and 1w ADX trend filter. Designed for low trade frequency 
-# (target 20-50 trades/year) to avoid fee drag. Uses daily structure for key levels, 
-# daily volume surge for momentum confirmation, and weekly ADX to ensure we only trade 
-# in strong trends. Works in bull/bear markets by following higher timeframe trends 
-# with strict entry filters based on institutional pivot levels.
+# Hypothesis: 4h strategy using 12h Camarilla pivot levels with volume confirmation and 4h ADX trend filter.
+# Uses pivot points from 12h timeframe for structural support/resistance, requiring volume spike for confirmation.
+# ADX > 25 ensures we trade only in trending markets, reducing whipsaw in ranging conditions.
+# Designed for low trade frequency (20-40/year) to avoid fee drag while capturing significant moves.
 
-name = "12h_Camarilla_R3S3_Volume_ADX"
-timeframe = "12h"
+name = "4h_Camarilla_12h_Volume_ADX"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,140 +22,117 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots and volume
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 12h data for Camarilla pivot levels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Camarilla pivot levels (using previous day's data)
-    # Classic formula: R4 = C + (H-L)*1.1/2, R3 = C + (H-L)*1.1/4, etc.
-    # We'll use R3 and S3 for entries
-    def calculate_camarilla(high, low, close):
-        # Calculate for each day using previous day's data
-        pivot = (high + low + close) / 3.0
-        range_ = high - low
-        
-        r3 = close + range_ * 1.1 / 4.0
-        s3 = close - range_ * 1.1 / 4.0
-        
-        return r3, s3
+    # Calculate Camarilla pivot levels (R3, S3) for each 12h bar
+    camarilla_r3 = np.full(len(close_12h), np.nan)
+    camarilla_s3 = np.full(len(close_12h), np.nan)
     
-    # Calculate Camarilla levels using previous day's data (to avoid look-ahead)
-    r3_1d = np.full_like(close_1d, np.nan)
-    s3_1d = np.full_like(close_1d, np.nan)
+    for i in range(len(close_12h)):
+        H = high_12h[i]
+        L = low_12h[i]
+        C = close_12h[i]
+        camarilla_r3[i] = C + (H - L) * 1.1 / 4
+        camarilla_s3[i] = C - (H - L) * 1.1 / 4
     
-    for i in range(1, len(close_1d)):
-        r3_1d[i], s3_1d[i] = calculate_camarilla(high_1d[i-1], low_1d[i-1], close_1d[i-1])
+    # Align Camarilla levels to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s3)
     
-    # Get weekly data for ADX trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
+    # Volume confirmation: 4h volume > 1.5x 20-period EMA
+    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ema * 1.5)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate ADX (14-period)
+    # ADX trend filter (4h)
     def calculate_adx(high, low, close, period=14):
-        # True Range
-        tr1 = high[1:] - low[1:]
-        tr2 = np.abs(high[1:] - close[:-1])
-        tr3 = np.abs(low[1:] - close[:-1])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr = np.concatenate([[np.nan], tr])  # First value is NaN
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
         
-        # Directional Movement
-        up_move = high[1:] - high[:-1]
-        down_move = low[:-1] - low[1:]
+        for i in range(1, len(high)):
+            plus_dm[i] = max(0, high[i] - high[i-1])
+            minus_dm[i] = max(0, low[i-1] - low[i])
+            if plus_dm[i] < minus_dm[i]:
+                plus_dm[i] = 0
+            if minus_dm[i] < plus_dm[i]:
+                minus_dm[i] = 0
+                
+            tr[i] = max(high[i] - low[i], 
+                       abs(high[i] - close[i-1]), 
+                       abs(low[i] - close[i-1]))
         
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+        # Smooth with Wilder's smoothing (alpha = 1/period)
+        atr = np.zeros_like(tr)
+        plus_di = np.zeros_like(high)
+        minus_di = np.zeros_like(high)
         
-        # Smooth TR, +DM, -DM using Wilder's smoothing (EMA with alpha=1/period)
-        def WilderMA(arr, period):
-            res = np.full_like(arr, np.nan)
-            if len(arr) < period:
-                return res
-            # First value is simple average
-            res[period-1] = np.nanmean(arr[1:period])
-            # Rest is Wilder smoothing
-            for i in range(period, len(arr)):
-                res[i] = (res[i-1] * (period-1) + arr[i]) / period
-            return res
+        atr[period] = np.mean(tr[1:period+1])
+        plus_dm_sum = np.sum(plus_dm[1:period+1])
+        minus_dm_sum = np.sum(minus_dm[1:period+1])
         
-        tr_ma = WilderMA(tr, period)
-        plus_dm_ma = WilderMA(plus_dm, period)
-        minus_dm_ma = WilderMA(minus_dm, period)
+        for i in range(period+1, len(high)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+            plus_dm_sum = plus_dm_sum - (plus_dm_sum/period) + plus_dm[i]
+            minus_dm_sum = minus_dm_sum - (minus_dm_sum/period) + minus_dm[i]
+            
+            plus_di[i] = 100 * plus_dm_sum / atr[i] if atr[i] != 0 else 0
+            minus_di[i] = 100 * minus_dm_sum / atr[i] if atr[i] != 0 else 0
         
-        # Avoid division by zero
-        plus_di = np.where(tr_ma != 0, 100 * plus_dm_ma / tr_ma, 0)
-        minus_di = np.where(tr_ma != 0, 100 * minus_dm_ma / tr_ma, 0)
+        dx = np.zeros_like(high)
+        dx = np.where((plus_di + minus_di) != 0, 
+                     100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
         
-        dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-        adx = WilderMA(dx, period)
-        
+        adx = np.zeros_like(high)
+        adx[2*period-1] = np.mean(dx[period:2*period])
+        for i in range(2*period, len(high)):
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+            
         return adx
     
-    adx_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
-    
-    # Volume spike: 2x 20-day EMA
-    vol_ema = pd.Series(volume_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike = volume_1d > (vol_ema * 2.0)
-    
-    # Align all indicators to 12h timeframe
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
+    adx = calculate_adx(high, low, close, 14)
+    trend_filter = adx > 25
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Ensure enough data for indicators
+    start_idx = 50  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r3_1d_aligned[i]) or 
-            np.isnan(s3_1d_aligned[i]) or 
-            np.isnan(adx_1w_aligned[i]) or 
-            np.isnan(vol_spike_aligned[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Only trade when ADX > 25 (strong trend)
-        if adx_1w_aligned[i] <= 25:
+        if (np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or 
+            np.isnan(trend_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above daily R3 + volume surge
-            if close[i] > r3_1d_aligned[i] and vol_spike_aligned[i]:
+            # Enter long: price breaks above R3 with volume confirmation and trend filter
+            if close[i] > r3_aligned[i] and vol_confirm[i] and trend_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below daily S3 + volume surge
-            elif close[i] < s3_1d_aligned[i] and vol_spike_aligned[i]:
+            # Enter short: price breaks below S3 with volume confirmation and trend filter
+            elif close[i] < s3_aligned[i] and vol_confirm[i] and trend_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below daily S3 or ADX weakens
-            if close[i] < s3_1d_aligned[i] or adx_1w_aligned[i] < 20:
+            # Exit long: price breaks below S3 or trend weakens
+            if close[i] < s3_aligned[i] or not trend_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above daily R3 or ADX weakens
-            if close[i] > r3_1d_aligned[i] or adx_1w_aligned[i] < 20:
+            # Exit short: price breaks above R3 or trend weakens
+            if close[i] > r3_aligned[i] or not trend_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
