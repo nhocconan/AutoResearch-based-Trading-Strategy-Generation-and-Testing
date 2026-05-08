@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Donchian20_VolumeTrend_v1"
-timeframe = "12h"
+name = "1h_4h1d_Pullback_Strategy_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,20 +17,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 4h data for trend direction (primary filter)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
+        return np.zeros(n)
+    
+    # Get 1d data for trend confirmation (secondary filter)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 4h EMA21 for trend direction
+    close_4h = df_4h['close'].values
+    ema_21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
     
-    # Donchian channels (20-period) on 12h data
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # 1d EMA50 for higher timeframe trend confirmation
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # 1h RSI for entry timing (overbought/oversold)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
     
     # Volume confirmation - 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -44,39 +59,53 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(ema_21_4h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(rsi[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        if position == 0:
-            # Long conditions: price breaks above Donchian high + above 1d EMA34 + volume confirmation
-            if (close[i] > highest_high[i] and 
-                close[i] > ema_34_1d_aligned[i] and
-                vol_ratio[i] > 1.3):
-                signals[i] = 0.25
-                position = 1
-            # Short conditions: price breaks below Donchian low + below 1d EMA34 + volume confirmation
-            elif (close[i] < lowest_low[i] and 
-                  close[i] < ema_34_1d_aligned[i] and
-                  vol_ratio[i] > 1.3):
-                signals[i] = -0.25
-                position = -1
+        # Long conditions: 
+        # 1. Price above 4h EMA21 (uptrend)
+        # 2. Price above 1d EMA50 (higher timeframe uptrend)
+        # 3. RSI < 40 (pullback/oversold)
+        # 4. Volume > 1.2x average (confirmation)
+        if (position == 0 and
+            close[i] > ema_21_4h_aligned[i] and
+            close[i] > ema_50_1d_aligned[i] and
+            rsi[i] < 40 and
+            vol_ratio[i] > 1.2):
+            signals[i] = 0.20
+            position = 1
+        
+        # Short conditions:
+        # 1. Price below 4h EMA21 (downtrend)
+        # 2. Price below 1d EMA50 (higher timeframe downtrend)
+        # 3. RSI > 60 (pullback/overbought)
+        # 4. Volume > 1.2x average (confirmation)
+        elif (position == 0 and
+              close[i] < ema_21_4h_aligned[i] and
+              close[i] < ema_50_1d_aligned[i] and
+              rsi[i] > 60 and
+              vol_ratio[i] > 1.2):
+            signals[i] = -0.20
+            position = -1
+        
+        # Long exit: price breaks below 4h EMA21 OR RSI > 60 (overbought)
         elif position == 1:
-            # Long exit: price crosses below Donchian low OR below 1d EMA34
-            if close[i] < lowest_low[i] or close[i] < ema_34_1d_aligned[i]:
+            if close[i] < ema_21_4h_aligned[i] or rsi[i] > 60:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
+        
+        # Short exit: price breaks above 4h EMA21 OR RSI < 40 (oversold)
         elif position == -1:
-            # Short exit: price crosses above Donchian high OR above 1d EMA34
-            if close[i] > highest_high[i] or close[i] > ema_34_1d_aligned[i]:
+            if close[i] > ema_21_4h_aligned[i] or rsi[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
