@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Band squeeze breakout with 1d trend filter and volume confirmation
-# Exploits volatility contraction/expansion cycles: enter when price breaks out of
-# a low-volatility Bollinger Band squeeze, in the direction of the daily trend.
-# Volume spike confirms the breakout. Designed for low trade frequency and robustness
-# across bull/bear regimes via trend filter.
-# Target: 50-150 total trades over 4 years = 12-37/year
+# Hypothesis: 4h Williams %R with 1d trend filter and volume confirmation
+# Williams %R identifies overbought/oversold conditions. In trending markets,
+# pullbacks to extreme levels offer high-probability entries. Uses 1d EMA for
+# trend filter and volume spike for confirmation. Designed for low trade frequency
+# Target: 20-50 total trades over 4 years = 5-12/year
 
-name = "6h_BB_Squeeze_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_WilliamsR_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,9 +18,9 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
     # Get daily data once
@@ -34,17 +33,10 @@ def generate_signals(prices):
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Bollinger Bands (20, 2) on 6h data
-    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper = sma20 + 2 * std20
-    lower = sma20 - 2 * std20
-    
-    # Bollinger Band Width: (upper - lower) / sma20
-    bb_width = (upper - lower) / sma20
-    # Squeeze condition: BB width below its 50-period mean (low volatility)
-    bb_width_ma = pd.Series(bb_width).rolling(window=50, min_periods=50).mean().values
-    squeeze = bb_width < bb_width_ma
+    # Williams %R (14-period) on 4h data
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -57,41 +49,40 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(sma20[i]) or 
-            np.isnan(std20[i]) or np.isnan(bb_width[i]) or 
-            np.isnan(bb_width_ma[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         ema34_1d_val = ema34_1d_aligned[i]
-        is_squeeze = squeeze[i]
+        wr = williams_r[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: squeeze breakout up + uptrend + volume spike
-            if (close[i] > upper[i] and is_squeeze and 
+            # Enter long: Williams %R oversold (< -80) + uptrend + volume spike
+            if (wr < -80 and 
                 close[i] > ema34_1d_val and 
                 vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: squeeze breakout down + downtrend + volume spike
-            elif (close[i] < lower[i] and is_squeeze and 
+            # Enter short: Williams %R overbought (> -20) + downtrend + volume spike
+            elif (wr > -20 and 
                   close[i] < ema34_1d_val and 
                   vol_spike):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price re-enters Bollinger Bands or trend turns bearish
-            if (close[i] < sma20[i] or close[i] < ema34_1d_val):
+            # Exit long: Williams %R overbought OR price breaks below trend
+            if (wr > -20 or close[i] < ema34_1d_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price re-enters Bollinger Bands or trend turns bullish
-            if (close[i] > sma20[i] or close[i] > ema34_1d_val):
+            # Exit short: Williams %R oversold OR price breaks above trend
+            if (wr < -80 or close[i] > ema34_1d_val):
                 signals[i] = 0.0
                 position = 0
             else:
