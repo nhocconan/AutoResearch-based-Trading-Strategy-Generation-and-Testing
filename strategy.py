@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6s Weekly Pivot + Daily Trend + Volume Spike
-# Uses weekly Camarilla pivot levels for bias, daily EMA34 for trend filter, and 6h volume spike (>2x 20-period average) for entry.
-# Designed to capture continuation of weekly trend with daily confirmation and volume momentum.
-# Target: 12-37 trades/year (50-150 total over 4 years). Works in both bull and bear via weekly pivot bias.
+# Hypothesis: 12h Donchian Breakout with Daily Trend and Volume Confirmation
+# Uses 12h price channel breakout (Donchian 20) for entry, filtered by daily EMA34 trend and volume spike (>2x 20-period average).
+# Designed to capture trend continuation with reduced whipsaw in both bull and bear markets.
+# Target: 12-37 trades/year (50-150 total over 4 years). Works via trend alignment and volume confirmation.
 
-name = "6h_WeeklyPivot_DailyTrend_VolumeSpike"
-timeframe = "6h"
+name = "12h_Donchian20_DailyTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,23 +21,6 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    
-    # Get weekly data for Camarilla pivot levels
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 2:
-        return np.zeros(n)
-    
-    # Calculate weekly Camarilla pivot levels (R3, R4, S3, S4)
-    high_w = df_weekly['high'].values
-    low_w = df_weekly['low'].values
-    close_w = df_weekly['close'].values
-    
-    pivot = (high_w + low_w + close_w) / 3
-    range_w = high_w - low_w
-    r3 = pivot + range_w * 1.1
-    r4 = pivot + range_w * 1.5
-    s3 = pivot - range_w * 1.1
-    s4 = pivot - range_w * 1.5
     
     # Get daily data for EMA34 trend
     df_daily = get_htf_data(prices, '1d')
@@ -52,19 +35,21 @@ def generate_signals(prices):
         for i in range(34, len(close_daily)):
             ema34_daily[i] = (close_daily[i] * 2 + ema34_daily[i-1] * 32) / 34
     
-    # Calculate 6h volume average for volume spike
+    # Calculate 12h Donchian channels (20-period)
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    if n >= 20:
+        for i in range(20, n):
+            donchian_high[i] = np.max(high[i-20:i])
+            donchian_low[i] = np.min(low[i-20:i])
+    
+    # Calculate 12h volume average for volume spike
     vol_avg_20 = np.full(n, np.nan)
     if n >= 20:
         for i in range(20, n):
             vol_avg_20[i] = np.mean(volume[i-20:i])
     
-    # Align weekly pivot levels to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_weekly, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_weekly, r4)
-    s3_aligned = align_htf_to_ltf(prices, df_weekly, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_weekly, s4)
-    
-    # Align daily EMA34 to 6h timeframe
+    # Align daily EMA34 to 12h timeframe
     ema34_daily_aligned = align_htf_to_ltf(prices, df_daily, ema34_daily)
     
     # Pre-compute session filter (08-20 UTC)
@@ -85,7 +70,7 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(ema34_daily_aligned[i]) or np.isnan(vol_avg_20[i]):
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(ema34_daily_aligned[i]) or np.isnan(vol_avg_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -108,33 +93,29 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Determine weekly bias from pivot levels
-        weekly_bullish = close[i] > r3_aligned[i]  # Price above R3 = bullish bias
-        weekly_bearish = close[i] < s3_aligned[i]  # Price below S3 = bearish bias
-        
         # Check conditions
         price_above_ema = close_daily_current > ema34_daily_aligned[i]
         price_below_ema = close_daily_current < ema34_daily_aligned[i]
         vol_spike = volume[i] > 2.0 * vol_avg_20[i]
         
         if position == 0:
-            # Look for entry: follow weekly bias with daily trend and volume spike
-            if weekly_bullish and price_above_ema and vol_spike:
+            # Look for entry: breakout with trend and volume confirmation
+            if close[i] > donchian_high[i] and price_above_ema and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            elif weekly_bearish and price_below_ema and vol_spike:
+            elif close[i] < donchian_low[i] and price_below_ema and vol_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: weekly bias turns bearish or daily trend fails or volume drops
-            if not weekly_bullish or price_below_ema or not vol_spike:
+            # Exit long: breakdown or trend fails or volume drops
+            if close[i] < donchian_low[i] or not price_above_ema or not vol_spike:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: weekly bias turns bullish or daily trend fails or volume drops
-            if not weekly_bearish or price_above_ema or not vol_spike:
+            # Exit short: breakout or trend fails or volume drops
+            if close[i] > donchian_high[i] or not price_below_ema or not vol_spike:
                 signals[i] = 0.0
                 position = 0
             else:
