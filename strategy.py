@@ -3,13 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h timeframe with 4h direction filter (EMA21) and 1d momentum filter (RSI > 50 for long, < 50 for short)
-# Uses 4h EMA for trend direction, 1d RSI for momentum confirmation, and 1h for precise entry timing
-# Targets 60-150 total trades over 4 years (15-37/year) with session filter (08-20 UTC) to reduce noise
-# Position size fixed at 0.20 to manage risk and avoid overtrading
+# Hypothesis: 6h Williams Fractal reversal with 1d trend filter and volume confirmation
+# Long when bullish fractal forms at support, 1d EMA34 rising, volume > 1.3x average
+# Short when bearish fractal forms at resistance, 1d EMA34 falling, volume > 1.3x average
+# Uses 6h for entry timing, 1d for trend filter to avoid whipsaws in choppy markets
+# Targets 50-150 total trades over 4 years (12-37/year) for low fee drag and high win rate
+# Williams fractal requires 2-bar confirmation after the center bar
 
-name = "1h_EMA21_RSI50_SessionFilter"
-timeframe = "1h"
+name = "6h_WilliamsFractal_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,80 +24,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter (EMA21)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 21:
-        return np.zeros(n)
-    
-    close_4h = df_4h['close'].values
-    ema21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema21_4h)
-    
-    # Get 1d data for momentum filter (RSI14)
+    # Get 1d data for Williams fractal and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 10:  # Need at least 10 days for fractal calculation
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    delta = pd.Series(close_1d).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi14_1d = 100 - (100 / (1 + rs))
-    rsi14_1d_values = rsi14_1d.values
-    rsi14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi14_1d_values)
+    # Calculate Williams fractals on 1d high/low
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Williams fractal: 5-point pattern (high/low surrounded by 2 lower/higher on each side)
+    bearish_fractal = np.zeros(len(high_1d), dtype=bool)
+    bullish_fractal = np.zeros(len(low_1d), dtype=bool)
+    
+    for i in range(2, len(high_1d) - 2):
+        # Bearish fractal: high[i] is highest among i-2, i-1, i, i+1, i+2
+        if (high_1d[i] >= high_1d[i-2] and high_1d[i] >= high_1d[i-1] and 
+            high_1d[i] >= high_1d[i+1] and high_1d[i] >= high_1d[i+2]):
+            bearish_fractal[i] = True
+        # Bullish fractal: low[i] is lowest among i-2, i-1, i, i+1, i+2
+        if (low_1d[i] <= low_1d[i-2] and low_1d[i] <= low_1d[i-1] and 
+            low_1d[i] <= low_1d[i+1] and low_1d[i] <= low_1d[i+2]):
+            bullish_fractal[i] = True
+    
+    # Williams fractal requires 2-bar confirmation after the center bar
+    # So we shift the signal by 2 bars to the right (future confirmation)
+    bearish_fractal_confirmed = np.zeros_like(bearish_fractal)
+    bullish_fractal_confirmed = np.zeros_like(bullish_fractal)
+    bearish_fractal_confirmed[2:] = bearish_fractal[:-2]
+    bullish_fractal_confirmed[2:] = bullish_fractal[:-2]
+    
+    # Get 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align 1d indicators to 6h timeframe
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal_confirmed.astype(float))
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal_confirmed.astype(float))
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Volume spike: current volume > 1.3x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 21  # warmup for EMA21
+    start_idx = 20  # warmup for volume MA
     
     for i in range(start_idx, n):
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
         # Skip if any critical data is NaN
-        if (np.isnan(ema21_4h_aligned[i]) or np.isnan(rsi14_1d_aligned[i])):
+        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        close_val = close[i]
-        ema21_4h_val = ema21_4h_aligned[i]
-        rsi14_1d_val = rsi14_1d_aligned[i]
+        bearish_fractal_val = bearish_fractal_aligned[i] > 0.5
+        bullish_fractal_val = bullish_fractal_aligned[i] > 0.5
+        ema34_1d_val = ema34_1d_aligned[i]
+        vol_spike_val = vol_spike[i]
         
         if position == 0:
-            # Enter long: price above 4h EMA21, 1d RSI > 50 (bullish momentum)
-            if close_val > ema21_4h_val and rsi14_1d_val > 50:
-                signals[i] = 0.20
+            # Enter long: bullish fractal forms, 1d uptrend, volume spike
+            if bullish_fractal_val and ema34_1d_val > 0 and vol_spike_val:
+                signals[i] = 0.25
                 position = 1
-            # Enter short: price below 4h EMA21, 1d RSI < 50 (bearish momentum)
-            elif close_val < ema21_4h_val and rsi14_1d_val < 50:
-                signals[i] = -0.20
+            # Enter short: bearish fractal forms, 1d downtrend, volume spike
+            elif bearish_fractal_val and ema34_1d_val < 0 and vol_spike_val:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price below 4h EMA21 or 1d RSI < 50
-            if close_val < ema21_4h_val or rsi14_1d_val < 50:
+            # Exit long: bearish fractal forms or 1d trend down
+            if bearish_fractal_val or ema34_1d_val < 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price above 4h EMA21 or 1d RSI > 50
-            if close_val > ema21_4h_val or rsi14_1d_val > 50:
+            # Exit short: bullish fractal forms or 1d trend up
+            if bullish_fractal_val or ema34_1d_val > 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
