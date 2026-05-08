@@ -9,8 +9,8 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # continuation in both bull and bear markets by following the weekly trend while avoiding
 # false signals with volume confirmation. Target: 12-37 trades/year.
 
-name = "12h_WeeklyEMA50_DailyPriceAction_VolumeSpike"
-timeframe = "12h"
+name = "1d_WeeklyEMA50_DailyPriceAction_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -48,7 +48,7 @@ def generate_signals(prices):
         for i in range(20, len(vol_daily)):
             vol_avg_20_daily[i] = np.mean(vol_daily[i-20:i])
     
-    # Align weekly and daily indicators to 12h timeframe
+    # Align weekly and daily indicators to 1d timeframe
     ema50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema50_weekly)
     vol_avg_20_daily_aligned = align_htf_to_ltf(prices, df_daily, vol_avg_20_daily)
     
@@ -89,10 +89,10 @@ def generate_signals(prices):
             idx_daily -= 1  # last completed daily bar
             
             if idx_daily >= 0:
-                vol_12h_current = volume[i]
-                vol_spike = vol_12h_current > 2.0 * vol_avg_20_daily_aligned[i]
+                vol_1d_current = volume[i]
+                vol_spike = vol_1d_current > 2.0 * vol_avg_20_daily_aligned[i]
                 
-                # Check if current 12h price is above/below weekly EMA
+                # Check if current 1d price is above/below weekly EMA
                 price_above_weekly_ema = close[i] > ema50_weekly_aligned[i]
                 price_below_weekly_ema = close[i] < ema50_weekly_aligned[i]
         
