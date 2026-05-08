@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Weekly EMA200 Trend + Daily Price Action + Volume Spike
-# Uses weekly EMA200 for long-term trend bias, daily price crossing above/below weekly EMA for entry,
-# and volume spike (>2x 20-day average) for confirmation. Designed to capture trend
-# continuation in both bull and bear markets by following the weekly trend while avoiding
-# false signals with volume confirmation. Target: 12-37 trades/year.
+# Hypothesis: 4h Donchian Breakout + Volume Spike + 1d EMA Trend Filter
+# Uses Donchian(20) breakout for trend entry, confirmed by volume spike (>2x 20-period average)
+# and filtered by 1d EMA50 trend direction. Designed to capture strong trends in both bull
+# and bear markets with volume confirmation to avoid false breakouts. Target: 20-50 trades/year.
 
-name = "12h_WeeklyEMA200_DailyPriceAction_VolumeSpike"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_VolumeSpike_1dEMA50"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,34 +22,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for EMA trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 200:
-        return np.zeros(n)
-    
-    # Get daily data for price action and volume
+    # Get daily data for EMA trend filter
     df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 20:
+    if len(df_daily) < 50:
         return np.zeros(n)
     
-    # Calculate weekly EMA200 for trend filter
-    close_weekly = df_weekly['close'].values
-    ema200_weekly = np.full(len(close_weekly), np.nan)
-    if len(close_weekly) >= 200:
-        ema200_weekly[199] = np.mean(close_weekly[:200])
-        for i in range(200, len(close_weekly)):
-            ema200_weekly[i] = (close_weekly[i] * 2 + ema200_weekly[i-1] * 198) / 200
+    # Calculate daily EMA50 for trend filter
+    close_daily = df_daily['close'].values
+    ema50_daily = np.full(len(close_daily), np.nan)
+    if len(close_daily) >= 50:
+        ema50_daily[49] = np.mean(close_daily[:50])
+        for i in range(50, len(close_daily)):
+            ema50_daily[i] = (close_daily[i] * 2 + ema50_daily[i-1] * 48) / 50
     
-    # Calculate daily volume average for volume spike
-    vol_daily = df_daily['volume'].values
-    vol_avg_20_daily = np.full(len(vol_daily), np.nan)
-    if len(vol_daily) >= 20:
-        for i in range(20, len(vol_daily)):
-            vol_avg_20_daily[i] = np.mean(vol_daily[i-20:i])
+    # Calculate Donchian channels (20-period)
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    for i in range(20, n):
+        highest_high[i] = np.max(high[i-20:i])
+        lowest_low[i] = np.min(low[i-20:i])
     
-    # Align weekly and daily indicators to 12h timeframe
-    ema200_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema200_weekly)
-    vol_avg_20_daily_aligned = align_htf_to_ltf(prices, df_daily, vol_avg_20_daily)
+    # Calculate volume average for spike detection
+    vol_avg_20 = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_avg_20[i] = np.mean(volume[i-20:i])
+    
+    # Align daily EMA50 to 4h timeframe
+    ema50_daily_aligned = align_htf_to_ltf(prices, df_daily, ema50_daily)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -59,7 +57,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(200, 20)  # warmup for indicators
+    start_idx = max(50, 20)  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if outside trading session
@@ -70,50 +68,39 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(ema200_weekly_aligned[i]) or np.isnan(vol_avg_20_daily_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(ema50_daily_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Find current daily bar's volume and price action
-        vol_spike = False
-        price_above_weekly_ema = False
-        price_below_weekly_ema = False
+        # Volume spike condition
+        vol_spike = volume[i] > 2.0 * vol_avg_20[i]
         
-        if not np.isnan(vol_avg_20_daily_aligned[i]):
-            # Find current daily bar's data
-            idx_daily = 0
-            while idx_daily < len(df_daily) and df_daily.iloc[idx_daily]['open_time'] <= prices.iloc[i]['open_time']:
-                idx_daily += 1
-            idx_daily -= 1  # last completed daily bar
-            
-            if idx_daily >= 0:
-                vol_12h_current = volume[i]
-                vol_spike = vol_12h_current > 2.0 * vol_avg_20_daily_aligned[i]
-                
-                # Check if current 12h price is above/below weekly EMA
-                price_above_weekly_ema = close[i] > ema200_weekly_aligned[i]
-                price_below_weekly_ema = close[i] < ema200_weekly_aligned[i]
+        # Trend filter: price relative to daily EMA50
+        price_above_ema = close[i] > ema50_daily_aligned[i]
+        price_below_ema = close[i] < ema50_daily_aligned[i]
         
         if position == 0:
-            # Look for entry: follow weekly EMA trend with volume spike
-            if price_above_weekly_ema and vol_spike:
+            # Look for long entry: price breaks above Donchian high + volume spike + uptrend
+            if close[i] > highest_high[i] and vol_spike and price_above_ema:
                 signals[i] = 0.25
                 position = 1
-            elif price_below_weekly_ema and vol_spike:
+            # Look for short entry: price breaks below Donchian low + volume spike + downtrend
+            elif close[i] < lowest_low[i] and vol_spike and price_below_ema:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns below weekly EMA or volume drops
-            if price_below_weekly_ema or not vol_spike:
+            # Exit long: price returns below Donchian low or trend changes
+            if close[i] < lowest_low[i] or not price_above_ema:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns above weekly EMA or volume drops
-            if price_above_weekly_ema or not vol_spike:
+            # Exit short: price returns above Donchian high or trend changes
+            if close[i] > highest_high[i] or not price_below_ema:
                 signals[i] = 0.0
                 position = 0
             else:
