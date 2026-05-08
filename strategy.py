@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R with 1d ADX trend filter and volume confirmation
-# Williams %R identifies overbought/oversold conditions. ADX > 25 confirms strong trend
-# Volume spike validates breakout. Designed for low trade frequency in both bull/bear markets
-# Target: 20-50 total trades over 4 years = 5-12/year
+# Hypothesis: 12h Camarilla Pivot (R1/S1) breakout with 1d trend filter and volume confirmation
+# Uses daily pivot levels derived from previous day's range for support/resistance
+# Requires price to break above R1 or below S1 with volume spike and daily EMA trend alignment
+# Designed for low trade frequency (target: 50-150 total trades over 4 years)
+# Works in bull/bear via trend filter and volatility-based entry
 
-name = "4h_WilliamsR_1dADX_Trend_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,58 +25,29 @@ def generate_signals(prices):
     
     # Get daily data once
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate daily ADX(14) for trend strength
+    # Calculate daily EMA(34) for trend direction
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Calculate 12h Camarilla pivot levels (R1, S1) using previous day's OHLC
+    # R1 = close + 1.1 * (high - low) / 12
+    # S1 = close - 1.1 * (high - low) / 12
+    # We need previous day's data, so we shift by 1
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1d_prev = df_1d['close'].values
     
-    # True Range
-    tr1 = np.maximum(high_1d[1:], low_1d[:-1]) - np.minimum(low_1d[1:], high_1d[:-1])
-    tr1 = np.concatenate([[np.nan], tr1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr2 = np.concatenate([[np.nan], tr2])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr3 = np.concatenate([[np.nan], tr3])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Calculate pivot levels for each day
+    camarilla_r1 = close_1d_prev + 1.1 * (high_1d - low_1d) / 12
+    camarilla_s1 = close_1d_prev - 1.1 * (high_1d - low_1d) / 12
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_minus = np.concatenate([[0], dm_minus])
-    
-    # Smooth with Wilder's smoothing (equivalent to EMA with alpha=1/period)
-    def WilderSmooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) >= period:
-            result[period-1] = np.nansum(data[1:period])  # first value is simple average
-            for i in range(period, len(data)):
-                result[i] = result[i-1] - (result[i-1]/period) + data[i]
-        return result
-    
-    atr = WilderSmooth(tr, 14)
-    dm_plus_smooth = WilderSmooth(dm_plus, 14)
-    dm_minus_smooth = WilderSmooth(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
-    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = WilderSmooth(dx, 14)
-    adx_1d = WilderSmooth(dx, 14)  # Reuse smoothed DX for ADX
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Calculate Williams %R (14-period) on 4h data
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Align pivot levels to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -88,40 +60,41 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(adx_1d_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        adx_val = adx_1d_aligned[i]
-        wr = williams_r[i]
+        ema34_1d_val = ema34_1d_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: Oversold + strong trend + volume spike
-            if (wr < -80 and 
-                adx_val > 25 and 
+            # Enter long: price breaks above R1 + uptrend + volume spike
+            if (close[i] > r1_val and 
+                close[i] > ema34_1d_val and 
                 vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Overbought + strong trend + volume spike
-            elif (wr > -20 and 
-                  adx_val > 25 and 
+            # Enter short: price breaks below S1 + downtrend + volume spike
+            elif (close[i] < s1_val and 
+                  close[i] < ema34_1d_val and 
                   vol_spike):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Overbought OR trend weakens
-            if (wr > -20 or adx_val < 20):
+            # Exit long: price breaks below S1 or trend turns bearish
+            if (close[i] < s1_val or close[i] < ema34_1d_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Oversold OR trend weakens
-            if (wr < -80 or adx_val < 20):
+            # Exit short: price breaks above R1 or trend turns bullish
+            if (close[i] > r1_val or close[i] > ema34_1d_val):
                 signals[i] = 0.0
                 position = 0
             else:
