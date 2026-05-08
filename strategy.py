@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_Weekly_Camarilla_R3S3_Breakout_Trend_Volume"
-timeframe = "1d"
+name = "6h_Ichimoku_Cloud_TenkanKijun_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,67 +17,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data once for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Weekly EMA20 trend filter (more responsive than EMA50 for weekly)
-    close_1w = df_1w['close'].values
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    trend_1w = (close_1w > ema20_1w).astype(float)
-    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
-    
-    # Get daily data once for Camarilla pivot levels
+    # Get 1d data once for Ichimoku calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 52:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla calculation (R3/S3 levels)
-    prev_high = np.roll(df_1d['high'].values, 1)
-    prev_low = np.roll(df_1d['low'].values, 1)
-    prev_close = np.roll(df_1d['close'].values, 1)
-    prev_high[0] = df_1d['high'].values[0]
-    prev_low[0] = df_1d['low'].values[0]
-    prev_close[0] = df_1d['close'].values[0]
+    # Ichimoku components (9, 26, 52)
+    high_9 = pd.Series(df_1d['high'].values).rolling(window=9, min_periods=9).max().values
+    low_9 = pd.Series(df_1d['low'].values).rolling(window=9, min_periods=9).min().values
+    tenkan = (high_9 + low_9) / 2
     
-    # Camarilla pivot levels calculation (R3 and S3)
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_val = prev_high - prev_low
-    r3 = pivot + (range_val * 1.1 / 2)  # R3 level
-    s3 = pivot - (range_val * 1.1 / 2)  # S3 level
+    high_26 = pd.Series(df_1d['high'].values).rolling(window=26, min_periods=26).max().values
+    low_26 = pd.Series(df_1d['low'].values).rolling(window=26, min_periods=26).min().values
+    kijun = (high_26 + low_26) / 2
     
-    # Align Camarilla levels to daily timeframe (already daily, but keep for consistency)
-    r3_1d = align_htf_to_ltf(prices, df_1d, r3)
-    s3_1d = align_htf_to_ltf(prices, df_1d, s3)
+    high_52 = pd.Series(df_1d['high'].values).rolling(window=52, min_periods=52).max().values
+    low_52 = pd.Series(df_1d['low'].values).rolling(window=52, min_periods=52).min().values
+    senkou_a = (tenkan + kijun) / 2
+    senkou_b = (high_52 + low_52) / 2
     
-    # Volume spike detection: current volume > 2.0 * 20-period average
+    # Align Ichimoku to 6h timeframe
+    tenkan_6h = align_htf_to_ltf(prices, df_1d, tenkan)
+    kijun_6h = align_htf_to_ltf(prices, df_1d, kijun)
+    senkou_a_6h = align_htf_to_ltf(prices, df_1d, senkou_a)
+    senkou_b_6h = align_htf_to_ltf(prices, df_1d, senkou_b)
+    
+    # Price relative to cloud (senkou_a and senkou_b)
+    cloud_top = np.maximum(senkou_a_6h, senkou_b_6h)
+    cloud_bottom = np.minimum(senkou_a_6h, senkou_b_6h)
+    price_above_cloud = close > cloud_top
+    price_below_cloud = close < cloud_bottom
+    
+    # Volume filter: current volume > 2.0 * 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (vol_ma20 * 2.0)
-    
-    # Price distance filter: require breakout to be at least 0.3% above/below level
-    price_above_r3 = close > r3_1d * 1.003
-    price_below_s3 = close < s3_1d * 0.997
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # warmup for volume MA
+    start_idx = 52  # warmup for Ichimoku
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r3_1d[i]) or np.isnan(s3_1d[i]) or np.isnan(trend_1w_aligned[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or 
+            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or 
+            np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: price breaks above R3 with volume spike and weekly uptrend
-            long_cond = (price_above_r3[i] and vol_spike[i] and trend_1w_aligned[i] > 0.5)
+            # Long entry: Tenkan crosses above Kijun, price above cloud, volume spike
+            long_cond = (tenkan_6h[i] > kijun_6h[i] and 
+                         price_above_cloud[i] and 
+                         vol_spike[i])
             
-            # Short entry: price breaks below S3 with volume spike and weekly downtrend
-            short_cond = (price_below_s3[i] and vol_spike[i] and trend_1w_aligned[i] < 0.5)
+            # Short entry: Tenkan crosses below Kijun, price below cloud, volume spike
+            short_cond = (tenkan_6h[i] < kijun_6h[i] and 
+                          price_below_cloud[i] and 
+                          vol_spike[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -86,15 +85,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price reverses back below R3 (mean reversion)
-            if close[i] < r3_1d[i]:
+            # Long exit: Tenkan crosses below Kijun
+            if tenkan_6h[i] < kijun_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price reverses back above S3 (mean reversion)
-            if close[i] > s3_1d[i]:
+            # Short exit: Tenkan crosses above Kijun
+            if tenkan_6h[i] > kijun_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,8 +101,7 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Weekly Camarilla R3/S3 breakout with volume confirmation and weekly trend filter.
-# Uses daily timeframe with weekly EMA20 trend filter for multi-timeframe alignment.
-# Volume spike > 2.0x 20-day average and price distance > 0.3% from levels to avoid false breakouts.
-# Position size 0.25 to manage risk, targeting 10-25 trades/year to minimize fee drag.
-# Designed to work in both bull and bear markets by using weekly trend filter and mean-reversion exits.
+# Hypothesis: Ichimoku Cloud with Tenkan-Kijun crossover on 6h timeframe using 1d Ichimoku components.
+# Price above/below cloud filters false signals, volume spike confirms momentum.
+# Works in bull markets (trend following via cloud) and bear markets (counter-trend via cloud rejection).
+# Target: 15-30 trades/year to avoid fee drag while maintaining edge in both bull and bear markets.
