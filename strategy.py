@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume_v2"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Refined"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -40,22 +40,33 @@ def generate_signals(prices):
         close_prev = close_1d[i-1]
         range_val = high_prev - low_prev
         
+        if range_val <= 0:
+            R3[i] = R3[i-1] if i > 1 else close_prev
+            S3[i] = S3[i-1] if i > 1 else close_prev
+            continue
+            
         C = close_prev + (range_val * 1.1 / 6)
         R3[i] = C + (range_val * 1.1 / 2)
         S3[i] = C - (range_val * 1.1 / 2)
     
-    # Align Camarilla levels to 12h timeframe
+    # Forward fill first value
+    if len(R3) > 0:
+        R3[0] = R3[1] if len(R3) > 1 else close_1d[0]
+        S3[0] = S3[1] if len(S3) > 1 else close_1d[0]
+    
+    # Align Camarilla levels to 4h timeframe
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
-    # Volume spike: current volume > 1.8x 30-period average (stricter)
-    vol_ma30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_spike = volume > (1.8 * vol_ma30)
+    # Volume spike: current volume > 1.5x 20-period average
+    vol_series = pd.Series(volume)
+    vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
