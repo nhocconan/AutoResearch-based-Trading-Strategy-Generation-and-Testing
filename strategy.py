@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator + 12h Trend + Volume Spike
-# Long when price > Alligator teeth, 12h EMA50 rising, volume > 1.5x avg
-# Short when price < Alligator teeth, 12h EMA50 falling, volume > 1.5x avg
-# Alligator identifies trend, EMA50 confirms higher timeframe direction, volume filters weak moves
-# Targets 50-150 total trades over 4 years (12-37/year) to balance accuracy and frequency
+# Hypothesis: 4h Williams Alligator with 1d trend filter and volume confirmation
+# Long when Alligator is bullish (jaws < teeth < lips) and 1d EMA50 up and volume > 1.5x average
+# Short when Alligator is bearish (jaws > teeth > lips) and 1d EMA50 down and volume > 1.5x average
+# Exit when Alligator direction changes or volume drops below average
+# Williams Alligator identifies trend structure, 1d EMA50 filters higher timeframe trend,
+# volume confirmation reduces false signals. Targets 20-50 trades per year to minimize fee drag.
 
-name = "6h_WilliamsAlligator_12hTrend_VolumeSpike"
-timeframe = "6h"
+name = "4h_WilliamsAlligator_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,81 +24,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data once for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get daily data once for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 12h EMA(50) for trend filter
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Calculate daily EMA(50) for trend filter
+    daily_close = df_1d['close'].values
+    ema50_1d = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Williams Alligator (13,8,5) with SMMA (Smoothed Moving Average)
-    def smma(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
+    # Williams Alligator (13,8,5) - Smoothed Medians
+    # Jaw: 13-period SMMA, shifted 8 bars forward
+    # Teeth: 8-period SMMA, shifted 5 bars forward  
+    # Lips: 5-period SMMA, shifted 3 bars forward
+    def smma(data, period):
+        """Smoothed Moving Average"""
+        result = np.full_like(data, np.nan, dtype=np.float64)
+        if len(data) < period:
             return result
-        # First value is SMA
-        result[period-1] = np.mean(arr[:period])
-        # Subsequent values: SMMA = (prev * (period-1) + current) / period
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        # First value is simple average
+        result[period-1] = np.mean(data[:period])
+        # Subsequent values: (prev * (period-1) + current) / period
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
         return result
     
-    jaw = smma(high, 13)  # Blue line (13-period)
-    teeth = smma(low, 8)   # Red line (8-period)
-    lips = smma(close, 5)  # Green line (5-period)
+    jaw = smma(close, 13)
+    teeth = smma(close, 8)
+    lips = smma(close, 5)
     
-    # Volume spike filter: current volume > 1.5x 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma20 * 1.5)
+    # Shift as per Alligator definition
+    jaw = np.roll(jaw, 8)
+    teeth = np.roll(teeth, 5)
+    lips = np.roll(lips, 3)
+    # Set shifted values to NaN
+    jaw[:8] = np.nan
+    teeth[:5] = np.nan
+    lips[:3] = np.nan
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = np.where(vol_ma > 0, volume / vol_ma, 0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for Alligator and EMA
+    start_idx = 50  # warmup for calculations
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
         if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_ma20[i])):
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Alligator condition: price alignment
-        price_above_teeth = close[i] > teeth[i]
-        price_below_teeth = close[i] < teeth[i]
+        jaw_val = jaw[i]
+        teeth_val = teeth[i]
+        lips_val = lips[i]
+        ema50_1d_val = ema50_1d_aligned[i]
+        vol_ratio_val = vol_ratio[i]
         
         if position == 0:
-            # Enter long: price > teeth, 12h EMA50 rising, volume spike
-            if (price_above_teeth and 
-                ema50_12h_aligned[i] > ema50_12h_aligned[i-1] and 
-                vol_spike[i]):
+            # Enter long: Alligator bullish (jaws < teeth < lips), 1d EMA50 up, volume confirmation
+            if jaw_val < teeth_val < lips_val and ema50_1d_val > 0 and vol_ratio_val > 1.5:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price < teeth, 12h EMA50 falling, volume spike
-            elif (price_below_teeth and 
-                  ema50_12h_aligned[i] < ema50_12h_aligned[i-1] and 
-                  vol_spike[i]):
+            # Enter short: Alligator bearish (jaws > teeth > lips), 1d EMA50 down, volume confirmation
+            elif jaw_val > teeth_val > lips_val and ema50_1d_val < 0 and vol_ratio_val > 1.5:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price < teeth or 12h EMA50 falling or no volume spike
-            if (price_below_teeth or 
-                ema50_12h_aligned[i] < ema50_12h_aligned[i-1] or 
-                not vol_spike[i]):
+            # Exit long: Alligator turns bearish or volume drops
+            if not (jaw_val < teeth_val < lips_val) or vol_ratio_val < 1.0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price > teeth or 12h EMA50 rising or no volume spike
-            if (price_above_teeth or 
-                ema50_12h_aligned[i] > ema50_12h_aligned[i-1] or 
-                not vol_spike[i]):
+            # Exit short: Alligator turns bullish or volume drops
+            if not (jaw_val > teeth_val > lips_val) or vol_ratio_val < 1.0:
                 signals[i] = 0.0
                 position = 0
             else:
