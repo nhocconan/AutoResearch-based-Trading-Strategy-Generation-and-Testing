@@ -29,9 +29,10 @@ def generate_signals(prices):
     # 1d high-low range for Camarilla calculation
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d_val = df_1d['close'].values
     
     # Camarilla levels (based on previous 1d candle)
-    typical_price = (high_1d + low_1d + close_1d) / 3.0
+    typical_price = (high_1d + low_1d + close_1d_val) / 3.0
     range_1d = high_1d - low_1d
     R1 = typical_price + 1.1 * range_1d / 12
     S1 = typical_price - 1.1 * range_1d / 12
