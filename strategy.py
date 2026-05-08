@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_ElderRay_Power_1dTrend"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,54 +17,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data once for Elder Ray and trend filter
+    # Get 1d data once for trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Elder Ray (Bull/Bear Power)
+    # 1d EMA50 trend filter
     close_1d = df_1d['close'].values
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13_1d
-    bear_power = low - ema13_1d
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_1d = (close_1d > ema50_1d).astype(float)
+    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # Trend filter: EMA34 on 1d close
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_up = (close_1d > ema34_1d).astype(float)
-    trend_dn = (close_1d < ema34_1d).astype(float)
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = np.roll(df_1d['high'].values, 1)
+    prev_low = np.roll(df_1d['low'].values, 1)
+    prev_close = np.roll(df_1d['close'].values, 1)
+    prev_high[0] = df_1d['high'].values[0]
+    prev_low[0] = df_1d['low'].values[0]
+    prev_close[0] = df_1d['close'].values[0]
     
-    # Align to 6h
-    bull_power_6h = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_6h = align_htf_to_ltf(prices, df_1d, bear_power)
-    trend_up_6h = align_htf_to_ltf(prices, df_1d, trend_up)
-    trend_dn_6h = align_htf_to_ltf(prices, df_1d, trend_dn)
+    # Camarilla pivot levels calculation - R3 and S3
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_val = prev_high - prev_low
+    r3 = pivot + (range_val * 1.1 / 2)
+    s3 = pivot - (range_val * 1.1 / 2)
     
-    # Volume filter: volume > 1.5 * 20-period average
+    # Align Camarilla levels to 4h timeframe
+    r3_4h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_4h = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Volume spike detection: current volume > 2.0 * 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (vol_ma20 * 1.5)
+    vol_spike = volume > (vol_ma20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # warmup for EMA34
+    start_idx = 20  # warmup for volume MA
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(bull_power_6h[i]) or np.isnan(bear_power_6h[i]) or 
-            np.isnan(trend_up_6h[i]) or np.isnan(trend_dn_6h[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Bull power positive, bear power negative, uptrend, volume filter
-            long_cond = (bull_power_6h[i] > 0 and bear_power_6h[i] < 0 and 
-                         trend_up_6h[i] > 0.5 and vol_filter[i])
+            # Long entry: price breaks above R3 with volume spike and 1d uptrend
+            long_cond = (close[i] > r3_4h[i] and vol_spike[i] and trend_1d_aligned[i] > 0.5)
             
-            # Short: Bear power negative, bull power negative, downtrend, volume filter
-            short_cond = (bear_power_6h[i] < 0 and bull_power_6h[i] < 0 and 
-                          trend_dn_6h[i] > 0.5 and vol_filter[i])
+            # Short entry: price breaks below S3 with volume spike and 1d downtrend
+            short_cond = (close[i] < s3_4h[i] and vol_spike[i] and trend_1d_aligned[i] < 0.5)
             
             if long_cond:
                 signals[i] = 0.25
@@ -73,15 +77,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Bear power turns positive (bulls losing control)
-            if bear_power_6h[i] > 0:
+            # Long exit: price breaks below S3 (reversal signal)
+            if close[i] < s3_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Bull power turns positive (bears losing control)
-            if bull_power_6h[i] > 0:
+            # Short exit: price reverses back above R3 (reversal signal)
+            if close[i] > r3_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -89,10 +93,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Elder Ray (Bull/Bear Power) with 1d EMA34 trend filter on 6h timeframe.
-# Enters long when bull power > 0, bear power < 0 (bulls in control), 1d uptrend, and volume filter.
-# Enters short when bear power < 0, bull power < 0 (bears in control), 1d downtrend, and volume filter.
-# Exits when the opposing power turns positive (loss of control).
-# Uses volume filter to avoid low-conviction moves. Targets 15-25 trades/year on 6h.
-# Works in bull markets (follow bull power) and bear markets (follow bear power).
-# Elder Ray measures buying/selling pressure relative to EMA13, effective in trending markets.
+# Hypothesis: Camarilla R3/S3 breakout strategy with volume spike confirmation and 1d EMA50 trend filter on 4h timeframe.
+# Uses wider R3/S3 levels for fewer, stronger breakouts (targeting 20-30 trades/year).
+# Enters long when price breaks above R3 with volume spike and 1d uptrend (close > EMA50).
+# Enters short when price breaks below S3 with volume spike and 1d downtrend (close < EMA50).
+# Exits when price reverses back through S3/R3 respectively.
+# Uses discrete sizing (0.25) to minimize churn. 1d trend filter ensures we only trade with the higher timeframe trend.
+# Works in bull markets (trend-following breakouts) and bear markets (reversal breakouts from overextended levels).
