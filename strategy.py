@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with volume confirmation and 1d trend filter.
-# Long when price breaks above 4h Donchian high(20) and 1d EMA(50) rising, volume > 2x average.
-# Short when price breaks below 4h Donchian low(20) and 1d EMA(50) falling, volume > 2x average.
-# Uses 4h for entry timing and 1d for trend filter to reduce false signals.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
-# Works in bull (breakout long) and bear (breakout short) with trend alignment.
+# Hypothesis: 12h strategy using 1w trend filter (EMA34), 1d Donchian breakout, and volume confirmation.
+# Long when 1w trend up, price breaks above 1d Donchian upper band, volume > 1.5x average.
+# Short when 1w trend down, price breaks below 1d Donchian lower band, volume > 1.5x average.
+# Includes ATR-based stoploss to limit drawdown.
+# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and fee drag.
+# Works in bull (trend follow) and bear (trend still exists in downtrends).
 
-name = "4h_Donchian_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_1wTrend_1dDonchian_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,36 +24,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Donchian calculation (same timeframe as primary)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    close_1w = df_1w['close'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for Donchian bands
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # 4h Donchian channels (20-period)
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # 1w EMA(34) for trend
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_1w_up = ema_34_1w > np.roll(ema_34_1w, 1)
+    trend_1w_up = np.where(np.isnan(trend_1w_up), False, trend_1w_up)
     
-    # 1d EMA(50) for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_prev = np.roll(ema_50_1d, 1)
-    ema_50_1d_prev[0] = np.nan
-    trend_1d_up = ema_50_1d > ema_50_1d_prev
-    trend_1d_down = ema_50_1d < ema_50_1d_prev
+    # 1d Donchian(20) bands
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align 1d trend to 4h
-    trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
-    trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
+    # Align 1w trend to 12h
+    trend_1w_up_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_up.astype(float))
+    # Align 1d Donchian bands to 12h
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
     # Volume average (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -62,37 +61,40 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure enough data for Donchian
+    start_idx = 34  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(trend_1w_up_aligned[i]) or np.isnan(donchian_high_aligned[i]) or
+            np.isnan(donchian_low_aligned[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above Donchian high, 1d trend up, volume spike
-            if (close[i] > donchian_high[i] and trend_1d_up_aligned[i] and vol_ratio[i] > 2.0):
+            # Long: 1w trend up, price breaks above 1d Donchian upper band, volume spike
+            if (trend_1w_up_aligned[i] and
+                close[i] > donchian_high_aligned[i] and
+                vol_ratio[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below Donchian low, 1d trend down, volume spike
-            elif (close[i] < donchian_low[i] and trend_1d_down_aligned[i] and vol_ratio[i] > 2.0):
+            # Short: 1w trend down, price breaks below 1d Donchian lower band, volume spike
+            elif (not trend_1w_up_aligned[i] and
+                  close[i] < donchian_low_aligned[i] and
+                  vol_ratio[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: break below Donchian low or trend reversal
-            if (close[i] < donchian_low[i] or not trend_1d_up_aligned[i]):
+            # Long exit: trend break or price breaks below Donchian lower band
+            if (not trend_1w_up_aligned[i] or close[i] < donchian_low_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: break above Donchian high or trend reversal
-            if (close[i] > donchian_high[i] or not trend_1d_down_aligned[i]):
+            # Short exit: trend break or price breaks above Donchian upper band
+            if (trend_1w_up_aligned[i] or close[i] > donchian_high_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
