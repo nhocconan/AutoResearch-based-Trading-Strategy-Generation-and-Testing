@@ -3,15 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using daily KAMA for trend and Bollinger Bands for mean-reversion signals.
-# Long when price touches lower Bollinger Band (20,2) and KAMA is rising (uptrend).
-# Short when price touches upper Bollinger Band (20,2) and KAMA is falling (downtrend).
-# Uses daily KAMA to filter trend direction and reduce whipsaw. Bollinger Bands provide
-# mean-reversion entries in ranging markets, while KAMA filters out counter-trend moves.
-# Designed for low trade frequency (20-40/year) to minimize fee drag and capture mean-reversion
-# within the dominant trend.
+# Hypothesis: 4h strategy using 1d Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
+# Long when price breaks above 1d high + ATR multiplier in uptrend with volume surge.
+# Short when price breaks below 1d low - ATR multiplier in downtrend with volume surge.
+# Uses 1d EMA(50) for trend direction and 1d ATR(14) for dynamic breakout levels.
+# Designed for low trade frequency (15-25/year) to minimize fee drag and capture sustained moves.
 
-name = "4h_KAMA_Bollinger_MeanReversion"
+name = "4h_DonchianBreakout_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,114 +21,87 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get daily data for trend (KAMA) and Bollinger Bands
+    # Get 1d data for trend and volatility
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Daily KAMA ( Kaufman Adaptive Moving Average )
-    # Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close_1d))
-    change = np.concatenate([[0], change])  # align with close_1d index
-    volatility = np.abs(np.diff(close_1d, 1))
-    volatility = np.concatenate([[0], volatility])
+    # 1d EMA(50) for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_up = ema_50_1d[1:] > ema_50_1d[:-1]  # Rising EMA = uptrend
+    trend_up = np.concatenate([[False], trend_up])  # Align with 1d index
     
-    # Sum of absolute changes over 10 periods for ER numerator
-    change_sum = np.convolve(change, np.ones(10), mode='full')
-    change_sum = change_sum[9:len(change_sum)-0]  # valid part
-    change_sum = np.concatenate([np.zeros(9), change_sum])  # align
+    # 1d ATR(14) for volatility
+    high_low = high_1d - low_1d
+    high_close = np.abs(high_1d - np.roll(close_1d, 1))
+    low_close = np.abs(low_1d - np.roll(close_1d, 1))
+    high_close[0] = high_1d[0] - close_1d[0]  # First value
+    low_close[0] = low_1d[0] - close_1d[0]    # First value
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Sum of absolute changes over 10 periods for ER denominator
-    volatility_sum = np.convolve(volatility, np.ones(10), mode='full')
-    volatility_sum = volatility_sum[9:len(volatility_sum)-0]
-    volatility_sum = np.concatenate([np.zeros(9), volatility_sum])
+    # 1d Donchian(20) channels
+    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Avoid division by zero
-    er = np.where(volatility_sum != 0, change_sum / volatility_sum, 0)
+    # Dynamic breakout levels: 1d Donchian ± ATR multiplier
+    upper_break = high_20 + (atr_14 * 0.5)
+    lower_break = low_20 - (atr_14 * 0.5)
     
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    # Align 1d indicators to 4h timeframe
+    trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up.astype(float))
+    upper_break_aligned = align_htf_to_ltf(prices, df_1d, upper_break)
+    lower_break_aligned = align_htf_to_ltf(prices, df_1d, lower_break)
     
-    # KAMA calculation
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    
-    # Daily Bollinger Bands (20,2)
-    bb_period = 20
-    bb_std = 2
-    sma = np.convolve(close_1d, np.ones(bb_period)/bb_period, mode='same')
-    # Handle edges
-    sma[:bb_period-1] = np.nan
-    sma[-bb_period+1:] = np.nan
-    
-    # Calculate rolling std using convolution for efficiency
-    def rolling_std(arr, window):
-        # Using method: sqrt(E[X^2] - E[X]^2)
-        arr_sq = arr ** 2
-        mean = np.convolve(arr, np.ones(window)/window, mode='same')
-        mean_sq = np.convolve(arr_sq, np.ones(window)/window, mode='same')
-        var = mean_sq - mean ** 2
-        # Handle edges
-        var[:window-1] = np.nan
-        var[-window+1:] = np.nan
-        return np.sqrt(np.maximum(var, 0))
-    
-    std = rolling_std(close_1d, bb_period)
-    upper_bb = sma + (bb_std * std)
-    lower_bb = sma - (bb_std * std)
-    
-    # Align daily indicators to 4h timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
-    sma_aligned = align_htf_to_ltf(prices, df_1d, sma)  # for exit
-    
-    # Bollinger Band width for regime filter (optional, can add later)
-    # bb_width = (upper_bb - lower_bb) / sma
+    # Volume confirmation: 4h volume > 2.0x 20-period EMA
+    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ema * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after enough data for calculations
-    start_idx = max(30, bb_period)  # ensure BB and KAMA ready
+    start_idx = 50  # Ensure enough data for EMA(50)
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(kama_aligned[i]) or np.isnan(upper_bb_aligned[i]) or
-            np.isnan(lower_bb_aligned[i]) or np.isnan(sma_aligned[i])):
+        if (np.isnan(trend_up_aligned[i]) or np.isnan(upper_break_aligned[i]) or
+            np.isnan(lower_break_aligned[i]) or np.isnan(vol_ema[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price touches lower BB and KAMA is rising (uptrend)
-            if (low[i] <= lower_bb_aligned[i] and  # touch or penetrate lower band
-                kama_aligned[i] > kama_aligned[i-1]):  # KAMA rising
+            # Long setup: break above 1d high + ATR in uptrend with volume
+            if (trend_up_aligned[i] > 0.5 and  # 1d uptrend
+                close[i] > upper_break_aligned[i] and
+                vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price touches upper BB and KAMA is falling (downtrend)
-            elif (high[i] >= upper_bb_aligned[i] and  # touch or penetrate upper band
-                  kama_aligned[i] < kama_aligned[i-1]):  # KAMA falling
+            # Short setup: break below 1d low - ATR in downtrend with volume
+            elif (trend_up_aligned[i] <= 0.5 and  # 1d downtrend
+                  close[i] < lower_break_aligned[i] and
+                  vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price returns to SMA (mean reversion complete) or KAMA turns down
-            if (high[i] >= sma_aligned[i] or  # price back to mean
-                kama_aligned[i] < kama_aligned[i-1]):  # trend turned down
+            # Long exit: break below 1d low or trend turns down
+            if close[i] < lower_break_aligned[i] or trend_up_aligned[i] <= 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price returns to SMA or KAMA turns up
-            if (low[i] <= sma_aligned[i] or  # price back to mean
-                kama_aligned[i] > kama_aligned[i-1]):  # trend turned up
+            # Short exit: break above 1d high or trend turns up
+            if close[i] > upper_break_aligned[i] or trend_up_aligned[i] > 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
