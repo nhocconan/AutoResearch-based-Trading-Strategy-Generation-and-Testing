@@ -1,18 +1,20 @@
-# 1d_Camarilla_R1S1_Breakout_WeeklyTrend
-# Hypothesis: Daily strategy using Camarilla pivot levels from weekly timeframe with daily volume confirmation.
-# Weekly R1/S1 provide institutional support/resistance. Long when price breaks above weekly R1 with volume confirmation and weekly trend alignment.
-# Short when price breaks below weekly S1 with volume confirmation and weekly trend alignment.
-# Uses daily volume > 1.5x 20-period EMA for confirmation.
-# Weekly trend filter using 50-period EMA on weekly close.
-# Designed for low trade frequency (10-20/year) to minimize fee drag while capturing institutional level breaks.
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_Camarilla_R1S1_Breakout_WeeklyTrend"
-timeframe = "1d"
+# Hypothesis: 6h strategy using Donchian breakout with daily trend filter and volume confirmation.
+# Donchian(20) breakouts capture momentum, filtered by daily EMA(50) to avoid counter-trend trades.
+# Volume confirmation ensures breakouts have institutional participation.
+# Designed for low trade frequency (15-25/year) to minimize fee drag while working in both bull and bear markets.
+
+name = "6h_Donchian20_Breakout_DailyTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,84 +22,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels from previous week's range (R1/S1 only)
-    camarilla_r1 = np.zeros_like(close_1w)
-    camarilla_s1 = np.zeros_like(close_1w)
+    # Daily EMA(50) for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    for i in range(1, len(close_1w)):
-        # Previous week's high, low, close
-        ph = high_1w[i-1]
-        pl = low_1w[i-1]
-        pc = close_1w[i-1]
-        
-        # Range
-        rng = ph - pl
-        
-        # Camarilla R1 and S1 levels
-        camarilla_r1[i] = pc + (rng * 1.1 / 6)
-        camarilla_s1[i] = pc - (rng * 1.1 / 6)
+    # 6h Donchian(20) channels
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # First week has no previous data
-    camarilla_r1[0] = camarilla_s1[0] = np.nan
-    
-    # Align Camarilla levels to daily timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s1)
-    
-    # Daily volume confirmation: volume > 1.5x 20-period EMA
+    # 6h volume confirmation: volume > 1.5x 20-period EMA
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     vol_confirm = volume > (vol_ema * 1.5)
-    
-    # Weekly trend filter: 50-period EMA on weekly close
-    close_1w_series = pd.Series(close_1w)
-    ema_50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for EMA(50)
+    start_idx = 50  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema_50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Breakout entries: price breaks R1 or S1 with volume confirmation and trend alignment
-            if close[i] > r1_aligned[i] and vol_confirm[i]:
-                # Only take long breakout if above weekly EMA50 (uptrend)
-                if close[i] > ema_50_1w_aligned[i]:
-                    signals[i] = 0.25
-                    position = 1
-            elif close[i] < s1_aligned[i] and vol_confirm[i]:
-                # Only take short breakout if below weekly EMA50 (downtrend)
-                if close[i] < ema_50_1w_aligned[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # Long breakout: price breaks above Donchian high with volume and daily uptrend
+            if close[i] > donchian_high[i] and vol_confirm[i] and close[i] > ema_50_1d_aligned[i]:
+                signals[i] = 0.25
+                position = 1
+            # Short breakdown: price breaks below Donchian low with volume and daily downtrend
+            elif close[i] < donchian_low[i] and vol_confirm[i] and close[i] < ema_50_1d_aligned[i]:
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Long exit: break below S1 or trend turns down
-            if close[i] < s1_aligned[i] or close[i] < ema_50_1w_aligned[i]:
+            # Long exit: price breaks below Donchian low or trend turns down
+            if close[i] < donchian_low[i] or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: break above R1 or trend turns up
-            if close[i] > r1_aligned[i] or close[i] > ema_50_1w_aligned[i]:
+            # Short exit: price breaks above Donchian high or trend turns up
+            if close[i] > donchian_high[i] or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
