@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Confirm"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume_Confirm"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,9 +22,9 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
     # Calculate Camarilla pivot levels from daily data
@@ -38,18 +38,17 @@ def generate_signals(prices):
     range_1d = high_1d - low_1d
     # Resistance levels
     r1_1d = close_1d + (range_1d * 1.1 / 12)
-    # Support levels
     s1_1d = close_1d - (range_1d * 1.1 / 12)
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     # Volume confirmation - 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -63,7 +62,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or
+            np.isnan(s1_1d_aligned[i]) or np.isnan(ema_50_12h_aligned[i]) or
             np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -71,28 +70,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 + above 1w EMA50 + volume confirmation
+            # Long: price breaks above R1 + above 12h EMA50 + volume confirmation
             if (close[i] > r1_1d_aligned[i] and 
-                close[i] > ema_50_1w_aligned[i] and
+                close[i] > ema_50_12h_aligned[i] and
                 vol_ratio[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + below 1w EMA50 + volume confirmation
+            # Short: price breaks below S1 + below 12h EMA50 + volume confirmation
             elif (close[i] < s1_1d_aligned[i] and 
-                  close[i] < ema_50_1w_aligned[i] and
+                  close[i] < ema_50_12h_aligned[i] and
                   vol_ratio[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price falls back below pivot OR below 1w EMA50
-            if close[i] < pivot_1d_aligned[i] or close[i] < ema_50_1w_aligned[i]:
+            # Exit long: price falls back below pivot OR below 12h EMA50
+            if close[i] < pivot_1d_aligned[i] or close[i] < ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price rises back above pivot OR above 1w EMA50
-            if close[i] > pivot_1d_aligned[i] or close[i] > ema_50_1w_aligned[i]:
+            # Exit short: price rises back above pivot OR above 12h EMA50
+            if close[i] > pivot_1d_aligned[i] or close[i] > ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
