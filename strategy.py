@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w volume confirmation and 1w ADX trend filter
-# Daily breakouts above/below 20-day Donchian channels capture strong trends.
-# Weekly volume surge confirms institutional participation. Weekly ADX > 25 ensures
-# we trade only in strong trends, avoiding whipsaws in ranges. This works in both
-# bull and bear markets by filtering for strong trends only.
-# Targets 7-25 trades per year (30-100 total over 4 years) to minimize fee drag.
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 12h EMA trend filter and volume confirmation
+# Elder Ray measures bullish/bearish power relative to EMA. Bull Power = High - EMA, Bear Power = Low - EMA.
+# Strong bullish power indicates buying pressure, strong bearish power indicates selling pressure.
+# We use 12h EMA for trend direction (long when Bull Power > 0 and EMA rising, short when Bear Power < 0 and EMA falling).
+# Volume surge confirms institutional participation. This works in bull/bear by following the trend with momentum confirmation.
+# Targets 20-30 trades per year (~80-120 total over 4 years) to minimize fee drag.
 
-name = "1d_Donchian20_1wVolume_1wADX"
-timeframe = "1d"
+name = "6h_ElderRay_12hEMA_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,119 +24,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for Donchian, volume, and ADX
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 12h data for EMA calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 21:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    # Calculate EMA(21) on 12h
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Donchian channels (20-period)
-    def rolling_max(arr, window):
-        res = np.full_like(arr, np.nan)
-        for i in range(window - 1, len(arr)):
-            res[i] = np.max(arr[i - window + 1:i + 1])
-        return res
+    # Align EMA to 6h timeframe
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    def rolling_min(arr, window):
-        res = np.full_like(arr, np.nan)
-        for i in range(window - 1, len(arr)):
-            res[i] = np.min(arr[i - window + 1:i + 1])
-        return res
+    # Calculate EMA(13) for Elder Ray on 6h (using close prices)
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    upper = rolling_max(high_1w, 20)
-    lower = rolling_min(low_1w, 20)
+    # Elder Ray components
+    bull_power = high - ema_13  # Bull Power = High - EMA
+    bear_power = low - ema_13   # Bear Power = Low - EMA
     
-    # Volume spike detection on weekly
-    vol_ma = np.full_like(volume_1w, np.nan)
-    for i in range(20, len(volume_1w)):  # 20-week MA
-        vol_ma[i] = np.mean(volume_1w[i - 20:i])
-    vol_spike = volume_1w > (vol_ma * 2.0)
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_surge = volume > (vol_ma * 1.5)
     
-    # ADX trend filter on weekly (14-period)
-    plus_dm = np.zeros_like(high_1w)
-    minus_dm = np.zeros_like(high_1w)
-    tr = np.zeros_like(high_1w)
-    
-    for i in range(1, len(high_1w)):
-        plus_dm[i] = max(high_1w[i] - high_1w[i - 1], 0)
-        minus_dm[i] = max(low_1w[i - 1] - low_1w[i], 0)
-        if plus_dm[i] == minus_dm[i]:
-            plus_dm[i] = 0
-            minus_dm[i] = 0
-        tr[i] = max(
-            high_1w[i] - low_1w[i],
-            abs(high_1w[i] - close_1w[i - 1]),
-            abs(low_1w[i] - close_1w[i - 1])
-        )
-    
-    def wilder_smooth(arr, period):
-        res = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return res
-        res[period - 1] = np.nansum(arr[:period])
-        for i in range(period, len(arr)):
-            res[i] = res[i - 1] - (res[i - 1] / period) + arr[i]
-        return res
-    
-    tr14 = wilder_smooth(tr, 14)
-    plus_dm14 = wilder_smooth(plus_dm, 14)
-    minus_dm14 = wilder_smooth(minus_dm, 14)
-    
-    plus_di14 = np.where(tr14 != 0, 100 * (plus_dm14 / tr14), 0)
-    minus_di14 = np.where(tr14 != 0, 100 * (minus_dm14 / tr14), 0)
-    
-    dx = np.where((plus_di14 + minus_di14) != 0,
-                  100 * np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14), 0)
-    adx = wilder_smooth(dx, 14)
-    
-    adx_strong = adx > 25
-    adx_weak = adx < 20
-    
-    # Align weekly indicators to daily timeframe
-    upper_d = align_htf_to_ltf(prices, df_1w, upper)
-    lower_d = align_htf_to_ltf(prices, df_1w, lower)
-    vol_spike_d = align_htf_to_ltf(prices, df_1w, vol_spike)
-    adx_strong_d = align_htf_to_ltf(prices, df_1w, adx_strong)
-    adx_weak_d = align_htf_to_ltf(prices, df_1w, adx_weak)
+    # EMA trend filter: EMA rising/falling
+    ema_rising = ema_12h_aligned > np.roll(ema_12h_aligned, 1)
+    ema_falling = ema_12h_aligned < np.roll(ema_12h_aligned, 1)
+    # Handle first element
+    ema_rising[0] = False
+    ema_falling[0] = False
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Ensure sufficient data for Donchian (20) + vol MA (20)
+    start_idx = 20  # Ensure sufficient data for volume MA
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(upper_d[i]) or np.isnan(lower_d[i]) or 
-            np.isnan(vol_spike_d[i]) or np.isnan(adx_strong_d[i]) or 
-            np.isnan(adx_weak_d[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(ema_12h_aligned[i]) or np.isnan(vol_surge[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above upper Donchian, volume spike, strong trend
-            if close[i] > upper_d[i] and vol_spike_d[i] and adx_strong_d[i]:
+            # Enter long: Bull Power > 0, EMA rising, volume surge
+            if bull_power[i] > 0 and ema_rising[i] and vol_surge[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below lower Donchian, volume spike, strong trend
-            elif close[i] < lower_d[i] and vol_spike_d[i] and adx_strong_d[i]:
+            # Enter short: Bear Power < 0, EMA falling, volume surge
+            elif bear_power[i] < 0 and ema_falling[i] and vol_surge[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to lower Donchian or trend weakens
-            if close[i] < lower_d[i] or adx_weak_d[i]:
+            # Exit long: Bull Power <= 0 or EMA not rising
+            if bull_power[i] <= 0 or not ema_rising[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to upper Donchian or trend weakens
-            if close[i] > upper_d[i] or adx_weak_d[i]:
+            # Exit short: Bear Power >= 0 or EMA not falling
+            if bear_power[i] >= 0 or not ema_falling[i]:
                 signals[i] = 0.0
                 position = 0
             else:
