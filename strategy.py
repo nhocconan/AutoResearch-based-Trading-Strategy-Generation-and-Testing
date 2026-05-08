@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 reversal with 1d trend filter and volume confirmation.
+# Hypothesis: 4h Camarilla R3/S3 with 1d trend filter and volume confirmation.
 # Fade at R3/S3 when 1d trend is opposite (mean reversion in range),
 # Breakout continuation at R4/S4 when 1d trend aligns (trend follow).
 # Uses 1d EMA(34) for trend and 60-period volume spike for confirmation.
