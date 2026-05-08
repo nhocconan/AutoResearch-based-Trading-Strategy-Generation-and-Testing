@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,21 +31,21 @@ def generate_signals(prices):
     pivot_1d = (high_1d + low_1d + close_1d) / 3.0
     # Range = H - L
     range_1d = high_1d - low_1d
-    # Resistance and Support levels (R1, S1)
-    r1_1d = close_1d + (range_1d * 1.1 / 12)
-    s1_1d = close_1d - (range_1d * 1.1 / 12)
+    # Resistance and Support levels (R3, S3)
+    r3_1d = close_1d + (range_1d * 1.1 / 4)
+    s3_1d = close_1d - (range_1d * 1.1 / 4)
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 6h timeframe
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
     # 1d EMA34 for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation - 12-period average volume (12h for 4h timeframe)
-    vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
+    # Volume confirmation - 6-period average volume (36h for 6h timeframe)
+    vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1.0)
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
@@ -59,8 +59,8 @@ def generate_signals(prices):
     start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or
+        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or 
+            np.isnan(s3_1d_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or
             np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -74,16 +74,16 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 + above 1d EMA34 + volume confirmation
-            if (close[i] > r1_1d_aligned[i] and 
+            # Long: price breaks above R3 + above 1d EMA34 + volume confirmation
+            if (close[i] > r3_1d_aligned[i] and 
                 close[i] > ema_34_1d_aligned[i] and
-                vol_ratio[i] > 1.8):
+                vol_ratio[i] > 2.0):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + below 1d EMA34 + volume confirmation
-            elif (close[i] < s1_1d_aligned[i] and 
+            # Short: price breaks below S3 + below 1d EMA34 + volume confirmation
+            elif (close[i] < s3_1d_aligned[i] and 
                   close[i] < ema_34_1d_aligned[i] and
-                  vol_ratio[i] > 1.8):
+                  vol_ratio[i] > 2.0):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
