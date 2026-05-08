@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Ichimoku Cloud with daily filter and volume confirmation
-# Uses Ichimoku conversion (9), base (26), lagging span (52) for trend signals
-# Confirms with 1d cloud (Senkou A/B) direction to filter trend alignment
-# Requires volume > 1.5x 20-period average for institutional participation
-# Targets 80-140 total trades over 4 years (20-35/year) to avoid fee drag
-# Works in bull/bear via cloud filter + momentum confirmation
+# Hypothesis: 12h Donchian(20) breakout with 1w EMA200 trend filter and volume confirmation.
+# Long when price breaks above upper Donchian channel AND price > EMA200(1w) AND volume > 2x 20-period average.
+# Short when price breaks below lower Donchian channel AND price < EMA200(1w) AND volume > 2x 20-period average.
+# Exit when price crosses back below upper Donchian (long) or above lower Donchian (short).
+# Weekly EMA200 filters long-term trend direction. Volume confirms institutional participation.
+# Target: 50-150 total trades over 4 years (12-37/year) to stay within optimal range.
 
-name = "6h_Ichimoku_1dCloud_Volume"
-timeframe = "6h"
+name = "12h_Donchian_20_1wEMA200_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,106 +24,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume filter: current volume > 1.5x 20-period average
+    # 12h volume filter: current volume > 2x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma20)
+    volume_filter = volume > (2.0 * vol_ma20)
     
-    # Ichimoku components (6h)
-    # Conversion Line (tenkan): (9-period high + low)/2
-    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan = (high_9 + low_9) / 2
-    
-    # Base Line (kijun): (26-period high + low)/2
-    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun = (high_26 + low_26) / 2
-    
-    # Leading Span A (Senkou A): (tenkan + kijun)/2 shifted 26 periods
-    senkou_a = ((tenkan + kijun) / 2)
-    
-    # Leading Span B (Senkou B): (52-period high + low)/2 shifted 26 periods
-    high_52 = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    low_52 = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = ((high_52 + low_52) / 2)
-    
-    # 1d data for cloud filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    # 1w data for Donchian channel and EMA200
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 1d Ichimoku cloud components
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # 1d Conversion and Base
-    high_9_1d = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    low_9_1d = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan_1d = (high_9_1d + low_9_1d) / 2
+    # Donchian channel (20-period high/low)
+    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    high_26_1d = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    low_26_1d = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun_1d = (high_26_1d + low_26_1d) / 2
+    # EMA200 on 1w close
+    ema_200 = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # 1d Senkou A and B (current cloud)
-    senkou_a_1d = ((tenkan_1d + kijun_1d) / 2)
-    high_52_1d = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    low_52_1d = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_b_1d = ((high_52_1d + low_52_1d) / 2)
-    
-    # Cloud top/bottom (current)
-    cloud_top_1d = np.maximum(senkou_a_1d, senkou_b_1d)
-    cloud_bottom_1d = np.minimum(senkou_a_1d, senkou_b_1d)
-    
-    # Align Ichimoku components to 6h
-    tenkan_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high, 'low': low}), tenkan)
-    kijun_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high, 'low': low}), kijun)
-    senkou_a_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high, 'low': low}), senkou_a)
-    senkou_b_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high, 'low': low}), senkou_b)
-    
-    # Align 1d cloud to 6h
-    cloud_top_aligned = align_htf_to_ltf(prices, df_1d, cloud_top_1d)
-    cloud_bottom_aligned = align_htf_to_ltf(prices, df_1d, cloud_bottom_1d)
+    # Align 1w indicators to 12h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
+    ema_200_aligned = align_htf_to_ltf(prices, df_1w, ema_200)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Sufficient warmup for Ichimoku
+    start_idx = 200  # Sufficient warmup for EMA200
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
-            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or
-            np.isnan(cloud_top_aligned[i]) or np.isnan(cloud_bottom_aligned[i]) or
-            np.isnan(volume_filter[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(ema_200_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Bullish: price above cloud AND tenkan > kijun (bullish momentum)
-            bullish = (close[i] > cloud_top_aligned[i]) and (tenkan_aligned[i] > kijun_aligned[i])
-            # Bearish: price below cloud AND tenkan < kijun (bearish momentum)
-            bearish = (close[i] < cloud_bottom_aligned[i]) and (tenkan_aligned[i] < kijun_aligned[i])
+            # Long conditions: break above upper Donchian, price > EMA200, volume filter
+            long_cond = (high[i] > donchian_high_aligned[i]) and (close[i] > ema_200_aligned[i]) and volume_filter[i]
+            # Short conditions: break below lower Donchian, price < EMA200, volume filter
+            short_cond = (low[i] < donchian_low_aligned[i]) and (close[i] < ema_200_aligned[i]) and volume_filter[i]
             
-            if bullish and volume_filter[i]:
+            if long_cond:
                 signals[i] = 0.25
                 position = 1
-            elif bearish and volume_filter[i]:
+            elif short_cond:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price closes below cloud OR tenkan < kijun (momentum loss)
-            if (close[i] < cloud_top_aligned[i]) or (tenkan_aligned[i] < kijun_aligned[i]):
+            # Long exit: close below upper Donchian
+            if close[i] < donchian_high_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price closes above cloud OR tenkan > kijun (momentum loss)
-            if (close[i] > cloud_bottom_aligned[i]) or (tenkan_aligned[i] > kijun_aligned[i]):
+            # Short exit: close above lower Donchian
+            if close[i] > donchian_low_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
