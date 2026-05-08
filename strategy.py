@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Keltner_Breakout_Trend_Volume"
-timeframe = "12h"
+name = "4h_Pivot_Trend_Switch_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,83 +17,96 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d and 1w data once
+    # Get 1d data for pivots and 12h data for trend
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
+    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_1d) < 30 or len(df_1w) < 30:
+    if len(df_1d) < 30 or len(df_12h) < 30:
         return np.zeros(n)
     
-    # === 1d ATR for Keltner channel (10-period) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    tr = np.maximum(high_1d - low_1d, 
-                    np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), 
-                               np.abs(low_1d - np.roll(close_1d, 1))))
-    tr[0] = high_1d[0] - low_1d[0]
-    atr10_1d = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
-    atr10_1d_aligned = align_htf_to_ltf(prices, df_1d, atr10_1d)
+    # === 1d Pivot Points (standard calculation) ===
+    prev_high = np.roll(df_1d['high'].values, 1)
+    prev_low = np.roll(df_1d['low'].values, 1)
+    prev_close = np.roll(df_1d['close'].values, 1)
+    # First bar: use current values to avoid look-ahead
+    prev_high[0] = df_1d['high'].values[0]
+    prev_low[0] = df_1d['low'].values[0]
+    prev_close[0] = df_1d['close'].values[0]
     
-    # === 1d EMA20 for middle line ===
-    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_1d = prev_high - prev_low
     
-    # === Keltner bands (1.5 * ATR) ===
-    upper_keltner = ema20_1d_aligned + 1.5 * atr10_1d_aligned
-    lower_keltner = ema20_1d_aligned - 1.5 * atr10_1d_aligned
+    # Key levels: R1, S1, R2, S2
+    r1 = pivot + (range_1d * 1.0 / 2.0)  # Standard R1
+    s1 = pivot - (range_1d * 1.0 / 2.0)  # Standard S1
+    r2 = pivot + range_1d                # Standard R2
+    s2 = pivot - range_1d                # Standard S2
     
-    # === 1w EMA50 for trend filter ===
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Align to 4h timeframe
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    r2_4h = align_htf_to_ltf(prices, df_1d, r2)
+    s2_4h = align_htf_to_ltf(prices, df_1d, s2)
     
-    # === Volume filter: current volume > 20-period average ===
+    # === 12h EMA25 for trend filter ===
+    close_12h = df_12h['close'].values
+    ema25_12h = pd.Series(close_12h).ewm(span=25, adjust=False, min_periods=25).mean().values
+    ema25_12h_4h = align_htf_to_ltf(prices, df_12h, ema25_12h)
+    
+    # === Volume confirmation: 20-period average ===
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for volatility and volume
+    start_idx = 30  # warmup for EMA25
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(upper_keltner[i]) or np.isnan(lower_keltner[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or np.isnan(r2_4h[i]) or np.isnan(s2_4h[i]) or
+            np.isnan(ema25_12h_4h[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above upper Keltner + uptrend + volume
-            long_cond = (close[i] > upper_keltner[i] and 
-                        close[i] > ema50_1w_aligned[i] and
-                        volume[i] > vol_ma20[i])
+            # Determine trend: above/below 12h EMA25
+            uptrend = close[i] > ema25_12h_4h[i]
+            downtrend = close[i] < ema25_12h_4h[i]
             
-            # Short: break below lower Keltner + downtrend + volume
-            short_cond = (close[i] < lower_keltner[i] and 
-                         close[i] < ema50_1w_aligned[i] and
-                         volume[i] > vol_ma20[i])
-            
-            if long_cond:
-                signals[i] = 0.25
-                position = 1
-            elif short_cond:
-                signals[i] = -0.25
-                position = -1
+            if uptrend:
+                # In uptrend: look for pullback to S1 for long entry
+                long_cond = (close[i] <= s1_4h[i] * 1.005 and  # Allow small buffer
+                            volume[i] > vol_ma20[i])
+                
+                if long_cond:
+                    signals[i] = 0.25
+                    position = 1
+            elif downtrend:
+                # In downtrend: look for bounce to R1 for short entry
+                short_cond = (close[i] >= r1_4h[i] * 0.995 and  # Allow small buffer
+                             volume[i] > vol_ma20[i])
+                
+                if short_cond:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Long exit: close below EMA20 (middle line) or opposite signal
-            exit_cond = close[i] < ema20_1d_aligned[i]
-            if exit_cond:
+            # Long exit: either take profit at R1 or stop if trend breaks
+            if close[i] >= r1_4h[i] * 0.995:  # Take profit near R1
+                signals[i] = 0.0
+                position = 0
+            elif close[i] < ema25_12h_4h[i]:  # Trend breakdown
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: close above EMA20 (middle line) or opposite signal
-            exit_cond = close[i] > ema20_1d_aligned[i]
-            if exit_cond:
+            # Short exit: either take profit at S1 or stop if trend breaks
+            if close[i] <= s1_4h[i] * 1.005:  # Take profit near S1
+                signals[i] = 0.0
+                position = 0
+            elif close[i] > ema25_12h_4h[i]:  # Trend reversal
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,10 +114,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 12h Keltner breakout with 1w trend filter and volume confirmation.
-# Enters long when price breaks above upper Keltner band (EMA20 + 1.5*ATR) in uptrend
-# (price > 1w EMA50) with volume confirmation. Enters short on breakdown below lower
-# Keltner band in downtrend with volume. Exits when price crosses back below/above
-# the middle line (EMA20). Uses 1d for Keltner calculation, 1w for trend filter.
-# Designed to capture trend moves in both bull and bear markets while avoiding
-# false breakouts in ranging conditions. Targets 50-150 trades over 4 years.
+# Hypothesis: Pivot-based trend-following strategy that buys pullbacks to S1 in uptrends
+# and sells bounces to R1 in downtrends. Uses 12h EMA25 as trend filter and volume
+# confirmation for institutional validation. Designed to work in both bull and bear
+# markets by following the higher timeframe trend. Targets 50-150 trades over 4 years
+# (12-37/year) with discrete sizing (0.25) to minimize fee drag. Works on BTC/ETH via
+# institutional pivot levels that act as support/resistance in trending markets.
