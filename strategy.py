@@ -3,21 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d price action with weekly trend filter and volume confirmation.
-# Long when price breaks above weekly Donchian upper band AND weekly EMA50 rising AND daily volume > 1.5x 20-day average.
-# Short when price breaks below weekly Donchian lower band AND weekly EMA50 falling AND daily volume > 1.5x 20-day average.
-# Exit when price crosses back inside the weekly Donchian channel.
-# Weekly trend filter ensures alignment with higher timeframe momentum.
-# Volume confirms institutional participation.
-# Designed for low turnover (target: 30-100 trades over 4 years) to minimize fee drag.
+# Hypothesis: 4h Choppiness Index + Donchian breakout with volume confirmation.
+# In trending markets (CHOP < 38.2), trade Donchian breakouts; in ranging markets (CHOP > 61.8), fade extremes.
+# Uses 4h Donchian(20) breakout for trend entries and mean reversion at Bollinger Bands(20,2) in ranging markets.
+# Volume > 1.3x 20-period average confirms participation. Designed for low trade frequency (<30/year) to avoid fee drag.
+# Works in both bull and bear via regime adaptation.
 
-name = "1d_Donchian_20_WeeklyEMA50_Volume"
-timeframe = "1d"
+name = "4h_Chop_Donchian_BB_MeanRev"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,73 +23,118 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for Donchian calculation and trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # Calculate 4h Choppiness Index (14-period)
+    atr_period = 14
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First bar
     
-    # Weekly Donchian channels (20-period)
-    donchian_high = pd.Series(df_1w['high']).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(df_1w['low']).rolling(window=20, min_periods=20).min().values
+    atr = np.zeros(n)
+    for i in range(atr_period, n):
+        atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
     
-    # Align Donchian levels to daily timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
+    # Initialize first ATR value
+    if n > atr_period:
+        atr[atr_period] = np.mean(tr[1:atr_period+1])
     
-    # Weekly EMA50 for trend filter
-    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Choppiness Index: 100 * log10(sum(atr/period) / (max(high)-min(low))) / log10(period)
+    chop = np.full(n, 50.0)  # Default to neutral
+    for i in range(2*atr_period, n):
+        sum_atr = np.sum(tr[i-atr_period+1:i+1])
+        max_high = np.max(high[i-atr_period+1:i+1])
+        min_low = np.min(low[i-atr_period+1:i+1])
+        if max_high > min_low and sum_atr > 0:
+            chop[i] = 100 * np.log10(sum_atr / (max_high - min_low)) / np.log10(atr_period)
+        else:
+            chop[i] = 50.0
     
-    # Weekly EMA50 direction
-    ema50_rising = np.zeros_like(ema50_1w_aligned, dtype=bool)
-    ema50_falling = np.zeros_like(ema50_1w_aligned, dtype=bool)
-    ema50_rising[1:] = ema50_1w_aligned[1:] > ema50_1w_aligned[:-1]
-    ema50_falling[1:] = ema50_1w_aligned[1:] < ema50_1w_aligned[:-1]
+    # Donchian channels (20-period)
+    donchian_period = 20
+    upper_channel = np.full(n, np.nan)
+    lower_channel = np.full(n, np.nan)
+    for i in range(donchian_period-1, n):
+        upper_channel[i] = np.max(high[i-donchian_period+1:i+1])
+        lower_channel[i] = np.min(low[i-donchian_period+1:i+1])
     
-    # Daily volume filter: current volume > 1.5x 20-day average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma20)
+    # Bollinger Bands (20,2) for mean reversion in ranging markets
+    bb_period = 20
+    bb_std = 2
+    sma = np.full(n, np.nan)
+    std_dev = np.full(n, np.nan)
+    upper_bb = np.full(n, np.nan)
+    lower_bb = np.full(n, np.nan)
+    for i in range(bb_period-1, n):
+        sma[i] = np.mean(close[i-bb_period+1:i+1])
+        std_dev[i] = np.std(close[i-bb_period+1:i+1])
+        upper_bb[i] = sma[i] + bb_std * std_dev[i]
+        lower_bb[i] = sma[i] - bb_std * std_dev[i]
+    
+    # Volume filter: > 1.3x 20-period average
+    vol_ma20 = np.full(n, np.nan)
+    for i in range(19, n):
+        vol_ma20[i] = np.mean(volume[i-19:i+1])
+    volume_filter = volume > (1.3 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 2)  # Sufficient warmup for EMA50 and Donchian
+    start_idx = max(2*atr_period, donchian_period, bb_period, 20) + 1
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(ema50_rising[i]) or 
-            np.isnan(ema50_falling[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(chop[i]) or np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or
+            np.isnan(upper_bb[i]) or np.isnan(lower_bb[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price breaks above weekly Donchian high, weekly EMA50 rising, volume filter
-            long_cond = (close[i] > donchian_high_aligned[i]) and ema50_rising[i] and volume_filter[i]
-            # Short conditions: price breaks below weekly Donchian low, weekly EMA50 falling, volume filter
-            short_cond = (close[i] < donchian_low_aligned[i]) and ema50_falling[i] and volume_filter[i]
-            
-            if long_cond:
-                signals[i] = 0.25
-                position = 1
-            elif short_cond:
-                signals[i] = -0.25
-                position = -1
+            # Trending market: CHOP < 38.2 -> trade Donchian breakouts
+            if chop[i] < 38.2:
+                if close[i] > upper_channel[i] and volume_filter[i]:
+                    signals[i] = 0.25
+                    position = 1
+                elif close[i] < lower_channel[i] and volume_filter[i]:
+                    signals[i] = -0.25
+                    position = -1
+            # Ranging market: CHOP > 61.8 -> fade at Bollinger Bands
+            elif chop[i] > 61.8:
+                if close[i] < lower_bb[i] and volume_filter[i]:
+                    signals[i] = 0.25  # Long at lower BB
+                    position = 1
+                elif close[i] > upper_bb[i] and volume_filter[i]:
+                    signals[i] = -0.25  # Short at upper BB
+                    position = -1
         elif position == 1:
-            # Long exit: price crosses back below weekly Donchian low
-            if close[i] < donchian_low_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
+            # Long exit: trend -> Donchian lower band; range -> SMA
+            if chop[i] < 38.2:
+                if close[i] < lower_channel[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            else:  # ranging market
+                if close[i] > sma[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses back above weekly Donchian high
-            if close[i] > donchian_high_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+            # Short exit: trend -> Donchian upper band; range -> SMA
+            if chop[i] < 38.2:
+                if close[i] > upper_channel[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
+            else:  # ranging market
+                if close[i] < sma[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
