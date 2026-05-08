@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout + 1d volume spike + 1w ADX trend filter
-# Donchian breakouts capture momentum in trending markets. Volume spike confirms institutional participation.
-# 1w ADX > 25 ensures we only trade in strong trends, avoiding whipsaws in ranges.
-# Exits occur when price returns to the Donchian midpoint or trend weakens (ADX < 20).
-# Targets 20-30 trades per year (~80-120 total over 4 years) to minimize fee drag.
-# Works in both bull and bear markets by filtering for strong trends only.
+# Hypothesis: 6h Camarilla R3/S3 breakout with 1d volume spike and 1d ADX trend filter
+# Camarilla levels identify key intraday support/resistance. Breakouts above R3 or below S3
+# indicate strong momentum. Volume spike confirms institutional participation. 1d ADX > 25
+# ensures we only trade in strong trends, avoiding whipsaws in ranges. This combination
+# works in both bull and bear markets by filtering for strong trends only.
+# Targets 15-25 trades per year (~60-100 total over 4 years) to minimize fee drag.
 
-name = "1d_Donchian20_1dVolume_1wADX"
-timeframe = "1d"
+name = "6h_Camarilla_R3S3_1dVolume_1dADX"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,48 +24,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels on 1d
-    lookback = 20
-    dc_high = np.full_like(high, np.nan)
-    dc_low = np.full_like(low, np.nan)
-    dc_mid = np.full_like(close, np.nan)
+    # Calculate Camarilla levels from previous day's OHLC
+    # For each 6h bar, we use the prior day's close, high, low
+    # We need to align daily data to 6h bars
     
-    for i in range(lookback, n):
-        dc_high[i] = np.max(high[i-lookback:i])
-        dc_low[i] = np.min(low[i-lookback:i])
-        dc_mid[i] = (dc_high[i] + dc_low[i]) / 2.0
-    
-    # Get 1d data for volume confirmation (same timeframe, no alignment needed)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    vol_spike = volume > (vol_ma.values * 2.0)
-    
-    # Get 1w data for ADX trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get 1d data for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate Camarilla levels for each day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate ADX(14) on weekly
-    plus_dm = np.zeros_like(high_1w)
-    minus_dm = np.zeros_like(high_1w)
-    tr = np.zeros_like(high_1w)
+    # Camarilla multipliers
+    R3 = close_1d + 1.1 * (high_1d - low_1d) / 6
+    S3 = close_1d - 1.1 * (high_1d - low_1d) / 6
+    R4 = close_1d + 1.382 * (high_1d - low_1d) / 2
+    S4 = close_1d - 1.382 * (high_1d - low_1d) / 2
     
-    for i in range(1, len(high_1w)):
-        plus_dm[i] = max(high_1w[i] - high_1w[i-1], 0)
-        minus_dm[i] = max(low_1w[i-1] - low_1w[i], 0)
+    # Align Camarilla levels to 6h timeframe (use previous day's levels)
+    R3_6h = align_htf_to_ltf(prices, df_1d, R3)
+    S3_6h = align_htf_to_ltf(prices, df_1d, S3)
+    R4_6h = align_htf_to_ltf(prices, df_1d, R4)
+    S4_6h = align_htf_to_ltf(prices, df_1d, S4)
+    
+    # Volume spike detection on 1d
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean()  # 24 * 6h = 4d approx
+    vol_spike = volume > (vol_ma.values * 2.0)
+    
+    # ADX trend filter on 1d
+    # Calculate ADX(14) on daily
+    plus_dm = np.zeros_like(high_1d)
+    minus_dm = np.zeros_like(high_1d)
+    tr = np.zeros_like(high_1d)
+    
+    for i in range(1, len(high_1d)):
+        plus_dm[i] = max(high_1d[i] - high_1d[i-1], 0)
+        minus_dm[i] = max(low_1d[i-1] - low_1d[i], 0)
         if plus_dm[i] == minus_dm[i]:
             plus_dm[i] = 0
             minus_dm[i] = 0
         tr[i] = max(
-            high_1w[i] - low_1w[i],
-            abs(high_1w[i] - close_1w[i-1]),
-            abs(low_1w[i] - close_1w[i-1])
+            high_1d[i] - low_1d[i],
+            abs(high_1d[i] - close_1d[i-1]),
+            abs(low_1d[i] - close_1d[i-1])
         )
     
-    # Smooth TR, +DM, -DM
+    # Wilder smoothing
     def wilder_smooth(arr, period):
         result = np.full_like(arr, np.nan)
         if len(arr) < period:
@@ -89,43 +96,43 @@ def generate_signals(prices):
     
     adx_strong = adx > 25
     adx_weak = adx < 20
-    adx_strong_aligned = align_htf_to_ltf(prices, df_1w, adx_strong)
-    adx_weak_aligned = align_htf_to_ltf(prices, df_1w, adx_weak)
+    adx_strong_6h = align_htf_to_ltf(prices, df_1d, adx_strong)
+    adx_weak_6h = align_htf_to_ltf(prices, df_1d, adx_weak)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(lookback, 40)  # Ensure sufficient data
+    start_idx = 24  # Ensure sufficient data for volume MA
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(dc_high[i]) or np.isnan(dc_low[i]) or np.isnan(dc_mid[i]) or 
-            np.isnan(vol_spike[i]) or np.isnan(adx_strong_aligned[i]) or 
-            np.isnan(adx_weak_aligned[i])):
+        if (np.isnan(R3_6h[i]) or np.isnan(S3_6h[i]) or np.isnan(R4_6h[i]) or 
+            np.isnan(S4_6h[i]) or np.isnan(vol_spike[i]) or 
+            np.isnan(adx_strong_6h[i]) or np.isnan(adx_weak_6h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above Donchian high, volume spike, strong trend
-            if close[i] > dc_high[i] and vol_spike[i] and adx_strong_aligned[i]:
+            # Enter long: price breaks above R3, volume spike, strong trend
+            if close[i] > R3_6h[i] and vol_spike[i] and adx_strong_6h[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below Donchian low, volume spike, strong trend
-            elif close[i] < dc_low[i] and vol_spike[i] and adx_strong_aligned[i]:
+            # Enter short: price breaks below S3, volume spike, strong trend
+            elif close[i] < S3_6h[i] and vol_spike[i] and adx_strong_6h[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to midpoint or trend weakens
-            if close[i] < dc_mid[i] or adx_weak_aligned[i]:
+            # Exit long: price returns to S3 or trend weakens
+            if close[i] < S3_6h[i] or adx_weak_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to midpoint or trend weakens
-            if close[i] > dc_mid[i] or adx_weak_aligned[i]:
+            # Exit short: price returns to R3 or trend weakens
+            if close[i] > R3_6h[i] or adx_weak_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
