@@ -3,19 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using Donchian breakout (20) with 1d ADX trend filter and volume confirmation.
-# Long when price breaks above 20-period Donchian high + ADX > 25 + volume spike.
-# Short when price breaks below 20-period Donchian low + ADX > 25 + volume spike.
-# Exit when price crosses the Donchian midline (average of 20-period high/low).
-# Designed for low trade frequency (<30/year) to avoid fee drag. Trend filter reduces whipsaws in chop.
+# Hypothesis: 4h strategy using 1d Keltner Channel breakout with volume confirmation and 1w RSI trend filter.
+# Long when price breaks above upper Keltner Channel (EMA + 2*ATR) with volume surge and 1w RSI > 50.
+# Short when price breaks below lower Keltner Channel (EMA - 2*ATR) with volume surge and 1w RSI < 50.
+# Uses 1d ATR and EMA for Keltner Channel, 1w RSI for trend filter.
+# Designed for low trade frequency (15-25/year) to avoid fee drag. Keltner Channels adapt to volatility,
+# working in both trending and ranging markets. Volume confirmation ensures breakout strength.
 
-name = "12h_Donchian20_ADX25_Volume"
-timeframe = "12h"
+name = "4h_1dKeltner_1wRSI_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,77 +24,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX calculation
+    # Get 1d data for Keltner Channel calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate ADX on 1d data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1d EMA (20-period) for Keltner Channel middle line
+    ema_20 = pd.Series(df_1d['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # first value NaN
+    # Calculate 1d ATR (14-period) for Keltner Channel width
+    tr1 = np.abs(df_1d['high'].values[1:] - df_1d['low'].values[:-1])
+    tr2 = np.abs(df_1d['high'].values[1:] - df_1d['close'].values[:-1])
+    tr3 = np.abs(df_1d['low'].values[1:] - df_1d['close'].values[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    # Calculate Keltner Channel bands
+    kc_upper = ema_20 + 2.0 * atr_14
+    kc_lower = ema_20 - 2.0 * atr_14
     
-    # Smoothed values (Wilder's smoothing)
-    def WilderSmooth(x, period):
-        result = np.full_like(x, np.nan)
-        if len(x) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nanmean(x[1:period])  # skip first NaN in tr
-        for i in range(period, len(x)):
-            result[i] = result[i-1] - (result[i-1] / period) + x[i]
-        return result
+    # Get 1w data for RSI trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
+        return np.zeros(n)
     
-    atr = WilderSmooth(tr, 14)
-    dm_plus_smooth = WilderSmooth(dm_plus, 14)
-    dm_minus_smooth = WilderSmooth(dm_minus, 14)
+    # Calculate 1w RSI (14-period)
+    close_1w = df_1w['close'].values
+    delta = np.diff(close_1w)
+    delta = np.concatenate([[np.nan], delta])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1w = 100 - (100 / (1 + rs))
     
-    # DI+ and DI-
-    di_plus = np.where(atr > 0, 100 * dm_plus_smooth / atr, 0)
-    di_minus = np.where(atr > 0, 100 * dm_minus_smooth / atr, 0)
+    # Align 1d indicators to 4h timeframe
+    kc_upper_aligned = align_htf_to_ltf(prices, df_1d, kc_upper)
+    kc_lower_aligned = align_htf_to_ltf(prices, df_1d, kc_lower)
     
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = WilderSmooth(dx, 14)
+    # Align 1w RSI to 4h timeframe
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
     
-    # Align ADX to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Donchian channels (20-period) on 12h data
-    def rolling_max(arr, window):
-        res = np.full_like(arr, np.nan)
-        for i in range(window-1, len(arr)):
-            res[i] = np.max(arr[i-window+1:i+1])
-        return res
-    
-    def rolling_min(arr, window):
-        res = np.full_like(arr, np.nan)
-        for i in range(window-1, len(arr)):
-            res[i] = np.min(arr[i-window+1:i+1])
-        return res
-    
-    donch_high = rolling_max(high, 20)
-    donch_low = rolling_min(low, 20)
-    donch_mid = (donch_high + donch_low) / 2.0
-    
-    # Volume confirmation: 12h volume spike (1.5x 20-period EMA)
+    # Volume confirmation: 4h volume spike (2x 20-period EMA)
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike = volume > (vol_ema * 1.5)
+    vol_spike = volume > (vol_ema * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -102,34 +77,78 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(adx_aligned[i]) or 
-            np.isnan(donch_high[i]) or 
-            np.isnan(donch_low[i]) or 
-            np.isnan(donch_mid[i])):
+        if (np.isnan(kc_upper_aligned[i]) or 
+            np.isnan(kc_lower_aligned[i]) or 
+            np.isnan(rsi_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above Donchian high + ADX > 25 + volume spike
-            if close[i] > donch_high[i] and adx_aligned[i] > 25 and vol_spike[i]:
+            # Enter long: price breaks above upper KC + volume surge + 1w RSI > 50
+            if close[i] > kc_upper_aligned[i] and vol_spike[i] and rsi_1w_aligned[i] > 50:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below Donchian low + ADX > 25 + volume spike
-            elif close[i] < donch_low[i] and adx_aligned[i] > 25 and vol_spike[i]:
+            # Enter short: price breaks below lower KC + volume surge + 1w RSI < 50
+            elif close[i] < kc_lower_aligned[i] and vol_spike[i] and rsi_1w_aligned[i] < 50:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below Donchian midline
-            if close[i] < donch_mid[i]:
+            # Exit long: price breaks below middle line (EMA)
+            if close[i] < ema_20_aligned[i] if 'ema_20_aligned' in locals() else False:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above Donchian midline
-            if close[i] > donch_mid[i]:
+            # Exit short: price breaks above middle line (EMA)
+            if close[i] > ema_20_aligned[i] if 'ema_20_aligned' in locals() else False:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
+    
+    # Fix: align EMA_20 for exit condition
+    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20)
+    
+    # Re-run loop with proper EMA alignment (simplified - in practice we'd compute this earlier)
+    # For brevity and correctness, we'll recompute signals with proper alignment
+    
+    # Recompute with proper EMA alignment
+    signals = np.zeros(n)
+    position = 0
+    
+    for i in range(start_idx, n):
+        # Skip if any critical data is NaN
+        if (np.isnan(kc_upper_aligned[i]) or 
+            np.isnan(kc_lower_aligned[i]) or 
+            np.isnan(rsi_1w_aligned[i]) or 
+            np.isnan(ema_20_aligned[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        if position == 0:
+            # Enter long: price breaks above upper KC + volume surge + 1w RSI > 50
+            if close[i] > kc_upper_aligned[i] and vol_spike[i] and rsi_1w_aligned[i] > 50:
+                signals[i] = 0.25
+                position = 1
+            # Enter short: price breaks below lower KC + volume surge + 1w RSI < 50
+            elif close[i] < kc_lower_aligned[i] and vol_spike[i] and rsi_1w_aligned[i] < 50:
+                signals[i] = -0.25
+                position = -1
+        elif position == 1:
+            # Exit long: price breaks below middle line (EMA)
+            if close[i] < ema_20_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        elif position == -1:
+            # Exit short: price breaks above middle line (EMA)
+            if close[i] > ema_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
