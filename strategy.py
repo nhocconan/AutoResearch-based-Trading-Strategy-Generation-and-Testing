@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_SuperTrend_Multiplier_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 150:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,43 +26,20 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # SuperTrend (10, 3.0) on 6h
-    atr_period = 10
-    multiplier = 3.0
+    # Camarilla levels from 1d data (R3, S3)
+    # Standard Camarilla: R4 = C + ((H-L) * 1.1/2), R3 = C + ((H-L) * 1.1/4)
+    #                     S3 = C - ((H-L) * 1.1/4), S4 = C - ((H-L) * 1.1/2)
+    # where C = (H+L+C)/3 (typical price), but using close as pivot for simplicity
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_arr = df_1d['close'].values
     
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    pivot = (high_1d + low_1d + close_1d_arr) / 3.0
+    R3 = pivot + ((high_1d - low_1d) * 1.1 / 4)
+    S3 = pivot - ((high_1d - low_1d) * 1.1 / 4)
     
-    # Upper and Lower Bands
-    hl2 = (high + low) / 2
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
-    
-    # SuperTrend calculation
-    supertrend = np.zeros(n)
-    direction = np.ones(n)  # 1 for uptrend, -1 for downtrend
-    
-    for i in range(atr_period, n):
-        if i == atr_period:
-            supertrend[i] = upper_band[i]
-            direction[i] = 1
-        else:
-            if supertrend[i-1] == upper_band[i-1]:
-                if close[i] <= upper_band[i]:
-                    supertrend[i] = upper_band[i]
-                else:
-                    supertrend[i] = lower_band[i]
-                    direction[i] = -1
-            else:
-                if close[i] >= lower_band[i]:
-                    supertrend[i] = lower_band[i]
-                else:
-                    supertrend[i] = upper_band[i]
-                    direction[i] = 1
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
     # Volume spike: current volume > 2.0x 30-period average
     vol_ma30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
@@ -71,24 +48,24 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(atr_period, 30)  # Ensure enough data for indicators
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(supertrend[i]) or 
-            np.isnan(direction[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(R3_aligned[i]) or 
+            np.isnan(S3_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: SuperTrend uptrend + price > 1d EMA34 + volume spike
-            long_cond = (direction[i] == 1) and \
+            # Long: break above R3 + uptrend (price > 1d EMA34) + volume spike
+            long_cond = (close[i] > R3_aligned[i]) and \
                         (close[i] > ema_34_1d_aligned[i]) and \
                         volume_spike[i]
-            # Short: SuperTrend downtrend + price < 1d EMA34 + volume spike
-            short_cond = (direction[i] == -1) and \
+            # Short: break below S3 + downtrend (price < 1d EMA34) + volume spike
+            short_cond = (close[i] < S3_aligned[i]) and \
                          (close[i] < ema_34_1d_aligned[i]) and \
                          volume_spike[i]
             
@@ -99,15 +76,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: SuperTrend flips to downtrend
-            if direction[i] == -1:
+            # Long exit: close below S3 (mean reversion to pivot area)
+            if close[i] < S3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: SuperTrend flips to uptrend
-            if direction[i] == 1:
+            # Short exit: close above R3 (mean reversion to pivot area)
+            if close[i] > R3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
