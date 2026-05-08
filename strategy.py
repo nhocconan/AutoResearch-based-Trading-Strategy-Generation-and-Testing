@@ -1,18 +1,12 @@
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+# 6h_Equilibrium_Pulse
+# Strategy: 6h equilibrium detection using 1d VWAP deviation + volume surge + 1w trend filter
+# Long when price > 1d VWAP with volume spike in uptrend, short when price < 1d VWAP with volume spike in downtrend
+# Exit when price returns to VWAP or trend weakens
+# Target: 60-120 trades over 4 years (15-30/year) to minimize fee drag
+# Works in bull (follow 1w trend) and bear (mean revert to VWAP in range)
 
-# Hypothesis: 1d Williams Fractal + Volume Spike + Weekly Trend Filter
-# Uses Williams Fractals (5-bar) for swing point detection, volume spike for confirmation,
-# and weekly EMA for trend filter. Long on bullish fractal breakout above resistance with volume spike in uptrend.
-# Short on bearish fractal breakdown below support with volume spike in downtrend.
-# Exit on opposite fractal signal or trend reversal.
-# Target: 30-100 trades over 4 years (7-25/year) to minimize fee drag.
-# Works in bull (trend follow breakouts) and bear (mean reversion via fractal reversals in range).
-
-name = "1d_WilliamsFractal_VolumeSpike_Trend"
-timeframe = "1d"
+name = "6h_Equilibrium_Pulse"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,107 +19,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for higher timeframe trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for VWAP and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
+    # Get 1w data for higher timeframe trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
+        return np.zeros(n)
+    
+    # Calculate 1d VWAP (typical price * volume) / cumulative volume
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    vwap = (typical_price * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
+    vwap_values = vwap.values
+    
+    # Calculate 1d VWAP standard deviation for bands
+    vwap_dev = typical_price - vwap_values
+    vwap_var = (vwap_dev ** 2 * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
+    vwap_std = np.sqrt(np.maximum(vwap_var, 0))
+    
+    # 1w EMA(21) for trend filter
     close_1w = df_1w['close'].values
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    trend_1w_up = ema_21_1w > np.roll(ema_21_1w, 1)
+    trend_1w_up = np.where(np.isnan(trend_21_1w), False, trend_1w_up)
     
-    # Williams Fractals (5-bar: 2 left, 2 right)
-    # Bearish fractal: high[n-2] < high[n] > high[n+2] and high[n-1] < high[n] > high[n+1]
-    # Bullish fractal: low[n-2] > low[n] < low[n+2] and low[n-1] > low[n] < low[n+1]
-    bearish_fractal = np.zeros(n, dtype=bool)
-    bullish_fractal = np.zeros(n, dtype=bool)
+    # Align 1d VWAP and bands to 6h
+    vwap_6h = align_htf_to_ltf(prices, df_1d, vwap_values)
+    vwap_upper_6h = align_htf_to_ltf(prices, df_1d, vwap_values + vwap_std)
+    vwap_lower_6h = align_htf_to_ltf(prices, df_1d, vwap_values - vwap_std)
     
-    for i in range(2, n-2):
-        if (high[i-2] < high[i] and high[i-1] < high[i] and 
-            high[i+1] < high[i] and high[i+2] < high[i]):
-            bearish_fractal[i] = True
-        if (low[i-2] > low[i] and low[i-1] > low[i] and 
-            low[i+1] > low[i] and low[i+2] > low[i]):
-            bullish_fractal[i] = True
+    # Align 1w trend to 6h
+    trend_1w_up_6h = align_htf_to_ltf(prices, df_1w, trend_1w_up.astype(float))
     
-    # Volume spike: volume > 1.5 * 20-period average volume
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma20)
-    
-    # Weekly EMA(21) for trend filter
-    close_1w_series = pd.Series(close_1w)
-    ema_21_1w = close_1w_series.ewm(span=21, adjust=False, min_periods=21).mean().values
-    trend_1w_up = ema_21_1w[1:] > ema_21_1w[:-1]
-    trend_1w_up = np.concatenate([[False], trend_21_1w])
-    
-    # Align 1w trend to 1d
-    trend_1w_up_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_up.astype(float))
-    
-    # Resistance and support levels from recent fractals
-    # Resistance: highest bearish fractal high in last 20 periods
-    # Support: lowest bullish fractal low in last 20 periods
-    resistance = np.full(n, np.nan)
-    support = np.full(n, np.nan)
-    
-    for i in range(20, n):
-        # Look back 20 periods for fractals
-        lookback_high = high[max(0, i-20):i]
-        lookback_low = low[max(0, i-20):i]
-        bearish_in_lookback = bearish_fractal[max(0, i-20):i]
-        bullish_in_lookback = bullish_fractal[max(0, i-20):i]
-        
-        if np.any(bearish_in_lookback):
-            # Get highest high where bearish fractal occurred
-            idx = np.where(bearish_in_lookback)[0]
-            resistance[i] = np.max(lookback_high[idx])
-        if np.any(bullish_in_lookback):
-            # Get lowest low where bullish fractal occurred
-            idx = np.where(bullish_in_lookback)[0]
-            support[i] = np.min(lookback_low[idx])
+    # Volume surge detection: current volume > 1.5 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_surge = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 25  # Ensure enough data for calculations
+    start_idx = 20  # Ensure enough data for volume MA
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(resistance[i]) or np.isnan(support[i]) or 
-            np.isnan(trend_1w_up_aligned[i])):
+        if (np.isnan(vwap_6h[i]) or np.isnan(vwap_upper_6h[i]) or np.isnan(vwap_lower_6h[i]) or
+            np.isnan(trend_1w_up_6h[i]) or np.isnan(volume_surge[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: bullish fractal breakout above resistance with volume spike in uptrend
-            if (bullish_fractal[i] and 
-                close[i] > resistance[i] and 
-                volume_spike[i] and 
-                trend_1w_up_aligned[i]):
-                signals[i] = 0.25
-                position = 1
-            # Short entry: bearish fractal breakdown below support with volume spike in downtrend
-            elif (bearish_fractal[i] and 
-                  close[i] < support[i] and 
-                  volume_spike[i] and 
-                  not trend_1w_up_aligned[i]):
-                signals[i] = -0.25
-                position = -1
+            # Look for volume surge away from VWAP in direction of 1w trend
+            if volume_surge[i]:
+                # Long conditions: price above VWAP, 1w uptrend
+                if close[i] > vwap_6h[i] and trend_1w_up_6h[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # Short conditions: price below VWAP, 1w downtrend
+                elif close[i] < vwap_6h[i] and not trend_1w_up_6h[i]:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Long exit: bearish fractal breakdown or trend reversal
-            if bearish_fractal[i] and close[i] < support[i]:
-                signals[i] = 0.0
-                position = 0
-            elif not trend_1w_up_aligned[i]:
+            # Long exit: price returns to VWAP or trend weakens
+            if close[i] <= vwap_6h[i] or not trend_1w_up_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: bullish fractal breakout or trend reversal
-            if bullish_fractal[i] and close[i] > resistance[i]:
-                signals[i] = 0.0
-                position = 0
-            elif trend_1w_up_aligned[i]:
+            # Short exit: price returns to VWAP or trend weakens
+            if close[i] >= vwap_6h[i] or trend_1w_up_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
