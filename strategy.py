@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d trend filter (EMA50) and volume confirmation
-# Long when price breaks above Donchian high(20) on 12h, 1d EMA50 rising, volume > 1.5x average
+# Hypothesis: 4h price channel breakout with 1d trend filter (EMA50) and volume confirmation
+# Long when price breaks above Donchian high(20), 1d EMA50 rising, volume > 1.5x average
 # Short when price breaks below Donchian low(20), 1d EMA50 falling, volume > 1.5x average
-# Uses 12h for entry timing, 1d for trend filter to avoid whipsaws in choppy markets
-# Targets 50-150 total trades over 4 years (12-37/year) for low fee drag and high win rate
+# Uses 4h for entry timing, 1d for trend filter to avoid whipsaws in choppy markets
+# Tight entry conditions to target ~25-60 total trades over 4 years (6-15/year) for low fee drag
 
-name = "12h_Donchian20_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,18 +23,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Donchian channels (primary timeframe)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 4h data for Donchian channels (primary timeframe)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate Donchian channels on 12h high/low
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+    # Calculate Donchian channels on 4h high/low
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
     
     # Get 1d data for trend filter (EMA50)
     df_1d = get_htf_data(prices, '1d')
