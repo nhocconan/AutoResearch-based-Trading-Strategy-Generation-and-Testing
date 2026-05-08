@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_TRIX_WeeklyTrend_Volume_v1"
-timeframe = "1d"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,67 +17,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data once
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get daily data once
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 40:
         return np.zeros(n)
     
-    # Calculate TRIX (15-period EMA of EMA of EMA) on weekly close
-    close_1w = df_1w['close'].values
-    ema1 = pd.Series(close_1w).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
-    trix = pd.Series(ema3).pct_change(periods=1).values  # TRIX as percentage change
+    # Calculate 1d EMA(34) for trend direction
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Align TRIX to daily timeframe
-    trix_aligned = align_htf_to_ltf(prices, df_1w, trix)
+    # Calculate 1d Camarilla pivot levels (based on previous day)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_prev = df_1d['close'].values
     
-    # Weekly EMA(34) for trend filter
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Calculate pivot and ranges
+    pivot_1d = (high_1d + low_1d + close_1d_prev) / 3
+    range_1d = high_1d - low_1d
     
-    # Volume spike detection: current volume > 2.5 * 20-day average
+    # Camarilla levels: R3, S3 (most significant)
+    r3_1d = close_1d_prev + range_1d * 1.1 / 2
+    s3_1d = close_1d_prev - range_1d * 1.1 / 2
+    
+    # Align Camarilla levels to 4h timeframe
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    
+    # Volume spike detection: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.5 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
+    
+    # Calculate daily range for volatility filter
+    daily_range_pct = range_1d / close_1d_prev
+    daily_range_pct_aligned = align_htf_to_ltf(prices, df_1d, daily_range_pct)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # warmup for TRIX and EMA calculations
+    start_idx = 40  # warmup for daily calculations
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(trix_aligned[i]) or np.isnan(ema34_1w_aligned[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or 
+            np.isnan(s3_1d_aligned[i]) or np.isnan(daily_range_pct_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        trix_val = trix_aligned[i]
-        ema_val = ema34_1w_aligned[i]
+        ema_val = ema34_1d_aligned[i]
+        r3_val = r3_1d_aligned[i]
+        s3_val = s3_1d_aligned[i]
         vol_spike = volume_spike[i]
+        daily_range = daily_range_pct_aligned[i]
+        
+        # Volatility filter: only trade when daily range is between 1% and 8%
+        vol_filter = (daily_range >= 0.01) and (daily_range <= 0.08)
         
         if position == 0:
-            # Enter long: TRIX crosses above zero, above weekly EMA, with volume spike
-            if (trix_val > 0 and trix_aligned[i-1] <= 0 and 
-                close[i] > ema_val and vol_spike):
+            # Enter long: price breaks above R3 with volume spike, above 1d EMA, in volatility range
+            if (close[i] > r3_val and vol_spike and 
+                close[i] > ema_val and vol_filter):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: TRIX crosses below zero, below weekly EMA, with volume spike
-            elif (trix_val < 0 and trix_aligned[i-1] >= 0 and 
-                  close[i] < ema_val and vol_spike):
+            # Enter short: price breaks below S3 with volume spike, below 1d EMA, in volatility range
+            elif (close[i] < s3_val and vol_spike and 
+                  close[i] < ema_val and vol_filter):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: TRIX crosses below zero OR price drops below weekly EMA
-            if (trix_val < 0 and trix_aligned[i-1] >= 0) or close[i] < ema_val:
+            # Exit long: price breaks below S3 OR below 1d EMA
+            if (close[i] < s3_val or close[i] < ema_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: TRIX crosses above zero OR price rises above weekly EMA
-            if (trix_val > 0 and trix_aligned[i-1] <= 0) or close[i] > ema_val:
+            # Exit short: price breaks above R3 OR above 1d EMA
+            if (close[i] > r3_val or close[i] > ema_val):
                 signals[i] = 0.0
                 position = 0
             else:
