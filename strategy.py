@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Contrarian_Reversal_ZScore_Pivot_v1"
-timeframe = "4h"
+name = "6h_ADX_RSI_Momentum_Confluence_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,93 +17,113 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d and 1w data once
+    # Get 12h and 1d data once
+    df_12h = get_htf_data(prices, '12h')
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 30 or len(df_1w) < 10:
+    if len(df_12h) < 30 or len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 1d Close for Z-score calculation ===
+    # === 12h ADX for trend strength ===
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # True Range
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr_12h = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_12h[0] = high_12h[0] - low_12h[0]
+    
+    # Directional Movement
+    dm_plus = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h),
+                       np.maximum(high_12h - np.roll(high_12h, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(high_12h, 1)),
+                        np.maximum(np.roll(low_12h, 1) - low_12h, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smooth with Wilder's smoothing (alpha = 1/period)
+    def wilders_smooth(data, period):
+        result = np.zeros_like(data)
+        alpha = 1.0 / period
+        result[period-1] = np.mean(data[:period])
+        for i in range(period, len(data)):
+            result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
+        return result
+    
+    tr_smoothed = wilders_smooth(tr_12h, 14)
+    dm_plus_smoothed = wilders_smooth(dm_plus, 14)
+    dm_minus_smoothed = wilders_smooth(dm_minus, 14)
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_smoothed / (tr_smoothed + 1e-10)
+    di_minus = 100 * dm_minus_smoothed / (tr_smoothed + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx_12h = wilders_smooth(dx, 14)
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    
+    # === 1d RSI for momentum ===
     close_1d = df_1d['close'].values
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # === 1d Z-score of close (20-day) ===
-    mean_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    zscore = (close_1d - mean_20) / (std_20 + 1e-10)
-    zscore_4h = align_htf_to_ltf(prices, df_1d, zscore)
+    # Wilder's smoothing for RSI
+    avg_gain = wilders_smooth(gain, 14)
+    avg_loss = wilders_smooth(loss, 14)
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # === 1w EMA50 for long-term trend filter ===
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    
-    # === 1d Previous day's pivot points (HLC/3) ===
-    prev_high_1d = np.roll(df_1d['high'].values, 1)
-    prev_low_1d = np.roll(df_1d['low'].values, 1)
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d[0] = df_1d['high'].values[0]
-    prev_low_1d[0] = df_1d['low'].values[0]
-    prev_close_1d[0] = close_1d[0]
-    
-    pivot = (prev_high_1d + prev_low_1d + prev_close_1d) / 3.0
-    range_1d = prev_high_1d - prev_low_1d
-    
-    # Pivot support/resistance levels
-    r1 = pivot + (range_1d * 1.1 / 12)
-    s1 = pivot - (range_1d * 1.1 / 12)
-    
-    # Align pivot levels to 4h timeframe
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # === 4h Volume filter: current volume > 20-period average ===
+    # === 6h volume filter ===
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for Z-score and volume MA
+    start_idx = 50  # warmup
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(zscore_4h[i]) or np.isnan(ema50_1w_aligned[i]) or 
-            np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(adx_12h_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Z-score < -2.0 (oversold) + above S1 + long-term uptrend + volume
-            long_cond = (zscore_4h[i] < -2.0 and 
-                        close[i] > s1_4h[i] and 
-                        close[i] > ema50_1w_aligned[i] and
-                        volume[i] > vol_ma20[i])
+            # Entry conditions: Strong trend + momentum alignment + volume
+            strong_trend = adx_12h_aligned[i] > 25
+            bullish_momentum = rsi_1d_aligned[i] > 50
+            bearish_momentum = rsi_1d_aligned[i] < 50
+            volume_ok = volume[i] > vol_ma20[i]
             
-            # Short: Z-score > 2.0 (overbought) + below R1 + long-term downtrend + volume
-            short_cond = (zscore_4h[i] > 2.0 and 
-                         close[i] < r1_4h[i] and 
-                         close[i] < ema50_1w_aligned[i] and
-                         volume[i] > vol_ma20[i])
-            
-            if long_cond:
+            # Long: strong trend + bullish momentum + volume
+            if strong_trend and bullish_momentum and volume_ok:
                 signals[i] = 0.25
                 position = 1
-            elif short_cond:
+            # Short: strong trend + bearish momentum + volume
+            elif strong_trend and bearish_momentum and volume_ok:
                 signals[i] = -0.25
                 position = -1
+        
         elif position == 1:
-            # Long exit: Z-score > -0.5 (mean reversion) or breakdown below S1
-            exit_cond = (zscore_4h[i] > -0.5 or close[i] < s1_4h[i])
+            # Long exit: trend weakness or momentum reversal
+            exit_cond = (adx_12h_aligned[i] < 20) or (rsi_1d_aligned[i] < 40)
             if exit_cond:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
+        
         elif position == -1:
-            # Short exit: Z-score < 0.5 (mean reversion) or breakout above R1
-            exit_cond = (zscore_4h[i] < 0.5 or close[i] > r1_4h[i])
+            # Short exit: trend weakness or momentum reversal
+            exit_cond = (adx_12h_aligned[i] < 20) or (rsi_1d_aligned[i] > 60)
             if exit_cond:
                 signals[i] = 0.0
                 position = 0
@@ -112,13 +132,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Contrarian reversal strategy using 1d Z-score (20) for extreme
-# deviations combined with 1w EMA50 trend filter and 1d pivot levels (S1/R1) for
-# entry/exit. Enters long when price is significantly oversold (Z<-2) above S1
-# in a long-term uptrend, and short when significantly overbought (Z>2) below R1
-# in a long-term downtrend. Uses volume confirmation and exits on mean reversion
-# (Z-score > -0.5 for longs, < 0.5 for shorts) or pivot breakdown/breakout.
-# Designed to work in both bull (buy dips in uptrend) and bear (sell rallies in
-# downtrend) markets. Targets 20-60 trades over 4 years (5-15/year) to minimize
-# fee drag. Uses discrete sizing (0.25) to reduce churn. Works on BTC/ETH via
-# statistical extremes and institutional pivot levels.
+# Hypothesis: Combines 12h ADX for trend strength filtering with 1d RSI for momentum
+# alignment and 6h volume confirmation. Only enters strong trends (ADX>25) when
+# momentum confirms direction (RSI>50 for long, <50 for short). Exits when trend
+# weakens (ADX<20) or momentum diverges. Designed to work in both bull and bear
+# markets by following established trends while avoiding choppy conditions. Targets
+# 50-150 trades over 4 years through strict ADX>25 filter. Uses discrete sizing
+# (0.25) to minimize fee churn. Works on BTC/ETH via institutional trend/momentum
+# confluence.
