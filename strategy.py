@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "6h_Liquidity_Grab_Reversal_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,48 +17,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla and trend
+    # Daily data for liquidity zones
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Previous day's data for Camarilla calculation
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Previous day high/low for liquidity grab identification
+    prev_day_high = df_1d['high'].shift(1).values
+    prev_day_low = df_1d['low'].shift(1).values
     
-    # Calculate Camarilla levels (R1, S1)
-    # R1 = close + (high - low) * 1.1 / 12
-    # S1 = close - (high - low) * 1.1 / 12
-    camarilla_range = prev_high - prev_low
-    R1 = prev_close + camarilla_range * 1.1 / 12
-    S1 = prev_close - camarilla_range * 1.1 / 12
+    # Align daily levels to 6h timeframe
+    prev_day_high_aligned = align_htf_to_ltf(prices, df_1d, prev_day_high)
+    prev_day_low_aligned = align_htf_to_ltf(prices, df_1d, prev_day_low)
     
-    # Trend filter: 50 EMA on daily
-    ema_50 = pd.Series(prev_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align all indicators to 12h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
-    
-    # Volume confirmation - 4-period average volume (2 days for 12h timeframe)
-    vol_ma = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    # Volume confirmation: 20-period volume average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1.0)
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
     # Session filter: 08-20 UTC
-    hours = prices.index.hour
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(prev_day_high_aligned[i]) or np.isnan(prev_day_low_aligned[i]) or
+            np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,33 +58,39 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        current_close = close[i]
-        current_high = high[i]
-        current_low = low[i]
+        # Liquidity grab detection
+        # Bullish setup: price breaks below prev day low then reverses above it
+        # Bearish setup: price breaks above prev day high then reverses below it
         
         if position == 0:
-            # Long: Close above R1 + price > EMA50 + volume confirmation
-            if (current_close > R1_aligned[i] and 
-                current_close > ema_50_aligned[i] and
-                vol_ratio[i] > 1.5):
+            # Long: bullish liquidity grab reversal
+            # Price was below prev day low 2 periods ago, now above it
+            if (i >= 2 and 
+                low[i-2] < prev_day_low_aligned[i-2] and  # Was below
+                close[i] > prev_day_low_aligned[i] and      # Now above
+                vol_ratio[i] > 1.8):                        # Volume confirmation
                 signals[i] = 0.25
                 position = 1
-            # Short: Close below S1 + price < EMA50 + volume confirmation
-            elif (current_close < S1_aligned[i] and 
-                  current_close < ema_50_aligned[i] and
-                  vol_ratio[i] > 1.5):
+            # Short: bearish liquidity grab reversal
+            # Price was above prev day high 2 periods ago, now below it
+            elif (i >= 2 and 
+                  high[i-2] > prev_day_high_aligned[i-2] and  # Was above
+                  close[i] < prev_day_high_aligned[i] and      # Now below
+                  vol_ratio[i] > 1.8):                        # Volume confirmation
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Close below S1 OR price < EMA50
-            if (current_close < S1_aligned[i] or current_close < ema_50_aligned[i]):
+            # Exit long: price breaks below entry area or volume dries up
+            if (close[i] < prev_day_low_aligned[i] * 0.995 or  # Slight buffer
+                vol_ratio[i] < 0.8):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Close above R1 OR price > EMA50
-            if (current_close > R1_aligned[i] or current_close > ema_50_aligned[i]):
+            # Exit short: price breaks above entry area or volume dries up
+            if (close[i] > prev_day_high_aligned[i] * 1.005 or  # Slight buffer
+                vol_ratio[i] < 0.8):
                 signals[i] = 0.0
                 position = 0
             else:
