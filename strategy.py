@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_WilliamsFractal_WeeklyTrend_VolumeSpike"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,82 +17,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data once for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
-    # Weekly EMA20 trend filter
-    close_1w = df_1w['close'].values
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    trend_1w = (close_1w > ema20_1w).astype(float)
-    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
-    
-    # Get daily data once for Williams Fractals
+    # Get 1d data once for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Williams Fractals calculation
-    # Bearish fractal: high[n-2] < high[n-1] > high[n] and high[n-1] > high[n-3] and high[n-1] > high[n+1]
-    # Bullish fractal: low[n-2] > low[n-1] < low[n] and low[n-1] < low[n-3] and low[n-1] < low[n+1]
-    high_vals = df_1d['high'].values
-    low_vals = df_1d['low'].values
-    n_1d = len(high_vals)
+    # 1d EMA34 trend filter
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_1d = (close_1d > ema34_1d).astype(float)
+    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    bearish_fractal = np.zeros(n_1d, dtype=bool)
-    bullish_fractal = np.zeros(n_1d, dtype=bool)
+    # Get 1d data once for Camarilla pivot levels (current day's OHLC for today's levels)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_vals = df_1d['close'].values
     
-    for i in range(2, n_1d - 2):
-        if (high_vals[i-2] < high_vals[i-1] and 
-            high_vals[i] < high_vals[i-1] and
-            high_vals[i-3] < high_vals[i-1] and
-            high_vals[i+1] < high_vals[i-1]):
-            bearish_fractal[i] = True
-            
-        if (low_vals[i-2] > low_vals[i-1] and 
-            low_vals[i] > low_vals[i-1] and
-            low_vals[i-3] > low_vals[i-1] and
-            low_vals[i+1] > low_vals[i-1]):
-            bullish_fractal[i] = True
+    # Previous day's OHLC for Camarilla calculation (R3/S3 levels)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d_vals, 1)
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d_vals[0]
     
-    # Align fractals to 6h with additional delay for confirmation
-    # Williams fractal needs 2 extra daily bars after the center bar for confirmation
-    bearish_fractal_aligned = align_htf_to_ltf(
-        prices, df_1d, bearish_fractal.astype(float), additional_delay_bars=2
-    )
-    bullish_fractal_aligned = align_htf_to_ltf(
-        prices, df_1d, bullish_fractal.astype(float), additional_delay_bars=2
-    )
+    # Camarilla pivot levels calculation (R3 and S3)
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_val = prev_high - prev_low
+    r3 = pivot + (range_val * 1.1 / 2)  # R3 level
+    s3 = pivot - (range_val * 1.1 / 2)  # S3 level
     
-    # Volume spike detection: current volume > 2.0 * 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma20 * 2.0)
+    # Align Camarilla levels to 12h timeframe
+    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Volume spike detection: current volume > 2.5 * 30-period average
+    vol_ma30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    vol_spike = volume > (vol_ma30 * 2.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # warmup for volume MA
+    start_idx = 30  # warmup for volume MA
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(trend_1w_aligned[i]) or np.isnan(bearish_fractal_aligned[i]) or 
-            np.isnan(bullish_fractal_aligned[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ma30[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: bullish fractal confirmed + weekly uptrend + volume spike
-            long_cond = (bullish_fractal_aligned[i] > 0.5 and 
-                        trend_1w_aligned[i] > 0.5 and 
-                        vol_spike[i])
+            # Long entry: price breaks above R3 with volume spike and 1d uptrend
+            long_cond = (close[i] > r3_12h[i] and vol_spike[i] and trend_1d_aligned[i] > 0.5)
             
-            # Short entry: bearish fractal confirmed + weekly downtrend + volume spike
-            short_cond = (bearish_fractal_aligned[i] > 0.5 and 
-                         trend_1w_aligned[i] < 0.5 and 
-                         vol_spike[i])
+            # Short entry: price breaks below S3 with volume spike and 1d downtrend
+            short_cond = (close[i] < s3_12h[i] and vol_spike[i] and trend_1d_aligned[i] < 0.5)
             
             if long_cond:
                 signals[i] = 0.25
@@ -101,15 +82,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: bearish fractal confirmed (reversal signal)
-            if bearish_fractal_aligned[i] > 0.5:
+            # Long exit: price breaks below S3 (reversal signal)
+            if close[i] < s3_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: bullish fractal confirmed (reversal signal)
-            if bullish_fractal_aligned[i] > 0.5:
+            # Short exit: price reverses back above R3 (reversal signal)
+            if close[i] > r3_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -117,9 +98,8 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Williams Fractal reversal signals on 6h timeframe with weekly EMA20 trend filter and volume spike confirmation.
-# Williams Fractals identify potential reversal points - bullish fractals suggest bottoms, bearish fractals suggest tops.
-# Weekly trend filter ensures we trade in the direction of the higher timeframe trend.
-# Volume spike confirmation reduces false signals by requiring increased participation at fractal points.
-# Designed to work in both bull (buy bullish fractals in uptrend) and bear (sell bearish fractals in downtrend) markets.
-# Discrete sizing (0.25) minimizes churn. Target: 15-35 trades/year.
+# Hypothesis: Camarilla R3/S3 breakout strategy with volume spike confirmation and 1d EMA34 trend filter on 12h timeframe.
+# Uses 1d trend filter for multi-timeframe alignment and 1d Camarilla levels for structure.
+# Volume spike filter (2.5x 30-period average) reduces false breakouts.
+# Designed to work in both bull (trend-following breakouts) and bear (reversal from extreme levels) markets.
+# Discrete sizing (0.25) minimizes churn. Target: 15-30 trades/year.
