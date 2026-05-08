@@ -3,19 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h momentum strategy using 4h RSI and 1d trend filter with volume confirmation.
-# Uses 4h RSI(14) for momentum extremes (oversold/overbought) and 1d EMA(50) for trend direction.
-# Volume spike filters entries to avoid low-conviction moves.
-# Designed for low trade frequency in both bull and bear markets by using higher timeframes for direction.
-# Target: 60-150 total trades over 4 years = 15-37/year
+# Hypothesis: 6h Donchian(20) breakout with weekly pivot context and volume confirmation
+# Long when price breaks above Donchian(20) high and weekly pivot > prior weekly pivot (uptrend)
+# Short when price breaks below Donchian(20) low and weekly pivot < prior weekly pivot (downtrend)
+# Weekly pivot provides higher-timeframe trend bias to avoid counter-trend trades
+# Volume confirmation ensures breakout authenticity
+# Designed for low trade frequency in both bull and bear markets
+# Target: 50-150 total trades over 4 years = 12-37/year
 
-name = "1h_RSI4h_1dTrend_Volume"
-timeframe = "1h"
+name = "6h_Donchian20_WeeklyPivot_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,87 +25,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data once for RSI
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 14:
+    # Get weekly data once
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate 4h RSI(14)
-    close_4h = df_4h['close'].values
-    delta = np.diff(close_4h, prepend=close_4h[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_4h = 100 - (100 / (1 + rs))
-    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
+    # Calculate weekly pivot points (standard formula)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Get 1d data once for trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # Pivot Point = (High + Low + Close) / 3
+    pivot = (high_1w + low_1w + close_1w) / 3.0
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
     
-    # Calculate 1d EMA(50)
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Donchian(20) channels on 6h data
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
-    # Session filter: 8-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # warmup for calculations
+    start_idx = 50  # warmup for calculations
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(rsi_4h_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        rsi_val = rsi_4h_aligned[i]
-        ema50_val = ema50_1d_aligned[i]
+        pivot_val = pivot_aligned[i]
+        donch_high = donchian_high[i]
+        donch_low = donchian_low[i]
         vol_spike = volume_spike[i]
-        in_session = session_filter[i]
         
         if position == 0:
-            # Enter long: RSI < 30 (oversold) + uptrend + volume spike + session
-            if (rsi_val < 30 and 
-                close[i] > ema50_val and 
-                vol_spike and 
-                in_session):
-                signals[i] = 0.20
+            # Enter long: break above Donchian high + weekly pivot up + volume spike
+            if (close[i] > donch_high and 
+                i > 0 and pivot_val > pivot_aligned[i-1] and 
+                vol_spike):
+                signals[i] = 0.25
                 position = 1
-            # Enter short: RSI > 70 (overbought) + downtrend + volume spike + session
-            elif (rsi_val > 70 and 
-                  close[i] < ema50_val and 
-                  vol_spike and 
-                  in_session):
-                signals[i] = -0.20
+            # Enter short: break below Donchian low + weekly pivot down + volume spike
+            elif (close[i] < donch_low and 
+                  i > 0 and pivot_val < pivot_aligned[i-1] and 
+                  vol_spike):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: RSI > 50 (momentum fading) OR price breaks below trend
-            if rsi_val > 50 or close[i] < ema50_val:
+            # Exit long: break below Donchian low
+            if close[i] < donch_low:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: RSI < 50 (momentum fading) OR price breaks above trend
-            if rsi_val < 50 or close[i] > ema50_val:
+            # Exit short: break above Donchian high
+            if close[i] > donch_high:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
