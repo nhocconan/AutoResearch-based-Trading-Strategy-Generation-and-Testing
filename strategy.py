@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian channel breakout with daily volume confirmation and weekly ADX trend filter
-# Long when price breaks above 20-period Donchian upper band + daily volume > 1.5x 20-period SMA + weekly ADX > 25
-# Short when price breaks below 20-period Donchian lower band + daily volume > 1.5x 20-period SMA + weekly ADX > 25
-# Exit when price returns to the 10-period Donchian middle (mean reversion) or weekly ADX falls below 20
-# Combines trend-following breakout with volume confirmation and trend strength filter
-# Targets 15-25 trades/year to minimize fee decay while capturing sustained moves in trending markets
+# Hypothesis: 12-hour CAMARILLA PIVOT LEVELS + DAILY VOLUME CONFIRMATION + WEEKLY ADX TREND FILTER
+# Long when price breaks above R1 with volume confirmation and weekly ADX > 25
+# Short when price breaks below S1 with volume confirmation and weekly ADX > 25
+# Exit when price returns to pivot point or weekly ADX falls below 20
+# Camarilla pivots provide strong intraday support/resistance levels
+# Volume confirms breakout strength, ADX filters for trending conditions
+# Targets 15-25 trades/year to minimize fee decay while capturing sustained moves
 
-name = "12h_DonchianBreakout_Volume_ADX"
+name = "12h_CamarillaPivot_Volume_ADX"
 timeframe = "12h"
 leverage = 1.0
 
@@ -23,35 +24,15 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     
-    # Get daily data for volume confirmation
+    # Get daily data for pivot points and volume confirmation
     df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 20:
+    if len(df_daily) < 2:
         return np.zeros(n)
     
     # Get weekly data for ADX trend filter
     df_weekly = get_htf_data(prices, '1w')
     if len(df_weekly) < 30:
         return np.zeros(n)
-    
-    # Calculate 20-period Donchian channels
-    lookback = 20
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
-    
-    for i in range(lookback - 1, n):
-        highest_high[i] = np.max(high[i-lookback+1:i+1])
-        lowest_low[i] = np.min(low[i-lookback+1:i+1])
-    
-    # Calculate 10-period Donchian middle for exit
-    lookback_middle = 10
-    highest_high_middle = np.full(n, np.nan)
-    lowest_low_middle = np.full(n, np.nan)
-    
-    for i in range(lookback_middle - 1, n):
-        highest_high_middle[i] = np.max(high[i-lookback_middle+1:i+1])
-        lowest_low_middle[i] = np.min(low[i-lookback_middle+1:i+1])
-    
-    donchian_middle = (highest_high_middle + lowest_low_middle) / 2
     
     # Calculate weekly ADX(14) for trend strength
     weekly_high = df_weekly['high'].values
@@ -110,49 +91,64 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, lookback)  # warmup period
+    start_idx = max(100, 20)  # warmup period
     
     for i in range(start_idx, n):
-        if (np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or 
-            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(donchian_middle[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume filter: current daily volume > 1.5x 20-day SMA
-        # Find the most recent completed daily bar
+        # Find the most recent completed daily bar for pivot calculation
         idx_daily = len(df_daily) - 1
         while idx_daily >= 0 and df_daily.iloc[idx_daily]['open_time'] > prices.iloc[i]['open_time']:
             idx_daily -= 1
-        vol_filter = False
-        if idx_daily >= 0:
-            vol_daily_current = df_daily.iloc[idx_daily]['volume']
-            vol_filter = vol_daily_current > 1.5 * vol_ma_20_aligned[i]
+        
+        if idx_daily < 0:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Calculate Camarilla pivot levels for the most recent completed daily bar
+        daily_high = df_daily.iloc[idx_daily]['high']
+        daily_low = df_daily.iloc[idx_daily]['low']
+        daily_close = df_daily.iloc[idx_daily]['close']
+        
+        pivot = (daily_high + daily_low + daily_close) / 3
+        range_val = daily_high - daily_low
+        
+        # Camarilla levels
+        r1 = pivot + (range_val * 1.1 / 12)
+        s1 = pivot - (range_val * 1.1 / 12)
+        
+        # Volume filter: current daily volume > 1.5x 20-day SMA
+        vol_daily_current = df_daily.iloc[idx_daily]['volume']
+        vol_filter = vol_daily_current > 1.5 * vol_ma_20_aligned[i]
         
         if position == 0:
-            # Look for Donchian breakout with volume confirmation and strong trend
-            # Long: price breaks above 20-period upper band
-            if close[i] > highest_high[i] and adx_aligned[i] > 25:
+            # Look for Camarilla breakout with volume confirmation and strong trend
+            # Long: price breaks above R1
+            if close[i] > r1 and adx_aligned[i] > 25:
                 if vol_filter:
                     signals[i] = 0.25
                     position = 1
-            # Short: price breaks below 20-period lower band
-            elif close[i] < lowest_low[i] and adx_aligned[i] > 25:
+            # Short: price breaks below S1
+            elif close[i] < s1 and adx_aligned[i] > 25:
                 if vol_filter:
                     signals[i] = -0.25
                     position = -1
         elif position == 1:
-            # Exit long: price returns to 10-period Donchian middle or ADX falls below 20
-            if close[i] <= donchian_middle[i] or adx_aligned[i] < 20:
+            # Exit long: price returns to pivot point or ADX falls below 20
+            if close[i] <= pivot or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to 10-period Donchian middle or ADX falls below 20
-            if close[i] >= donchian_middle[i] or adx_aligned[i] < 20:
+            # Exit short: price returns to pivot point or ADX falls below 20
+            if close[i] >= pivot or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
