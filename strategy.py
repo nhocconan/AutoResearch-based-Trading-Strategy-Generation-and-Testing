@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h EMA(21) trend with 4h ADX filter and volume confirmation
-# Long when price > EMA21 + 4h ADX > 25 + volume > 1.5x 20-period average
-# Short when price < EMA21 + 4h ADX > 25 + volume > 1.5x 20-period average
-# Exit when price crosses back below/above EMA21
-# Uses 4h for trend strength (ADX) and 1h for entry/exit timing
-# Target: 60-150 total trades over 4 years (15-37/year) to minimize fee drag
+# Hypothesis: 6h Elder Ray Index (Bull Power/Bear Power) with 1w trend filter and volume confirmation
+# Long when Bull Power > 0, Bear Power < 0, price > weekly EMA20, volume > 1.5x 20-period average
+# Short when Bull Power < 0, Bear Power > 0, price < weekly EMA20, volume > 1.5x 20-period average
+# Exit when Bull Power and Bear Power converge (|Bull Power - Bear Power| < 0.1 * ATR)
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drift
 
-name = "1h_EMA21_ADX25_VolumeFilter"
-timeframe = "1h"
+name = "6h_ElderRay_1wEMA20_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,80 +23,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for ADX trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 4h ADX (14-period)
-    def calculate_adx(high, low, close, period=14):
-        plus_dm = np.zeros_like(high)
-        minus_dm = np.zeros_like(high)
-        tr = np.zeros_like(high)
-        
-        for i in range(1, len(high)):
-            plus_dm[i] = max(high[i] - high[i-1], 0)
-            minus_dm[i] = max(low[i-1] - low[i], 0)
-            if plus_dm[i] > minus_dm[i]:
-                minus_dm[i] = 0
-            elif minus_dm[i] > plus_dm[i]:
-                plus_dm[i] = 0
-            else:
-                plus_dm[i] = 0
-                minus_dm[i] = 0
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        # Smooth TR, +DM, -DM
-        atr = np.zeros_like(high)
-        plus_di = np.zeros_like(high)
-        minus_di = np.zeros_like(high)
-        
-        # Initial values
-        atr[period-1] = np.mean(tr[1:period])
-        plus_dm_smooth = np.mean(plus_dm[1:period])
-        minus_dm_smooth = np.mean(minus_dm[1:period])
-        
-        for i in range(period, len(high)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-            plus_dm_smooth = (plus_dm_smooth * (period-1) + plus_dm[i]) / period
-            minus_dm_smooth = (minus_dm_smooth * (period-1) + minus_dm[i]) / period
-            
-            if atr[i] != 0:
-                plus_di[i] = 100 * plus_dm_smooth / atr[i]
-                minus_di[i] = 100 * minus_dm_smooth / atr[i]
-            else:
-                plus_di[i] = 0
-                minus_di[i] = 0
-        
-        dx = np.zeros_like(high)
-        adx = np.zeros_like(high)
-        
-        for i in range(2*period-1, len(high)):
-            if plus_di[i] + minus_di[i] != 0:
-                dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
-            else:
-                dx[i] = 0
-        
-        # Smooth DX to get ADX
-        adx[2*period-1] = np.mean(dx[period:2*period])
-        for i in range(2*period, len(high)):
-            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx
+    # Calculate weekly EMA20 for trend filter
+    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Calculate ADX on 4h data
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    adx_4h = calculate_adx(high_4h, low_4h, close_4h, 14)
-    adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
+    # Calculate ATR(14) for exit condition
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate 1h EMA21
-    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Calculate Elder Ray components (13-period EMA as per standard)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    # Calculate volume filter: volume > 1.5x 20-period average
+    # Volume filter: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > 1.5 * vol_ma_20
+    vol_filter = volume > 1.5 * vol_ma_20
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -117,33 +66,36 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if np.isnan(ema_21[i]) or np.isnan(adx_4h_aligned[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(ema_20_1w_aligned[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(atr[i]) or np.isnan(vol_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Look for entry: EMA21 cross + ADX > 25 + volume filter
-            if close[i] > ema_21[i] and adx_4h_aligned[i] > 25 and volume_filter[i]:
-                signals[i] = 0.20
+            # Look for entry: Elder Ray divergence + trend + volume
+            long_condition = bull_power[i] > 0 and bear_power[i] < 0 and close[i] > ema_20_1w_aligned[i] and vol_filter[i]
+            short_condition = bull_power[i] < 0 and bear_power[i] > 0 and close[i] < ema_20_1w_aligned[i] and vol_filter[i]
+            
+            if long_condition:
+                signals[i] = 0.25
                 position = 1
-            elif close[i] < ema_21[i] and adx_4h_aligned[i] > 25 and volume_filter[i]:
-                signals[i] = -0.20
+            elif short_condition:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses back below EMA21
-            if close[i] <= ema_21[i]:
+            # Exit long: Elder Ray convergence
+            if abs(bull_power[i] - bear_power[i]) < 0.1 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses back above EMA21
-            if close[i] >= ema_21[i]:
+            # Exit short: Elder Ray convergence
+            if abs(bull_power[i] - bear_power[i]) < 0.1 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
