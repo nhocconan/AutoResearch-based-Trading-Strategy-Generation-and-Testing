@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R3S3_Breakout_1wTrend_Volume"
-timeframe = "12h"
+name = "4h_TRIX_ZeroCross_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 70:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,63 +17,53 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Camarilla levels from previous 1d (H, L, C)
+    # TRIX: TRIX(12) smoothed TRIX(12)
+    close_series = pd.Series(close)
+    ema1 = close_series.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
+    trix_raw = (ema3 - ema3.shift(1)) / ema3.shift(1) * 100
+    trix = trix_raw.ewm(span=12, adjust=False, min_periods=12).mean().values
+    
+    # Volume spike: current volume > 2.0x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma20)
+    
+    # 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 55:
         return np.zeros(n)
     
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Previous day values
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    
-    # Camarilla R3, S3 levels
-    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
-    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
-    
-    # Align to 12h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Weekly trend filter using EMA34 on 1w
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 35:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Volume spike: current volume > 2.5x 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.5 * vol_ma20)
+    # 1d EMA55 for trend filter
+    ema_55_1d = pd.Series(close_1d).ewm(span=55, adjust=False, min_periods=55).mean().values
+    ema_55_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_55_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Sufficient warmup
+    start_idx = 60  # Sufficient warmup for TRIX
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(trix[i]) or np.isnan(ema_55_1d_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above R3 + weekly uptrend + volume spike
-            long_cond = (close[i] > camarilla_r3_aligned[i]) and \
-                        (close[i] > ema_34_1w_aligned[i]) and \
+            # Long: TRIX crosses above zero + uptrend + volume spike
+            long_cond = (trix[i] > 0) and (trix[i-1] <= 0) and \
+                        (close[i] > ema_55_1d_aligned[i]) and \
                         volume_spike[i]
-            # Short: break below S3 + weekly downtrend + volume spike
-            short_cond = (close[i] < camarilla_s3_aligned[i]) and \
-                         (close[i] < ema_34_1w_aligned[i]) and \
+            # Short: TRIX crosses below zero + downtrend + volume spike
+            short_cond = (trix[i] < 0) and (trix[i-1] >= 0) and \
+                         (close[i] < ema_55_1d_aligned[i]) and \
                          volume_spike[i]
             
             if long_cond:
@@ -83,15 +73,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: close below S3 (reversion to mean)
-            if close[i] < camarilla_s3_aligned[i]:
+            # Long exit: TRIX crosses below zero
+            if trix[i] < 0 and trix[i-1] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: close above R3
-            if close[i] > camarilla_r3_aligned[i]:
+            # Short exit: TRIX crosses above zero
+            if trix[i] > 0 and trix[i-1] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
