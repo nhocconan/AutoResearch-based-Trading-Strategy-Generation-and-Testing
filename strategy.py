@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Choppiness Index regime filter + 4h Donchian(20) breakout with volume confirmation
-# Long when CHOP > 61.8 (range) + price breaks above Donchian high(20) + volume > 1.5x avg
-# Short when CHOP > 61.8 (range) + price breaks below Donchian low(20) + volume > 1.5x avg
-# Exit when CHOP < 38.2 (trend) or opposite Donchian break
-# Uses 4h for all signals, targeting 20-50 trades/year for low fee drag
-# Chop filter reduces whipsaws in strong trends, focusing on mean-reversion in ranges
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA10 trend filter and volume confirmation
+# Long when price breaks above Donchian high(20), 1w EMA10 rising, volume > 1.5x average
+# Short when price breaks below Donchian low(20), 1w EMA10 falling, volume > 1.5x average
+# Uses 1d for entry timing, 1w for trend filter to avoid whipsaws
+# Targets 30-100 total trades over 4 years (7-25/year) for low fee drag
 
-name = "4h_ChopDonchian_Volume"
-timeframe = "4h"
+name = "1d_Donchian20_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,25 +23,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate ATR(14) for Chop calculation
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Get 1d data once for Donchian channels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Calculate True Range components for Chop denominator
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    # Calculate Donchian channels on 1d high/low
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # Chop = 100 * log10(sum(TR14) / (max_high - min_low)) / log10(14)
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    range_hl = max_high - min_low
-    chop = 100 * np.log10(tr_sum / range_hl) / np.log10(14)
+    # Get 1w data once for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
+        return np.zeros(n)
     
-    # Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate EMA10 on 1w close for trend filter
+    close_1w = df_1w['close'].values
+    ema10_1w = pd.Series(close_1w).ewm(span=10, adjust=False, min_periods=10).mean().values
+    ema10_1w_aligned = align_htf_to_ltf(prices, df_1w, ema10_1w)
     
     # Volume spike: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,43 +53,43 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # warmup for Chop and Donchian
+    start_idx = 20  # warmup for Donchian
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(chop[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(ema10_1w_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        chop_val = chop[i]
         high_val = high[i]
         low_val = low[i]
-        donchian_high_val = donchian_high[i]
-        donchian_low_val = donchian_low[i]
+        donchian_high_val = donchian_high_aligned[i]
+        donchian_low_val = donchian_low_aligned[i]
+        ema10_1w_val = ema10_1w_aligned[i]
         vol_spike_val = vol_spike[i]
         
         if position == 0:
-            # Enter long: range market (CHOP > 61.8) + break above Donchian high + volume spike
-            if chop_val > 61.8 and high_val > donchian_high_val and vol_spike_val:
+            # Enter long: price breaks above Donchian high, 1w uptrend, volume spike
+            if high_val > donchian_high_val and ema10_1w_val > 0 and vol_spike_val:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: range market (CHOP > 61.8) + break below Donchian low + volume spike
-            elif chop_val > 61.8 and low_val < donchian_low_val and vol_spike_val:
+            # Enter short: price breaks below Donchian low, 1w downtrend, volume spike
+            elif low_val < donchian_low_val and ema10_1w_val < 0 and vol_spike_val:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: trend market (CHOP < 38.2) or price breaks below Donchian low
-            if chop_val < 38.2 or low_val < donchian_low_val:
+            # Exit long: price breaks below Donchian low or 1w trend down
+            if low_val < donchian_low_val or ema10_1w_val < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: trend market (CHOP < 38.2) or price breaks above Donchian high
-            if chop_val < 38.2 or high_val > donchian_high_val:
+            # Exit short: price breaks above Donchian high or 1w trend up
+            if high_val > donchian_high_val or ema10_1w_val > 0:
                 signals[i] = 0.0
                 position = 0
             else:
