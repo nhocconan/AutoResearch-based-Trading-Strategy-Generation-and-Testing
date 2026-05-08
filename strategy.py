@@ -3,21 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian Channel Breakout with 12h Trend and Volume Confirmation
-# - Uses Donchian(20) from 4h timeframe for breakout signals
-# - 12h EMA50 determines trend direction to avoid counter-trend trades
-# - Volume spike (>2x 20-period average) confirms breakout strength
-# - Works in both bull and bear markets by using 12h trend filter
-# - Target: 20-40 trades/year to minimize fee drag on 4h timeframe
-# - Exit when price returns to the middle of the Donchian channel
+# Hypothesis: 1h price action with 4h trend filter and 1d volume spike filter
+# - Uses 4h EMA20 for trend direction (long above EMA20, short below EMA20)
+# - Uses 1h price action: breakout above recent 1h high for long, below recent 1h low for short
+# - Uses 1d volume spike (>1.5x 20-day average) to confirm momentum
+# - Only trades during active session (08-20 UTC) to avoid low-liquidity noise
+# - Fixed position size of 0.20 to control risk and minimize fee churn
+# - Target: 15-30 trades/year to stay within fee limits
 
-name = "4h_DonchianBreakout_12hTrend_Volume"
-timeframe = "4h"
+name = "1h_Trend_Breakout_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,70 +25,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian Channel (20-period) on 4h data
-    high_max20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_middle = (high_max20 + low_min20) / 2.0
+    # Pre-compute session filter (08-20 UTC)
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
-    # 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 5:
+    # 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    # 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    close_4h = df_4h['close'].values
+    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
     
-    # Volume spike: current volume > 2.0x 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma20)
+    # 1d data for volume spike filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    volume_1d = df_1d['volume'].values
+    vol_ma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = volume_1d > (1.5 * vol_ma20_1d)
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
+    
+    # 1h price action: recent high/low for breakout
+    # Use 5-period lookback for recent swing high/low
+    high_roll5 = pd.Series(high).rolling(window=5, min_periods=5).max().values
+    low_roll5 = pd.Series(low).rolling(window=5, min_periods=5).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = 20  # Need enough history for indicators
     
     for i in range(start_idx, n):
+        # Skip if not in trading session
+        if not in_session[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+            
         # Skip if any critical data is NaN
-        if (np.isnan(high_max20[i]) or np.isnan(low_min20[i]) or 
-            np.isnan(donchian_middle[i]) or np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(ema_20_4h_aligned[i]) or 
+            np.isnan(vol_spike_1d_aligned[i]) or
+            np.isnan(high_roll5[i]) or 
+            np.isnan(low_roll5[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above upper Donchian band with 12h uptrend + volume spike
-            long_cond = (close[i] > high_max20[i] and 
-                        ema_50_12h_aligned[i] > ema_50_12h_aligned[i-1] and
-                        volume_spike[i])
+            # Long: price breaks above recent 5-period high, 4h uptrend, volume spike
+            long_cond = (close[i] > high_roll5[i-1] and 
+                        ema_20_4h_aligned[i] > ema_20_4h_aligned[i-1] and
+                        vol_spike_1d_aligned[i])
             
-            # Short: price breaks below lower Donchian band with 12h downtrend + volume spike
-            short_cond = (close[i] < low_min20[i] and 
-                         ema_50_12h_aligned[i] < ema_50_12h_aligned[i-1] and
-                         volume_spike[i])
+            # Short: price breaks below recent 5-period low, 4h downtrend, volume spike
+            short_cond = (close[i] < low_roll5[i-1] and 
+                         ema_20_4h_aligned[i] < ema_20_4h_aligned[i-1] and
+                         vol_spike_1d_aligned[i])
             
             if long_cond:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             elif short_cond:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Long exit: price returns to the middle of Donchian channel
-            if close[i] < donchian_middle[i]:
+            # Long exit: price breaks below recent 5-period low
+            if close[i] < low_roll5[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: price returns to the middle of Donchian channel
-            if close[i] > donchian_middle[i]:
+            # Short exit: price breaks above recent 5-period high
+            if close[i] > high_roll5[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
