@@ -3,96 +3,95 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Choppiness Index regime filter with 1w Williams Alligator trend confirmation.
-# Long when Choppiness Index (14) > 61.8 (range) AND Williams Alligator Lips > Teeth (bullish) AND close > SMA(50).
-# Short when Choppiness Index (14) > 61.8 (range) AND Williams Alligator Lips < Teeth (bearish) AND close < SMA(50).
-# Exit when Choppiness Index (14) < 38.2 (trending) OR Alligator lines cross in opposite direction.
-# This strategy captures mean reversion in ranging markets with trend confirmation to avoid false signals.
-# The weekly Alligator filter ensures alignment with higher timeframe momentum.
-# Target: 30-100 total trades over 4 years (7-25/year).
+# Hypothesis: 6h Williams %R with 1d EMA34 trend filter and volume spike confirmation.
+# Long when Williams %R crosses above -20 (oversold) AND 1d EMA34 rising AND volume > 2x 20-period average.
+# Short when Williams %R crosses below -80 (overbought) AND 1d EMA34 falling AND volume > 2x 20-period average.
+# Exit when Williams %R crosses back through -50 (mean reversion).
+# Williams %R identifies overbought/oversold conditions; EMA34 ensures trend alignment; volume confirms conviction.
+# Designed for 60-120 total trades over 4 years (15-30/year) to avoid fee drag.
 
-name = "1d_Chop_Alligator_Trend"
-timeframe = "1d"
+name = "6h_WilliamsR_1dEMA34_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # 1w data for Williams Alligator
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 60:
+    # 1d data for Williams %R and EMA34
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Williams Alligator: SMAs of median price (H+L)/2
-    median_price = (df_1w['high'] + df_1w['low']) / 2
-    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().shift(8).values  # Blue line
-    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().shift(5).values   # Red line
-    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().shift(3).values    # Green line
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align Alligator lines to 1d timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1w, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1w, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1w, lips)
+    # Williams %R (14-period)
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # avoid div by zero
     
-    # Choppiness Index (14) on 1d data
-    atr_14 = pd.Series(np.maximum(np.maximum(high - low, np.abs(high - np.roll(close, 1))), np.abs(low - np.roll(close, 1)))).rolling(window=14, min_periods=14).mean().values
-    atr_14[0] = np.maximum(high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0]))  # Fix first value
-    sum_atr_14 = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(sum_atr_14 / (highest_high_14 - lowest_low_14)) / np.log10(14)
-    # Handle division by zero or invalid cases
-    chop = np.where((highest_high_14 - lowest_low_14) > 0, chop, 50.0)
+    # Align Williams %R to 6h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
-    # 1d SMA50 for trend filter
-    sma50 = pd.Series(close).rolling(window=50, min_periods=50).mean().values
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # EMA34 direction
+    ema34_rising = np.zeros_like(ema34_1d_aligned, dtype=bool)
+    ema34_falling = np.zeros_like(ema34_1d_aligned, dtype=bool)
+    ema34_rising[1:] = ema34_1d_aligned[1:] > ema34_1d_aligned[:-1]
+    ema34_falling[1:] = ema34_1d_aligned[1:] < ema34_1d_aligned[:-1]
+    
+    # Volume filter: current volume > 2x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (2.0 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Sufficient warmup for all indicators
+    start_idx = max(50, 34)  # Sufficient warmup for EMA34 and Williams %R
     
     for i in range(start_idx, n):
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
-            np.isnan(chop[i]) or np.isnan(sma50[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(ema34_rising[i]) or np.isnan(ema34_falling[i]) or 
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Williams Alligator signals
-        lips_above_teeth = lips_aligned[i] > teeth_aligned[i]  # Bullish
-        lips_below_teeth = lips_aligned[i] < teeth_aligned[i]  # Bearish
-        
-        # Choppiness regime
-        chop_range = chop[i] > 61.8    # Ranging market
-        chop_trend = chop[i] < 38.2    # Trending market
-        
         if position == 0:
-            # Long: ranging market + bullish Alligator + price above SMA50
-            if chop_range and lips_above_teeth and close[i] > sma50[i]:
+            # Long: Williams %R crosses above -20 (from below), EMA34 rising, volume filter
+            long_cond = (williams_r_aligned[i] > -20) and (williams_r_aligned[i-1] <= -20) and ema34_rising[i] and volume_filter[i]
+            # Short: Williams %R crosses below -80 (from above), EMA34 falling, volume filter
+            short_cond = (williams_r_aligned[i] < -80) and (williams_r_aligned[i-1] >= -80) and ema34_falling[i] and volume_filter[i]
+            
+            if long_cond:
                 signals[i] = 0.25
                 position = 1
-            # Short: ranging market + bearish Alligator + price below SMA50
-            elif chop_range and lips_below_teeth and close[i] < sma50[i]:
+            elif short_cond:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: trending market OR Alligator turns bearish
-            if chop_trend or lips_below_teeth:
+            # Long exit: Williams %R crosses below -50 (from above)
+            if williams_r_aligned[i] < -50 and williams_r_aligned[i-1] >= -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: trending market OR Alligator turns bullish
-            if chop_trend or lips_above_teeth:
+            # Short exit: Williams %R crosses above -50 (from below)
+            if williams_r_aligned[i] > -50 and williams_r_aligned[i-1] <= -50:
                 signals[i] = 0.0
                 position = 0
             else:
