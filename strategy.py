@@ -3,15 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h price position within 1d Bollinger Bands + 1d volume spike + 1w ADX trend filter
-# In trending markets (1w ADX > 25), price tends to stay near the upper/lower Bollinger Band.
-# We go long when price touches lower band with volume spike, short when touches upper band.
-# Volume spike confirms institutional participation. Exits when price returns to the 1d SMA(20).
-# This mean-reversion-within-trend approach works in both bull and bear markets by filtering for strong trends.
-# Targets 15-25 trades per year (~60-100 total over 4 years) to minimize fee drag.
+# Hypothesis: 12h Williams Alligator + 1d volume spike + 1w ADX trend filter
+# Williams Alligator uses SMAs (13,8,5) with shifts (8,5,3) to identify trends.
+# When jaws (13-bar) > teeth (8-bar) > lips (5-bar) = uptrend; reverse for downtrend.
+# 1d volume spike confirms institutional participation in the trend.
+# 1w ADX > 25 ensures we only trade in strong trends, avoiding whipsaws in ranges.
+# Exits occur when Alligator lines re-cross or trend weakens (ADX < 20).
+# Targets 12-37 trades per year (~50-150 total over 4 years) to minimize fee drag.
+# Works in both bull and bear markets by filtering for strong trends only.
 
-name = "6h_BBPosition_1dVolume_1wADX"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_1dVolume_1wADX"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,22 +26,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Bollinger Bands and volume
+    # Williams Alligator on 12h
+    jaw_period = 13
+    teeth_period = 8
+    lips_period = 5
+    jaw_shift = 8
+    teeth_shift = 5
+    lips_shift = 3
+    
+    # Calculate SMAs
+    def sma(arr, period):
+        result = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return result
+        for i in range(period-1, len(arr)):
+            result[i] = np.mean(arr[i-period+1:i+1])
+        return result
+    
+    sma_close = sma(close, jaw_period)
+    jaw = np.roll(sma_close, jaw_shift)
+    sma_close_teeth = sma(close, teeth_period)
+    teeth = np.roll(sma_close_teeth, teeth_shift)
+    sma_close_lips = sma(close, lips_period)
+    lips = np.roll(sma_close_lips, lips_shift)
+    
+    # Get 1d data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Bollinger Bands on 1d close (20, 2)
-    close_1d = df_1d['close'].values
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + (2 * std_20)
-    lower_bb = sma_20 - (2 * std_20)
-    
-    # Volume spike on 1d (volume > 2x 20-period average)
     vol_1d = df_1d['volume'].values
-    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = vol_1d > (vol_ma_20 * 2.0)
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean()
+    vol_spike_1d = vol_1d > (vol_ma_1d.values * 2.0)
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
     
     # Get 1w data for ADX trend filter
     df_1w = get_htf_data(prices, '1w')
@@ -94,47 +113,40 @@ def generate_signals(prices):
     adx_strong_aligned = align_htf_to_ltf(prices, df_1w, adx_strong)
     adx_weak_aligned = align_htf_to_ltf(prices, df_1w, adx_weak)
     
-    # Align 1d indicators to 6h timeframe
-    sma_20_aligned = align_htf_to_ltf(prices, df_1d, sma_20)
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after sufficient data for all indicators
-    start_idx = max(30, 40)  # Need 30 for 1d BB, 40 for 1w ADX (14*2+12)
+    start_idx = max(jaw_period + jaw_shift, 30)  # Ensure sufficient data
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(sma_20_aligned[i]) or np.isnan(upper_bb_aligned[i]) or 
-            np.isnan(lower_bb_aligned[i]) or np.isnan(vol_spike_1d_aligned[i]) or 
-            np.isnan(adx_strong_aligned[i]) or np.isnan(adx_weak_aligned[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(vol_spike_1d_aligned[i]) or np.isnan(adx_strong_aligned[i]) or 
+            np.isnan(adx_weak_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price at or below lower Bollinger Band, volume spike, strong trend
-            if close[i] <= lower_bb_aligned[i] and vol_spike_1d_aligned[i] and adx_strong_aligned[i]:
+            # Enter long: jaws > teeth > lips (uptrend), volume spike, strong trend
+            if jaw[i] > teeth[i] and teeth[i] > lips[i] and vol_spike_1d_aligned[i] and adx_strong_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price at or above upper Bollinger Band, volume spike, strong trend
-            elif close[i] >= upper_bb_aligned[i] and vol_spike_1d_aligned[i] and adx_strong_aligned[i]:
+            # Enter short: jaws < teeth < lips (downtrend), volume spike, strong trend
+            elif jaw[i] < teeth[i] and teeth[i] < lips[i] and vol_spike_1d_aligned[i] and adx_strong_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to or above the 1d SMA(20)
-            if close[i] >= sma_20_aligned[i] or adx_weak_aligned[i]:
+            # Exit long: Alligator lines re-cross or trend weakens
+            if jaw[i] <= teeth[i] or adx_weak_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to or below the 1d SMA(20)
-            if close[i] <= sma_20_aligned[i] or adx_weak_aligned[i]:
+            # Exit short: Alligator lines re-cross or trend weakens
+            if jaw[i] >= teeth[i] or adx_weak_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
