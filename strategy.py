@@ -1,16 +1,15 @@
-#%%
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_EquiVol_Donchian_Breakout_Strategy"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 20:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,102 +17,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for volatility calculation
+    # Daily data for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Daily volatility: 10-day ATR normalized by price
-    atr_10d = np.zeros(len(close_1d))
-    for i in range(1, len(close_1d)):
-        tr = max(
-            high[i] - low[i],
-            abs(high[i] - close[i-1]),
-            abs(low[i] - close[i-1])
-        )
-        if i < 10:
-            atr_10d[i] = np.mean(atr_10d[:i+1]) if i > 0 else tr
-        else:
-            atr_10d[i] = (atr_10d[i-1] * 9 + tr) / 10
+    # Previous day's Camarilla pivot levels
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close[0] = close_1d[0]  # first day uses same day
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
     
-    # Normalized volatility (ATR/price)
-    vol_norm = atr_10d / close_1d
-    vol_norm = np.nan_to_num(vol_norm, nan=0.0)
+    # Camarilla levels: R1, S1, R2, S2, R3, S3
+    R1 = prev_close + 1.1 * (prev_high - prev_low) / 12
+    S1 = prev_close - 1.1 * (prev_high - prev_low) / 12
+    R2 = prev_close + 1.1 * (prev_high - prev_low) / 6
+    S2 = prev_close - 1.1 * (prev_high - prev_low) / 6
     
-    # Equal volatility weight: inverse of normalized vol
-    eq_vol_weight = 1.0 / (vol_norm + 1e-8)
-    # Cap extreme weights
-    eq_vol_weight = np.clip(eq_vol_weight, 0.5, 3.0)
+    # Align Camarilla levels to 12h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    R2_aligned = align_htf_to_ltf(prices, df_1d, R2)
+    S2_aligned = align_htf_to_ltf(prices, df_1d, S2)
     
-    # Align daily volatility weight to 4h timeframe
-    eq_vol_weight_aligned = align_htf_to_ltf(prices, df_1d, eq_vol_weight)
+    # Daily EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # 4h Donchian channels (20-period)
-    donch_high = np.full(n, np.nan)
-    donch_low = np.full(n, np.nan)
-    
-    for i in range(20, n):
-        donch_high[i] = np.max(high[i-20:i])
-        donch_low[i] = np.min(low[i-20:i])
-    
-    # 4h EMA50 for trend filter
-    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Volume spike: current volume > 1.8x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.8 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Need EMA50 and Donchian
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(eq_vol_weight_aligned[i]) or np.isnan(donch_high[i]) or 
-            np.isnan(donch_low[i]) or np.isnan(ema50[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+            np.isnan(R2_aligned[i]) or np.isnan(S2_aligned[i]) or 
+            np.isnan(ema34_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_weight = eq_vol_weight_aligned[i]
-        
         if position == 0:
-            # Long: price breaks above Donchian high AND above EMA50
-            long_cond = (close[i] > donch_high[i] and 
-                        close[i] > ema50[i])
+            # Long: Price breaks above R1, price above EMA34, volume spike
+            long_cond = (close[i] > R1_aligned[i] and 
+                        close[i] > ema34_aligned[i] and
+                        volume_spike[i])
             
-            # Short: price breaks below Donchian low AND below EMA50
-            short_cond = (close[i] < donch_low[i] and 
-                         close[i] < ema50[i])
+            # Short: Price breaks below S1, price below EMA34, volume spike
+            short_cond = (close[i] < S1_aligned[i] and 
+                         close[i] < ema34_aligned[i] and
+                         volume_spike[i])
             
             if long_cond:
-                # Scale position by volatility weight (0.25 base)
-                pos_size = 0.25 * vol_weight
-                pos_size = min(pos_size, 0.35)  # Cap at 35%
-                signals[i] = pos_size
+                signals[i] = 0.25
                 position = 1
             elif short_cond:
-                # Scale position by volatility weight (0.25 base)
-                pos_size = 0.25 * vol_weight
-                pos_size = min(pos_size, 0.35)  # Cap at 35%
-                signals[i] = -pos_size
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price closes below Donchian low OR below EMA50
-            if close[i] < donch_low[i] or close[i] < ema50[i]:
+            # Long exit: Price breaks below S1 OR price crosses below EMA34
+            if close[i] < S1_aligned[i] or close[i] < ema34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25 * vol_weight
-                signals[i] = min(signals[i], 0.35)
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price closes above Donchian high OR above EMA50
-            if close[i] > donch_high[i] or close[i] > ema50[i]:
+            # Short exit: Price breaks above R1 OR price crosses above EMA34
+            if close[i] > R1_aligned[i] or close[i] > ema34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25 * vol_weight
-                signals[i] = max(signals[i], -0.35)
+                signals[i] = -0.25
     
     return signals
-#%%
