@@ -1,17 +1,17 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA trend filter and volume confirmation.
-# Long when Bull Power > 0, price > 1d EMA34, and volume > 1.5x 20-period average.
-# Short when Bear Power < 0, price < 1d EMA34, and volume > 1.5x 20-period average.
-# Exit when Bull/Bear Power crosses zero or price crosses 1d EMA34.
-# Elder Ray measures bull/bear strength via EMA; EMA34 filter ensures trend alignment.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# Hypothesis: 12h Camarilla pivot reversal with 1d RSI filter and volume spike.
+# Long when price touches S3 level AND 1d RSI < 30 (oversold) AND volume > 2x 20-period average.
+# Short when price touches R3 level AND 1d RSI > 70 (overbought) AND volume > 2x 20-period average.
+# Exit when price crosses back to the pivot point (PP).
+# Uses mean reversion at extreme pivot levels with RSI filter to avoid false signals in strong trends.
+# Target: 50-150 total trades over 4 years (12-37/year) for low fee drag.
 
-name = "6h_ElderRay_1dEMA34_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_RSI_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,46 +24,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 6-day EMA for Elder Ray (13-period as per standard)
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # 12h pivot point (PP) from previous bar
+    pp = (high[:-1] + low[:-1] + close[:-1]) / 3
+    pp = np.concatenate([[np.nan], pp])  # align with current bar
     
-    # Elder Ray components
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Calculate Camarilla levels (based on previous bar's range)
+    range_val = (high[:-1] - low[:-1])
+    r3 = pp + 1.1 * (range_val / 2)
+    s3 = pp - 1.1 * (range_val / 2)
     
-    # 6h volume filter: current volume > 1.5x 20-period average
+    # Align levels to current bar (use previous bar's levels for current bar)
+    r3 = np.concatenate([[np.nan], r3[:-1]])
+    s3 = np.concatenate([[np.nan], s3[:-1]])
+    
+    # 12h volume filter: current volume > 2x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma20)
+    volume_filter = volume > (2.0 * vol_ma20)
     
-    # 1d data for EMA34 trend filter
+    # 1d data for RSI filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate EMA34 on 1d close
+    # Calculate RSI (14-period) on 1d data
     close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    delta = np.diff(close_1d)
+    delta = np.concatenate([[np.nan], delta])
+    
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi[np.isnan(rs)] = 50  # neutral when no loss
+    
+    # Align 1d RSI to 12h timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 35  # Sufficient warmup for EMA34
+    start_idx = 20  # Sufficient warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(volume_filter[i]) or np.isnan(ema34_1d_aligned[i])):
+        if (np.isnan(pp[i]) or np.isnan(r3[i]) or np.isnan(s3[i]) or 
+            np.isnan(volume_filter[i]) or np.isnan(rsi_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: Bull Power > 0, price > 1d EMA34, volume spike
-            long_cond = (bull_power[i] > 0) and (close[i] > ema34_1d_aligned[i]) and volume_filter[i]
-            # Short conditions: Bear Power < 0, price < 1d EMA34, volume spike
-            short_cond = (bear_power[i] < 0) and (close[i] < ema34_1d_aligned[i]) and volume_filter[i]
+            # Long conditions: touch S3, RSI < 30, volume spike
+            long_cond = (low[i] <= s3[i]) and (rsi_aligned[i] < 30) and volume_filter[i]
+            # Short conditions: touch R3, RSI > 70, volume spike
+            short_cond = (high[i] >= r3[i]) and (rsi_aligned[i] > 70) and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -72,15 +91,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Bull Power crosses zero OR price crosses below 1d EMA34
-            if bull_power[i] <= 0 or close[i] < ema34_1d_aligned[i]:
+            # Long exit: price crosses back to pivot point
+            if close[i] >= pp[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Bear Power crosses zero OR price crosses above 1d EMA34
-            if bear_power[i] >= 0 or close[i] > ema34_1d_aligned[i]:
+            # Short exit: price crosses back to pivot point
+            if close[i] <= pp[i]:
                 signals[i] = 0.0
                 position = 0
             else:
