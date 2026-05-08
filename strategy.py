@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot S1/S3 breakout with 1d volume spike and 4h EMA50 trend filter.
-# Long when price breaks above S3 AND 1d volume > 2x 20-period average AND close > EMA50.
-# Short when price breaks below S1 AND 1d volume > 2x 20-period average AND close < EMA50.
-# Exit when price crosses back below S2 (for long) or above S4 (for short).
-# Uses Camarilla pivot levels for precise entries with volume and trend confirmation.
+# Hypothesis: 4h 1-2-3 pattern with 1d RSI filter and volume confirmation.
+# Long when price breaks above point 2 of 1-2-3 pattern AND 1d RSI > 50 AND volume > 1.5x 20-period average.
+# Short when price breaks below point 1 of 1-2-3 pattern AND 1d RSI < 50 AND volume > 1.5x 20-period average.
+# Exit when price crosses point 3 for long or point 2 for short.
+# Uses 1-2-3 pattern for trend reversal with RSI filter to avoid counter-trend entries.
 # Target: 80-150 total trades over 4 years (20-38/year) for low fee drift.
 
-name = "4h_Camarilla_S1S3_1dVolume_4hEMA50"
+name = "4h_123Pattern_1dRSI_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,80 +24,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h EMA50 trend filter
-    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 4h 1-2-3 pattern: point 1 (recent low), point 2 (recent high), point 3 (recent low after point 2)
+    # We'll use 10-period lookback for simplicity
+    lookback = 10
+    point1 = np.full(n, np.nan)
+    point2 = np.full(n, np.nan)
+    point3 = np.full(n, np.nan)
     
-    # 4h volume filter: current volume > 2x 20-period average
+    for i in range(lookback, n):
+        # Point 1: lowest low in lookback period
+        point1[i] = np.min(low[i-lookback:i])
+        # Point 2: highest high after point 1 formation (simplified: highest high in lookback)
+        point2[i] = np.max(high[i-lookback:i])
+        # Point 3: lowest low after point 2 (simplified: lowest low in lookback)
+        point3[i] = np.min(low[i-lookback:i])
+    
+    # 4h volume filter: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter_4h = volume > (2.0 * vol_ma20)
+    volume_filter = volume > (1.5 * vol_ma20)
     
-    # 1d data for Camarilla pivot levels
+    # 1d data for RSI filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous day
-    high_prev = df_1d['high'].shift(1).values
-    low_prev = df_1d['low'].shift(1).values
-    close_prev = df_1d['close'].shift(1).values
+    # Calculate RSI (14-period) on 1d data
+    close_1d = df_1d['close'].values
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Camarilla formulas
-    camarilla_h5 = close_prev + 1.1 * (high_prev - low_prev) * 1.1 / 6
-    camarilla_h4 = close_prev + 1.1 * (high_prev - low_prev) * 1.1 / 4
-    camarilla_h3 = close_prev + 1.1 * (high_prev - low_prev) * 1.1 / 3
-    camarilla_l3 = close_prev - 1.1 * (high_prev - low_prev) * 1.1 / 3
-    camarilla_l4 = close_prev - 1.1 * (high_prev - low_prev) * 1.1 / 4
-    camarilla_l5 = close_prev - 1.1 * (high_prev - low_prev) * 1.1 / 6
+    # Wilder's smoothing
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
     
-    # Key levels: S1 = L3, S3 = L5, R1 = H3, R3 = H5
-    s1 = camarilla_l3
-    s3 = camarilla_l5
-    r1 = camarilla_h3
-    r3 = camarilla_h5
-    s2 = camarilla_l4
-    s4 = camarilla_l5  # Actually L5 is S3, S4 would be below but we use S3 for exit
-    r2 = camarilla_h4
-    r4 = camarilla_h5  # R4 would be above but we use R3 for exit
+    for i in range(14, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # Align 1d Camarilla levels to 4h timeframe
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s3)  # S3 as exit for shorts
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r3)  # R3 as exit for longs
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
+    rsi[:14] = 50  # Neutral before enough data
     
-    # 1d volume filter: current volume > 2x 20-period average
-    vol_1d = df_1d['volume'].values
-    vol_ma20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    volume_filter_1d = vol_1d > (2.0 * vol_ma20_1d)
-    volume_filter_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_filter_1d.astype(float))
+    # Align 1d RSI to 4h timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Sufficient warmup for EMA50
+    start_idx = 30  # Sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema50[i]) or np.isnan(volume_filter_4h[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(r3_aligned[i]) or
-            np.isnan(s2_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(r4_aligned[i]) or
-            np.isnan(volume_filter_1d_aligned[i])):
+        if (np.isnan(point1[i]) or np.isnan(point2[i]) or np.isnan(point3[i]) or 
+            np.isnan(volume_filter[i]) or np.isnan(rsi_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: break above R3, 1d volume spike, EMA50 uptrend
-            long_cond = (close[i] > r3_aligned[i]) and volume_filter_1d_aligned[i] and (close[i] > ema50[i])
-            # Short conditions: break below S3, 1d volume spike, EMA50 downtrend
-            short_cond = (close[i] < s3_aligned[i]) and volume_filter_1d_aligned[i] and (close[i] < ema50[i])
+            # Long conditions: break above point 2, RSI > 50, volume spike
+            long_cond = (close[i] > point2[i]) and (rsi_aligned[i] > 50) and volume_filter[i]
+            # Short conditions: break below point 1, RSI < 50, volume spike
+            short_cond = (close[i] < point1[i]) and (rsi_aligned[i] < 50) and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -106,15 +98,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: cross below R2 (or S4 for safety)
-            if close[i] < r2_aligned[i]:
+            # Long exit: cross below point 3
+            if close[i] < point3[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: cross above S2 (or R4 for safety)
-            if close[i] > s2_aligned[i]:
+            # Short exit: cross above point 2
+            if close[i] > point2[i]:
                 signals[i] = 0.0
                 position = 0
             else:
