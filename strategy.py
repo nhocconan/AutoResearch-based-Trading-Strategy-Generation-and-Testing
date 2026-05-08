@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h trend-following strategy using 4h Supertrend for direction and 1h volume breakout for entry.
-# Long when 4h Supertrend is bullish AND 1h price breaks above 20-bar high AND volume > 1.5x 20-bar average.
-# Short when 4h Supertrend is bearish AND 1h price breaks below 20-bar low AND volume > 1.5x 20-bar average.
-# Exit when 4h Supertrend flips direction.
-# Uses 4h for signal direction (reducing trade frequency) and 1h for precise entry timing.
-# Volume breakout filters for institutional participation. Target: 60-150 total trades over 4 years.
+# Hypothesis: 6h Elder Ray Index (bull/bear power) with 1d EMA34 trend filter and volume confirmation.
+# Long when bull power > 0, price > EMA34(1d), and volume > 1.5x 20-period average.
+# Short when bear power < 0, price < EMA34(1d), and volume > 1.5x 20-period average.
+# Exit when bull/bear power crosses zero or price crosses EMA34.
+# Elder Ray measures bull/bear power relative to EMA13. EMA34 filters trend direction.
+# Volume spike confirms institutional participation. Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "1h_Supertrend4h_VolumeBreakout"
-timeframe = "1h"
+name = "6h_ElderRay_1dEMA34_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,106 +24,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Session filter: 08-20 UTC (active trading hours)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
-    
-    # 4h Supertrend calculation (ATR=10, multiplier=3)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 10:
-        return np.zeros(n)
-    
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # True Range calculation
-    tr1 = high_4h[1:] - low_4h[1:]
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
-    tr = np.concatenate([[np.inf], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    # ATR calculation
-    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
-    
-    # Supertrend calculation
-    hl2 = (high_4h + low_4h) / 2
-    upper_band = hl2 + (3 * atr)
-    lower_band = hl2 - (3 * atr)
-    
-    supertrend = np.zeros_like(close_4h)
-    direction = np.ones_like(close_4h)  # 1 for uptrend, -1 for downtrend
-    
-    for i in range(1, len(close_4h)):
-        if close_4h[i] > upper_band[i-1]:
-            direction[i] = 1
-        elif close_4h[i] < lower_band[i-1]:
-            direction[i] = -1
-        else:
-            direction[i] = direction[i-1]
-            
-            if direction[i] == 1 and lower_band[i] < lower_band[i-1]:
-                lower_band[i] = lower_band[i-1]
-            if direction[i] == -1 and upper_band[i] > upper_band[i-1]:
-                upper_band[i] = upper_band[i-1]
-        
-        if direction[i] == 1:
-            supertrend[i] = lower_band[i]
-        else:
-            supertrend[i] = upper_band[i]
-    
-    # Supertrend direction (1 for uptrend, -1 for downtrend)
-    supertrend_direction = direction
-    
-    # Align 4h Supertrend direction to 1h timeframe
-    supertrend_dir_aligned = align_htf_to_ltf(prices, df_4h, supertrend_direction)
-    
-    # 1h indicators: 20-bar high/low and volume filter
-    high_roll_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Volume filter: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma20)
+    
+    # 1d data for EMA34
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
+    
+    # EMA34 on 1d close
+    close_1d = df_1d['close'].values
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    
+    # Calculate EMA13 for Elder Ray (using 6h data)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Elder Ray components
+    bull_power = high - ema13  # Bull power: high - EMA13
+    bear_power = low - ema13   # Bear power: low - EMA13
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Sufficient warmup for 20-bar calculations
+    start_idx = 34  # Sufficient warmup for EMA34
     
     for i in range(start_idx, n):
-        # Skip if any critical data is NaN or outside session
-        if (np.isnan(supertrend_dir_aligned[i]) or np.isnan(high_roll_max[i]) or 
-            np.isnan(low_roll_min[i]) or np.isnan(volume_filter[i]) or
-            not session_filter[i]):
+        # Skip if any critical data is NaN
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: 4h uptrend, price breaks above 20-bar high, volume filter
-            long_cond = (supertrend_dir_aligned[i] == 1) and (close[i] > high_roll_max[i]) and volume_filter[i]
-            # Short conditions: 4h downtrend, price breaks below 20-bar low, volume filter
-            short_cond = (supertrend_dir_aligned[i] == -1) and (close[i] < low_roll_min[i]) and volume_filter[i]
+            # Long conditions: bull power > 0, price > EMA34, volume filter
+            long_cond = (bull_power[i] > 0) and (close[i] > ema_34_aligned[i]) and volume_filter[i]
+            # Short conditions: bear power < 0, price < EMA34, volume filter
+            short_cond = (bear_power[i] < 0) and (close[i] < ema_34_aligned[i]) and volume_filter[i]
             
             if long_cond:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
             elif short_cond:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: 4h trend turns bearish
-            if supertrend_dir_aligned[i] == -1:
+            # Long exit: bull power <= 0 or price <= EMA34
+            if (bull_power[i] <= 0) or (close[i] <= ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: 4h trend turns bullish
-            if supertrend_dir_aligned[i] == 1:
+            # Short exit: bear power >= 0 or price >= EMA34
+            if (bear_power[i] >= 0) or (close[i] >= ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
