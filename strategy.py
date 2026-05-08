@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d EMA34 trend filter + volume confirmation
-# Long when price breaks above 20-period high and 1d EMA34 rising
-# Short when price breaks below 20-period low and 1d EMA34 falling
-# Volume confirmation: current volume > 1.2x 20-period average
-# Donchian provides clear breakout levels, EMA34 filters trend direction, volume confirms strength
-# Designed for 4h timeframe to target 75-200 total trades over 4 years (19-50/year)
+# Hypothesis: 1d Donchian(20) breakout + 1w EMA50 trend filter + volume confirmation
+# Long when price breaks above Donchian upper channel and price > 1w EMA50
+# Short when price breaks below Donchian lower channel and price < 1w EMA50
+# Volume confirmation: current volume > 1.5x 20-period average
+# Uses 1d timeframe with 1w trend filter to reduce whipsaw in both bull and bear markets
+# Targets 20-50 total trades over 4 years (5-12/year) for optimal fee drag
 
-name = "4h_Donchian20_1dEMA34_Volume"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,72 +24,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Donchian channels (20-period)
+    def rolling_max(arr, window):
+        result = np.full_like(arr, np.nan, dtype=float)
+        for i in range(window - 1, len(arr)):
+            result[i] = np.max(arr[i - window + 1:i + 1])
+        return result
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    def rolling_min(arr, window):
+        result = np.full_like(arr, np.nan, dtype=float)
+        for i in range(window - 1, len(arr)):
+            result[i] = np.min(arr[i - window + 1:i + 1])
+        return result
+    
+    upper_channel = rolling_max(high, 20)
+    lower_channel = rolling_min(low, 20)
+    
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate EMA34 on 1d close for trend filter
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_prev = np.roll(ema34_1d, 1)
-    ema34_1d_prev[0] = np.nan
-    ema34_1d_rising = ema34_1d > ema34_1d_prev
-    ema34_1d_falling = ema34_1d < ema34_1d_prev
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    ema34_1d_rising_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d_rising)
-    ema34_1d_falling_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d_falling)
+    # Calculate EMA50 on 1w close for trend filter
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Volume confirmation: current volume > 1.2x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_conf = volume > (vol_ma * 1.2)
+    vol_conf = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Need enough data for Donchian and EMA
+    start_idx = 50  # Need enough data for Donchian and EMA
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(ema34_1d_rising_aligned[i]) or 
-            np.isnan(ema34_1d_falling_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         close_val = close[i]
-        high_20_val = high_20[i]
-        low_20_val = low_20[i]
-        ema34_1d_val = ema34_1d_aligned[i]
-        rising_val = ema34_1d_rising_aligned[i]
-        falling_val = ema34_1d_falling_aligned[i]
+        upper_val = upper_channel[i]
+        lower_val = lower_channel[i]
+        ema50_1w_val = ema50_1w_aligned[i]
         vol_conf_val = vol_conf[i]
         
         if position == 0:
-            # Enter long: breakout above high_20, 1d uptrend, volume confirmation
-            if close_val > high_20_val and rising_val and vol_conf_val:
+            # Enter long: break above upper channel, price > 1w EMA50, volume confirmation
+            if close_val > upper_val and close_val > ema50_1w_val and vol_conf_val:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: breakout below low_20, 1d downtrend, volume confirmation
-            elif close_val < low_20_val and falling_val and vol_conf_val:
+            # Enter short: break below lower channel, price < 1w EMA50, volume confirmation
+            elif close_val < lower_val and close_val < ema50_1w_val and vol_conf_val:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: breakdown below low_20 or 1d trend turns down
-            if close_val < low_20_val or not rising_val:
+            # Exit long: break below lower channel or price < 1w EMA50
+            if close_val < lower_val or close_val < ema50_1w_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: breakout above high_20 or 1d trend turns up
-            if close_val > high_20_val or not falling_val:
+            # Exit short: break above upper channel or price > 1w EMA50
+            if close_val > upper_val or close_val > ema50_1w_val:
                 signals[i] = 0.0
                 position = 0
             else:
