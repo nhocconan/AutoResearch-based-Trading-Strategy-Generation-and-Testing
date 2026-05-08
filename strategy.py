@@ -1,15 +1,17 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Ichimoku Cloud with 1d Trend Filter + Volume Confirmation
-# Uses 1d EMA50 for trend bias, 6h Ichimoku TK cross for entry timing, and volume > 1.5x average for confirmation.
-# Designed to work in both bull and bear markets by following daily trend while avoiding false signals.
-# Target: 50-150 total trades over 4 years (12-37/year).
+# Hypothesis: 12h Camarilla Pivot Breakout + Daily Volume Spike + Choppiness Regime
+# Uses daily Camarilla pivot levels for structure, daily volume spike (>2x 20-day avg) for momentum confirmation,
+# and daily choppiness index to filter choppy markets. Designed to work in both bull and bear markets
+# by following price action around institutional pivot levels while avoiding low-momentum chop.
+# Target: 15-30 trades/year on 12h timeframe.
 
-name = "6h_Ichimoku_1dEMA50_VolumeConfirm"
-timeframe = "6h"
+name = "12h_Camarilla_Pivot_VolumeSpike_ChopFilter"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,91 +24,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for EMA trend filter
+    # Get daily data for Camarilla pivots, volume average, and choppiness
     df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 50:
+    if len(df_daily) < 20:
         return np.zeros(n)
     
-    # Calculate daily EMA50 for trend filter
+    # Calculate daily Camarilla pivot levels (based on previous day)
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
     close_daily = df_daily['close'].values
-    ema50_daily = np.full(len(close_daily), np.nan)
-    if len(close_daily) >= 50:
-        ema50_daily[49] = np.mean(close_daily[:50])
-        for i in range(50, len(close_daily)):
-            ema50_daily[i] = (close_daily[i] * 2 + ema50_daily[i-1] * 48) / 50
     
-    # Get 6h data for Ichimoku components
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 52:  # Need 26*2 for Ichimoku
-        return np.zeros(n)
+    # Previous day's values for pivot calculation
+    prev_high = np.roll(high_daily, 1)
+    prev_low = np.roll(low_daily, 1)
+    prev_close = np.roll(close_daily, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_val = prev_high - prev_low
     
-    # Calculate Ichimoku components (9, 26, 52 periods)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period9_high = np.full(len(high_6h), np.nan)
-    period9_low = np.full(len(low_6h), np.nan)
-    if len(high_6h) >= 9:
-        for i in range(9, len(high_6h)):
-            period9_high[i] = np.max(high_6h[i-9:i+1])
-            period9_low[i] = np.min(low_6h[i-9:i+1])
-    tenkan_sen = np.full(len(high_6h), np.nan)
-    if len(high_6h) >= 9:
-        for i in range(9, len(high_6h)):
-            tenkan_sen[i] = (period9_high[i] + period9_low[i]) / 2
+    # Camarilla levels
+    R4 = pivot + range_val * 1.5
+    R3 = pivot + range_val * 1.25
+    R2 = pivot + range_val * 1.166
+    R1 = pivot + range_val * 1.083
+    S1 = pivot - range_val * 1.083
+    S2 = pivot - range_val * 1.166
+    S3 = pivot - range_val * 1.25
+    S4 = pivot - range_val * 1.5
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period26_high = np.full(len(high_6h), np.nan)
-    period26_low = np.full(len(low_6h), np.nan)
-    if len(high_6h) >= 26:
-        for i in range(26, len(high_6h)):
-            period26_high[i] = np.max(high_6h[i-26:i+1])
-            period26_low[i] = np.min(low_6h[i-26:i+1])
-    kijun_sen = np.full(len(high_6h), np.nan)
-    if len(high_6h) >= 26:
-        for i in range(26, len(high_6h)):
-            kijun_sen[i] = (period26_high[i] + period26_low[i]) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
-    senkou_span_a = np.full(len(high_6h), np.nan)
-    if len(high_6h) >= 26:
-        for i in range(len(high_6h)):
-            idx = i + 26
-            if idx < len(tenkan_sen) and not np.isnan(tenkan_sen[i]) and not np.isnan(kijun_sen[i]):
-                senkou_span_a[idx] = (tenkan_sen[i] + kijun_sen[i]) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    period52_high = np.full(len(high_6h), np.nan)
-    period52_low = np.full(len(low_6h), np.nan)
-    if len(high_6h) >= 52:
-        for i in range(52, len(high_6h)):
-            period52_high[i] = np.max(high_6h[i-52:i+1])
-            period52_low[i] = np.min(low_6h[i-52:i+1])
-    senkou_span_b = np.full(len(high_6h), np.nan)
-    if len(high_6h) >= 52:
-        for i in range(len(high_6h)):
-            idx = i + 26
-            if idx < len(period52_high) and not np.isnan(period52_high[i]) and not np.isnan(period52_low[i]):
-                senkou_span_b[idx] = (period52_high[i] + period52_low[i]) / 2
-    
-    # Calculate daily volume average for volume confirmation
+    # Calculate daily volume average (20-period)
     vol_daily = df_daily['volume'].values
     vol_avg_20_daily = np.full(len(vol_daily), np.nan)
     if len(vol_daily) >= 20:
         for i in range(20, len(vol_daily)):
             vol_avg_20_daily[i] = np.mean(vol_daily[i-20:i])
     
-    # Align daily indicators to 6h timeframe
-    ema50_daily_aligned = align_htf_to_ltf(prices, df_daily, ema50_daily)
-    vol_avg_20_daily_aligned = align_htf_to_ltf(prices, df_daily, vol_avg_20_daily)
+    # Calculate daily choppiness index (14-period)
+    atr_14_daily = np.full(len(close_daily), np.nan)
+    if len(close_daily) >= 14:
+        tr = np.maximum(high_daily[1:] - low_daily[1:], 
+                        np.maximum(np.abs(high_daily[1:] - close_daily[:-1]),
+                                   np.abs(low_daily[1:] - close_daily[:-1])))
+        tr = np.concatenate([[np.nan], tr])
+        for i in range(14, len(tr)):
+            if np.isnan(atr_14_daily[i-1]):
+                atr_14_daily[i] = np.nanmean(tr[i-13:i+1])
+            else:
+                atr_14_daily[i] = (atr_14_daily[i-1] * 13 + tr[i]) / 14
     
-    # Align Ichimoku components to 6h timeframe (they're already on 6h, but need alignment for safety)
-    tenkan_sen_aligned = align_htf_to_ltf(prices, df_6h, tenkan_sen)
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_6h, kijun_sen)
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_6h, senkou_span_a)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_6h, senkou_span_b)
+    highest_high_14 = np.full(len(close_daily), np.nan)
+    lowest_low_14 = np.full(len(close_daily), np.nan)
+    if len(close_daily) >= 14:
+        for i in range(14, len(close_daily)):
+            highest_high_14[i] = np.max(high_daily[i-13:i+1])
+            lowest_low_14[i] = np.min(low_daily[i-13:i+1])
+    
+    chop_daily = np.full(len(close_daily), np.nan)
+    if len(close_daily) >= 14:
+        for i in range(14, len(close_daily)):
+            if (not np.isnan(atr_14_daily[i]) and 
+                not np.isnan(highest_high_14[i]) and 
+                not np.isnan(lowest_low_14[i]) and
+                highest_high_14[i] > lowest_low_14[i]):
+                sum_atr = np.nansum(atr_14_daily[i-13:i+1])
+                chop_daily[i] = 100 * np.log10(sum_atr) / np.log10(14) / np.log10((highest_high_14[i] - lowest_low_14[i]) + 1e-10)
+            else:
+                chop_daily[i] = 50  # neutral when no range
+    
+    # Align daily indicators to 12h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_daily, R1)
+    R2_aligned = align_htf_to_ltf(prices, df_daily, R2)
+    R3_aligned = align_htf_to_ltf(prices, df_daily, R3)
+    S1_aligned = align_htf_to_ltf(prices, df_daily, S1)
+    S2_aligned = align_htf_to_ltf(prices, df_daily, S2)
+    S3_aligned = align_htf_to_ltf(prices, df_daily, S3)
+    vol_avg_20_daily_aligned = align_htf_to_ltf(prices, df_daily, vol_avg_20_daily)
+    chop_daily_aligned = align_htf_to_ltf(prices, df_daily, chop_daily)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -115,7 +111,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 26, 52, 20)  # warmup for indicators
+    start_idx = max(20, 14)  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if outside trading session
@@ -126,42 +122,34 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(ema50_daily_aligned[i]) or np.isnan(tenkan_sen_aligned[i]) or
-            np.isnan(kijun_sen_aligned[i]) or np.isnan(senkou_span_a_aligned[i]) or
-            np.isnan(senkou_span_b_aligned[i]) or np.isnan(vol_avg_20_daily_aligned[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or
+            np.isnan(vol_avg_20_daily_aligned[i]) or
+            np.isnan(chop_daily_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current 6h volume > 1.5x 20-period average of daily volume
-        vol_confirm = volume[i] > 1.5 * vol_avg_20_daily_aligned[i]
-        
-        # Determine cloud top and bottom
-        cloud_top = max(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
-        cloud_bottom = min(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        # Volume spike: current 12h volume > 2x 20-day average of daily volume
+        vol_spike = volume[i] > 2.0 * vol_avg_20_daily_aligned[i]
         
         if position == 0:
-            # Look for entry: TK cross in direction of daily trend with volume confirmation
-            # Bullish TK cross: Tenkan crosses above Kijun
-            tk_cross_bullish = tenkan_sen_aligned[i] > kijun_sen_aligned[i] and tenkan_sen_aligned[i-1] <= kijun_sen_aligned[i-1]
-            # Bearish TK cross: Tenkan crosses below Kijun
-            tk_cross_bearish = tenkan_sen_aligned[i] < kijun_sen_aligned[i] and tenkan_sen_aligned[i-1] >= kijun_sen_aligned[i-1]
+            # Look for entry: Camarilla breakout with volume spike in non-choppy market
+            # Choppiness < 38.2 indicates trending market
+            trending_market = chop_daily_aligned[i] < 38.2
             
-            # Long when bullish TK cross, price above cloud, and daily trend is up
+            # Long when price breaks above R1 with volume spike
             long_condition = (
-                tk_cross_bullish and
-                close[i] > cloud_top and
-                close[i] > ema50_daily_aligned[i] and  # price above daily EMA50 (bullish bias)
-                vol_confirm
+                close[i] > R1_aligned[i] and   # price above R1 pivot
+                trending_market and            # trending market (not choppy)
+                vol_spike                      # volume spike for momentum
             )
             
-            # Short when bearish TK cross, price below cloud, and daily trend is down
+            # Short when price breaks below S1 with volume spike
             short_condition = (
-                tk_cross_bearish and
-                close[i] < cloud_bottom and
-                close[i] < ema50_daily_aligned[i] and  # price below daily EMA50 (bearish bias)
-                vol_confirm
+                close[i] < S1_aligned[i] and   # price below S1 pivot
+                trending_market and            # trending market (not choppy)
+                vol_spike                      # volume spike for momentum
             )
             
             if long_condition:
@@ -171,15 +159,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below Kijun or enters cloud
-            if tenkan_sen_aligned[i] < kijun_sen_aligned[i] or close[i] < cloud_top:
+            # Exit long: price returns below R1 or market becomes choppy
+            if close[i] < R1_aligned[i] or chop_daily_aligned[i] > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above Kijun or enters cloud
-            if tenkan_sen_aligned[i] > kijun_sen_aligned[i] or close[i] > cloud_bottom:
+            # Exit short: price returns above S1 or market becomes choppy
+            if close[i] > S1_aligned[i] or chop_daily_aligned[i] > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
