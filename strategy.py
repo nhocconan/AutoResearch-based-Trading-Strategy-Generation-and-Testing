@@ -9,7 +9,7 @@ leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,12 +17,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation and trend
+    # Get daily data for Camarilla pivot and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels
+    # Calculate Camarilla pivot levels from daily data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -44,19 +44,19 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation - 20-period average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation - 12-period average volume (48h)
+    vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1.0)
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
     # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    hours = prices.index.hour
     in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 40
+    start_idx = 50
     
     for i in range(start_idx, n):
         if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
@@ -77,28 +77,28 @@ def generate_signals(prices):
             # Long: price breaks above R1 + above 1d EMA34 + volume confirmation
             if (close[i] > r1_1d_aligned[i] and 
                 close[i] > ema_34_1d_aligned[i] and
-                vol_ratio[i] > 1.8):
-                signals[i] = 0.30
+                vol_ratio[i] > 1.5):
+                signals[i] = 0.25
                 position = 1
             # Short: price breaks below S1 + below 1d EMA34 + volume confirmation
             elif (close[i] < s1_1d_aligned[i] and 
                   close[i] < ema_34_1d_aligned[i] and
-                  vol_ratio[i] > 1.8):
-                signals[i] = -0.30
+                  vol_ratio[i] > 1.5):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price falls back below pivot
-            if close[i] < pivot_1d_aligned[i]:
+            # Exit long: price falls back below pivot OR below 1d EMA34
+            if close[i] < pivot_1d_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price rises back above pivot
-            if close[i] > pivot_1d_aligned[i]:
+            # Exit short: price rises back above pivot OR above 1d EMA34
+            if close[i] > pivot_1d_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
