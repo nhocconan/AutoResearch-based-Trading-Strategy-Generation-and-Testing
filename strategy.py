@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Spike"
-timeframe = "4h"
+name = "1d_Weekly_Camarilla_R1_S1_Breakout_TrendFilter_V1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,57 +17,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla levels and 1d trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data once
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate weekly Camarilla pivot levels (based on previous week)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate daily EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Camarilla levels for current week (calculated from previous week's OHLC)
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # We need previous week's data, so we shift by 1
+    prev_high = np.roll(high_1w, 1)
+    prev_low = np.roll(low_1w, 1)
+    prev_close = np.roll(close_1w, 1)
+    # First week will have invalid data (rolled from last), handle with nans
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Calculate Camarilla levels from previous day
-    # R1 = close + 1.1*(high-low)/12
-    # S1 = close - 1.1*(high-low)/12
-    camarilla_range = high_1d - low_1d
-    r1 = close_1d + 1.1 * camarilla_range / 12
-    s1 = close_1d - 1.1 * camarilla_range / 12
+    rng = prev_high - prev_low
+    R1 = prev_close + rng * 1.1 / 12
+    S1 = prev_close - rng * 1.1 / 12
     
-    # Align to 4h timeframe
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Align weekly R1/S1 to daily timeframe (only use after weekly bar closes)
+    R1_aligned = align_htf_to_ltf(prices, df_1w, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1w, S1)
     
-    # Volume spike detection (20-period average)
+    # Weekly trend filter: EMA34 (only use after weekly bar closes)
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    
+    # Daily volume spike: volume > 1.5 * 20-day average (using only past data)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # warmup for indicators
+    start_idx = 50  # warmup
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+            np.isnan(ema34_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long breakout above R1 with volume spike and uptrend
-            long_cond = (close[i] > r1_aligned[i]) and \
-                       (volume[i] > 1.5 * vol_ma[i]) and \
-                       (close[i] > ema34_1d_aligned[i])
+            # Long: price breaks above R1 AND weekly trend up (close > EMA34) AND volume spike
+            long_cond = (close[i] > R1_aligned[i]) and (close[i] > ema34_aligned[i]) and vol_spike[i]
             
-            # Short breakdown below S1 with volume spike and downtrend
-            short_cond = (close[i] < s1_aligned[i]) and \
-                        (volume[i] > 1.5 * vol_ma[i]) and \
-                        (close[i] < ema34_1d_aligned[i])
+            # Short: price breaks below S1 AND weekly trend down (close < EMA34) AND volume spike
+            short_cond = (close[i] < S1_aligned[i]) and (close[i] < ema34_aligned[i]) and vol_spike[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -76,15 +82,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses back below R1
-            if close[i] < r1_aligned[i]:
+            # Long exit: price closes below S1 (reversal) OR weekly trend turns down
+            if (close[i] < S1_aligned[i]) or (close[i] < ema34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses back above S1
-            if close[i] > s1_aligned[i]:
+            # Short exit: price closes above R1 (reversal) OR weekly trend turns up
+            if (close[i] > R1_aligned[i]) or (close[i] > ema34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -92,8 +98,8 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R1/S1 levels act as intraday support/resistance. 
-# Breakouts with volume spam and 1d EMA34 trend filter capture institutional moves.
+# Hypothesis: Weekly Camarilla R1/S1 levels act as strong support/resistance. 
+# Breakouts with volume confirmation and weekly trend filter (EMA34) capture institutional moves.
 # Works in bull markets (breakouts above R1 in uptrend) and bear markets (breakdowns below S1 in downtrend).
-# Volume spike filter reduces false breakouts. 
-# Target: 20-50 trades/year to avoid fee drag.
+# Volume spike ensures breakout validity. Weekly EMA34 filters counter-trend breakouts.
+# Target: 20-60 trades over 4 years = 5-15/year to minimize fee decay and avoid overtrading.
