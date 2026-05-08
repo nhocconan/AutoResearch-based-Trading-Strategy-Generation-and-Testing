@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Pivot_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Pivot Points (Camarilla style) once before loop
+    # Calculate 1d Pivot Points (R1, S1) once before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -26,13 +26,13 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla pivot: P = (H+L+C)/3
+    # Classic pivot point calculation: P = (H+L+C)/3
     pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    # Camarilla R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
-    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
+    # R1 = 2*P - L, S1 = 2*P - H
+    r1_1d = 2 * pivot_1d - low_1d
+    s1_1d = 2 * pivot_1d - high_1d
     
-    # Align Pivot levels to 12h timeframe (wait for 1d bar close)
+    # Align Pivot levels to 4h timeframe (wait for 1d bar close)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
@@ -47,7 +47,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Sufficient warmup for EMA34
+    start_idx = 100  # Sufficient warmup for EMA34
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
