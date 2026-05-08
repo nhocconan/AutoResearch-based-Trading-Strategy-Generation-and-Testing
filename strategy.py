@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1-day Williams %R with volume confirmation and ADX trend filter.
-# Williams %R identifies overbought/oversold conditions, effective in both trending and ranging markets.
-# Long when Williams %R < -80 (oversold) with volume confirmation and ADX > 25 (trending).
-# Short when Williams %R > -20 (overbought) with volume confirmation and ADX > 25 (trending).
-# Exit when Williams %R crosses back to -50 level.
-# Designed for low trade frequency (20-40/year) to avoid fee drag. Uses 1-day timeframe for signal generation.
+# Hypothesis: 1d strategy using weekly Williams Fractal for reversal signals with volume confirmation.
+# Uses weekly bearish/bullish fractals to identify potential reversal points in higher timeframe structure.
+# Long when bullish fractal forms on weekly chart and price closes above fractal high with volume confirmation.
+# Short when bearish fractal forms on weekly chart and price closes below fractal low with volume confirmation.
+# Exit when price moves back to the fractal level or opposite fractal forms.
+# Designed for low trade frequency (10-20/year) to avoid fee decay. Works in trending and ranging markets via fractal structure.
 
-name = "4h_1dWilliamsR_Volume_ADX"
-timeframe = "4h"
+name = "1d_1wWilliamsFractal_Reversal"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,130 +24,100 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-day data for Williams %R and ADX
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data for Williams Fractals
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Calculate 1-day Williams %R (14-period)
-    period = 14
-    highest_high = np.full_like(high_1d, np.nan)
-    lowest_low = np.full_like(low_1d, np.nan)
+    # Calculate Williams Fractals (5-bar pattern)
+    # Bearish fractal: high[n-2] < high[n-1] > high[n] and high[n-3] < high[n-2] and high[n+1] < high[n]
+    # Bullish fractal: low[n-2] > low[n-1] < low[n] and low[n-3] > low[n-2] and low[n+1] > low[n]
+    n_1w = len(high_1w)
+    bearish_fractal = np.zeros(n_1w, dtype=bool)
+    bullish_fractal = np.zeros(n_1w, dtype=bool)
     
-    for i in range(len(high_1d)):
-        if i < period - 1:
-            highest_high[i] = np.nan
-            lowest_low[i] = np.nan
-        else:
-            highest_high[i] = np.max(high_1d[i-(period-1):i+1])
-            lowest_low[i] = np.min(low_1d[i-(period-1):i+1])
+    for i in range(2, n_1w - 2):
+        # Bearish fractal: middle bar is highest
+        if (high_1w[i] > high_1w[i-1] and high_1w[i] > high_1w[i-2] and
+            high_1w[i] > high_1w[i+1] and high_1w[i] > high_1w[i+2]):
+            bearish_fractal[i] = True
+        # Bullish fractal: middle bar is lowest
+        if (low_1w[i] < low_1w[i-1] and low_1w[i] < low_1w[i-2] and
+            low_1w[i] < low_1w[i+1] and low_1w[i] < low_1w[i+2]):
+            bullish_fractal[i] = True
     
-    williams_r = np.where(
-        (highest_high - lowest_low) != 0,
-        -100 * (highest_high - close_1d) / (highest_high - lowest_low),
-        -50
-    )
+    # Convert to float arrays for alignment (1.0 at fractal points, 0.0 otherwise)
+    bearish_fractal_float = bearish_fractal.astype(float)
+    bullish_fractal_float = bullish_fractal.astype(float)
     
-    # Calculate 1-day ADX (14-period)
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Need 2-bar confirmation for fractals (as per Williams Fractal rules)
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bearish_fractal_float, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bullish_fractal_float, additional_delay_bars=2)
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.concatenate([[np.nan], dm_minus])
+    # Store actual fractal levels for entry/exit
+    bearish_level = np.full(n_1w, np.nan)
+    bullish_level = np.full(n_1w, np.nan)
+    bearish_level[bearish_fractal] = high_1w[bearish_fractal]
+    bullish_level[bullish_fractal] = low_1w[bullish_fractal]
     
-    # Smoothed values
-    atr = np.full_like(tr, np.nan)
-    dm_plus_smooth = np.full_like(dm_plus, np.nan)
-    dm_minus_smooth = np.full_like(dm_minus, np.nan)
+    bearish_level_aligned = align_htf_to_ltf(prices, df_1w, bearish_level)
+    bullish_level_aligned = align_htf_to_ltf(prices, df_1w, bullish_level)
     
-    # Initial values (first 14 periods)
-    if len(tr) >= period:
-        atr[period-1] = np.nanmean(tr[1:period])
-        dm_plus_smooth[period-1] = np.nanmean(dm_plus[1:period])
-        dm_minus_smooth[period-1] = np.nanmean(dm_minus[1:period])
-        
-        # Wilder's smoothing
-        for i in range(period, len(tr)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-            dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (period-1) + dm_plus[i]) / period
-            dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (period-1) + dm_minus[i]) / period
-    
-    # DI+ and DI-
-    di_plus = np.full_like(dm_plus_smooth, np.nan)
-    di_minus = np.full_like(dm_minus_smooth, np.nan)
-    dx = np.full_like(tr, np.nan)
-    
-    for i in range(period-1, len(tr)):
-        if atr[i] != 0 and not np.isnan(atr[i]):
-            di_plus[i] = 100 * dm_plus_smooth[i] / atr[i]
-            di_minus[i] = 100 * dm_minus_smooth[i] / atr[i]
-            if (di_plus[i] + di_minus[i]) != 0:
-                dx[i] = 100 * np.abs(di_plus[i] - di_minus[i]) / (di_plus[i] + di_minus[i])
-    
-    # ADX (smoothed DX)
-    adx = np.full_like(dx, np.nan)
-    if len(dx) >= 2*period-1:
-        adx[2*period-2] = np.nanmean(dx[period-1:2*period-1])
-        for i in range(2*period-1, len(dx)):
-            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-    
-    # Align 1-day indicators to 4h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume confirmation: 4h volume > 1.3x 20-period EMA
+    # Volume confirmation: daily volume > 1.5x 20-day EMA
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ema * 1.3)
+    vol_confirm = volume > (vol_ema * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for Williams %R and ADX
+    start_idx = 50  # Ensure enough data for calculations
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(williams_r_aligned[i]) or 
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(bearish_level_aligned[i]) and np.isnan(bullish_level_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: Williams %R < -80 (oversold) with volume confirmation and ADX > 25
-            if (williams_r_aligned[i] < -80 and 
-                vol_confirm[i] and 
-                adx_aligned[i] > 25):
-                signals[i] = 0.25
-                position = 1
-            # Enter short: Williams %R > -20 (overbought) with volume confirmation and ADX > 25
-            elif (williams_r_aligned[i] > -20 and 
-                  vol_confirm[i] and 
-                  adx_aligned[i] > 25):
-                signals[i] = -0.25
-                position = -1
+            # Enter long: bullish fractal formed and price closes above fractal low with volume
+            if not np.isnan(bullish_level_aligned[i]) and bullish_level_aligned[i] > 0:
+                if close[i] > bullish_level_aligned[i] and vol_confirm[i]:
+                    signals[i] = 0.25
+                    position = 1
+            # Enter short: bearish fractal formed and price closes below fractal high with volume
+            elif not np.isnan(bearish_level_aligned[i]) and bearish_level_aligned[i] > 0:
+                if close[i] < bearish_level_aligned[i] and vol_confirm[i]:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Exit long: Williams %R crosses above -50
-            if williams_r_aligned[i] > -50:
+            # Exit long: price returns to fractal level or bearish fractal forms
+            if not np.isnan(bullish_level_aligned[i]) and bullish_level_aligned[i] > 0:
+                if close[i] <= bullish_level_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            elif not np.isnan(bearish_level_aligned[i]) and bearish_level_aligned[i] > 0:
+                # Bearish fractal formed - exit long
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R crosses below -50
-            if williams_r_aligned[i] < -50:
+            # Exit short: price returns to fractal level or bullish fractal forms
+            if not np.isnan(bearish_level_aligned[i]) and bearish_level_aligned[i] > 0:
+                if close[i] >= bearish_level_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
+            elif not np.isnan(bullish_level_aligned[i]) and bullish_level_aligned[i] > 0:
+                # Bullish fractal formed - exit short
                 signals[i] = 0.0
                 position = 0
             else:
