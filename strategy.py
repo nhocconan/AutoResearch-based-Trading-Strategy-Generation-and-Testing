@@ -1,14 +1,15 @@
-# Hypothesis: 12h Donchian breakout with 1d volume confirmation and ADX trend filter.
-# Long when price breaks above Donchian(20) high AND 1d volume > 1.3x 20-period average AND ADX(14) > 25 (trending market).
-# Short when price breaks below Donchian(20) low AND 1d volume > 1.3x 20-period average AND ADX(14) > 25.
-# Exit when price crosses back inside the Donchian channel.
-# Uses 12h timeframe as specified, with 1d volume and ADX for higher timeframe context.
-# Target: 50-150 total trades over 4 years (12-37/year) with controlled frequency to avoid fee drag.
-
+#137156
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: 12h Donchian(20) breakout with 1d volume confirmation and ADX(14) > 25 trend filter.
+# Long when price breaks above Donchian(20) high AND 1d volume > 1.3x 20-period average AND ADX(14) > 25.
+# Short when price breaks below Donchian(20) low AND 1d volume > 1.3x 20-period average AND ADX(14) > 25.
+# Exit when price crosses back inside the Donchian channel.
+# Uses 12h timeframe as specified, with 1d volume and ADX for higher timeframe context.
+# Target: 50-150 total trades over 4 years (12-37/year) with controlled frequency to avoid fee drag.
 
 name = "12h_Donchian_20_1dVolume_ADX"
 timeframe = "12h"
