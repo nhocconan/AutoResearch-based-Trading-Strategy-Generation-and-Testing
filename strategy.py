@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_WeeklyPivot_Breakout_Trend_Volume"
-timeframe = "1d"
+name = "6h_ChaikinVolatility_Expansion_Breakout_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,72 +17,56 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for pivot points and trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # 1d data for trend filter and volatility
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Weekly EMA50 for trend filter
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Weekly ATR for volatility filter (optional)
-    tr = np.maximum(high_1w - low_1w, 
-                    np.maximum(np.abs(high_1w - np.roll(close_1w, 1)), 
-                               np.abs(low_1w - np.roll(close_1w, 1))))
-    tr[0] = high_1w[0] - low_1w[0]
-    atr14_1w = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr14_1w_aligned = align_htf_to_ltf(prices, df_1w, atr14_1w)
+    # 1d Chaikin Volatility: EMA of (high-low) difference
+    # Chaikin Volatility = EMA of (high - low) over period
+    hl_diff = high_1d - low_1d
+    chaikin_vol = pd.Series(hl_diff).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Expansion signal: current Chaikin Volatility > 1.5 * 10-period SMA of Chaikin Volatility
+    chaikin_sma10 = pd.Series(chaikin_vol).rolling(window=10, min_periods=10).mean().values
+    chaikin_expansion = chaikin_vol > (chaikin_sma10 * 1.5)
+    chaikin_expansion_aligned = align_htf_to_ltf(prices, df_1d, chaikin_expansion.astype(float))
     
-    # Weekly pivot from previous week (to avoid look-ahead)
-    prev_high_1w = np.roll(high_1w, 1)
-    prev_low_1w = np.roll(low_1w, 1)
-    prev_close_1w = np.roll(close_1w, 1)
-    prev_high_1w[0] = high_1w[0]
-    prev_low_1w[0] = low_1w[0]
-    prev_close_1w[0] = close_1w[0]
-    
-    pivot = (prev_high_1w + prev_low_1w + prev_close_1w) / 3.0
-    range_1w = prev_high_1w - prev_low_1w
-    r1 = pivot + (range_1w * 1.1 / 12)
-    s1 = pivot - (range_1w * 1.1 / 12)
-    
-    # Align weekly pivot levels to daily timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    
-    # Volume filter: daily volume > 20-day average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 6h Donchian channel breakout (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for EMA50
+    start_idx = 100  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or
-            np.isnan(vol_ma20[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(chaikin_expansion_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above R1, price above weekly EMA50, volume above average
-            long_cond = (close[i] > r1_aligned[i] and 
-                        close[i] > ema50_1w_aligned[i] and
-                        volume[i] > vol_ma20[i])
+            # Long: Price breaks above Donchian high, 1d trend up (price > EMA50), volatility expanding
+            long_cond = (close[i] > donchian_high[i] and 
+                        close[i] > ema50_1d_aligned[i] and
+                        chaikin_expansion_aligned[i] > 0.5)
             
-            # Short: Price breaks below S1, price below weekly EMA50, volume above average
-            short_cond = (close[i] < s1_aligned[i] and 
-                         close[i] < ema50_1w_aligned[i] and
-                         volume[i] > vol_ma20[i])
+            # Short: Price breaks below Donchian low, 1d trend down (price < EMA50), volatility expanding
+            short_cond = (close[i] < donchian_low[i] and 
+                         close[i] < ema50_1d_aligned[i] and
+                         chaikin_expansion_aligned[i] > 0.5)
             
             if long_cond:
                 signals[i] = 0.25
@@ -91,15 +75,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Price closes below S1 OR price crosses below weekly EMA50
-            if close[i] < s1_aligned[i] or close[i] < ema50_1w_aligned[i]:
+            # Long exit: Price closes below Donchian low OR volatility contraction
+            if close[i] < donchian_low[i] or chaikin_expansion_aligned[i] <= 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price closes above R1 OR price crosses above weekly EMA50
-            if close[i] > r1_aligned[i] or close[i] > ema50_1w_aligned[i]:
+            # Short exit: Price closes above Donchian high OR volatility contraction
+            if close[i] > donchian_high[i] or chaikin_expansion_aligned[i] <= 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -107,10 +91,8 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Weekly pivot breakout with trend filter and volume confirmation on daily timeframe.
-# Uses institutional weekly pivot levels (R1/S1) for entry, weekly EMA50 for trend filter,
-# and volume confirmation to ensure participation. Works in both bull and bear markets:
-# - Bull: breakouts above R1 in uptrend
-# - Bear: breakdowns below S1 in downtrend
-# Weekly timeframe reduces noise, daily execution provides timely signals.
-# Target: 15-25 trades/year to minimize fee drag while capturing significant moves.
+# Hypothesis: Chaikin Volatility expansion identifies periods of increasing volatility
+# that often precede sustained moves. Combined with Donchian breakouts and 1d EMA50 trend
+# filter, this captures institutional breakout moves in both bull and bear markets.
+# The volatility filter avoids choppy markets while the trend filter ensures alignment
+# with higher timeframe direction. 6h timeframe targets 15-35 trades/year to avoid fee drag.
