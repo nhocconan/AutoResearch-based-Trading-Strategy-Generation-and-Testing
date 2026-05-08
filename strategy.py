@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h KAMA trend + RSI mean reversion + volume spike
-# Uses adaptive trend filter (KAMA) to avoid whipsaws in ranging markets
-# Long: KAMA bullish AND RSI < 35 AND volume spike (>1.5x 20-period avg)
-# Short: KAMA bearish AND RSI > 65 AND volume spike (>1.5x 20-period avg)
-# Exit: RSI returns to neutral (40-60) or trend change
-# Designed for 20-35 trades/year with proper risk control via mean reversion in trend
+# Hypothesis: 4h Donchian breakout with 12h trend filter and volume spike confirmation
+# Designed for 25-35 trades/year with proper risk control via trend failure
+# Long: price breaks above Donchian(20) high + price > 12h EMA50 + volume spike
+# Short: price breaks below Donchian(20) low + price < 12h EMA50 + volume spike
+# Exit: trend failure (price crosses 12h EMA50) or opposite breakout
+# Volume filter: current 4h volume > 1.5x 20-period average to avoid false breakouts
+# Donchian provides clear trend structure, EMA50 on 12h filters trend direction, volume confirms breakout strength
 
-name = "4h_KAMA_RSI_VolumeSpike"
+name = "4h_Donchian_Breakout_12hEMA50_VolumeFilter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,67 +25,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate KAMA (adaptive trend filter)
-    # Efficiency Ratio: |close - close[10]| / sum(|close - close[1]|) over 10 periods
-    change = np.abs(np.subtract(close[10:], close[:-10]))
-    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0) if len(close) > 1 else np.array([0.0])
-    # Fix volatility calculation for rolling window
-    volatility = np.array([np.sum(np.abs(np.diff(close[i:i+10]))) if i+10 <= len(close) else 0.0 
-                          for i in range(len(close))])
-    er = np.divide(change, volatility, out=np.full_like(change, 0.0), where=volatility!=0)
-    # Smoothing constants: fastest SC=2/(2+1)=0.67, slowest SC=2/(30+1)=0.0645
-    sc = np.power(er * (0.67 - 0.0645) + 0.0645, 2)
-    # Calculate KAMA
-    kama = np.full_like(close, np.nan)
-    kama[9] = close[9]  # seed
-    for i in range(10, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
     
-    # Calculate RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, 0.0), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate 12h EMA50 for trend filter
+    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate volume spike filter
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.5 * vol_ma)
+    # Calculate Donchian channels (20-period) on 4h data
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 20-period average volume for volume filter
+    volume_series = pd.Series(volume)
+    vol_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    
+    # Align 12h EMA50 to 4h timeframe
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # warmup for RSI and volatility
+    start_idx = max(50, 20)  # warmup period
     
     for i in range(start_idx, n):
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma[i])):
+        if np.isnan(ema50_12h_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(vol_ma_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Volume filter: current 4h volume > 1.5x 20-period average
+        vol_filter = volume[i] > 1.5 * vol_ma_20[i]
+        
         if position == 0:
-            # Look for mean reversion entries within trend
-            # Long: KAMA bullish (price > KAMA) AND RSI oversold AND volume spike
-            if close[i] > kama[i] and rsi[i] < 35 and vol_spike[i]:
-                signals[i] = 0.25
-                position = 1
-            # Short: KAMA bearish (price < KAMA) AND RSI overbought AND volume spike
-            elif close[i] < kama[i] and rsi[i] > 65 and vol_spike[i]:
-                signals[i] = -0.25
-                position = -1
+            # Look for breakout with trend and volume confirmation
+            # Long: price breaks above Donchian high + uptrend + volume spike
+            if close[i] > donchian_high[i] and ema50_12h_aligned[i] > 0:
+                if vol_filter:
+                    signals[i] = 0.25
+                    position = 1
+            # Short: price breaks below Donchian low + downtrend + volume spike
+            elif close[i] < donchian_low[i] and ema50_12h_aligned[i] < 0:
+                if vol_filter:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Exit long: RSI returns to neutral or trend change
-            if rsi[i] > 40 or close[i] <= kama[i]:
+            # Exit long: trend failure (price crosses below EMA50) or opposite breakout
+            if ema50_12h_aligned[i] <= 0 or close[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: RSI returns to neutral or trend change
-            if rsi[i] < 60 or close[i] >= kama[i]:
+            # Exit short: trend failure (price crosses above EMA50) or opposite breakout
+            if ema50_12h_aligned[i] >= 0 or close[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
