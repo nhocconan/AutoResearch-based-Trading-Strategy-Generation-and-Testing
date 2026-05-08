@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R with 1d Trend Filter and Volume Confirmation
-# Williams %R identifies overbought/oversold conditions. We use %R < -80 for oversold (long entry)
-# and %R > -20 for overbought (short entry). Entries are only taken when 1d ADX > 25 (strong trend)
-# and 1d volume is above its 20-period average (institutional participation). This avoids whipsaws
-# in ranging markets while capturing momentum in trending environments. Works in both bull and bear
-# markets by filtering for strong trends only. Targets 20-30 trades per year (~80-120 total over 4 years).
+# Hypothesis: 12h Donchian channel breakout with 1d volume confirmation and 1d ADX trend filter
+# Donchian(20) identifies structural breakouts. Volume surge confirms institutional participation.
+# 1d ADX > 25 ensures we only trade in strong trends, avoiding whipsaws in ranges.
+# This works in both bull and bear markets by filtering for strong trends only.
+# Targets 15-25 trades per year (~60-100 total over 4 years) to minimize fee drag.
 
-name = "6h_WilliamsR_1dADX_Volume"
-timeframe = "6h"
+name = "12h_Donchian20_1dVolume_1dADX"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,26 +23,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX and volume filters
+    # Get 1d data for volume and ADX
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:  # Need at least 20 days for Donchian
         return np.zeros(n)
     
+    # Calculate Donchian channel (20-period) on 12h data
+    # We need at least 20 periods for Donchian calculation
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 1d volume spike
+    vol_ma = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_spike = df_1d['volume'].values > (vol_ma * 2.0)
+    vol_spike_12h = align_htf_to_ltf(prices, df_1d, vol_spike)
+    
+    # Calculate ADX(14) on 1d
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate Williams %R (14 period) on 6x data
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    williams_r = williams_r.values  # Convert to numpy array
-    
-    # Calculate ADX(14) on daily data
+    # Calculate True Range and DM
+    tr = np.zeros_like(high_1d)
     plus_dm = np.zeros_like(high_1d)
     minus_dm = np.zeros_like(high_1d)
-    tr = np.zeros_like(high_1d)
     
     for i in range(1, len(high_1d)):
         plus_dm[i] = max(high_1d[i] - high_1d[i-1], 0)
@@ -79,48 +82,42 @@ def generate_signals(prices):
                   100 * np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14), 0)
     adx = wilder_smooth(dx, 14)
     
-    # Calculate volume moving average on daily data
-    vol_ma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean()
-    
-    # Align indicators to 6h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma.values)
-    volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+    adx_strong = adx > 25
+    adx_strong_12h = align_htf_to_ltf(prices, df_1d, adx_strong)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure sufficient data for indicators
+    start_idx = 20  # Ensure sufficient data for Donchian
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(vol_ma_aligned[i]) or np.isnan(volume_1d_aligned[i])):
+        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
+            np.isnan(vol_spike_12h[i]) or np.isnan(adx_strong_12h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: Williams %R oversold (< -80), strong trend (ADX > 25), volume above average
-            if williams_r_aligned[i] < -80 and adx_aligned[i] > 25 and volume_1d_aligned[i] > vol_ma_aligned[i]:
+            # Enter long: price breaks above Donchian high, volume spike, strong trend
+            if close[i] > high_max[i] and vol_spike_12h[i] and adx_strong_12h[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Williams %R overbought (> -20), strong trend (ADX > 25), volume above average
-            elif williams_r_aligned[i] > -20 and adx_aligned[i] > 25 and volume_1d_aligned[i] > vol_ma_aligned[i]:
+            # Enter short: price breaks below Donchian low, volume spike, strong trend
+            elif close[i] < low_min[i] and vol_spike_12h[i] and adx_strong_12h[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R returns to -50 or trend weakens (ADX < 20)
-            if williams_r_aligned[i] > -50 or adx_aligned[i] < 20:
+            # Exit long: price returns to Donchian low or trend weakens
+            if close[i] < low_min[i]:  # Could also use adx_weak but we only have strong signal
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R returns to -50 or trend weakens (ADX < 20)
-            if williams_r_aligned[i] < -50 or adx_aligned[i] < 20:
+            # Exit short: price returns to Donchian high or trend weakens
+            if close[i] > high_max[i]:
                 signals[i] = 0.0
                 position = 0
             else:
