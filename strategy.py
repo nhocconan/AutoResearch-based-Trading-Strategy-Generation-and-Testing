@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_Filtered"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -40,13 +40,17 @@ def generate_signals(prices):
     r3_1d = close_1d_prev + range_1d * 1.1 / 2
     s3_1d = close_1d_prev - range_1d * 1.1 / 2
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
-    # Volume spike detection: current volume > 2.5 * 20-period average
+    # Volume spike detection: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.5 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
+    
+    # Calculate daily range for volatility filter
+    daily_range_pct = range_1d / close_1d_prev
+    daily_range_pct_aligned = align_htf_to_ltf(prices, df_1d, daily_range_pct)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -56,7 +60,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
         if (np.isnan(ema34_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or 
-            np.isnan(s3_1d_aligned[i])):
+            np.isnan(s3_1d_aligned[i]) or np.isnan(daily_range_pct_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,14 +70,20 @@ def generate_signals(prices):
         r3_val = r3_1d_aligned[i]
         s3_val = s3_1d_aligned[i]
         vol_spike = volume_spike[i]
+        daily_range = daily_range_pct_aligned[i]
+        
+        # Volatility filter: only trade when daily range is between 1% and 8%
+        vol_filter = (daily_range >= 0.01) and (daily_range <= 0.08)
         
         if position == 0:
-            # Enter long: price breaks above R3 with volume spike, above 1d EMA
-            if (close[i] > r3_val and vol_spike and close[i] > ema_val):
+            # Enter long: price breaks above R3 with volume spike, above 1d EMA, in volatility range
+            if (close[i] > r3_val and vol_spike and 
+                close[i] > ema_val and vol_filter):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S3 with volume spike, below 1d EMA
-            elif (close[i] < s3_val and vol_spike and close[i] < ema_val):
+            # Enter short: price breaks below S3 with volume spike, below 1d EMA, in volatility range
+            elif (close[i] < s3_val and vol_spike and 
+                  close[i] < ema_val and vol_filter):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
