@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_PivotBreakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla levels and trend
+    # Daily data for pivot levels and trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -26,21 +26,26 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily Camarilla levels
+    # Calculate daily pivot levels
     n1d = len(close_1d)
-    H = high_1d[:-1]
-    L = low_1d[:-1]
-    C = close_1d[:-1]
+    daily_P = np.full(n1d, np.nan)
+    daily_S1 = np.full(n1d, np.nan)
+    daily_R1 = np.full(n1d, np.nan)
     
-    R3 = np.full(n1d, np.nan)
-    S3 = np.full(n1d, np.nan)
     for i in range(1, n1d):
-        R3[i] = C[i-1] + (H[i-1] - L[i-1]) * 1.1 / 4
-        S3[i] = C[i-1] - (H[i-1] - L[i-1]) * 1.1 / 4
+        PH = high_1d[i-1]
+        PL = low_1d[i-1]
+        PC = close_1d[i-1]
+        
+        P = (PH + PL + PC) / 3.0
+        daily_P[i] = P
+        daily_S1[i] = 2 * P - PH
+        daily_R1[i] = 2 * P - PL
     
-    # Align Camarilla levels to 6h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    # Align daily pivot levels to 12h timeframe
+    daily_P_aligned = align_htf_to_ltf(prices, df_1d, daily_P)
+    daily_S1_aligned = align_htf_to_ltf(prices, df_1d, daily_S1)
+    daily_R1_aligned = align_htf_to_ltf(prices, df_1d, daily_R1)
     
     # Daily EMA34 for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
@@ -53,25 +58,26 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(daily_P_aligned[i]) or np.isnan(daily_S1_aligned[i]) or 
+            np.isnan(daily_R1_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R3 with 1d uptrend + volume spike
-            long_cond = (close[i] > R3_aligned[i] and 
+            # Long: price breaks above R1 with 1d uptrend + volume spike
+            long_cond = (close[i] > daily_R1_aligned[i] and 
                         ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and
                         volume_spike[i])
             
-            # Short: price breaks below S3 with 1d downtrend + volume spike
-            short_cond = (close[i] < S3_aligned[i] and 
+            # Short: price breaks below S1 with 1d downtrend + volume spike
+            short_cond = (close[i] < daily_S1_aligned[i] and 
                          ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and
                          volume_spike[i])
             
@@ -82,15 +88,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below S3
-            if close[i] < S3_aligned[i]:
+            # Long exit: price breaks below P (pivot point)
+            if close[i] < daily_P_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above R3
-            if close[i] > R3_aligned[i]:
+            # Short exit: price breaks above P (pivot point)
+            if close[i] > daily_P_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
