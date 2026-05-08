@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams Fractal breakout with 1w volume spike and 1w EMA50 trend filter.
-# Long when price breaks above recent bullish fractal AND 1w volume > 2.0x 24-period average AND price > 1w EMA50.
-# Short when price breaks below recent bearish fractal AND 1w volume > 2.0x 24-period average AND price < 1w EMA50.
-# Exit when price crosses back below/above 1w EMA50 (trend-based exit).
-# Williams Fractals require 2-bar confirmation, so we use additional_delay_bars=2 in align_htf_to_ltf.
-# Target: 30-100 total trades over 4 years (7-25/year) for low fee drift.
+# Hypothesis: 6h Williams %R mean reversion with 12h trend filter and volume spike confirmation.
+# Long when Williams %R < -80 (oversold) AND price > 12h EMA50 (uptrend) AND volume > 1.5x 20-period average.
+# Short when Williams %R > -20 (overbought) AND price < 12h EMA50 (downtrend) AND volume > 1.5x 20-period average.
+# Exit when Williams %R crosses back above -50 (for longs) or below -50 (for shorts).
+# Williams %R identifies overextended moves, trend filter ensures we trade with higher timeframe momentum,
+# volume spike confirms participation. Designed for low frequency (target: 60-120 total trades over 4 years).
 
-name = "1d_WilliamsFractal_Breakout_1wVolume_1wEMA50"
-timeframe = "1d"
+name = "6h_WilliamsR_12hEMA50_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,53 +24,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w data for trend filter and volume filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate Williams Fractals on 1w data
-    from mtf_data import compute_williams_fractals
-    bearish_fractal, bullish_fractal = compute_williams_fractals(
-        df_1w['high'].values,
-        df_1w['low'].values,
-    )
-    # Williams fractals need 2 extra 1w bars after the center bar for confirmation
-    bearish_fractal_1d = align_htf_to_ltf(
-        prices, df_1w, bearish_fractal, additional_delay_bars=2
-    )
-    bullish_fractal_1d = align_htf_to_ltf(
-        prices, df_1w, bullish_fractal, additional_delay_bars=2
-    )
+    # Calculate Williams %R (14 period) on 6x data
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # 1w volume filter: current volume > 2.0x 24-period average
-    vol_ma24 = pd.Series(df_1w['volume'].values).rolling(window=24, min_periods=24).mean().values
-    volume_filter_1d = align_htf_to_ltf(prices, df_1w, vol_ma24 > 2.0)
+    # 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_1d = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Volume filter: current volume > 1.5x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Sufficient warmup for EMA and fractals
+    start_idx = 50  # Sufficient warmup for Williams %R and EMA
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(bearish_fractal_1d[i]) or np.isnan(bullish_fractal_1d[i]) or 
-            np.isnan(volume_filter_1d[i]) or np.isnan(ema50_1w_1d[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema50_12h_aligned[i]) or 
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price breaks above bullish fractal, volume spike, above 1w EMA50
-            long_cond = (close[i] > bullish_fractal_1d[i]) and volume_filter_1d[i] and (close[i] > ema50_1w_1d[i])
-            # Short conditions: price breaks below bearish fractal, volume spike, below 1w EMA50
-            short_cond = (close[i] < bearish_fractal_1d[i]) and volume_filter_1d[i] and (close[i] < ema50_1w_1d[i])
+            # Long conditions: Williams %R oversold (< -80), above 12h EMA50, volume spike
+            long_cond = (williams_r[i] < -80) and (close[i] > ema50_12h_aligned[i]) and volume_filter[i]
+            # Short conditions: Williams %R overbought (> -20), below 12h EMA50, volume spike
+            short_cond = (williams_r[i] > -20) and (close[i] < ema50_12h_aligned[i]) and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -79,15 +72,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below 1w EMA50 (trend change)
-            if close[i] < ema50_1w_1d[i]:
+            # Long exit: Williams %R crosses above -50 (mean reversion complete)
+            if williams_r[i] > -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above 1w EMA50 (trend change)
-            if close[i] > ema50_1w_1d[i]:
+            # Short exit: Williams %R crosses below -50 (mean reversion complete)
+            if williams_r[i] < -50:
                 signals[i] = 0.0
                 position = 0
             else:
