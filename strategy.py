@@ -1,14 +1,18 @@
-# 6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_HT
-# Strategy: Camarilla pivot breakout with daily trend filter and volume confirmation
-# Long when price breaks above R3 (1d Camarilla) AND 1d EMA34 > EMA89 (uptrend) AND 6h volume > 1.5x 20-period average
-# Short when price breaks below S3 (1d Camarilla) AND 1d EMA34 < EMA89 (downtrend) AND 6h volume > 1.5x 20-period average
-# Exit when price crosses back to daily pivot point (mean reversion to equilibrium)
-# Uses proven Camarilla structure with trend filter to avoid false breakouts in ranging markets
-# Target: 50-150 total trades over 4 years (12-37/year) for low fee drag
-# Works in bull (breakouts continue) and bear (mean reversion to pivot)
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_HT"
-timeframe = "6h"
+# Hypothesis: 12h Williams %R with 1d ADX trend filter and 12h volume confirmation.
+# Williams %R (14) identifies overbought/oversold conditions.
+# Long when Williams %R < -80 (oversold) AND 1d ADX > 25 (trending) AND 12h volume > 1.5x 20-period average.
+# Short when Williams %R > -20 (overbought) AND 1d ADX > 25 AND 12h volume > 1.5x 20-period average.
+# Exit when Williams %R crosses back above -50 (for long) or below -50 (for short).
+# Uses mean reversion in trending markets with volume confirmation to avoid false signals.
+# Target: 50-150 total trades over 4 years (12-37/year) for low fee drift.
+
+name = "12h_WilliamsR_1dADX_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,71 +25,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 6h volume filter: current volume > 1.5x 20-period average
+    # 12h Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    williams_r[highest_high == lowest_low] = -50  # Avoid division by zero
+    
+    # 12h volume filter: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma20)
     
-    # 1d data for Camarilla levels and trend filter
+    # 1d data for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day's OHLC
-    # Using previous day's data to avoid look-ahead
+    # Calculate ADX (14-period) on 1d data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    open_1d = df_1d['open'].values
     
-    # Previous day's typical price (Camarilla uses previous day's range)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
+    # True Range
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
     
-    # Handle first value
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Camarilla levels: based on previous day's range
-    range_ = prev_high - prev_low
-    camarilla_pivot = (prev_high + prev_low + prev_close) / 3
-    camarilla_r3 = camarilla_pivot + (1.1 * range_ / 2)
-    camarilla_s3 = camarilla_pivot - (1.1 * range_ / 2)
+    # Smoothed values
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # 1d EMA trend filter: EMA34 vs EMA89
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_89 = pd.Series(close_1d).ewm(span=89, adjust=False, min_periods=89).mean().values
-    uptrend = ema_34 > ema_89
-    downtrend = ema_34 < ema_89
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / atr
+    di_minus = 100 * dm_minus_smooth / atr
     
-    # Align 1d indicators to 6h timeframe
-    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    uptrend_aligned = align_htf_to_ltf(prices, df_1d, uptrend)
-    downtrend_aligned = align_htf_to_ltf(prices, df_1d, downtrend)
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    dx[di_plus + di_minus == 0] = 0  # Avoid division by zero
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Align 1d ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 90  # Sufficient warmup for EMA89
+    start_idx = 30  # Sufficient warmup for Williams %R and ADX
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(camarilla_pivot_aligned[i]) or np.isnan(uptrend_aligned[i]) or 
-            np.isnan(downtrend_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(volume_filter[i]) or 
+            np.isnan(adx_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: break above R3, uptrend, volume spike
-            long_cond = (close[i] > camarilla_r3_aligned[i]) and uptrend_aligned[i] and volume_filter[i]
-            # Short conditions: break below S3, downtrend, volume spike
-            short_cond = (close[i] < camarilla_s3_aligned[i]) and downtrend_aligned[i] and volume_filter[i]
+            # Long conditions: Williams %R < -80 (oversold), ADX > 25, volume spike
+            long_cond = (williams_r[i] < -80) and (adx_aligned[i] > 25) and volume_filter[i]
+            # Short conditions: Williams %R > -20 (overbought), ADX > 25, volume spike
+            short_cond = (williams_r[i] > -20) and (adx_aligned[i] > 25) and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -94,15 +104,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: return to pivot (mean reversion)
-            if close[i] < camarilla_pivot_aligned[i]:
+            # Long exit: Williams %R crosses above -50
+            if williams_r[i] > -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: return to pivot (mean reversion)
-            if close[i] > camarilla_pivot_aligned[i]:
+            # Short exit: Williams %R crosses below -50
+            if williams_r[i] < -50:
                 signals[i] = 0.0
                 position = 0
             else:
