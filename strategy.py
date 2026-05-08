@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h price action with daily volume confirmation and 1d ADX trend filter
-# Uses 4h price action for entry timing, daily volume for confirmation, and 1d ADX to filter weak trends.
-# Works in bull/bear via breakout logic with volume and trend strength filters.
-# Target: 50-150 total trades over 4 years with low turnover to minimize fee drag.
+# Hypothesis: 4h Donchian breakout with 1d volume and ADX filter
+# Uses Donchian(20) breakout for entry, confirmed by daily volume > 1.5x EMA and ADX > 25
+# Exits when price re-enters the Donchian channel or ADX weakens
+# Designed to work in both bull and bear markets via breakout logic
+# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag
 
-name = "4h_PriceAction_DailyVolume_ADX"
+name = "4h_Donchian_Breakout_1dVolume_ADX"
 timeframe = "4h"
 leverage = 1.0
 
@@ -20,14 +21,13 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get daily data for volume average and ADX
+    # Get daily data for volume and ADX
     df_daily = get_htf_data(prices, '1d')
     if len(df_daily) < 34:
         return np.zeros(n)
     
-    # Calculate daily volume average (34-period EMA)
+    # Calculate daily volume EMA (34-period)
     vol_ema_34 = pd.Series(df_daily['volume'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # Calculate daily ADX (34-period)
@@ -75,10 +75,18 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
+    # Pre-compute Donchian channels (20-period)
+    lookback = 20
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    for i in range(lookback-1, n):
+        highest_high[i] = np.max(high[i-lookback+1:i+1])
+        lowest_low[i] = np.min(low[i-lookback+1:i+1])
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup
+    start_idx = max(50, lookback-1)  # warmup
     
     for i in range(start_idx, n):
         # Skip if outside trading session
@@ -88,7 +96,7 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        if np.isnan(vol_ema_34_aligned[i]) or np.isnan(adx_aligned[i]):
+        if np.isnan(vol_ema_34_aligned[i]) or np.isnan(adx_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -111,22 +119,22 @@ def generate_signals(prices):
         
         if position == 0:
             # Look for breakout entry with volume and ADX confirmation
-            if close[i] > close[i-1] and close[i-1] > close[i-2] and vol_filter and adx_filter:
+            if close[i] > highest_high[i-1] and vol_filter and adx_filter:
                 signals[i] = 0.25
                 position = 1
-            elif close[i] < close[i-1] and close[i-1] < close[i-2] and vol_filter and adx_filter:
+            elif close[i] < lowest_low[i-1] and vol_filter and adx_filter:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks down or ADX weakens
-            if close[i] < close[i-1] or adx_aligned[i] < 20:
+            # Exit long: price re-enters Donchian channel or ADX weakens
+            if close[i] < highest_high[i-1] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks up or ADX weakens
-            if close[i] > close[i-1] or adx_aligned[i] < 20:
+            # Exit short: price re-enters Donchian channel or ADX weakens
+            if close[i] > lowest_low[i-1] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
