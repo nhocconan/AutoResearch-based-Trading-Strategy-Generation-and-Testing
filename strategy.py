@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Donchian20_Breakout_VolumeTrend"
-timeframe = "4h"
+name = "6h_1d_Camarilla_R3S3_Breakout_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,49 +17,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data once for trend filter and Donchian reference
+    # Get 1d data once for Camarilla pivot levels and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 25:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Daily EMA200 for trend filter
+    # 1d EMA34 trend filter
     close_1d = df_1d['close'].values
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    trend_1d = (close_1d > ema200_1d).astype(float)
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_1d = (close_1d > ema34_1d).astype(float)
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # Daily Donchian channels (20-day high/low)
-    high_20d = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
-    low_20d = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = np.roll(df_1d['high'].values, 1)
+    prev_low = np.roll(df_1d['low'].values, 1)
+    prev_close = np.roll(df_1d['close'].values, 1)
+    prev_high[0] = df_1d['high'].values[0]
+    prev_low[0] = df_1d['low'].values[0]
+    prev_close[0] = df_1d['close'].values[0]
     
-    # Align Donchian levels to 4h timeframe
-    donch_high_4h = align_htf_to_ltf(prices, df_1d, high_20d)
-    donch_low_4h = align_htf_to_ltf(prices, df_1d, low_20d)
+    # Camarilla pivot levels calculation
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_val = prev_high - prev_low
+    r3 = pivot + (range_val * 1.1 / 2)
+    s3 = pivot - (range_val * 1.1 / 2)
     
-    # Volume spike: current volume > 2.5 * 20-period average
+    # Align Camarilla levels to 6h timeframe
+    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Volume spike detection: current volume > 2.0 * 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma20 * 2.5)
+    vol_spike = volume > (vol_ma20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 25  # warmup for Donchian and volume MA
+    start_idx = 34  # warmup for EMA34 and volume MA
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donch_high_4h[i]) or np.isnan(donch_low_4h[i]) or 
-            np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: price breaks above 20-day high with volume spike and daily uptrend
-            long_cond = (close[i] > donch_high_4h[i] and vol_spike[i] and trend_1d_aligned[i] > 0.5)
+            # Long entry: price breaks above R3 with volume spike and 1d uptrend
+            long_cond = (close[i] > r3_6h[i] and vol_spike[i] and trend_1d_aligned[i] > 0.5)
             
-            # Short entry: price breaks below 20-day low with volume spike and daily downtrend
-            short_cond = (close[i] < donch_low_4h[i] and vol_spike[i] and trend_1d_aligned[i] < 0.5)
+            # Short entry: price breaks below S3 with volume spike and 1d downtrend
+            short_cond = (close[i] < s3_6h[i] and vol_spike[i] and trend_1d_aligned[i] < 0.5)
             
             if long_cond:
                 signals[i] = 0.25
@@ -68,15 +77,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below 20-day low (reversal signal)
-            if close[i] < donch_low_4h[i]:
+            # Long exit: price breaks below S3 (reversal signal)
+            if close[i] < s3_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above 20-day high (reversal signal)
-            if close[i] > donch_high_4h[i]:
+            # Short exit: price reverses back above R3 (reversal signal)
+            if close[i] > r3_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -84,12 +93,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Donchian(20) breakout on daily timeframe with volume spike confirmation and daily EMA200 trend filter on 4h timeframe.
-# Enters long when price breaks above 20-day daily high with volume spike and daily uptrend (close > EMA200).
-# Enters short when price breaks below 20-day daily low with volume spike and daily downtrend (close < EMA200).
-# Exits when price reverses back through the opposite Donchian level.
-# Uses daily Donchian channels to capture longer-term breaks, reducing false signals on 4h.
-# Volume spike requirement ensures momentum behind the breakout.
-# Trend filter ensures we only trade in the direction of the daily trend, reducing whipsaw.
-# Works in bull markets (breakouts in uptrend) and bear markets (breakdowns in downtrend).
-# Discrete sizing (0.25) minimizes churn. Targets ~20-40 trades/year on 4h timeframe.
+# Hypothesis: Camarilla R3/S3 breakout strategy with volume spike confirmation and 1d EMA34 trend filter on 6h timeframe.
+# Enters long when price breaks above R3 with volume spike and 1d uptrend (close > EMA34).
+# Enters short when price breaks below S3 with volume spike and 1d downtrend (close < EMA34).
+# Exits when price reverses back through S3/R3 respectively.
+# Uses discrete sizing (0.25) to minimize churn. Targets 50-150 total trades over 4 years on 6h timeframe.
+# 1d trend filter ensures we only trade with the higher timeframe trend, reducing whipsaw in sideways markets.
+# R3/S3 levels represent stronger breakout points than R1/S1, filtering out false breakouts in ranging markets.
+# Works in bull markets (trend-following breakouts) and bear markets (reversal breakouts from overextended levels).
