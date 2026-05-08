@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R with 1d trend filter and volume confirmation
-# Williams %R > -20 = overbought, < -80 = oversold
-# Long: Williams %R crosses above -80 (exit oversold) + price > 1d EMA50 + volume spike
-# Short: Williams %R crosses below -20 (enter overbought) + price < 1d EMA50 + volume spike
-# Exit: Williams %R crosses opposite threshold (-20 for long, -80 for short)
-# Williams %R captures momentum reversals, EMA50 filters trend direction, volume confirms strength
-# Designed for 15-30 trades/year with controlled frequency
+# Hypothesis: 4h KAMA trend + RSI mean reversion + volume spike
+# Uses adaptive trend filter (KAMA) to avoid whipsaws in ranging markets
+# Long: KAMA bullish AND RSI < 35 AND volume spike (>1.5x 20-period avg)
+# Short: KAMA bearish AND RSI > 65 AND volume spike (>1.5x 20-period avg)
+# Exit: RSI returns to neutral (40-60) or trend change
+# Designed for 20-35 trades/year with proper risk control via mean reversion in trend
 
-name = "6h_WilliamsR_1dEMA50_VolumeConfirm"
-timeframe = "6h"
+name = "4h_KAMA_RSI_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,85 +24,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 60m data for Williams %R calculation (14-period)
-    df_60m = get_htf_data(prices, '60m')
-    if len(df_60m) < 14:
-        return np.zeros(n)
+    # Calculate KAMA (adaptive trend filter)
+    # Efficiency Ratio: |close - close[10]| / sum(|close - close[1]|) over 10 periods
+    change = np.abs(np.subtract(close[10:], close[:-10]))
+    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0) if len(close) > 1 else np.array([0.0])
+    # Fix volatility calculation for rolling window
+    volatility = np.array([np.sum(np.abs(np.diff(close[i:i+10]))) if i+10 <= len(close) else 0.0 
+                          for i in range(len(close))])
+    er = np.divide(change, volatility, out=np.full_like(change, 0.0), where=volatility!=0)
+    # Smoothing constants: fastest SC=2/(2+1)=0.67, slowest SC=2/(30+1)=0.0645
+    sc = np.power(er * (0.67 - 0.0645) + 0.0645, 2)
+    # Calculate KAMA
+    kama = np.full_like(close, np.nan)
+    kama[9] = close[9]  # seed
+    for i in range(10, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Get 1d data for EMA50 trend filter and volume average
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # Calculate RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, 0.0), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate Williams %R (14-period)
-    high_60m = df_60m['high'].values
-    low_60m = df_60m['low'].values
-    close_60m = df_60m['close'].values
-    
-    # Williams %R = -100 * (HHV - Close) / (HHV - LLV)
-    highest_high = pd.Series(high_60m).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_60m).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close_60m) / (highest_high - lowest_low)
-    # Handle division by zero when HHV == LLV
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
-    
-    # Calculate 1d EMA50 for trend filter
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Calculate 20-day average volume for volume filter
-    vol_1d = df_1d['volume'].values
-    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Align indicators to 6h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_60m, williams_r)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    # Calculate volume spike filter
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 14)  # warmup period
+    start_idx = 20  # warmup for RSI and volatility
     
     for i in range(start_idx, n):
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(vol_ma_20_aligned[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume filter: current 1d volume > 1.5x 20-day average
-        # Find the most recent completed 1d bar
-        idx_1d = len(df_1d) - 1
-        while idx_1d >= 0 and df_1d.iloc[idx_1d]['open_time'] > prices.iloc[i]['open_time']:
-            idx_1d -= 1
-        vol_filter = False
-        if idx_1d >= 0:
-            vol_1d_current = df_1d.iloc[idx_1d]['volume']
-            vol_filter = vol_1d_current > 1.5 * vol_ma_20_aligned[i]
-        
         if position == 0:
-            # Look for mean reversion entries with trend and volume confirmation
-            # Long: Williams %R crosses above -80 (exit oversold) + uptrend + volume spike
-            if williams_r_aligned[i] > -80 and williams_r_aligned[i-1] <= -80 and ema50_1d_aligned[i] > 0:
-                if vol_filter:
-                    signals[i] = 0.25
-                    position = 1
-            # Short: Williams %R crosses below -20 (enter overbought) + downtrend + volume spike
-            elif williams_r_aligned[i] < -20 and williams_r_aligned[i-1] >= -20 and ema50_1d_aligned[i] < 0:
-                if vol_filter:
-                    signals[i] = -0.25
-                    position = -1
+            # Look for mean reversion entries within trend
+            # Long: KAMA bullish (price > KAMA) AND RSI oversold AND volume spike
+            if close[i] > kama[i] and rsi[i] < 35 and vol_spike[i]:
+                signals[i] = 0.25
+                position = 1
+            # Short: KAMA bearish (price < KAMA) AND RSI overbought AND volume spike
+            elif close[i] < kama[i] and rsi[i] > 65 and vol_spike[i]:
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Exit long: Williams %R crosses below -20 (overbought threshold)
-            if williams_r_aligned[i] < -20:
+            # Exit long: RSI returns to neutral or trend change
+            if rsi[i] > 40 or close[i] <= kama[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R crosses above -80 (oversold threshold)
-            if williams_r_aligned[i] > -80:
+            # Exit short: RSI returns to neutral or trend change
+            if rsi[i] < 60 or close[i] >= kama[i]:
                 signals[i] = 0.0
                 position = 0
             else:
