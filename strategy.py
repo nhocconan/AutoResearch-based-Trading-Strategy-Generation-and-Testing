@@ -3,19 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w trend filter and volume confirmation.
-# Breakout above upper band when 1w trend is up (trend following in bull/bear).
-# Breakdown below lower band when 1w trend is down (trend following in bear/bull).
-# Uses 1w EMA(34) for trend and 30-period volume spike for confirmation.
-# Target: 20-50 total trades over 4 years (5-12.5/year) to minimize fee drag.
+# Hypothesis: 6h Bollinger Bands mean reversion with 12h trend filter and volume confirmation.
+# Long when price touches lower BB and 12h trend is down (fade in downtrend).
+# Short when price touches upper BB and 12h trend is up (fade in uptrend).
+# Exit when price crosses middle band (mean reversion complete).
+# Uses Bollinger Bands (20, 2) on 6h, 12h EMA(34) for trend, 60-period volume spike.
+# Target: 80-120 total trades over 4 years (20-30/year) to balance opportunity and cost.
 
-name = "1d_Donchian20_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "6h_BB_MeanReversion_12hTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,67 +24,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 34:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_12h = df_12h['close'].values
     
-    # 1w EMA(34) for trend filter
-    close_1w_series = pd.Series(close_1w)
-    ema_34_1w = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_up = ema_34_1w[1:] > ema_34_1w[:-1]  # Rising EMA = uptrend
-    trend_up = np.concatenate([[False], trend_up])  # Align with 1w index
+    # Bollinger Bands (20, 2) on 6h
+    bb_period = 20
+    bb_std = 2
+    close_series = pd.Series(close)
+    bb_ma = close_series.rolling(window=bb_period, min_periods=bb_period).mean()
+    bb_std_dev = close_series.rolling(window=bb_period, min_periods=bb_period).std()
+    bb_upper = bb_ma + (bb_std_dev * bb_std)
+    bb_middle = bb_ma
+    bb_lower = bb_ma - (bb_std_dev * bb_std)
     
-    # Donchian(20) on daily
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 12h EMA(34) for trend filter
+    close_12h_series = pd.Series(close_12h)
+    ema_34_12h = close_12h_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_up = ema_34_12h[1:] > ema_34_12h[:-1]  # Rising EMA = uptrend
+    trend_up = np.concatenate([[False], trend_up])  # Align with 12h index
     
-    # Volume confirmation: 30-period volume spike (2.0x EMA)
-    vol_ema = pd.Series(volume).ewm(span=30, adjust=False, min_periods=30).mean().values
-    vol_confirm = volume > (vol_ema * 2.0)
+    # Volume confirmation: 60-period volume spike (1.8x EMA)
+    vol_ema = pd.Series(volume).ewm(span=60, adjust=False, min_periods=60).mean().values
+    vol_confirm = volume > (vol_ema * 1.8)
     
-    # Align 1w trend to daily
-    trend_up_aligned = align_htf_to_ltf(prices, df_1w, trend_up.astype(float))
+    # Align indicators to 6h timeframe
+    bb_upper_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), bb_upper.values)
+    bb_middle_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), bb_middle.values)
+    bb_lower_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), bb_lower.values)
+    trend_up_aligned = align_htf_to_ltf(prices, df_12h, trend_up.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Ensure enough data for volume EMA
+    start_idx = max(bb_period, 60)  # Ensure enough data for BB and volume EMA
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or
-            np.isnan(trend_up_aligned[i]) or np.isnan(vol_ema[i])):
+        if (np.isnan(bb_upper_aligned[i]) or np.isnan(bb_middle_aligned[i]) or
+            np.isnan(bb_lower_aligned[i]) or np.isnan(trend_up_aligned[i]) or
+            np.isnan(vol_ema[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: breakout above upper band in uptrend
-            if (trend_up_aligned[i] > 0.5 and  # 1w uptrend
-                high[i] >= high_20[i] and
+            # Long entry: price at or below lower BB in downtrend (fade)
+            if (trend_up_aligned[i] <= 0.5 and  # 12h downtrend
+                close[i] <= bb_lower_aligned[i] and
                 vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: breakdown below lower band in downtrend
-            elif (trend_up_aligned[i] <= 0.5 and  # 1w downtrend
-                  low[i] <= low_20[i] and
+            # Short entry: price at or above upper BB in uptrend (fade)
+            elif (trend_up_aligned[i] > 0.5 and  # 12h uptrend
+                  close[i] >= bb_upper_aligned[i] and
                   vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: reverse signal or stop
-            if trend_up_aligned[i] <= 0.5:  # 1w downtrend
+            # Long exit: price crosses above middle BB (mean reversion complete)
+            if close[i] >= bb_middle_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: reverse signal or stop
-            if trend_up_aligned[i] > 0.5:  # 1w uptrend
+            # Short exit: price crosses below middle BB (mean reversion complete)
+            if close[i] <= bb_middle_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
