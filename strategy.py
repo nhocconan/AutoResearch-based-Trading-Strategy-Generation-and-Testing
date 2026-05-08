@@ -3,20 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d volume spike and 1d ADX trend filter
-# Donchian channels capture price breakouts from volatility contractions. Volume surge
-# confirms institutional participation. ADX > 25 ensures we trade only in strong trends,
-# avoiding whipsaws in ranges. This works in both bull and bear markets by filtering
-# for strong trends only. Targets 15-25 trades per year (~60-100 total over 4 years)
-# to minimize fee drag.
+# Hypothesis: 6h EMA(13/34) crossover with 1d VWAP deviation and volume spike
+# Uses EMA crossover for momentum, 1d VWAP deviation for mean reversion context,
+# and volume spike for institutional confirmation. Works in both bull/bear by
+# requiring volume confirmation and filtering extremes. Targets ~20-30 trades/year.
 
-name = "12h_Donchian20_1dVolume_1dADX"
-timeframe = "12h"
+name = "6h_EMA13_34_1dVWAPDev_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,102 +22,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for volume and ADX
+    # Get 1d data for VWAP and volume
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Volume spike detection on 1d
-    vol_ma = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean()
-    vol_spike_1d = df_1d['volume'].values > (vol_ma.values * 2.0)
-    vol_spike_12h = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
+    # Calculate 13 and 34 period EMA on 6h close
+    close_series = pd.Series(close)
+    ema13 = close_series.ewm(span=13, adjust=False, min_periods=13).values
+    ema34 = close_series.ewm(span=34, adjust=False, min_periods=34).values
     
-    # ADX trend filter on 1d
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d VWAP
+    typical_price_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3
+    vwap_numerator = np.cumsum(typical_price_1d * df_1d['volume'].values)
+    vwap_denominator = np.cumsum(df_1d['volume'].values)
+    vwap_1d = np.divide(vwap_numerator, vwap_denominator, 
+                        out=np.full_like(vwap_denominator, np.nan), 
+                        where=vwap_denominator!=0)
+    
+    # Calculate deviation from VWAP (%)
     close_1d = df_1d['close'].values
+    vwap_dev = (close_1d - vwap_1d) / vwap_1d * 100
     
-    plus_dm = np.zeros_like(high_1d)
-    minus_dm = np.zeros_like(high_1d)
-    tr = np.zeros_like(high_1d)
+    # Align EMA, VWAP deviation to 6h
+    ema13_6h = align_htf_to_ltf(prices, close_series, ema13)
+    ema34_6h = align_htf_to_ltf(prices, close_series, ema34)
+    vwap_dev_6h = align_htf_to_ltf(prices, df_1d, vwap_dev)
     
-    for i in range(1, len(high_1d)):
-        plus_dm[i] = max(high_1d[i] - high_1d[i-1], 0)
-        minus_dm[i] = max(low_1d[i-1] - low_1d[i], 0)
-        if plus_dm[i] == minus_dm[i]:
-            plus_dm[i] = 0
-            minus_dm[i] = 0
-        tr[i] = max(
-            high_1d[i] - low_1d[i],
-            abs(high_1d[i] - close_1d[i-1]),
-            abs(low_1d[i] - close_1d[i-1])
-        )
-    
-    def wilder_smooth(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        result[period-1] = np.nansum(arr[:period])
-        for i in range(period, len(arr)):
-            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
-        return result
-    
-    tr14 = wilder_smooth(tr, 14)
-    plus_dm14 = wilder_smooth(plus_dm, 14)
-    minus_dm14 = wilder_smooth(minus_dm, 14)
-    
-    plus_di14 = np.where(tr14 != 0, 100 * (plus_dm14 / tr14), 0)
-    minus_di14 = np.where(tr14 != 0, 100 * (minus_dm14 / tr14), 0)
-    
-    dx = np.where((plus_di14 + minus_di14) != 0, 
-                  100 * np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14), 0)
-    adx = wilder_smooth(dx, 14)
-    
-    adx_strong = adx > 25
-    adx_weak = adx < 20
-    adx_strong_12h = align_htf_to_ltf(prices, df_1d, adx_strong)
-    adx_weak_12h = align_htf_to_ltf(prices, df_1d, adx_weak)
-    
-    # Calculate Donchian(20) on 12h data
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max()
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min()
-    donchian_high_arr = donchian_high.values
-    donchian_low_arr = donchian_low.values
+    # Volume spike detection (24-period ~4d average)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean()
+    vol_std = pd.Series(volume).rolling(window=24, min_periods=24).std()
+    vol_spike = volume > (vol_ma.values + 2.0 * vol_std.values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure sufficient data for Donchian
+    start_idx = 34  # Ensure sufficient data for EMA34
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donchian_high_arr[i]) or np.isnan(donchian_low_arr[i]) or 
-            np.isnan(vol_spike_12h[i]) or np.isnan(adx_strong_12h[i]) or 
-            np.isnan(adx_weak_12h[i])):
+        if (np.isnan(ema13_6h[i]) or np.isnan(ema34_6h[i]) or 
+            np.isnan(vwap_dev_6h[i]) or np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above Donchian high, volume spike, strong trend
-            if close[i] > donchian_high_arr[i] and vol_spike_12h[i] and adx_strong_12h[i]:
+            # Enter long: EMA13 > EMA34, price below VWAP (mean reversion), volume spike
+            if ema13_6h[i] > ema34_6h[i] and vwap_dev_6h[i] < -0.5 and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below Donchian low, volume spike, strong trend
-            elif close[i] < donchian_low_arr[i] and vol_spike_12h[i] and adx_strong_12h[i]:
+            # Enter short: EMA13 < EMA34, price above VWAP, volume spike
+            elif ema13_6h[i] < ema34_6h[i] and vwap_dev_6h[i] > 0.5 and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to Donchian low or trend weakens
-            if close[i] < donchian_low_arr[i] or adx_weak_12h[i]:
+            # Exit long: EMA crossover down or price reverts to VWAP
+            if ema13_6h[i] < ema34_6h[i] or vwap_dev_6h[i] > 0.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to Donchian high or trend weakens
-            if close[i] > donchian_high_arr[i] or adx_weak_12h[i]:
+            # Exit short: EMA crossover up or price reverts to VWAP
+            if ema13_6h[i] > ema34_6h[i] or vwap_dev_6h[i] < -0.2:
                 signals[i] = 0.0
                 position = 0
             else:
