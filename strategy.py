@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Choppiness Index regime filter + 1d CAMARILLA pivot breakouts with volume confirmation.
-# In trending markets (CHOP < 38.2), trade breakouts of CAMARILLA H3/L3 levels.
-# In ranging markets (CHOP > 61.8), trade mean reversion at H4/L4 levels.
-# Volume must exceed 1.5x 20-period average to confirm breakout/mean reversion.
-# Uses 4h timeframe for execution, with 1d pivots and 4h chop filter.
-# Target: 80-150 total trades over 4 years (20-38/year) to balance edge and fee drag.
+# Hypothesis: 1d Donchian breakout with 1w trend filter and volume confirmation.
+# Long when price breaks above 20-day high AND price > 1w EMA50 AND volume > 1.5x 20-day average.
+# Short when price breaks below 20-day low AND price < 1w EMA50 AND volume > 1.5x 20-day average.
+# Exit when price returns to 10-day moving average (mean reversion) or opposite breakout occurs.
+# Uses 1d price action with weekly trend filter to avoid counter-trend trades in both bull and bear markets.
+# Target: 30-80 total trades over 4 years (7-20/year) for low fee drift.
 
-name = "4h_Choppiness_Camarilla_Pivot_Volume"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,113 +24,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for CAMARILLA pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 4h Choppiness Index (14-period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # 10-day and 20-day moving averages for exit
+    ma10 = pd.Series(close).rolling(window=10, min_periods=10).mean().values
+    ma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
     
-    # True Range for chop denominator
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # 20-day Donchian channels
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Choppiness Index: 100 * log10(TR_sum / (ATR * 14)) / log10(14)
-    chop = 100 * np.log10(tr_sum / (atr * 14)) / np.log10(14)
-    
-    # 4h volume filter: current volume > 1.5x 20-period average
+    # Volume filter: current volume > 1.5x 20-day average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma20)
     
-    # Calculate 1d CAMARILLA pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # CAMARILLA formulas
-    H5 = close_1d + 1.1 * (high_1d - low_1d) / 2
-    H4 = close_1d + 1.1 * (high_1d - low_1d) / 4
-    H3 = close_1d + 1.1 * (high_1d - low_1d) / 6
-    L3 = close_1d - 1.1 * (high_1d - low_1d) / 6
-    L4 = close_1d - 1.1 * (high_1d - low_1d) / 4
-    L5 = close_1d - 1.1 * (high_1d - low_1d) / 2
-    
-    # Align CAMARILLA levels to 4h timeframe
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    # 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Sufficient warmup for chop and volume
+    start_idx = 50  # Sufficient warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(chop[i]) or np.isnan(volume_filter[i]) or 
-            np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(volume_filter[i]) or np.isnan(ema50_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Determine market regime based on Choppiness Index
-            if chop[i] < 38.2:  # Trending market
-                # Breakout strategy: enter on H3/L3 break with volume
-                long_break = (close[i] > H3_aligned[i]) and volume_filter[i]
-                short_break = (close[i] < L3_aligned[i]) and volume_filter[i]
-                
-                if long_break:
-                    signals[i] = 0.25
-                    position = 1
-                elif short_break:
-                    signals[i] = -0.25
-                    position = -1
-            elif chop[i] > 61.8:  # Ranging market
-                # Mean reversion strategy: enter at H4/L4 with volume
-                long_reversion = (close[i] < L4_aligned[i]) and volume_filter[i]
-                short_reversion = (close[i] > H4_aligned[i]) and volume_filter[i]
-                
-                if long_reversion:
-                    signals[i] = 0.20
-                    position = 1
-                elif short_reversion:
-                    signals[i] = -0.20
-                    position = -1
+            # Long conditions: break above 20-day high, above 1w EMA50, volume spike
+            long_cond = (close[i] > highest_high[i]) and (close[i] > ema50_1w_aligned[i]) and volume_filter[i]
+            # Short conditions: break below 20-day low, below 1w EMA50, volume spike
+            short_cond = (close[i] < lowest_low[i]) and (close[i] < ema50_1w_aligned[i]) and volume_filter[i]
+            
+            if long_cond:
+                signals[i] = 0.25
+                position = 1
+            elif short_cond:
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Long exit conditions
-            if chop[i] < 38.2:  # Trending: exit on H4 break or L3 retest
-                if close[i] > H4_aligned[i] or close[i] < L3_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-            else:  # Ranging: exit at H3 or mean reversion
-                if close[i] > H3_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.20
+            # Long exit: return to 10-day MA or opposite breakout
+            if close[i] < ma10[i] or close[i] < lowest_low[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit conditions
-            if chop[i] < 38.2:  # Trending: exit on L4 break or H3 retest
-                if close[i] < L4_aligned[i] or close[i] > H3_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
-            else:  # Ranging: exit at L3 or mean reversion
-                if close[i] < L3_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.20
+            # Short exit: return to 10-day MA or opposite breakout
+            if close[i] > ma10[i] or close[i] > highest_high[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
