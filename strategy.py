@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "4h"
+name = "6h_ElderRay_Power_WeeklyTrend"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,112 +17,105 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data once
+    # Get daily data once for Elder Ray calculations
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 15:
         return np.zeros(n)
     
-    # Calculate 1d EMA(34) for trend direction
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
+        return np.zeros(n)
     
-    # Calculate 1d ATR(14) for volatility normalization
+    # Calculate 13-period EMA for Elder Ray (using daily data)
+    close_1d = df_1d['close'].values
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
+    
+    # Calculate Elder Ray components: Bull Power and Bear Power
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    tr1 = np.maximum(high_1d[1:] - low_1d[1:], 
-                     np.maximum(np.abs(high_1d[1:] - close_1d[:-1]), 
-                                np.abs(low_1d[1:] - close_1d[:-1])))
-    tr1 = np.concatenate([[np.nan], tr1])
+    bull_power = high_1d - ema13_1d
+    bear_power = low_1d - ema13_1d
     
-    atr14 = pd.Series(tr1).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr14_aligned = align_htf_to_ltf(prices, df_1d, atr14)
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
     
-    # Calculate daily Camarilla pivot levels (standard formula)
-    # P = (H + L + C) / 3
-    # R4 = C + (H-L) * 1.1/2
-    # R3 = C + (H-L) * 1.1/4
-    # S3 = C - (H-L) * 1.1/4
-    # S4 = C - (H-L) * 1.1/2
-    # Using previous day's H, L, C
-    high_1d_prev = np.roll(high_1d, 1)
-    low_1d_prev = np.roll(low_1d, 1)
-    close_1d_prev = np.roll(close_1d, 1)
-    high_1d_prev[0] = np.nan
-    low_1d_prev[0] = np.nan
-    close_1d_prev[0] = np.nan
+    # Calculate weekly EMA(34) for trend filter
+    close_1w = df_1w['close'].values
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    P = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
-    HL = high_1d_prev - low_1d_prev
-    R3 = close_1d_prev + HL * 1.1 / 4.0
-    S3 = close_1d_prev - HL * 1.1 / 4.0
+    # Calculate 6-period RSI for overbought/oversold conditions
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Align daily pivot levels to 4h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    avg_gain = pd.Series(gain).ewm(alpha=1/6, adjust=False, min_periods=6).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/6, adjust=False, min_periods=6).mean().values
     
-    # Volume spike detection: current volume > 2 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2 * vol_ma)
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # warmup
+    start_idx = 50  # warmup
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(R3_aligned[i]) or 
-            np.isnan(S3_aligned[i])):
+        if (np.isnan(ema13_1d_aligned[i]) or np.isnan(ema34_1w_aligned[i]) or 
+            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
+            np.isnan(rsi[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema_val = ema34_1d_aligned[i]
-        r3_val = R3_aligned[i]
-        s3_val = S3_aligned[i]
-        vol_spike = volume_spike[i]
+        ema13_val = ema13_1d_aligned[i]
+        ema34_1w_val = ema34_1w_aligned[i]
+        bull_power_val = bull_power_aligned[i]
+        bear_power_val = bear_power_aligned[i]
+        rsi_val = rsi[i]
         
         if position == 0:
-            # Enter long: price breaks above R3 with volume spike, above 1d EMA
-            if (close[i] > r3_val and vol_spike and 
-                close[i] > ema_val):
-                signals[i] = 0.30
+            # Enter long: Bull Power > 0, price above weekly EMA, RSI not overbought
+            if (bull_power_val > 0 and 
+                close[i] > ema34_1w_val and 
+                rsi_val < 70):
+                signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S3 with volume spike, below 1d EMA
-            elif (close[i] < s3_val and vol_spike and 
-                  close[i] < ema_val):
-                signals[i] = -0.30
+            # Enter short: Bear Power < 0, price below weekly EMA, RSI not oversold
+            elif (bear_power_val < 0 and 
+                  close[i] < ema34_1w_val and 
+                  rsi_val > 30):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below S3 OR below 1d EMA
-            if (close[i] < s3_val or close[i] < ema_val):
+            # Exit long: Bull Power <= 0 OR price crosses below weekly EMA
+            if (bull_power_val <= 0 or close[i] < ema34_1w_val):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above R3 OR above 1d EMA
-            if (close[i] > r3_val or close[i] > ema_val):
+            # Exit short: Bear Power >= 0 OR price crosses above weekly EMA
+            if (bear_power_val >= 0 or close[i] > ema34_1w_val):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-# Hypothesis: Uses 4-hour Camarilla R3/S3 breakouts with volume confirmation and 1d EMA trend filter.
-# - Enters long when price breaks above R3 level with volume spike and above 1d EMA
-# - Enters short when price breaks below S3 level with volume spike and below 1d EMA
-# - Exits when price breaks back below S3 (long) or above R3 (short) OR crosses 1d EMA
-# - Volume spike filter ensures breakouts have conviction
-# - 1d EMA filter ensures trading with higher timeframe trend
-# - Camarilla levels provide clear support/resistance for breakout trading
-# - Target: 80-160 total trades over 4 years (20-40/year) to minimize fee drag
-# - Position size: 0.30 for balanced risk/return
-# - Works in both bull and bear markets by following 1d trend direction
-# - Volume confirmation reduces false breakouts in low-volume environments
+# Hypothesis: Uses Elder Ray (Bull/Bear Power) with weekly trend filter on 6-hour timeframe.
+# - Elder Ray measures bull/bear power relative to 13-day EMA
+# - Weekly EMA(34) filter ensures trading with higher timeframe trend
+# - Long when Bull Power > 0, price above weekly EMA, RSI < 70
+# - Short when Bear Power < 0, price below weekly EMA, RSI > 30
+# - Exits when power shifts or price crosses weekly EMA
+# - Works in both bull and bear markets by adapting to weekly trend direction
+# - Position size: 0.25 for balanced risk/return
+# - Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
 # - Focus on BTC and ETH as primary targets (not SOL-only)
