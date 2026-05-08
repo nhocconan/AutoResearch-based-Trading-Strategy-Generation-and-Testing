@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ChaikinVolatility_Expansion_Breakout_1dTrend"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -30,43 +30,59 @@ def generate_signals(prices):
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # 1d Chaikin Volatility: EMA of (high-low) difference
-    # Chaikin Volatility = EMA of (high - low) over period
-    hl_diff = high_1d - low_1d
-    chaikin_vol = pd.Series(hl_diff).ewm(span=10, adjust=False, min_periods=10).mean().values
-    # Expansion signal: current Chaikin Volatility > 1.5 * 10-period SMA of Chaikin Volatility
-    chaikin_sma10 = pd.Series(chaikin_vol).rolling(window=10, min_periods=10).mean().values
-    chaikin_expansion = chaikin_vol > (chaikin_sma10 * 1.5)
-    chaikin_expansion_aligned = align_htf_to_ltf(prices, df_1d, chaikin_expansion.astype(float))
+    # 1d ATR for volatility filter
+    tr = np.maximum(high_1d - low_1d, 
+                    np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), 
+                               np.abs(low_1d - np.roll(close_1d, 1))))
+    tr[0] = high_1d[0] - low_1d[0]
+    atr14_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
     
-    # 6h Donchian channel breakout (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 1d data for Camarilla pivot (previous day)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d[0] = high_1d[0]
+    prev_low_1d[0] = low_1d[0]
+    prev_close_1d[0] = close_1d[0]
+    
+    pivot = (prev_high_1d + prev_low_1d + prev_close_1d) / 3.0
+    range_1d = prev_high_1d - prev_low_1d
+    r1 = pivot + (range_1d * 1.1 / 12)
+    s1 = pivot - (range_1d * 1.1 / 12)
+    
+    # Align Camarilla levels to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Volume filter: 12h volume > 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # warmup for indicators
+    start_idx = 50  # warmup for EMA50
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(chaikin_expansion_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(atr14_1d_aligned[i]) or
+            np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above Donchian high, 1d trend up (price > EMA50), volatility expanding
-            long_cond = (close[i] > donchian_high[i] and 
+            # Long: Price breaks above R1, price above 1d EMA50, volume above average
+            long_cond = (close[i] > r1_aligned[i] and 
                         close[i] > ema50_1d_aligned[i] and
-                        chaikin_expansion_aligned[i] > 0.5)
+                        volume[i] > vol_ma20[i])
             
-            # Short: Price breaks below Donchian low, 1d trend down (price < EMA50), volatility expanding
-            short_cond = (close[i] < donchian_low[i] and 
+            # Short: Price breaks below S1, price below 1d EMA50, volume above average
+            short_cond = (close[i] < s1_aligned[i] and 
                          close[i] < ema50_1d_aligned[i] and
-                         chaikin_expansion_aligned[i] > 0.5)
+                         volume[i] > vol_ma20[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -75,15 +91,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Price closes below Donchian low OR volatility contraction
-            if close[i] < donchian_low[i] or chaikin_expansion_aligned[i] <= 0.5:
+            # Long exit: Price closes below S1 OR price crosses below 1d EMA50
+            if close[i] < s1_aligned[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price closes above Donchian high OR volatility contraction
-            if close[i] > donchian_high[i] or chaikin_expansion_aligned[i] <= 0.5:
+            # Short exit: Price closes above R1 OR price crosses above 1d EMA50
+            if close[i] > r1_aligned[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -91,8 +107,8 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Chaikin Volatility expansion identifies periods of increasing volatility
-# that often precede sustained moves. Combined with Donchian breakouts and 1d EMA50 trend
-# filter, this captures institutional breakout moves in both bull and bear markets.
-# The volatility filter avoids choppy markets while the trend filter ensures alignment
-# with higher timeframe direction. 6h timeframe targets 15-35 trades/year to avoid fee drag.
+# Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA50 trend filter and volume confirmation.
+# Targets 12-37 trades/year (50-150 over 4 years) to avoid fee drag.
+# Works in bull markets via breakout continuation, in bear via mean reversion at S1/R1.
+# Uses 12h timeframe for lower trade frequency, 1d trend filter for regime alignment,
+# and volume confirmation to ensure institutional participation. Discrete sizing (0.25) minimizes churn.
