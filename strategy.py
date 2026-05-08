@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -37,7 +37,7 @@ def generate_signals(prices):
     r4 = pivot + (range_ * 1.1)
     s4 = pivot - (range_ * 1.1)
     
-    # Align daily Camarilla levels to 6h timeframe
+    # Align daily Camarilla levels to 12h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
@@ -54,7 +54,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for indicators
+    start_idx = 60  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
@@ -69,14 +69,14 @@ def generate_signals(prices):
             # Long: price breaks above S4 with daily uptrend and volume
             if (close[i] > s4_aligned[i] and 
                 close[i] > ema_34_aligned[i] and
-                vol_ratio[i] > 1.5):
-                signals[i] = 0.25
+                vol_ratio[i] > 1.8):
+                signals[i] = 0.28
                 position = 1
             # Short: price breaks below R3 with daily downtrend and volume
             elif (close[i] < r3_aligned[i] and 
                   close[i] < ema_34_aligned[i] and
-                  vol_ratio[i] > 1.5):
-                signals[i] = -0.25
+                  vol_ratio[i] > 1.8):
+                signals[i] = -0.28
                 position = -1
         elif position == 1:
             # Long exit: price breaks below S3 or reverses below EMA
@@ -85,7 +85,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.28
         elif position == -1:
             # Short exit: price breaks above R3 or reverses above EMA
             if (close[i] > r3_aligned[i] or 
@@ -93,6 +93,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.28
     
     return signals
