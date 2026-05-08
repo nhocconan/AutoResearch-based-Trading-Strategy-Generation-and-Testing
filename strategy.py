@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Choppiness index regime filter combined with 1d EMA trend and volume spike.
-# Long when: 4h Choppiness > 61.8 (range) AND price > 1d EMA50 AND volume > 1.5x 20-period average.
-# Short when: 4h Choppiness > 61.8 (range) AND price < 1d EMA50 AND volume > 1.5x 20-period average.
-# Exit when Choppiness < 38.2 (trending) or opposite condition met.
-# This strategy mean-reverts in ranging markets (high chop) while avoiding trending markets (low chop).
-# Works in both bull and bear markets by using 1d EMA for direction and volume for confirmation.
-# Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drag.
+# Hypothesis: 6h Williams Alligator with 1d trend filter and volume confirmation.
+# Long when Alligator jaw < teeth < lips (bullish alignment) AND 1d EMA50 rising AND volume > 1.5x 20-period average.
+# Short when Alligator jaw > teeth > lips (bearish alignment) AND 1d EMA50 falling AND volume > 1.5x 20-period average.
+# Exit when Alligator lines re-cross (jaws cross teeth) or price crosses 8-period EMA.
+# The Alligator identifies trend phases via smoothed SMAs. The 1d EMA50 ensures alignment with daily trend.
+# Volume confirmation filters weak breakouts. This combination should work in both bull and bear markets
+# by following the dominant trend while avoiding choppy periods.
+# Target: 50-120 total trades over 4 years (12-30/year) to minimize fee drag.
 
-name = "4h_Chop_EMA50_Volume_MeanReversion"
-timeframe = "4h"
+name = "6h_WilliamsAlligator_1dEMA50_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,31 +26,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for EMA50
+    # Daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 4h Choppiness index (14-period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period has no previous close
+    # Williams Alligator: Jaw (13-period SMMA, shifted 8), Teeth (8-period SMMA, shifted 5), Lips (5-period SMMA, shifted 3)
+    # SMMA = Smoothed Moving Average (similar to Wilder's smoothing)
+    def smma(arr, period):
+        if len(arr) < period:
+            return np.full_like(arr, np.nan)
+        result = np.full_like(arr, np.nan)
+        # First value is simple SMA
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CURRENT_VALUE) / period
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    jaw = smma(close, 13)  # Blue line
+    teeth = smma(close, 8)  # Red line
+    lips = smma(close, 5)   # Green line
     
-    # Avoid division by zero
-    range14 = highest_high - lowest_low
-    range14 = np.where(range14 == 0, 1e-10, range14)
+    # Shift the lines as per Alligator definition
+    jaw_shifted = np.roll(jaw, 8)
+    teeth_shifted = np.roll(teeth, 5)
+    lips_shifted = np.roll(lips, 3)
     
-    chop = 100 * np.log10(atr14 * 14 / range14) / np.log10(14)
+    # Set NaN for shifted positions
+    jaw_shifted[:8] = np.nan
+    teeth_shifted[:5] = np.nan
+    lips_shifted[:3] = np.nan
     
     # 1d EMA50 for trend filter
     ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # 1d EMA50 direction
+    ema50_rising = np.zeros_like(ema50_1d_aligned, dtype=bool)
+    ema50_falling = np.zeros_like(ema50_1d_aligned, dtype=bool)
+    ema50_rising[1:] = ema50_1d_aligned[1:] > ema50_1d_aligned[:-1]
+    ema50_falling[1:] = ema50_1d_aligned[1:] < ema50_1d_aligned[:-1]
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -58,21 +75,27 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20, 14)  # Sufficient warmup
+    start_idx = max(50, 20)  # Sufficient warmup for EMA50 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(chop[i]) or np.isnan(ema50_1d_aligned[i]) or 
+        # Check for NaN values
+        if (np.isnan(jaw_shifted[i]) or np.isnan(teeth_shifted[i]) or np.isnan(lips_shifted[i]) or
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(ema50_rising[i]) or np.isnan(ema50_falling[i]) or
             np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Alligator alignment conditions
+        bullish_alignment = (jaw_shifted[i] < teeth_shifted[i]) and (teeth_shifted[i] < lips_shifted[i])
+        bearish_alignment = (jaw_shifted[i] > teeth_shifted[i]) and (teeth_shifted[i] > lips_shifted[i])
+        
         if position == 0:
-            # Long conditions: high chop (range), price above EMA50, volume filter
-            long_cond = (chop[i] > 61.8) and (close[i] > ema50_1d_aligned[i]) and volume_filter[i]
-            # Short conditions: high chop (range), price below EMA50, volume filter
-            short_cond = (chop[i] > 61.8) and (close[i] < ema50_1d_aligned[i]) and volume_filter[i]
+            # Long conditions: bullish alignment, 1d EMA50 rising, volume filter
+            long_cond = bullish_alignment and ema50_rising[i] and volume_filter[i]
+            # Short conditions: bearish alignment, 1d EMA50 falling, volume filter
+            short_cond = bearish_alignment and ema50_falling[i] and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -81,15 +104,19 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: chop drops below 38.2 (trending) or price crosses below EMA50
-            if chop[i] < 38.2 or close[i] < ema50_1d_aligned[i]:
+            # Long exit: bearish alignment (jaws cross teeth) or price crosses below 8-period EMA
+            ema8 = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
+            exit_cond = bearish_alignment or (close[i] < ema8[i])
+            if exit_cond:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: chop drops below 38.2 (trending) or price crosses above EMA50
-            if chop[i] < 38.2 or close[i] > ema50_1d_aligned[i]:
+            # Short exit: bullish alignment (jaws cross teeth) or price crosses above 8-period EMA
+            ema8 = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
+            exit_cond = bullish_alignment or (close[i] > ema8[i])
+            if exit_cond:
                 signals[i] = 0.0
                 position = 0
             else:
