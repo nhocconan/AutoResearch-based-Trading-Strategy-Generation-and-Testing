@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_PivotBreakout_VolumeTrend_1d"
-timeframe = "12h"
+name = "4h_WilliamsAlligator_ElderRay_1d"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,79 +17,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data once for pivot levels and trend filter
+    # Get 1d data once for Williams Alligator and Elder Ray
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Previous day's OHLC for pivot calculation
-    prev_high = np.roll(df_1d['high'].values, 1)
-    prev_low = np.roll(df_1d['low'].values, 1)
-    prev_close = np.roll(df_1d['close'].values, 1)
-    prev_high[0] = df_1d['high'].values[0]
-    prev_low[0] = df_1d['low'].values[0]
-    prev_close[0] = df_1d['close'].values[0]
+    # Williams Alligator (1d)
+    # Jaws: 13-period SMMA of median price, shifted 8 bars forward
+    median_price_1d = (df_1d['high'].values + df_1d['low'].values) / 2.0
+    jaws_raw = pd.Series(median_price_1d).rolling(window=13, min_periods=13).mean().values
+    jaws = np.roll(jaws_raw, 8)
+    jaws[:8] = np.nan
     
-    # Pivot point and R1/S1 levels (standard calculation)
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_val = prev_high - prev_low
-    r1 = pivot + range_val
-    s1 = pivot - range_val
+    # Teeth: 8-period SMMA of median price, shifted 5 bars forward
+    teeth_raw = pd.Series(median_price_1d).rolling(window=8, min_periods=8).mean().values
+    teeth = np.roll(teeth_raw, 5)
+    teeth[:5] = np.nan
     
-    # Align pivot levels to 12h timeframe
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
+    # Lips: 5-period SMMA of median price, shifted 3 bars forward
+    lips_raw = pd.Series(median_price_1d).rolling(window=5, min_periods=5).mean().values
+    lips = np.roll(lips_raw, 3)
+    lips[:3] = np.nan
     
-    # 1d EMA20 trend filter
-    close_1d = df_1d['close'].values
-    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    trend_1d = (close_1d > ema20_1d).astype(float)
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    # Elder Ray Power (1d)
+    # Bull Power = High - EMA13
+    # Bear Power = Low - EMA13
+    ema13_1d = pd.Series(df_1d['close'].values).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = df_1d['high'].values - ema13_1d
+    bear_power = df_1d['low'].values - ema13_1d
     
-    # Volume spike detection: current volume > 2.0 * 20-period average
+    # Align indicators to 4h timeframe
+    jaws_4h = align_htf_to_ltf(prices, df_1d, jaws)
+    teeth_4h = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_4h = align_htf_to_ltf(prices, df_1d, lips)
+    bull_power_4h = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_4h = align_htf_to_ltf(prices, df_1d, bear_power)
+    
+    # 4h volume spike detection: current volume > 2.5 * 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma20 * 2.0)
-    
-    # Price distance filter: require breakout to be at least 0.3% above/below level
-    price_above_r1 = close > r1_12h * 1.003
-    price_below_s1 = close < s1_12h * 0.997
+    vol_spike = volume > (vol_ma20 * 2.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # warmup for volume MA
+    start_idx = 30  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(jaws_4h[i]) or np.isnan(teeth_4h[i]) or np.isnan(lips_4h[i]) or 
+            np.isnan(bull_power_4h[i]) or np.isnan(bear_power_4h[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: price breaks above R1 with volume spike and 1d uptrend
-            long_cond = (price_above_r1[i] and vol_spike[i] and trend_1d_aligned[i] > 0.5)
+            # Long entry: Alligator bullish (jaws < teeth < lips) + Bull Power > 0 + volume spike
+            alligator_bullish = (jaws_4h[i] < teeth_4h[i]) and (teeth_4h[i] < lips_4h[i])
+            bull_power_positive = bull_power_4h[i] > 0
             
-            # Short entry: price breaks below S1 with volume spike and 1d downtrend
-            short_cond = (price_below_s1[i] and vol_spike[i] and trend_1d_aligned[i] < 0.5)
-            
-            if long_cond:
+            if alligator_bullish and bull_power_positive and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            elif short_cond:
+            
+            # Short entry: Alligator bearish (jaws > teeth > lips) + Bear Power < 0 + volume spike
+            elif (jaws_4h[i] > teeth_4h[i]) and (teeth_4h[i] > lips_4h[i]) and (bear_power_4h[i] < 0) and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
+        
         elif position == 1:
-            # Long exit: price reverses back below R1 (mean reversion)
-            if close[i] < r1_12h[i]:
+            # Long exit: Alligator turns bearish OR Bull Power turns negative
+            alligator_bearish = (jaws_4h[i] > teeth_4h[i]) and (teeth_4h[i] > lips_4h[i])
+            bull_power_negative = bull_power_4h[i] < 0
+            
+            if alligator_bearish or bull_power_negative:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
+        
         elif position == -1:
-            # Short exit: price reverses back above S1 (mean reversion)
-            if close[i] > s1_12h[i]:
+            # Short exit: Alligator turns bullish OR Bear Power turns positive
+            alligator_bullish = (jaws_4h[i] < teeth_4h[i]) and (teeth_4h[i] < lips_4h[i])
+            bear_power_positive = bear_power_4h[i] > 0
+            
+            if alligator_bullish or bear_power_positive:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -97,10 +109,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Pivot R1/S1 breakout with volume confirmation and 1d trend filter on 12h timeframe.
-# Uses standard pivot points (not Camarilla) for cleaner breakout signals.
-# Volume spike >2x 20-period average ensures institutional participation.
-# Price distance filter (0.3%) avoids false breakouts from noise.
-# Trend filter ensures alignment with daily bias.
-# Target: 12-37 trades/year to minimize fee decay while capturing meaningful moves.
-# Works in bull markets (breakouts continue) and bear markets (mean reversion at S1/R1).
+# Hypothesis: Williams Alligator trend alignment with Elder Ray power confirmation and volume spike on 4h timeframe.
+# Williams Alligator (jaws/teeth/lips) identifies trend direction and alignment.
+# Elder Ray measures bull/bear power relative to EMA13 for trend strength confirmation.
+# Volume spike >2.5x 20-period average ensures institutional participation in breakouts.
+# Works in bull markets (alligator bullish alignment) and bear markets (alligator bearish alignment).
+# Target: 20-35 trades/year to minimize fee decay while capturing strong trends.
