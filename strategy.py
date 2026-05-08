@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,7 +19,7 @@ def generate_signals(prices):
     
     # Daily data for trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
@@ -40,17 +40,21 @@ def generate_signals(prices):
         close_prev = close_1d[i-1]
         range_val = high_prev - low_prev
         
-        C = close_prev + (range_val * 1.1 / 6)
-        R3[i] = C + (range_val * 1.1 / 2)
-        S3[i] = C - (range_val * 1.1 / 2)
+        if range_val <= 0:
+            R3[i] = R3[i-1] if i > 1 else close_prev
+            S3[i] = S3[i-1] if i > 1 else close_prev
+        else:
+            C = close_prev + (range_val * 1.1 / 6)
+            R3[i] = C + (range_val * 1.1 / 2)
+            S3[i] = C - (range_val * 1.1 / 2)
     
-    # Align Camarilla levels to daily timeframe
+    # Align Camarilla levels to 4h timeframe
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
-    # Volume spike: current volume > 2x 50-period average (6h bars)
-    vol_ma50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
-    volume_spike = volume > (2.0 * vol_ma50)
+    # Volume spike: current volume > 2.0x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
