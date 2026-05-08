@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 80:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -40,18 +40,18 @@ def generate_signals(prices):
     r3 = close_1d_shift + (range_ * 1.1 / 4)
     s3 = close_1d_shift - (range_ * 1.1 / 4)
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Volume spike: current volume > 1.8 * 20-period average (less sensitive for 12h)
+    # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 80  # warmup for calculations
+    start_idx = 60  # warmup for calculations
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
@@ -72,13 +72,13 @@ def generate_signals(prices):
             if (close[i] > s3_val and 
                 close[i] > ema34_1d_val and 
                 vol_spike):
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             # Enter short: price breaks below R3 + downtrend + volume spike
             elif (close[i] < r3_val and 
                   close[i] < ema34_1d_val and 
                   vol_spike):
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
             # Exit long: price breaks below S3 OR trend turns down
@@ -86,13 +86,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
             # Exit short: price breaks above R3 OR trend turns up
             if (close[i] > r3_val or close[i] > ema34_1d_val):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
