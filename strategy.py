@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_Unique"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1wTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,16 +17,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data once for trend filter and Camarilla pivot levels
+    # Get weekly data once for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    # Weekly EMA20 trend filter (more responsive than 34 for weekly)
+    close_1w = df_1w['close'].values
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    trend_1w = (close_1w > ema20_1w).astype(float)
+    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
+    
+    # Get daily data for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
-    
-    # 1d EMA34 trend filter
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_1d = (close_1d > ema34_1d).astype(float)
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
     # Previous day's OHLC for Camarilla calculation (R3/S3 levels)
     prev_high = np.roll(df_1d['high'].values, 1)
@@ -42,33 +47,33 @@ def generate_signals(prices):
     r3 = pivot + (range_val * 1.1 / 2)  # R3 level
     s3 = pivot - (range_val * 1.1 / 2)  # S3 level
     
-    # Align Camarilla levels to 4h timeframe
-    r3_4h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_4h = align_htf_to_ltf(prices, df_1d, s3)
+    # Align Camarilla levels to 12h timeframe
+    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Volume spike detection: current volume > 2.5 * 30-period average (more selective)
-    vol_ma30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    vol_spike = volume > (vol_ma30 * 2.5)
+    # Volume spike detection: current volume > 2.0 * 24-period average (12h bars = 24 periods for 12 days)
+    vol_ma24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_spike = volume > (vol_ma24 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # warmup for volume MA
+    start_idx = 24  # warmup for volume MA
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ma30[i])):
+        if (np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or np.isnan(trend_1w_aligned[i]) or np.isnan(vol_ma24[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: price breaks above R3 with volume spike and 1d uptrend
-            long_cond = (close[i] > r3_4h[i] and vol_spike[i] and trend_1d_aligned[i] > 0.5)
+            # Long entry: price breaks above R3 with volume spike and 1w uptrend
+            long_cond = (close[i] > r3_12h[i] and vol_spike[i] and trend_1w_aligned[i] > 0.5)
             
-            # Short entry: price breaks below S3 with volume spike and 1d downtrend
-            short_cond = (close[i] < s3_4h[i] and vol_spike[i] and trend_1d_aligned[i] < 0.5)
+            # Short entry: price breaks below S3 with volume spike and 1w downtrend
+            short_cond = (close[i] < s3_12h[i] and vol_spike[i] and trend_1w_aligned[i] < 0.5)
             
             if long_cond:
                 signals[i] = 0.25
@@ -78,14 +83,14 @@ def generate_signals(prices):
                 position = -1
         elif position == 1:
             # Long exit: price breaks below S3 (reversal signal)
-            if close[i] < s3_4h[i]:
+            if close[i] < s3_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short exit: price reverses back above R3 (reversal signal)
-            if close[i] > r3_4h[i]:
+            if close[i] > r3_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -93,10 +98,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R3/S3 breakout strategy with volume spike confirmation and 1d EMA34 trend filter on 4h timeframe.
-# Uses wider R3/S3 levels (vs R1/S1) for fewer, higher-quality entries. Enters long when price breaks above R3
-# with volume spike and 1d uptrend (close > EMA34). Enters short when price breaks below S3 with volume spike
-# and 1d downtrend (close < EMA34). Exits when price reverses back through S3/R3 respectively.
-# Uses 30-period volume MA with 2.5x threshold for stricter volume confirmation.
-# Targets 20-35 trades/year on 4h timeframe to avoid overtrading. Works in bull markets (trend-following breakouts)
+# Hypothesis: Camarilla R3/S3 breakout strategy with volume spike confirmation and 1w EMA20 trend filter on 12h timeframe.
+# Uses weekly trend filter for stronger trend definition, reducing whipsaw in sideways markets.
+# Enters long when price breaks above R3 with volume spike and 1w uptrend (close > EMA20 weekly).
+# Enters short when price breaks below S3 with volume spike and 1w downtrend (close < EMA20 weekly).
+# Exits when price reverses back through S3/R3 respectively.
+# Uses 24-period volume MA with 2.0x threshold for volume confirmation (appropriate for 12h timeframe).
+# Targets 15-30 trades/year on 12h timeframe to avoid overtrading. Works in bull markets (trend-following breakouts)
 # and bear markets (reversal breakouts from extreme levels). Uses discrete sizing (0.25) to minimize churn.
