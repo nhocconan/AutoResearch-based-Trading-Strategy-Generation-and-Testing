@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_PivotBreakout_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_PriceChannel_Breakout_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,82 +17,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for pivot levels, trend and volume
+    # Get daily data for trend and volume filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily pivot levels (standard floor trader pivots)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
-    r2 = pivot + (high_1d - low_1d)
-    s2 = pivot - (high_1d - low_1d)
-    r3 = high_1d + 2 * (pivot - low_1d)
-    s3 = low_1d - 2 * (high_1d - pivot)
+    # Calculate 200-day EMA for trend direction
+    ema_200 = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
     
-    # Align pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Calculate 20-day volume average for volume filter
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume_1d / vol_ma_20
+    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio)
     
-    # Daily EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Daily volume ratio filter
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_1d = np.divide(vol_1d, vol_ma_1d, out=np.ones_like(vol_1d), where=vol_ma_1d!=0)
-    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
+    # Calculate 20-period Donchian channels on 4h data
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Ensure enough data for indicators
+    start_idx = 200  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema34_aligned[i]) or np.isnan(vol_ratio_aligned[i]) or
-            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
-            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i])):
+        if (np.isnan(ema_200_aligned[i]) or np.isnan(vol_ratio_aligned[i]) or 
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above R2 with volume and uptrend
-            if (close[i] > r2_aligned[i] and 
-                vol_ratio_aligned[i] > 1.5 and 
-                close[i] > ema34_aligned[i]):
+            # Long: Price breaks above upper Donchian + above 200 EMA + volume confirmation
+            if (close[i] > highest_high[i] and close[i] > ema_200_aligned[i] and vol_ratio_aligned[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S2 with volume and downtrend
-            elif (close[i] < s2_aligned[i] and 
-                  vol_ratio_aligned[i] > 1.5 and 
-                  close[i] < ema34_aligned[i]):
+            # Short: Price breaks below lower Donchian + below 200 EMA + volume confirmation
+            elif (close[i] < lowest_low[i] and close[i] < ema_200_aligned[i] and vol_ratio_aligned[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Price falls below R1 or trend turns down
-            if (close[i] < r1_aligned[i] or close[i] < ema34_aligned[i]):
+            # Long exit: Price crosses below lower Donchian
+            if close[i] < lowest_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price rises above S1 or trend turns up
-            if (close[i] > s1_aligned[i] or close[i] > ema34_aligned[i]):
+            # Short exit: Price crosses above upper Donchian
+            if close[i] > highest_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
