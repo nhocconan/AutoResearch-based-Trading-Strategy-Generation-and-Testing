@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Weekly Trend + Daily Breakout with Volume Confirmation
-# - Uses weekly trend (close above/below 50-week EMA) to filter direction
-# - Daily breakout above weekly resistance or below weekly support
-# - Volume spike confirms breakout strength
-# - Works in bull/bear by using weekly trend filter to avoid counter-trend trades
-# - Target: 10-20 trades/year to minimize fee drag on 1d timeframe
+# Hypothesis: 12h Williams Alligator with 1d Trend and Volume Spike
+# - Williams Alligator uses three SMAs (Jaw=13, Teeth=8, Lips=5) with future shift
+# - Trend: Jaw > Teeth > Lips = bullish, Jaw < Teeth < Lips = bearish
+# - Entry: Alligator aligned in trend direction + price crosses the middle line (Teeth) + volume spike
+# - Works in bull/bear by using 1d trend filter to avoid counter-trend trades
+# - Target: 15-30 trades/year to minimize fee drag on 12h timeframe
 
-name = "1d_WeeklyTrend_DailyBreakout_Volume"
-timeframe = "1d"
+name = "12h_WilliamsAlligator_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,25 +24,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w data for trend filter and support/resistance
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    close_1d = df_1d['close'].values
+    # 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Weekly EMA50 for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Williams Alligator calculation on 12h timeframe
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 13:
+        return np.zeros(n)
     
-    # Weekly high/low for support/resistance levels
-    weekly_high = np.maximum.accumulate(high_1w)
-    weekly_low = np.minimum.accumulate(low_1w)
+    median_12h = (df_12h['high'].values + df_12h['low'].values) / 2.0
     
-    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high)
-    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low)
+    # Jaw (13-period SMMA, shifted 8 bars forward)
+    jaw = pd.Series(median_12h).rolling(window=13, min_periods=13).mean().values
+    jaw = np.roll(jaw, 8)  # shift forward 8 bars
+    jaw[:8] = np.nan  # first 8 values invalid
+    
+    # Teeth (8-period SMMA, shifted 5 bars forward)
+    teeth = pd.Series(median_12h).rolling(window=8, min_periods=8).mean().values
+    teeth = np.roll(teeth, 5)  # shift forward 5 bars
+    teeth[:5] = np.nan  # first 5 values invalid
+    
+    # Lips (5-period SMMA, shifted 3 bars forward)
+    lips = pd.Series(median_12h).rolling(window=5, min_periods=5).mean().values
+    lips = np.roll(lips, 3)  # shift forward 3 bars
+    lips[:3] = np.nan  # first 3 values invalid
+    
+    # Align Alligator lines to 12h timeframe (already on 12h, but need to align to lower timeframe if needed)
+    # Since we're using 12h as primary timeframe, no alignment needed for Alligator
+    # But we need to align the 1d trend filter
     
     # Volume spike: current volume > 2.0x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,29 +67,28 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 50  # need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(weekly_high_aligned[i]) or 
-            np.isnan(weekly_low_aligned[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above weekly high with weekly uptrend + volume spike
-            long_cond = (close[i] > weekly_high_aligned[i] and 
-                        ema_50_1w_aligned[i] > ema_50_1w_aligned[i-1] and
-                        volume_spike[i])
+            # Bullish alignment: Jaw > Teeth > Lips
+            bullish = jaw[i] > teeth[i] > lips[i]
+            # Bearish alignment: Jaw < Teeth < Lips
+            bearish = jaw[i] < teeth[i] < lips[i]
             
-            # Short: price breaks below weekly low with weekly downtrend + volume spike
-            short_cond = (close[i] < weekly_low_aligned[i] and 
-                         ema_50_1w_aligned[i] < ema_50_1w_aligned[i-1] and
-                         volume_spike[i])
+            # Long: bullish alignment + price crosses above Teeth + volume spike
+            long_cond = bullish and (close[i] > teeth[i]) and (close[i-1] <= teeth[i-1]) and volume_spike[i]
+            
+            # Short: bearish alignment + price crosses below Teeth + volume spike
+            short_cond = bearish and (close[i] < teeth[i]) and (close[i-1] >= teeth[i-1]) and volume_spike[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -82,15 +97,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below weekly low
-            if close[i] < weekly_low_aligned[i]:
+            # Long exit: price crosses below Lips (or Alligator alignment breaks)
+            if close[i] < lips[i] or not (jaw[i] > teeth[i] > lips[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above weekly high
-            if close[i] > weekly_high_aligned[i]:
+            # Short exit: price crosses above Lips (or Alligator alignment breaks)
+            if close[i] > lips[i] or not (jaw[i] < teeth[i] < lips[i]):
                 signals[i] = 0.0
                 position = 0
             else:
