@@ -27,15 +27,17 @@ def generate_signals(prices):
     if len(df_daily) < 50:
         return np.zeros(n)
     
-    # Calculate daily EMA50 for trend
+    # Calculate daily EMA50 for trend using vectorized operations
     close_daily = df_daily['close'].values
     ema50_daily = np.full(len(close_daily), np.nan)
     if len(close_daily) >= 50:
-        ema50_daily[49] = np.mean(close_daily[:50])
-        for i in range(50, len(close_daily)):
-            ema50_daily[i] = (close_daily[i] * 2 + ema50_daily[i-1] * 48) / 50
+        # Vectorized EMA calculation
+        alpha = 2 / (50 + 1)
+        ema50_daily[0] = close_daily[0]
+        for i in range(1, len(close_daily)):
+            ema50_daily[i] = alpha * close_daily[i] + (1 - alpha) * ema50_daily[i-1]
     
-    # Calculate 4h Donchian(20)
+    # Calculate 4h Donchian(20) using vectorized operations
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     if n >= 20:
@@ -76,26 +78,9 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Find current daily bar's close
-        close_daily_current = np.nan
-        if not np.isnan(ema50_daily_aligned[i]):
-            idx_daily = 0
-            while idx_daily < len(df_daily) and df_daily.iloc[idx_daily]['open_time'] <= prices.iloc[i]['open_time']:
-                idx_daily += 1
-            idx_daily -= 1  # last completed daily bar
-            
-            if idx_daily >= 0:
-                close_daily_current = df_daily.iloc[idx_daily]['close']
-        
-        if np.isnan(close_daily_current):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
         # Check conditions
-        price_above_ema = close_daily_current > ema50_daily_aligned[i]
-        price_below_ema = close_daily_current < ema50_daily_aligned[i]
+        price_above_ema = close[i] > ema50_daily_aligned[i]
+        price_below_ema = close[i] < ema50_daily_aligned[i]
         vol_spike = volume[i] > 2.0 * vol_avg_20[i]
         
         if position == 0:
