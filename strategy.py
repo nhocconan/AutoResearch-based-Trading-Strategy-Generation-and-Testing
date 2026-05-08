@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d volume spike and ADX filter
-# Uses Camarilla pivot levels (R3/S3) for breakout entries, confirmed by daily volume > 2x EMA and ADX > 20
-# Exits when price returns to the pivot point (P) or ADX weakens
+# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and ADX filter
+# Uses 4h price breakout above/below 20-period Donchian channel, confirmed by daily volume > 1.5x 20-day EMA and ADX > 25
+# Exits when price returns to the 20-day EMA or ADX weakens below 20
 # Designed to capture strong trending moves while avoiding choppy markets
 # Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag
 
-name = "4h_Camarilla_R3S3_Breakout_1dVolume_ADX"
+name = "4h_Donchian_Breakout_1dVolume_ADX"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,16 +22,10 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get daily data for pivot calculation, volume and ADX
+    # Get daily data for volume and ADX
     df_daily = get_htf_data(prices, '1d')
     if len(df_daily) < 30:
         return np.zeros(n)
-    
-    # Calculate daily VWAP approximation using typical price and volume
-    typical_price = (df_daily['high'].values + df_daily['low'].values + df_daily['close'].values) / 3
-    vwap_num = (typical_price * df_daily['volume'].values).cumsum()
-    vwap_den = df_daily['volume'].values.cumsum()
-    vwap = np.divide(vwap_num, vwap_den, out=np.full_like(vwap_num, np.nan), where=vwap_den!=0)
     
     # Calculate daily volume EMA (20-period)
     vol_ema_20 = pd.Series(df_daily['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -74,7 +68,6 @@ def generate_signals(prices):
     adx = wilders_smoothing(dx, 14)
     
     # Align daily indicators to 4h timeframe
-    vwap_aligned = align_htf_to_ltf(prices, df_daily, vwap)
     vol_ema_20_aligned = align_htf_to_ltf(prices, df_daily, vol_ema_20)
     adx_aligned = align_htf_to_ltf(prices, df_daily, adx)
     
@@ -82,33 +75,17 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Pre-compute Camarilla levels from daily data
-    # Using previous day's OHLC to calculate today's levels (no look-ahead)
-    camarilla_R3 = np.full(n, np.nan)
-    camarilla_S3 = np.full(n, np.nan)
-    camarilla_P = np.full(n, np.nan)  # Pivot point for exit
+    # Pre-compute 4h Donchian channel (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    for i in range(1, n):
-        # Get previous completed daily bar
-        prev_idx = 0
-        while prev_idx < len(df_daily) and df_daily.iloc[prev_idx]['open_time'] < prices.iloc[i]['open_time']:
-            prev_idx += 1
-        prev_idx -= 1  # last completed daily bar
-        
-        if prev_idx >= 0:
-            ph = df_daily.iloc[prev_idx]['high']
-            pl = df_daily.iloc[prev_idx]['low']
-            pc = df_daily.iloc[prev_idx]['close']
-            
-            # Camarilla levels
-            camarilla_P[i] = (ph + pl + pc) / 3
-            camarilla_R3[i] = pc + (ph - pl) * 1.1 / 4  # R3 = C + (H-L)*1.1/4
-            camarilla_S3[i] = pc - (ph - pl) * 1.1 / 4  # S3 = C - (H-L)*1.1/4
+    # Pre-compute 4h 20-period EMA for exit
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 1)  # warmup
+    start_idx = max(20, 1)  # warmup
     
     for i in range(start_idx, n):
         # Skip if outside trading session
@@ -118,14 +95,14 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        if np.isnan(vwap_aligned[i]) or np.isnan(vol_ema_20_aligned[i]) or np.isnan(adx_aligned[i]) or \
-           np.isnan(camarilla_R3[i]) or np.isnan(camarilla_S3[i]) or np.isnan(camarilla_P[i]):
+        if np.isnan(vol_ema_20_aligned[i]) or np.isnan(adx_aligned[i]) or \
+           np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(ema_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume filter: current daily volume > 2x 20-day EMA
+        # Volume filter: current daily volume > 1.5x 20-day EMA
         # Find the most recent completed daily bar
         idx_daily = 0
         while idx_daily < len(df_daily) and df_daily.iloc[idx_daily]['open_time'] <= prices.iloc[i]['open_time']:
@@ -136,29 +113,29 @@ def generate_signals(prices):
             vol_filter = False
         else:
             vol_daily_current = df_daily.iloc[idx_daily]['volume']
-            vol_filter = vol_daily_current > 2.0 * vol_ema_20_aligned[i]
+            vol_filter = vol_daily_current > 1.5 * vol_ema_20_aligned[i]
         
-        # ADX filter: > 20 indicates trending market
-        adx_filter = adx_aligned[i] > 20
+        # ADX filter: > 25 indicates strong trending market
+        adx_filter = adx_aligned[i] > 25
         
         if position == 0:
             # Look for breakout entry with volume and ADX confirmation
-            if close[i] > camarilla_R3[i-1] and vol_filter and adx_filter:
+            if close[i] > donchian_high[i-1] and vol_filter and adx_filter:
                 signals[i] = 0.25
                 position = 1
-            elif close[i] < camarilla_S3[i-1] and vol_filter and adx_filter:
+            elif close[i] < donchian_low[i-1] and vol_filter and adx_filter:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to pivot point or ADX weakens
-            if close[i] <= camarilla_P[i] or adx_aligned[i] < 15:
+            # Exit long: price returns to 20 EMA or ADX weakens
+            if close[i] <= ema_20[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to pivot point or ADX weakens
-            if close[i] >= camarilla_P[i] or adx_aligned[i] < 15:
+            # Exit short: price returns to 20 EMA or ADX weakens
+            if close[i] >= ema_20[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
