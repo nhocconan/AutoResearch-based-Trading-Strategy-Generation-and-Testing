@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla Pivot (R1/S1) breakout with 1d trend filter and volume confirmation
-# Uses daily pivot levels derived from previous day's range for support/resistance
-# Requires price to break above R1 or below S1 with volume spike and daily EMA trend alignment
-# Designed for low trade frequency (target: 50-150 total trades over 4 years)
-# Works in bull/bear via trend filter and volatility-based entry
+# Hypothesis: 4h Trix + Volume Spike + 1d Trend Filter
+# Trix (Triple Exponential Average) filters noise and captures momentum.
+# Long when Trix crosses above zero with volume spike in uptrend (price > 1d EMA34).
+# Short when Trix crosses below zero with volume spike in downtrend (price < 1d EMA34).
+# Uses volume confirmation to avoid false signals. Designed for low trade frequency.
+# Target: 20-50 total trades over 4 years = 5-12/year.
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Trix_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -33,21 +34,12 @@ def generate_signals(prices):
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate 12h Camarilla pivot levels (R1, S1) using previous day's OHLC
-    # R1 = close + 1.1 * (high - low) / 12
-    # S1 = close - 1.1 * (high - low) / 12
-    # We need previous day's data, so we shift by 1
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_prev = df_1d['close'].values
-    
-    # Calculate pivot levels for each day
-    camarilla_r1 = close_1d_prev + 1.1 * (high_1d - low_1d) / 12
-    camarilla_s1 = close_1d_prev - 1.1 * (high_1d - low_1d) / 12
-    
-    # Align pivot levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Calculate Trix (15-period) on close prices
+    # Trix = EMA(EMA(EMA(close, 15), 15), 15)
+    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
+    trix = np.diff(ema3, prepend=ema3[0]) / ema3  # percentage change
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -60,41 +52,42 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(trix[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         ema34_1d_val = ema34_1d_aligned[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
+        trix_val = trix[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: price breaks above R1 + uptrend + volume spike
-            if (close[i] > r1_val and 
+            # Enter long: Trix crosses above zero + uptrend + volume spike
+            if (trix_val > 0 and 
+                trix[i-1] <= 0 and  # crossed above zero
                 close[i] > ema34_1d_val and 
                 vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S1 + downtrend + volume spike
-            elif (close[i] < s1_val and 
+            # Enter short: Trix crosses below zero + downtrend + volume spike
+            elif (trix_val < 0 and 
+                  trix[i-1] >= 0 and  # crossed below zero
                   close[i] < ema34_1d_val and 
                   vol_spike):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below S1 or trend turns bearish
-            if (close[i] < s1_val or close[i] < ema34_1d_val):
+            # Exit long: Trix crosses below zero OR price breaks below trend
+            if (trix_val < 0 and trix[i-1] >= 0) or close[i] < ema34_1d_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above R1 or trend turns bullish
-            if (close[i] > r1_val or close[i] > ema34_1d_val):
+            # Exit short: Trix crosses above zero OR price breaks above trend
+            if (trix_val > 0 and trix[i-1] <= 0) or close[i] > ema34_1d_val:
                 signals[i] = 0.0
                 position = 0
             else:
