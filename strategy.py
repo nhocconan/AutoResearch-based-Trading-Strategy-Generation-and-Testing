@@ -20,10 +20,10 @@ def generate_signals(prices):
     # Get 1d data once
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 1d Previous day's pivot points ===
+    # === 1d Previous day's pivot points (HLC/3) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -38,20 +38,24 @@ def generate_signals(prices):
     pivot = (prev_high_1d + prev_low_1d + prev_close_1d) / 3.0
     range_1d = prev_high_1d - prev_low_1d
     
-    # Pivot support/resistance levels (R1 and S1)
+    # Pivot support/resistance levels
     r1 = pivot + (range_1d * 1.1 / 12)
     s1 = pivot - (range_1d * 1.1 / 12)
+    r2 = pivot + (range_1d * 1.1 / 6)
+    s2 = pivot - (range_1d * 1.1 / 6)
     
     # Align pivot levels to 4h timeframe
     r1_4h = align_htf_to_ltf(prices, df_1d, r1)
     s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    r2_4h = align_htf_to_ltf(prices, df_1d, r2)
+    s2_4h = align_htf_to_ltf(prices, df_1d, s2)
+    
+    # === 4h Volume filter: current volume > 20-period average ===
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # === 1d EMA34 for trend filter ===
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # === 4h Volume filter: current volume > 20-period average ===
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -60,7 +64,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or 
+        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or np.isnan(r2_4h[i]) or np.isnan(s2_4h[i]) or
             np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -68,21 +72,15 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Determine trend: bullish if close > EMA34, bearish if close < EMA34
-            is_bullish = close[i] > ema34_1d_aligned[i]
-            is_bearish = close[i] < ema34_1d_aligned[i]
+            # Long: breakout above R1 with uptrend and volume
+            long_cond = (close[i] > r1_4h[i] and 
+                        close[i] > ema34_1d_aligned[i] and
+                        volume[i] > vol_ma20[i])
             
-            if is_bullish:
-                # Bullish trend: look for long at S1 bounce
-                long_cond = (close[i] <= s1_4h[i] * 1.005 and  # Allow small tolerance
-                            volume[i] > vol_ma20[i])
-            elif is_bearish:
-                # Bearish trend: look for short at R1 rejection
-                short_cond = (close[i] >= r1_4h[i] * 0.995 and  # Allow small tolerance
-                             volume[i] > vol_ma20[i])
-            else:
-                long_cond = False
-                short_cond = False
+            # Short: breakdown below S1 with downtrend and volume
+            short_cond = (close[i] < s1_4h[i] and 
+                         close[i] < ema34_1d_aligned[i] and
+                         volume[i] > vol_ma20[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -91,15 +89,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: close above R1 or trend reversal
-            if close[i] >= r1_4h[i] * 0.995 or close[i] < ema34_1d_aligned[i]:
+            # Long exit: breakdown below S1 or trend reversal
+            if close[i] < s1_4h[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: close below S1 or trend reversal
-            if close[i] <= s1_4h[i] * 1.005 or close[i] > ema34_1d_aligned[i]:
+            # Short exit: breakout above R1 or trend reversal
+            if close[i] > r1_4h[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -107,9 +105,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R1/S1 bounce strategy with 1d EMA34 trend filter and volume confirmation.
-# In bullish 1d trend (price > EMA34), look for long entries at S1 support with volume.
-# In bearish 1d trend (price < EMA34), look for short entries at R1 resistance with volume.
-# Exits when price reaches opposite pivot level (R1 for longs, S1 for shorts) or trend reverses.
-# Designed to work in both bull (trend-following pullsbacks) and bear (counter-trend bounces) markets.
-# Uses discrete sizing (0.25) to minimize fee churn. Targets 50-150 trades over 4 years.
+# Hypothesis: Camarilla pivot breakout strategy using 1d R1/S1 levels for entries
+# and 1d EMA34 for trend filter. Enters long on breakout above R1 in uptrend
+# with volume confirmation, short on breakdown below S1 in downtrend with volume.
+# Exits when price returns to S1/R1 or trend reverses. Designed to work in
+# both bull (breakout continuation) and bear (breakdown continuation) markets.
+# Uses discrete sizing (0.25) to minimize churn. Targets 50-150 trades over
+# 4 years (12-37/year) to reduce fee drag. Works on BTC/ETH via institutional
+# pivot levels widely watched by algorithms and banks.
