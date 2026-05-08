@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Index (Bull/Bear Power) with 12h Trend Filter and Volume Confirmation
-# - Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-# - Long when Bull Power > 0 and rising, Bear Power < 0, with 12h uptrend + volume spike
-# - Short when Bear Power < 0 and falling, Bull Power < 0, with 12h downtrend + volume spike
-# - Uses 12h EMA50 for trend filter to avoid counter-trend trades
-# - Volume spike confirms institutional participation
-# - Designed for 6h timeframe: targets 15-35 trades/year (60-140 total over 4 years)
-# - Works in bull/bear markets by aligning with higher timeframe trend
+# Hypothesis: 4h Ehlers Fisher Transform with 1d Trend Filter and Volume Confirmation
+# - Fisher Transform identifies turning points in price
+# - Long when Fisher crosses above -1.5 with 1d uptrend
+# - Short when Fisher crosses below +1.5 with 1d downtrend
+# - Volume filter ensures breakouts have momentum
+# - Works in bull/bear by using 1d trend to avoid counter-trend trades
+# - Target: 20-40 trades/year to minimize fee drag on 4h timeframe
 
-name = "6h_ElderRay_12hTrend_Volume"
-timeframe = "6h"
+name = "4h_FisherTransform_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,56 +25,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate EMA13 for Elder Ray (6h timeframe)
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Elder Ray components
-    bull_power = high - ema13  # High - EMA13
-    bear_power = low - ema13   # Low - EMA13
-    
-    # 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 5:
+    # 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    # 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    close_1d = df_1d['close'].values
+    # 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume spike: current volume > 2.0x 20-period average
+    # Fisher Transform on 4h close
+    price = close
+    # Normalize price to [-1, 1] range over 10 periods
+    highest_high = pd.Series(high).rolling(window=10, min_periods=10).max().values
+    lowest_low = pd.Series(low).rolling(window=10, min_periods=10).min().values
+    range_hl = highest_high - lowest_low
+    # Avoid division by zero
+    value1 = np.where(range_hl != 0, 2 * ((price - lowest_low) / range_hl - 0.5), 0)
+    # Limit value1 to [-0.999, 0.999] to prevent log domain errors
+    value1 = np.clip(value1, -0.999, 0.999)
+    
+    # Initialize Fisher arrays
+    fish = np.full(n, np.nan)
+    fish_signal = np.full(n, np.nan)
+    
+    # Calculate Fisher Transform
+    for i in range(1, n):
+        if i < 10:  # Need at least 10 periods for calculation
+            continue
+        value2 = 0.33 * value1[i] + 0.67 * fish[i-1] if not np.isnan(fish[i-1]) else 0.33 * value1[i]
+        value2 = np.clip(value2, -0.999, 0.999)
+        if np.isnan(fish[i-1]):
+            fish[i] = 0.5 * np.log((1 + value2) / (1 - value2))
+        else:
+            fish[i] = 0.5 * np.log((1 + value2) / (1 - value2)) + 0.5 * fish[i-1]
+        fish_signal[i] = fish[i-1]
+    
+    # Volume spike: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma20)
+    volume_spike = volume > (1.5 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(fish[i]) or 
+            np.isnan(fish_signal[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Bull Power positive and rising, Bear Power negative, 12h uptrend + volume spike
-            bull_rising = bull_power[i] > bull_power[i-1]
-            long_cond = (bull_power[i] > 0 and 
-                        bear_power[i] < 0 and
-                        bull_rising and
-                        ema_50_12h_aligned[i] > ema_50_12h_aligned[i-1] and
+            # Long: Fisher crosses above -1.5 with 1d uptrend + volume spike
+            long_cond = (fish[i] > -1.5 and fish_signal[i] <= -1.5 and 
+                        ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1] and
                         volume_spike[i])
             
-            # Short: Bear Power negative and falling, Bull Power negative, 12h downtrend + volume spike
-            bear_falling = bear_power[i] < bear_power[i-1]
-            short_cond = (bear_power[i] < 0 and 
-                         bull_power[i] < 0 and
-                         bear_falling and
-                         ema_50_12h_aligned[i] < ema_50_12h_aligned[i-1] and
+            # Short: Fisher crosses below +1.5 with 1d downtrend + volume spike
+            short_cond = (fish[i] < 1.5 and fish_signal[i] >= 1.5 and 
+                         ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1] and
                          volume_spike[i])
             
             if long_cond:
@@ -85,15 +98,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Bull Power turns negative or Bear Power turns positive
-            if bull_power[i] <= 0 or bear_power[i] >= 0:
+            # Long exit: Fisher crosses below signal line
+            if fish[i] < fish_signal[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Bear Power turns positive or Bull Power turns positive
-            if bear_power[i] >= 0 or bull_power[i] >= 0:
+            # Short exit: Fisher crosses above signal line
+            if fish[i] > fish_signal[i]:
                 signals[i] = 0.0
                 position = 0
             else:
