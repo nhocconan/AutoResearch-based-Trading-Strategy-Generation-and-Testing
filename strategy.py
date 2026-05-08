@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_BullBearPower_1dTrend"
-timeframe = "6h"
+name = "12h_1d_RSI_Overbought_Oversold_1wTrend"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,51 +17,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data once for trend filter and EMA13
+    # Get 1d data once for RSI
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # 1d EMA13 for trend filter
+    # RSI(14) on 1d
     close_1d = df_1d['close'].values
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    trend_1d = (close_1d > ema13_1d).astype(float)
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # 1d EMA13 for Elder Ray calculations (EMA13 of close)
-    ema13_1d_close = ema13_1d  # already computed
+    # Get 1w data once for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
-    # Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high - ema13_1d_close
-    bear_power = low - ema13_1d_close
-    
-    # Align Bull and Bear Power to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    
-    # Smooth the power values with 6-period EMA to reduce noise
-    bull_power_smooth = pd.Series(bull_power_aligned).ewm(span=6, adjust=False, min_periods=6).mean().values
-    bear_power_smooth = pd.Series(bear_power_aligned).ewm(span=6, adjust=False, min_periods=6).mean().values
+    # 1w EMA20 trend filter
+    close_1w = df_1w['close'].values
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    trend_1w = (close_1w > ema20_1w).astype(float)
+    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 13  # warmup for EMA13 and smoothing
+    start_idx = 14  # warmup for RSI
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(trend_1d_aligned[i]) or np.isnan(bull_power_smooth[i]) or np.isnan(bear_power_smooth[i])):
+        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(trend_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: Bull Power > 0 and Bear Power < 0 (both bullish) and daily uptrend
-            long_cond = (bull_power_smooth[i] > 0 and bear_power_smooth[i] < 0 and trend_1d_aligned[i] > 0.5)
-            
-            # Short entry: Bull Power < 0 and Bear Power > 0 (both bearish) and daily downtrend
-            short_cond = (bull_power_smooth[i] < 0 and bear_power_smooth[i] > 0 and trend_1d_aligned[i] < 0.5)
+            # Long entry: RSI oversold (<30) and weekly uptrend
+            long_cond = (rsi_1d_aligned[i] < 30 and trend_1w_aligned[i] > 0.5)
+            # Short entry: RSI overbought (>70) and weekly downtrend
+            short_cond = (rsi_1d_aligned[i] > 70 and trend_1w_aligned[i] < 0.5)
             
             if long_cond:
                 signals[i] = 0.25
@@ -70,15 +70,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Bear Power becomes positive (bearish signal)
-            if bear_power_smooth[i] > 0:
+            # Long exit: RSI returns to neutral (>50)
+            if rsi_1d_aligned[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Bull Power becomes positive (bullish signal)
-            if bull_power_smooth[i] > 0:
+            # Short exit: RSI returns to neutral (<50)
+            if rsi_1d_aligned[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -86,11 +86,8 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Elder Ray's Bull/Bear Power combined with daily trend filter on 6h timeframe.
-# Bull Power (High - EMA13) measures bullish strength, Bear Power (Low - EMA13) measures bearish strength.
-# Long when both powers indicate bullish bias (BP>0, BP<0) with daily uptrend.
-# Short when both indicate bearish bias (BP<0, BP>0) with daily downtrend.
-# Exits when power signals diverge, capturing trend changes early.
-# Works in bull markets (sustained bullish power) and bear markets (sustained bearish power).
-# Smoothing reduces whipsaws while maintaining responsiveness.
-# Target: 20-40 trades/year to balance signal quality with cost efficiency.
+# Hypothesis: Mean reversion using daily RSI extremes with weekly trend filter on 12h timeframe.
+# In bull markets, buy oversold dips in uptrend; in bear markets, sell overbought rallies in downtrend.
+# Weekly EMA20 ensures alignment with longer-term trend, reducing counter-trend trades.
+# RSI(14) provides clear overbought/oversold levels (30/70) for mean reversion entries.
+# Target: 20-40 trades/year to minimize fee decay while capturing meaningful reversals.
