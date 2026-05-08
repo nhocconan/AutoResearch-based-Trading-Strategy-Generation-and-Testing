@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) Breakout with 1w Trend and Volume Spike
-# - Long when price breaks above 20-day high with 1w uptrend and volume spike
-# - Short when price breaks below 20-day low with 1w downtrend and volume spike
-# - Uses weekly trend to avoid counter-trend trades in both bull and bear markets
-# - Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag on 1d timeframe
+# Hypothesis: 12h Williams %R with 1d Trend Filter and Volume Spike
+# - Uses Williams %R from daily timeframe to identify overbought/oversold conditions
+# - Long when %R crosses above -80 (oversold) with 1d uptrend and volume spike
+# - Short when %R crosses below -20 (overbought) with 1d downtrend and volume spike
+# - Works in bull/bear by using 1d trend filter to align with higher timeframe momentum
+# - Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag on 12h timeframe
 
-name = "1d_DonchianBreakout_1wTrend_Volume"
-timeframe = "1d"
+name = "12h_WilliamsR_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,31 +24,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for Donchian channels
+    # 1d data for Williams %R and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Donchian channels (20-period high/low)
-    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    # Using 14-period lookback
+    lookback = 14
+    williams_r = np.full(len(close_1d), np.nan)
     
-    # Align Donchian channels to 1d timeframe (already aligned but keep for consistency)
-    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
+    for i in range(lookback, len(close_1d)):
+        highest_high = np.max(high_1d[i-lookback:i])
+        lowest_low = np.min(low_1d[i-lookback:i])
+        close_val = close_1d[i]
+        if highest_high != lowest_low:
+            williams_r[i] = ((highest_high - close_val) / (highest_high - lowest_low)) * -100
+        else:
+            williams_r[i] = -50  # neutral when no range
     
-    # 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
+    # 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    close_1w = df_1w['close'].values
-    # 1w EMA20 for trend filter
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Align Williams %R and EMA to 12h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Volume spike: current volume > 2.0x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -60,23 +65,21 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
-            np.isnan(ema_20_1w_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above 20-day high with 1w uptrend + volume spike
-            long_cond = (close[i] > high_20_aligned[i] and 
-                        ema_20_1w_aligned[i] > ema_20_1w_aligned[i-1] and
-                        volume_spike[i])
+            # Long: Williams %R crosses above -80 from below (exiting oversold) with 1d uptrend + volume spike
+            wr_cross_up = (williams_r_aligned[i] > -80 and williams_r_aligned[i-1] <= -80)
+            long_cond = wr_cross_up and (ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1]) and volume_spike[i]
             
-            # Short: price breaks below 20-day low with 1w downtrend + volume spike
-            short_cond = (close[i] < low_20_aligned[i] and 
-                         ema_20_1w_aligned[i] < ema_20_1w_aligned[i-1] and
-                         volume_spike[i])
+            # Short: Williams %R crosses below -20 from above (exiting overbought) with 1d downtrend + volume spike
+            wr_cross_down = (williams_r_aligned[i] < -20 and williams_r_aligned[i-1] >= -20)
+            short_cond = wr_cross_down and (ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1]) and volume_spike[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -85,15 +88,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below 20-day low
-            if close[i] < low_20_aligned[i]:
+            # Long exit: Williams %R crosses above -20 (entering overbought)
+            if williams_r_aligned[i] > -20 and williams_r_aligned[i-1] <= -20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above 20-day high
-            if close[i] > high_20_aligned[i]:
+            # Short exit: Williams %R crosses below -80 (entering oversold)
+            if williams_r_aligned[i] < -80 and williams_r_aligned[i-1] >= -80:
                 signals[i] = 0.0
                 position = 0
             else:
