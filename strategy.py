@@ -3,72 +3,79 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_Choppiness_Index_Donchian_Breakout"
-timeframe = "1d"
+name = "6h_HeikinAshi_MACD_Trend"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    open_ = prices['open'].values
     volume = prices['volume'].values
     
-    # Weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Calculate Heikin-Ashi candles
+    ha_close = (open_ + high + low + close) / 4
+    ha_open = np.zeros(n)
+    ha_open[0] = (open_[0] + close[0]) / 2
+    for i in range(1, n):
+        ha_open[i] = (ha_open[i-1] + ha_close[i-1]) / 2
+    ha_high = np.maximum(high, np.maximum(ha_open, ha_close))
+    ha_low = np.minimum(low, np.minimum(ha_open, ha_close))
+    
+    # Calculate MACD (12,26,9) on HA close
+    ha_close_series = pd.Series(ha_close)
+    ema_fast = ha_close_series.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema_slow = ha_close_series.ewm(span=26, adjust=False, min_periods=26).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=9, adjust=False, min_periods=9).mean()
+    macd_hist = macd_line - signal_line
+    macd_hist_values = macd_hist.values
+    
+    # Daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
+    # Calculate 50-day EMA for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Weekly EMA20 for trend filter
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    
-    # Daily ATR(14) for Donchian and chop
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Daily Donchian(20) channels
-    upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Choppiness Index(14) for regime detection
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
+    # Volume filter: current volume > 1.5x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(upper[i]) or 
-            np.isnan(lower[i]) or np.isnan(chop[i])):
+        if (np.isnan(macd_hist_values[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian upper + weekly uptrend + chop < 38.2 (trending)
-            long_cond = (close[i] > upper[i] and 
-                        ema_20_1w_aligned[i] > ema_20_1w_aligned[i-1] and
-                        chop[i] < 38.2)
+            # Long: MACD histogram positive AND HA close > HA open AND above daily EMA50
+            long_cond = (macd_hist_values[i] > 0 and 
+                        ha_close[i] > ha_open[i] and
+                        close[i] > ema_50_1d_aligned[i] and
+                        volume_filter[i])
             
-            # Short: price breaks below Donchian lower + weekly downtrend + chop < 38.2 (trending)
-            short_cond = (close[i] < lower[i] and 
-                         ema_20_1w_aligned[i] < ema_20_1w_aligned[i-1] and
-                         chop[i] < 38.2)
+            # Short: MACD histogram negative AND HA close < HA open AND below daily EMA50
+            short_cond = (macd_hist_values[i] < 0 and 
+                         ha_close[i] < ha_open[i] and
+                         close[i] < ema_50_1d_aligned[i] and
+                         volume_filter[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -77,15 +84,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below Donchian lower or chop > 61.8 (ranging)
-            if close[i] < lower[i] or chop[i] > 61.8:
+            # Long exit: MACD histogram turns negative OR price crosses below daily EMA50
+            if macd_hist_values[i] < 0 or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above Donchian upper or chop > 61.8 (ranging)
-            if close[i] > upper[i] or chop[i] > 61.8:
+            # Short exit: MACD histogram turns positive OR price crosses above daily EMA50
+            if macd_hist_values[i] > 0 or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
