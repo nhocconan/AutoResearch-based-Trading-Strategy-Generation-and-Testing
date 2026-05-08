@@ -3,19 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Bollinger Band squeeze breakout with 4h trend filter and volume confirmation.
-# Long when price breaks above upper BB, 4h EMA50 rising, volume > 1.5x 20-period average, and squeeze present.
-# Short when price breaks below lower BB, 4h EMA50 falling, volume > 1.5x 20-period average, and squeeze present.
-# Exit when price crosses back inside Bollinger Bands (middle band).
-# This strategy targets low volatility breakouts with trend alignment and volume confirmation.
-# Bollinger squeeze identifies periods of low volatility that often precede explosive moves.
-# The 4h EMA50 filter ensures we trade with the higher timeframe trend.
-# Volume confirmation filters out false breakouts.
-# Target: 15-35 trades/year (60-140 total over 4 years) to minimize fee drag.
-# Works in both bull and bear markets by following the 4h trend direction.
+# Hypothesis: 6-hour Donchian breakout with 1-day trend filter and volume confirmation.
+# Long when price breaks above Donchian upper band (20-period high) AND 1-day EMA34 rising AND volume > 2x 20-period average.
+# Short when price breaks below Donchian lower band (20-period low) AND 1-day EMA34 falling AND volume > 2x 20-period average.
+# Exit when price returns to Donchian midline (average of upper and lower band).
+# This strategy captures breakouts aligned with daily trend and volume confirmation, targeting 15-35 trades/year to minimize fee drag.
+# Works in both bull and bear markets by following the daily trend direction.
 
-name = "1h_BollingerSqueeze_Breakout_4hEMA50_Volume"
-timeframe = "1h"
+name = "6h_DonchianBreakout_1dEMA34_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,79 +24,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Bollinger Bands (20, 2) on 1h
-    bb_period = 20
-    bb_std = 2
-    close_series = pd.Series(close)
-    bb_middle = close_series.rolling(window=bb_period, min_periods=bb_period).mean().values
-    bb_std_dev = close_series.rolling(window=bb_period, min_periods=bb_period).std().values
-    bb_upper = bb_middle + (bb_std * bb_std_dev)
-    bb_lower = bb_middle - (bb_std * bb_std_dev)
+    # Calculate Donchian channels (20-period) on 6h data
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (high_max + low_min) / 2
     
-    # Bollinger Band width for squeeze detection (normalized by middle band)
-    bb_width = (bb_upper - bb_lower) / bb_middle
-    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
-    squeeze_condition = bb_width < bb_width_ma  # True when volatility is low (squeeze)
+    # 1-day EMA34 for trend filter
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # 4h EMA50 for trend filter
-    ema50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # 1-day EMA34 direction
+    ema34_rising = np.zeros_like(ema34_1d_aligned, dtype=bool)
+    ema34_falling = np.zeros_like(ema34_1d_aligned, dtype=bool)
+    ema34_rising[1:] = ema34_1d_aligned[1:] > ema34_1d_aligned[:-1]
+    ema34_falling[1:] = ema34_1d_aligned[1:] < ema34_1d_aligned[:-1]
     
-    # 4h EMA50 direction
-    ema50_rising = np.zeros_like(ema50_4h_aligned, dtype=bool)
-    ema50_falling = np.zeros_like(ema50_4h_aligned, dtype=bool)
-    ema50_rising[1:] = ema50_4h_aligned[1:] > ema50_4h_aligned[:-1]
-    ema50_falling[1:] = ema50_4h_aligned[1:] < ema50_4h_aligned[:-1]
-    
-    # Volume filter: current volume > 1.5x 20-period average
+    # Volume filter: current volume > 2x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma20)
+    volume_filter = volume > (2.0 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(bb_period, 20, 50)  # Sufficient warmup for BB and EMAs
+    start_idx = max(20, 34, 20)  # Sufficient warmup for Donchian, EMA34, and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(bb_middle[i]) or
-            np.isnan(ema50_4h_aligned[i]) or np.isnan(ema50_rising[i]) or 
-            np.isnan(ema50_falling[i]) or np.isnan(volume_filter[i]) or
-            np.isnan(squeeze_condition[i])):
+        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
+            np.isnan(donchian_mid[i]) or np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(ema34_rising[i]) or np.isnan(ema34_falling[i]) or 
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price breaks above upper BB, 4h EMA50 rising, volume filter, squeeze present
-            long_cond = (close[i] > bb_upper[i]) and ema50_rising[i] and volume_filter[i] and squeeze_condition[i]
-            # Short conditions: price breaks below lower BB, 4h EMA50 falling, volume filter, squeeze present
-            short_cond = (close[i] < bb_lower[i]) and ema50_falling[i] and volume_filter[i] and squeeze_condition[i]
+            # Long conditions: price breaks above Donchian upper band, 1d EMA34 rising, volume filter
+            long_cond = (close[i] > high_max[i]) and ema34_rising[i] and volume_filter[i]
+            # Short conditions: price breaks below Donchian lower band, 1d EMA34 falling, volume filter
+            short_cond = (close[i] < low_min[i]) and ema34_falling[i] and volume_filter[i]
             
             if long_cond:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
             elif short_cond:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses back below middle BB
-            if close[i] < bb_middle[i]:
+            # Long exit: price returns to Donchian midline
+            if close[i] <= donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses back above middle BB
-            if close[i] > bb_middle[i]:
+            # Short exit: price returns to Donchian midline
+            if close[i] >= donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
