@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+name = "4h_RSI_MeanReversion_1dTrend_VolumeFilter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,40 +17,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot and trend
+    # Get 1d data for trend filter and RSI calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from daily data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # RSI(14) on 1d close
+    delta = np.diff(df_1d['close'].values)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Pivot = (H + L + C) / 3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    # Range = H - L
-    range_1d = high_1d - low_1d
-    # Resistance and Support levels (R1/S1)
-    r1_1d = close_1d + (range_1d * 1.1 / 12)
-    s1_1d = close_1d - (range_1d * 1.1 / 12)
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
     
-    # Align Camarilla levels to 4h timeframe
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Wilder's smoothing
+    for i in range(len(gain)):
+        if i == 0:
+            avg_gain[i] = np.mean(gain[:14]) if len(gain) >= 14 else np.nan
+            avg_loss[i] = np.mean(loss[:14]) if len(loss) >= 14 else np.nan
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # Daily EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi_14 = 100 - (100 / (1 + rs))
     
-    # Volume confirmation - 4-period average volume (16h)
-    vol_ma = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    # Align RSI to 4h timeframe
+    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
+    
+    # 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume confirmation - 20-period average volume (80h)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1.0)
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
     # Session filter: 08-20 UTC
-    hours = prices.index.hour
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
@@ -59,8 +64,7 @@ def generate_signals(prices):
     start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or
+        if (np.isnan(rsi_14_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -74,28 +78,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 + above daily EMA34 + volume confirmation
-            if (close[i] > r1_1d_aligned[i] and 
-                close[i] > ema_34_1d_aligned[i] and
+            # Long: RSI oversold (<30) + price above EMA50 + volume confirmation
+            if (rsi_14_aligned[i] < 30 and 
+                close[i] > ema_50_1d_aligned[i] and
                 vol_ratio[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + below daily EMA34 + volume confirmation
-            elif (close[i] < s1_1d_aligned[i] and 
-                  close[i] < ema_34_1d_aligned[i] and
+            # Short: RSI overbought (>70) + price below EMA50 + volume confirmation
+            elif (rsi_14_aligned[i] > 70 and 
+                  close[i] < ema_50_1d_aligned[i] and
                   vol_ratio[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price falls back below pivot OR below daily EMA34
-            if close[i] < pivot_1d_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            # Exit long: RSI returns to neutral (>50) or price falls below EMA50
+            if rsi_14_aligned[i] > 50 or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price rises back above pivot OR above daily EMA34
-            if close[i] > pivot_1d_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            # Exit short: RSI returns to neutral (<50) or price rises above EMA50
+            if rsi_14_aligned[i] < 50 or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
