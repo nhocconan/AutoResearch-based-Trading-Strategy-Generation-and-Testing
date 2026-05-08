@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_WeeklyBreakout_Volume_Trend_v2"
-timeframe = "1d"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume_Confirm"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,61 +17,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get daily data for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 20-period EMA on weekly close for trend
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Calculate Camarilla pivot levels from daily data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate daily Donchian channels (20-period)
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Pivot = (H + L + C) / 3
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Range = H - L
+    range_1d = high_1d - low_1d
+    # Resistance levels
+    r1_1d = close_1d + (range_1d * 1.1 / 12)
+    s1_1d = close_1d - (range_1d * 1.1 / 12)
     
-    # Volume confirmation - 20-period average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align Camarilla levels to 12h timeframe
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    
+    # Volume confirmation - 12-period average volume (12h * 12 = 6h, reasonable for volatility)
+    vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1.0)
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 200
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
-            np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
+            np.isnan(s1_1d_aligned[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above 20-day high + above weekly EMA20 + volume confirmation
-            if (close[i] > high_max[i] and 
-                close[i] > ema_20_1w_aligned[i] and
-                vol_ratio[i] > 1.5):
+            # Long: price breaks above R1 + volume confirmation
+            if (close[i] > r1_1d_aligned[i] and vol_ratio[i] > 1.8):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 20-day low + below weekly EMA20 + volume confirmation
-            elif (close[i] < low_min[i] and 
-                  close[i] < ema_20_1w_aligned[i] and
-                  vol_ratio[i] > 1.5):
+            # Short: price breaks below S1 + volume confirmation
+            elif (close[i] < s1_1d_aligned[i] and vol_ratio[i] > 1.8):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price falls back below 20-day low OR below weekly EMA20
-            if close[i] < low_min[i] or close[i] < ema_20_1w_aligned[i]:
+            # Exit long: price falls back below pivot
+            if close[i] < pivot_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price rises back above 20-day high OR above weekly EMA20
-            if close[i] > high_min[i] or close[i] > ema_20_1w_aligned[i]:
+            # Exit short: price rises back above pivot
+            if close[i] > pivot_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
