@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R3S3_Breakout_1wTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_RSI_TRIX_Combo_Volume_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,67 +17,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data once for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # 1w EMA50 trend filter
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_1w = (close_1w > ema50_1w).astype(float)
-    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
-    
-    # Get 1d data once for Camarilla pivot levels
+    # Get 1d data for trend filter and RSI
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla calculation (R3/S3 levels)
-    prev_high = np.roll(df_1d['high'].values, 1)
-    prev_low = np.roll(df_1d['low'].values, 1)
-    prev_close = np.roll(df_1d['close'].values, 1)
-    prev_high[0] = df_1d['high'].values[0]
-    prev_low[0] = df_1d['low'].values[0]
-    prev_close[0] = df_1d['close'].values[0]
+    # 1d RSI(14) for overbought/oversold
+    close_1d = df_1d['close'].values
+    delta = np.diff(close_1d)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d = np.concatenate([[np.nan], rsi_1d])  # align with original length
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Camarilla pivot levels calculation (R3 and S3)
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_val = prev_high - prev_low
-    r3 = pivot + (range_val * 1.1 / 2)  # R3 level
-    s3 = pivot - (range_val * 1.1 / 2)  # S3 level
+    # 1d TRIX (15-period EMA triple smoothed)
+    ema1 = pd.Series(close_1d).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
+    trix_raw = np.diff(ema3) / ema3[:-1] * 100
+    trix = np.concatenate([[np.nan, np.nan], trix_raw])  # align with original length
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
     
-    # Align Camarilla levels to 12h timeframe
-    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # Volume spike detection: current volume > 2.5 * 20-period average (more stringent)
+    # 4h volume spike detection
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma20 * 2.5)
-    
-    # Price distance filter: require breakout to be at least 0.5% above/below level
-    price_above_r3 = close > r3_12h * 1.005
-    price_below_s3 = close < s3_12h * 0.995
+    vol_spike = volume > (vol_ma20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # warmup for 1w EMA and volume MA
+    start_idx = 30  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or np.isnan(trend_1w_aligned[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(trix_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: price breaks above R3 with volume spike and 1w uptrend
-            long_cond = (price_above_r3[i] and vol_spike[i] and trend_1w_aligned[i] > 0.5)
+            # Long entry: RSI < 30 (oversold) and TRIX turning up (positive) and volume spike
+            long_cond = (rsi_1d_aligned[i] < 30 and trix_aligned[i] > 0 and vol_spike[i])
             
-            # Short entry: price breaks below S3 with volume spike and 1w downtrend
-            short_cond = (price_below_s3[i] and vol_spike[i] and trend_1w_aligned[i] < 0.5)
+            # Short entry: RSI > 70 (overbought) and TRIX turning down (negative) and volume spike
+            short_cond = (rsi_1d_aligned[i] > 70 and trix_aligned[i] < 0 and vol_spike[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -86,15 +73,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price reverses back below R3 (mean reversion)
-            if close[i] < r3_12h[i]:
+            # Long exit: RSI > 50 (back to neutral) or TRIX turns negative
+            if rsi_1d_aligned[i] > 50 or trix_aligned[i] < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price reverses back above S3 (mean reversion)
-            if close[i] > s3_12h[i]:
+            # Short exit: RSI < 50 (back to neutral) or TRIX turns positive
+            if rsi_1d_aligned[i] < 50 or trix_aligned[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,8 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R3/S3 breakout with weekly trend filter on 12h timeframe.
-# Uses 1w EMA50 for trend filter to capture major market direction (works in both bull/bear).
-# Volume confirmation (2.5x 20-period MA) and price distance filter (0.5%) reduce false breakouts.
-# Position size 0.25 manages risk. Target: 15-30 trades/year to avoid fee drag.
-# Weekly trend filter ensures we only trade with the dominant multi-week trend.
+# Hypothesis: Combines RSI for overbought/oversold conditions with TRIX for momentum confirmation on 1d timeframe.
+# Uses volume spike for entry confirmation. Designed to work in both bull and bear markets by capturing mean reversion
+# from extremes with momentum confirmation. Position size 0.25 to manage risk. Target: 20-40 trades/year.
