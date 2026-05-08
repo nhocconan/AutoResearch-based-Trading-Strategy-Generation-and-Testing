@@ -1,15 +1,21 @@
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Confirm
+# Hypothesis: 12h timeframe balances trade frequency and signal quality. 
+# Uses daily Camarilla pivot (R1/S1) for breakout entries, daily EMA trend filter, 
+# and volume confirmation. Targets 15-30 trades/year per symbol.
+# Works in bull (breakouts with trend) and bear (mean reversion at S1/R1 in range).
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Donchian_Breakout_1dTrend_Volume_Confirm_v2"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Confirm"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,33 +23,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter and Donchian calculation
+    # Get daily data for Camarilla pivot and EMA
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 20-period Donchian channels from daily data
+    # Calculate Camarilla pivot levels from daily data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    
-    # Upper band: highest high of last 20 days
-    high_20 = np.full(len(high_1d), np.nan)
-    for i in range(20, len(high_1d)):
-        high_20[i] = np.max(high_1d[i-20:i])
-    
-    # Lower band: lowest low of last 20 days
-    low_20 = np.full(len(low_1d), np.nan)
-    for i in range(20, len(low_1d)):
-        low_20[i] = np.min(low_1d[i-20:i])
-    
-    # Align Donchian levels to 4h timeframe
-    upper_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    lower_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
-    
-    # Daily EMA50 for trend filter
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Pivot = (H + L + C) / 3
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Range = H - L
+    range_1d = high_1d - low_1d
+    # Resistance levels
+    r1_1d = close_1d + (range_1d * 1.1 / 12)
+    # Support levels
+    s1_1d = close_1d - (range_1d * 1.1 / 12)
+    
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align daily indicators to 12h timeframe
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume confirmation - 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -53,39 +59,40 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 200
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
+            np.isnan(s1_1d_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or
+            np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above 20-day high + above daily EMA50 + volume confirmation
-            if (close[i] > upper_20_aligned[i] and 
-                close[i] > ema_50_1d_aligned[i] and
+            # Long: price breaks above R1 + above daily EMA34 + volume confirmation
+            if (close[i] > r1_1d_aligned[i] and 
+                close[i] > ema_34_1d_aligned[i] and
                 vol_ratio[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 20-day low + below daily EMA50 + volume confirmation
-            elif (close[i] < lower_20_aligned[i] and 
-                  close[i] < ema_50_1d_aligned[i] and
+            # Short: price breaks below S1 + below daily EMA34 + volume confirmation
+            elif (close[i] < s1_1d_aligned[i] and 
+                  close[i] < ema_34_1d_aligned[i] and
                   vol_ratio[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price falls back below 20-day low OR below daily EMA50
-            if close[i] < lower_20_aligned[i] or close[i] < ema_50_1d_aligned[i]:
+            # Exit long: price falls back below pivot OR below daily EMA34
+            if close[i] < pivot_1d_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price rises back above 20-day high OR above daily EMA50
-            if close[i] > upper_20_aligned[i] or close[i] > ema_50_1d_aligned[i]:
+            # Exit short: price rises back above pivot OR above daily EMA34
+            if close[i] > pivot_1d_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
