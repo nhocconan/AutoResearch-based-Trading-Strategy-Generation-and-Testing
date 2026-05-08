@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_DonchianBreakout_1dVolume_ADX_v2"
+name = "12h_DonchianBreakout_1dVolume_ADX_v3"
 timeframe = "12h"
 leverage = 1.0
 
