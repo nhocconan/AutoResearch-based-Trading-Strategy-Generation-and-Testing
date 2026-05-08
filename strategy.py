@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_SMMA_Fractal_Momentum_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Breakout_Trend_Volume_v4"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,73 +23,60 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === SMMA (Smoothed Moving Average) - 1d ===
-    close_1d = df_1d['close'].values
-    smma_1d = np.full_like(close_1d, np.nan, dtype=np.float64)
-    if len(close_1d) >= 10:
-        smma_1d[9] = np.mean(close_1d[:10])
-        for i in range(10, len(close_1d)):
-            smma_1d[i] = (smma_1d[i-1] * 9 + close_1d[i]) / 10
-    smma_1d_aligned = align_htf_to_ltf(prices, df_1d, smma_1d)
-    
-    # === Williams Fractals - 1d (requires extra delay for confirmation) ===
+    # === 1d Previous day's pivot points (HLC/3) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate fractals
-    bearish_fractal = np.zeros_like(high_1d)
-    bullish_fractal = np.zeros_like(low_1d)
-    for i in range(2, len(high_1d) - 2):
-        if (high_1d[i] > high_1d[i-1] and high_1d[i] > high_1d[i-2] and
-            high_1d[i] > high_1d[i+1] and high_1d[i] > high_1d[i+2]):
-            bearish_fractal[i] = high_1d[i]
-        if (low_1d[i] < low_1d[i-1] and low_1d[i] < low_1d[i-2] and
-            low_1d[i] < low_1d[i+1] and low_1d[i] < low_1d[i+2]):
-            bullish_fractal[i] = low_1d[i]
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d[0] = high_1d[0]
+    prev_low_1d[0] = low_1d[0]
+    prev_close_1d[0] = close_1d[0]
     
-    # Apply extra delay for fractal confirmation (2 bars)
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
+    pivot = (prev_high_1d + prev_low_1d + prev_close_1d) / 3.0
+    range_1d = prev_high_1d - prev_low_1d
     
-    # === 6h Volume filter ===
-    vol_ma10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    # Camarilla R3 and S3 levels
+    r3 = pivot + (range_1d * 1.1 / 4)
+    s3 = pivot - (range_1d * 1.1 / 4)
     
-    # === 6h RSI for momentum confirmation ===
-    delta = np.diff(close)
-    delta = np.insert(delta, 0, 0)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Align to 4h timeframe
+    r3_4h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_4h = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # === 4h Volume filter: current volume > 20-period average ===
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # === 1d EMA34 for trend filter ===
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # warmup for SMMA and RSI
+    start_idx = 34  # warmup for EMA34
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(smma_1d_aligned[i]) or np.isnan(bearish_fractal_aligned[i]) or 
-            np.isnan(bullish_fractal_aligned[i]) or np.isnan(vol_ma10[i]) or np.isnan(rsi[i])):
+        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above SMMA + bullish fractal + RSI > 50 + volume confirmation
-            long_cond = (close[i] > smma_1d_aligned[i] and 
-                        bullish_fractal_aligned[i] > 0 and
-                        rsi[i] > 50 and
-                        volume[i] > vol_ma10[i])
+            # Long: break above R3 with volume and trend filter
+            long_cond = (close[i] > r3_4h[i] and 
+                        volume[i] > vol_ma20[i] and
+                        close[i] > ema34_1d_aligned[i])
             
-            # Short: price below SMMA + bearish fractal + RSI < 50 + volume confirmation
-            short_cond = (close[i] < smma_1d_aligned[i] and 
-                         bearish_fractal_aligned[i] > 0 and
-                         rsi[i] < 50 and
-                         volume[i] > vol_ma10[i])
+            # Short: break below S3 with volume and trend filter
+            short_cond = (close[i] < s3_4h[i] and 
+                         volume[i] > vol_ma20[i] and
+                         close[i] < ema34_1d_aligned[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -98,23 +85,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price below SMMA or bearish fractal or RSI < 40
-            exit_cond = (close[i] < smma_1d_aligned[i] or 
-                        bearish_fractal_aligned[i] > 0 or
-                        rsi[i] < 40)
-            
-            if exit_cond:
+            # Long exit: close below EMA34 or below S3 (stop/reversal)
+            if close[i] < ema34_1d_aligned[i] or close[i] < s3_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price above SMMA or bullish fractal or RSI > 60
-            exit_cond = (close[i] > smma_1d_aligned[i] or 
-                        bullish_fractal_aligned[i] > 0 or
-                        rsi[i] > 60)
-            
-            if exit_cond:
+            # Short exit: close above EMA34 or above R3 (stop/reversal)
+            if close[i] > ema34_1d_aligned[i] or close[i] > r3_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -122,8 +101,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Combines SMMA (smooth trend) with Williams Fractals (key reversal points) on daily timeframe.
-# SMMA provides adaptive trend filter, fractals identify key reversal levels for entries.
-# Volume and RSI add confirmation. Designed for 6h timeframe to capture multi-day moves.
-# Works in bull markets via trend following (price > SMMA) and in bear markets via 
-# mean reversion at fractal levels. Targets 50-100 trades over 4 years to minimize fee drag.
+# Hypothesis: Camarilla R3/S3 breakout with volume confirmation and 1d EMA34 trend filter.
+# Enters long on break above R3 with volume and price above 1d EMA34 (uptrend).
+# Enters short on break below S3 with volume and price below 1d EMA34 (downtrend).
+# Exits when price crosses below/above EMA34 or breaks opposite S3 level.
+# Designed to capture institutional interest at key levels while avoiding false breakouts.
+# Uses discrete sizing (0.25) to minimize churn. Targets 20-50 trades/year on 4h.
+# Works in both bull (breakouts in uptrend) and bear (breakdowns in downtrend) markets.
