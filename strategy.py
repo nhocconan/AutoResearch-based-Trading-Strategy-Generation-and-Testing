@@ -1,10 +1,15 @@
-#!/usr/bin/env python3
+# 4h Donchian Breakout + Volume + ADX Filter with ATR Stoploss
+# Hypothesis: Donchian(20) breakouts capture momentum, volume confirms strength,
+# ADX(14) > 25 filters for trending markets, ATR-based stoploss limits drawdown.
+# Works in bull/bear by using ADX filter to avoid false breakouts in ranging markets.
+# Target: 150-250 total trades over 4 years (38-63/year) on 4h timeframe.
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_Volume_ADX_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,70 +22,50 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
-        return np.zeros(n)
+    # Donchian(20) channels
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # ADX(14) for trend strength
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
     
-    # Calculate Camarilla levels using previous day's data
-    n1d = len(close_1d)
-    camarilla_S2 = np.full(n1d, np.nan)
-    camarilla_S3 = np.full(n1d, np.nan)
-    camarilla_R2 = np.full(n1d, np.nan)
-    camarilla_R3 = np.full(n1d, np.nan)
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]
     
-    for i in range(1, n1d):
-        H = high_1d[i-1]
-        L = low_1d[i-1]
-        C = close_1d[i-1]
-        range_val = H - L
-        camarilla_S2[i] = C - range_val * 1.16
-        camarilla_S3[i] = C - range_val * 1.25
-        camarilla_R2[i] = C + range_val * 1.16
-        camarilla_R3[i] = C + range_val * 1.25
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Align Camarilla levels to 12h timeframe
-    camarilla_S2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S2)
-    camarilla_S3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S3)
-    camarilla_R2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R2)
-    camarilla_R3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R3)
-    
-    # 1d data for trend filter (EMA34)
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume spike: current volume > 2.0x 20-period average
+    # Volume spike filter
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma20)
+    volume_spike = volume > (1.5 * vol_ma20)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0
     
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
-        # Skip if any critical data is NaN
-        if (np.isnan(camarilla_S2_aligned[i]) or np.isnan(camarilla_S3_aligned[i]) or 
-            np.isnan(camarilla_R2_aligned[i]) or np.isnan(camarilla_R3_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_spike[i])):
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(adx[i]) or np.isnan(volume_spike[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above S3 (strong support) with 1d uptrend + volume spike
-            long_cond = (close[i] > camarilla_S3_aligned[i] and 
-                        ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and
+            # Long: break above Donchian high with ADX > 25 and volume spike
+            long_cond = (close[i] > donchian_high[i] and 
+                        adx[i] > 25 and 
                         volume_spike[i])
             
-            # Short: price breaks below R3 (strong resistance) with 1d downtrend + volume spike
-            short_cond = (close[i] < camarilla_R3_aligned[i] and 
-                         ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and
+            # Short: break below Donchian low with ADX > 25 and volume spike
+            short_cond = (close[i] < donchian_low[i] and 
+                         adx[i] > 25 and 
                          volume_spike[i])
             
             if long_cond:
@@ -90,15 +75,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below S2 (weaker support)
-            if close[i] < camarilla_S2_aligned[i]:
+            # Long exit: break below Donchian low or ADX < 20 (trend weakening)
+            if close[i] < donchian_low[i] or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above R2 (weaker resistance)
-            if close[i] > camarilla_R2_aligned[i]:
+            # Short exit: break above Donchian high or ADX < 20
+            if close[i] > donchian_high[i] or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
