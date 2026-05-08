@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h price action relative to 12h VWAP with volume confirmation and 1d EMA trend filter.
-# Long when price crosses above 12h VWAP AND 4h volume > 1.5x 20-period average AND price > 1d EMA50.
-# Short when price crosses below 12h VWAP AND 4h volume > 1.5x 20-period average AND price < 1d EMA50.
-# Exit when price crosses back below/above 1d EMA50 (trend-based exit).
-# Uses VWAP as dynamic support/resistance and volume spike for institutional interest confirmation.
-# Target: 60-120 total trades over 4 years (15-30/year) for low fee drag.
+# Hypothesis: 12h Williams Alligator with 1d Elder Ray and volume spike confirmation.
+# Long when Alligator jaws < teeth < lips (bullish alignment) AND Elder Ray bull power > 0 AND 12h volume > 1.8x 24-period average.
+# Short when Alligator jaws > teeth > lips (bearish alignment) AND Elder Ray bear power < 0 AND 12h volume > 1.8x 24-period average.
+# Exit when Alligator alignment breaks or Elder Ray signal reverses.
+# Uses Williams Alligator (13,8,5 SMAs) for trend, Elder Ray (13 EMA) for power, volume for confirmation.
+# Target: 60-120 total trades over 4 years (15-30/year) for low fee drift.
 
-name = "4h_VWAP_Cross_12h_Volume_1dEMA50"
-timeframe = "4h"
+name = "12h_WilliamsAlligator_1dElderRay_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,54 +24,56 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h data for VWAP calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    # Calculate 12h VWAP: cumulative(VP) / cumulative(volume)
-    typical_price_12h = (df_12h['high'] + df_12h['low'] + df_12h['close']) / 3
-    volume_price_12h = typical_price_12h * df_12h['volume']
-    cum_vp_12h = volume_price_12h.cumsum().values
-    cum_vol_12h = df_12h['volume'].cumsum().values
-    vwap_12h = np.divide(cum_vp_12h, cum_vol_12h, out=np.full_like(cum_vp_12h, np.nan), where=cum_vol_12h!=0)
-    
-    # Align 12h VWAP to 4h timeframe
-    vwap_12h_aligned = align_htf_to_ltf(prices, df_12h, vwap_12h)
-    
-    # 1d data for EMA trend filter
+    # 1d data for Elder Ray
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Williams Alligator on 12h: SMAs of median price
+    median_price = (high + low) / 2
+    jaws = pd.Series(median_price).rolling(window=13, min_periods=13).mean().rolling(window=8, min_periods=8).mean()
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().rolling(window=5, min_periods=5).mean()
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().rolling(window=3, min_periods=3).mean()
+    jaws = jaws.values
+    teeth = teeth.values
+    lips = lips.values
     
-    # 4h volume filter: current volume > 1.5x 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma20)
+    # Elder Ray on 1d: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high_1d - ema13_1d
+    bear_power = low_1d - ema13_1d
+    
+    # Align Elder Ray to 12h
+    bull_power_12h = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_12h = align_htf_to_ltf(prices, df_1d, bear_power)
+    
+    # 12h volume filter: current volume > 1.8x 24-period average
+    vol_ma24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_filter = volume > (1.8 * vol_ma24)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Sufficient warmup for EMA
+    start_idx = 30  # Sufficient warmup for Alligator and Elder Ray
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(vwap_12h_aligned[i]) or np.isnan(volume_filter[i]) or 
-            np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(jaws[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(bull_power_12h[i]) or np.isnan(bear_power_12h[i]) or 
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price crosses above VWAP, volume spike, above 1d EMA50
-            long_cond = (close[i] > vwap_12h_aligned[i]) and volume_filter[i] and (close[i] > ema50_1d_aligned[i])
-            # Short conditions: price crosses below VWAP, volume spike, below 1d EMA50
-            short_cond = (close[i] < vwap_12h_aligned[i]) and volume_filter[i] and (close[i] < ema50_1d_aligned[i])
+            # Long conditions: Bullish Alligator alignment, positive bull power, volume spike
+            long_cond = (jaws[i] < teeth[i]) and (teeth[i] < lips[i]) and (bull_power_12h[i] > 0) and volume_filter[i]
+            # Short conditions: Bearish Alligator alignment, negative bear power, volume spike
+            short_cond = (jaws[i] > teeth[i]) and (teeth[i] > lips[i]) and (bear_power_12h[i] < 0) and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -80,15 +82,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below 1d EMA50 (trend change)
-            if close[i] < ema50_1d_aligned[i]:
+            # Long exit: Alligator alignment breaks or bull power turns negative
+            if not ((jaws[i] < teeth[i]) and (teeth[i] < lips[i])) or (bull_power_12h[i] <= 0):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above 1d EMA50 (trend change)
-            if close[i] > ema50_1d_aligned[i]:
+            # Short exit: Alligator alignment breaks or bear power turns positive
+            if not ((jaws[i] > teeth[i]) and (teeth[i] > lips[i])) or (bear_power_12h[i] >= 0):
                 signals[i] = 0.0
                 position = 0
             else:
