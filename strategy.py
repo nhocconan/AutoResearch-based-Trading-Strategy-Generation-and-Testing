@@ -1,21 +1,23 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using weekly Donchian channel breakouts with daily volume confirmation and volatility filter.
-# Long when price breaks above weekly Donchian high with volume above average.
-# Short when price breaks below weekly Donchian low with volume above average.
-# Uses ATR-based volatility filter to avoid choppy markets.
-# Designed for low trade frequency (10-25/year) to minimize fee impact and capture strong trends.
+# Hypothesis: 6h strategy using 1-day volume profile high-volume nodes (HVN) with 1-week trend filter.
+# HVN act as dynamic support/resistance where price tends to consolidate or reverse.
+# Long when price approaches HVN from below in uptrend with volume confirmation.
+# Short when price approaches HVN from above in downtrend with volume confirmation.
+# Uses 1-week ADX > 25 to filter for trending markets only, avoiding chop.
+# Designed for low trade frequency (15-25/year) to minimize false breakouts in ranges.
 
-name = "1d_WeeklyDonchian_Breakout_Volume_Volatility"
-timeframe = "1d"
+name = "6h_VolumeProfile_HVN_TrendFilter"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,82 +25,173 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Donchian channel calculation
+    # Get daily data for volume profile calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
+    
+    # Calculate volume profile: price bins and volume distribution
+    # Use 20 price bins between daily low and high
+    hvn = np.zeros_like(close_1d)  # High Volume Node (price level with max volume)
+    
+    for i in range(len(close_1d)):
+        if i < 20:  # Need minimum lookback for stable calculation
+            hvn[i] = np.nan
+            continue
+            
+        # Lookback period for volume profile (20 days)
+        lookback = 20
+        start_idx = max(0, i - lookback + 1)
+        
+        # Price range in lookback period
+        period_high = np.max(high_1d[start_idx:i+1])
+        period_low = np.min(low_1d[start_idx:i+1])
+        
+        if period_high <= period_low:
+            hvn[i] = np.nan
+            continue
+            
+        # Create price bins
+        n_bins = 20
+        bin_edges = np.linspace(period_low, period_high, n_bins + 1)
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+        
+        # Volume distribution across bins
+        bin_volumes = np.zeros(n_bins)
+        
+        for j in range(start_idx, i+1):
+            # Find which bin this day's typical price falls into
+            typical_price = (high_1d[j] + low_1d[j] + close_1d[j]) / 3
+            bin_idx = np.searchsorted(bin_edges, typical_price) - 1
+            bin_idx = max(0, min(bin_idx, n_bins - 1))
+            bin_volumes[bin_idx] += volume_1d[j]
+        
+        # Find bin with maximum volume (HVN)
+        if np.sum(bin_volumes) > 0:
+            max_vol_idx = np.argmax(bin_volumes)
+            hvn[i] = bin_centers[max_vol_idx]
+        else:
+            hvn[i] = np.nan
+    
+    # First 20 days have no data
+    hvn[:20] = np.nan
+    
+    # Align HVN to 6h timeframe
+    hvn_aligned = align_htf_to_ltf(prices, df_1d, hvn)
+    
+    # Get weekly trend filter using ADX
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 30:
         return np.zeros(n)
     
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate weekly Donchian channels (20-period)
-    donch_high = np.full_like(high_1w, np.nan)
-    donch_low = np.full_like(low_1w, np.nan)
+    # Calculate ADX (14-period)
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = np.abs(high[1:] - low[1:])
+        tr2 = np.abs(high[1:] - close[:-1])
+        tr3 = np.abs(low[1:] - close[:-1])
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr = np.concatenate([[np.nan], tr])
+        
+        # Directional Movement
+        plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
+                           np.maximum(high[1:] - high[:-1], 0), 0)
+        minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
+                            np.maximum(low[:-1] - low[1:], 0), 0)
+        plus_dm = np.concatenate([[0], plus_dm])
+        minus_dm = np.concatenate([[0], minus_dm])
+        
+        # Smooth TR and DM
+        def smooth_wilder(arr, period):
+            result = np.full_like(arr, np.nan)
+            if len(arr) < period:
+                return result
+            # First value is simple average
+            result[period-1] = np.nanmean(arr[1:period])
+            # Subsequent values: Wilder smoothing
+            for i in range(period, len(arr)):
+                if not np.isnan(result[i-1]):
+                    result[i] = (result[i-1] * (period-1) + arr[i]) / period
+                else:
+                    result[i] = np.nan
+            return result
+        
+        atr = smooth_wilder(tr, period)
+        plus_di = 100 * smooth_wilder(plus_dm, period) / atr
+        minus_di = 100 * smooth_wilder(minus_dm, period) / atr
+        
+        # DX and ADX
+        dx = np.full_like(atr, np.nan)
+        mask = (plus_di + minus_di) > 0
+        dx[mask] = 100 * np.abs(plus_di[mask] - minus_di[mask]) / (plus_di[mask] + minus_di[mask])
+        
+        adx = smooth_wilder(dx, period)
+        return adx
     
-    for i in range(20, len(high_1w)):
-        donch_high[i] = np.max(high_1w[i-20:i])
-        donch_low[i] = np.min(low_1w[i-20:i])
+    adx_14 = calculate_adx(high_1w, low_1w, close_1w, 14)
+    # Strong trend: ADX > 25
+    strong_trend = adx_14 > 25
+    strong_trend = np.concatenate([[False], strong_trend[1:]])  # Align with index
+    strong_trend_aligned = align_htf_to_ltf(prices, df_1w, strong_trend.astype(float))
     
-    # Align Donchian channels to daily timeframe
-    donch_high_aligned = align_htf_to_ltf(prices, df_1w, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1w, donch_low)
+    # 6x EMA(50) for dynamic support/resistance and trend bias
+    close_series = pd.Series(close)
+    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Daily ATR(14) for volatility filter
-    high_low = high - low
-    high_close = np.abs(high - np.roll(close, 1))
-    low_close = np.abs(low - np.roll(close, 1))
-    true_range = np.maximum(high_low, np.maximum(high_close, low_close))
-    true_range[0] = high_low[0]  # First value
-    
-    atr = np.zeros_like(close)
-    for i in range(14, len(true_range)):
-        atr[i] = np.mean(true_range[i-14:i])
-    
-    # Daily volume confirmation: volume > 1.5x 20-period EMA
+    # Volume confirmation: current volume > 2.0x 20-period EMA
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ema * 1.5)
-    
-    # Volatility filter: ATR > 0.5x 50-period SMA of ATR (avoid low volatility/chop)
-    atr_sma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-    vol_filter = atr > (atr_sma * 0.5)
+    vol_confirm = volume > (vol_ema * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Ensure enough data for calculations
+    start_idx = 100  # Ensure enough data for calculations
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or
-            np.isnan(atr[i]) or np.isnan(atr_sma[i]) or np.isnan(vol_ema[i])):
+        if (np.isnan(hvn_aligned[i]) or np.isnan(ema_50[i]) or 
+            np.isnan(strong_trend_aligned[i]) or np.isnan(vol_ema[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: break above weekly Donchian high with volume and volatility
-            if (close[i] > donch_high_aligned[i] and 
-                vol_confirm[i] and 
-                vol_filter[i]):
+            # Long setup: price approaching HVN from below in uptrend with volume
+            if (strong_trend_aligned[i] > 0.5 and  # Strong uptrend (ADX > 25)
+                close[i] > ema_50[i] and             # Above EMA50 (uptrend bias)
+                close[i] <= hvn_aligned[i] * 1.01 and  # Within 1% above HVN
+                close[i] >= hvn_aligned[i] * 0.99 and  # Within 1% below HVN
+                vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: break below weekly Donchian low with volume and volatility
-            elif (close[i] < donch_low_aligned[i] and 
-                  vol_confirm[i] and 
-                  vol_filter[i]):
+            # Short setup: price approaching HVN from above in downtrend with volume
+            elif (strong_trend_aligned[i] > 0.5 and  # Strong downtrend (ADX > 25)
+                  close[i] < ema_50[i] and           # Below EMA50 (downtrend bias)
+                  close[i] >= hvn_aligned[i] * 0.99 and  # Within 1% below HVN
+                  close[i] <= hvn_aligned[i] * 1.01 and  # Within 1% above HVN
+                  vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: break below weekly Donchian low or volatility drops
-            if (close[i] < donch_low_aligned[i] or not vol_filter[i]):
+            # Long exit: price moves significantly away from HVN or trend weakens
+            if close[i] < hvn_aligned[i] * 0.97 or strong_trend_aligned[i] <= 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: break above weekly Donchian high or volatility drops
-            if (close[i] > donch_high_aligned[i] or not vol_filter[i]):
+            # Short exit: price moves significantly away from HVN or trend weakens
+            if close[i] > hvn_aligned[i] * 1.03 or strong_trend_aligned[i] <= 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
