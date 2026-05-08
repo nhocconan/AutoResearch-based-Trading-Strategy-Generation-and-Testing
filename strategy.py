@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v4"
-timeframe = "4h"
+name = "6h_Liquidity_Imbalance_Reversal_12hTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,82 +17,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data once for Camarilla levels and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    # Get 12h data once for trend filter and liquidity imbalance detection
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Daily close for Camarilla calculation
-    close_1d = df_1d['close'].values
+    # 12h close for trend filter (EMA34)
+    close_12h = df_12h['close'].values
+    ema34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_12h = (close_12h > ema34_12h).astype(float)
+    trend_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_12h)
     
-    # Calculate Camarilla levels (R1, S1) from previous day's range
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # We need previous day's high, low, close
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    prev_close = np.roll(close_1d, 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close[0] = close_1d[0]  # first value
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
+    # 12h volume for volume spike detection
+    volume_12h = df_12h['volume'].values
+    vol_ma12 = pd.Series(volume_12h).rolling(window=12, min_periods=12).mean().values
+    vol_spike_12h = volume_12h > (vol_ma12 * 1.8)
+    vol_spike_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_spike_12h)
     
-    # Calculate R1 and S1
-    R1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    S1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    # Calculate 6h liquidity imbalance: look for rapid price rejection at swing points
+    # Using 6-period RSI on 6h to detect overextension
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Align Camarilla levels to 4h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    avg_gain = pd.Series(gain).ewm(span=6, adjust=False, min_periods=6).mean().values
+    avg_loss = pd.Series(loss).ewm(span=6, adjust=False, min_periods=6).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Daily trend filter: EMA34
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_1d = (close_1d > ema34_1d).astype(float)
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
-    
-    # Daily volume spike: current volume > 1.5 * 20-day average
-    volume_1d = df_1d['volume'].values
-    vol_ma20d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_1d > (vol_ma20d * 1.5)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
+    # Volume-weighted price change for momentum exhaustion
+    price_change = np.diff(close, prepend=close[0])
+    vol_weighted_change = price_change * volume
+    vol_weighted_ma = pd.Series(vol_weighted_change).ewm(span=12, adjust=False, min_periods=12).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for all indicators
+    start_idx = 50  # warmup
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(trend_1d_aligned[i]) or np.isnan(vol_spike_aligned[i])):
+        if (np.isnan(trend_12h_aligned[i]) or np.isnan(vol_spike_12h_aligned[i]) or 
+            np.isnan(rsi[i]) or np.isnan(vol_weighted_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: price breaks above R1 with volume spike and daily uptrend
-            long_cond = (close[i] > R1_aligned[i] and vol_spike_aligned[i] and trend_1d_aligned[i] > 0.5)
+            # Long setup: RSI oversold + negative volume-weighted momentum (selling exhaustion) + 12h uptrend
+            long_setup = (rsi[i] < 30 and vol_weighted_ma[i] < 0 and trend_12h_aligned[i] > 0.5)
+            # Short setup: RSI overbought + positive volume-weighted momentum (buying exhaustion) + 12h downtrend
+            short_setup = (rsi[i] > 70 and vol_weighted_ma[i] > 0 and trend_12h_aligned[i] < 0.5)
             
-            # Short entry: price breaks below S1 with volume spike and daily downtrend
-            short_cond = (close[i] < S1_aligned[i] and vol_spike_aligned[i] and trend_1d_aligned[i] < 0.5)
-            
-            if long_cond:
+            # Require volume spike on 12h for confirmation
+            if long_setup and vol_spike_12h_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            elif short_cond:
+            elif short_setup and vol_spike_12h_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price closes below S1 (mean reversion to support)
-            if close[i] < S1_aligned[i]:
+            # Long exit: RSI overbought or momentum shifts positive
+            if rsi[i] > 70 or vol_weighted_ma[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price closes above R1 (mean reversion to resistance)
-            if close[i] > R1_aligned[i]:
+            # Short exit: RSI oversold or momentum shifts negative
+            if rsi[i] < 30 or vol_weighted_ma[i] < 0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -100,8 +94,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R1/S1 breakout on 4H with volume confirmation and daily trend filter.
-# Works in bull markets (breakouts continue) and bear markets (mean reversion at opposite level).
-# Daily EMA34 ensures alignment with longer-term trend, reducing counter-trend trades.
-# Volume spike filter (1.5x 20-day average) ensures momentum confirmation.
-# Target: 20-40 trades/year to minimize fee decay while capturing significant moves.
+# Hypothesis: 6h liquidity imbalance reversal strategy.
+# Uses 6h RSI to detect overextension and volume-weighted momentum to identify exhaustion.
+# 12h trend filter ensures we trade with higher timeframe momentum.
+# 12h volume spike confirms institutional participation.
+# Works in both bull/bear markets by fading exhaustion spikes in trending environments.
+# Target: 60-120 total trades over 4 years (15-30/year) to minimize fee drag.
