@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h KAMA + 12h ADX trend filter + volume confirmation
-# KAMA adapts to market noise - slow in ranging markets, fast in trends.
-# Combined with 12h ADX > 25 to ensure we only trade in strong trends.
-# Volume confirmation avoids false breakouts.
-# Designed to work in both bull (trend following) and bear (avoids false signals in chop).
+# Hypothesis: 4h Camarilla pivot + volume spike + choppiness regime
+# Camarilla levels (S1/S2/S3, R1/R2/R3) derived from prior day's range act as strong support/resistance.
+# Price touching S1/R1 with rejection (close back inside range) offers high-probability mean reversion.
+# Volume spike confirms institutional interest at the level.
+# Choppiness filter (CHOP > 61.8) ensures we only mean-revert in ranging markets, avoid trending days.
 # Target: 20-40 trades per year (~80-160 total over 4 years) to minimize fee drag.
 
-name = "6h_KAMA_12hADX_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R1S1_Rejection_Volume_Chop"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,119 +24,107 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # KAMA (Kaufman Adaptive Moving Average) - more responsive in trends, less in ranges
-    # ER = Efficiency Ratio, SC = Smoothing Constant
-    change = np.abs(np.diff(close, k=10))  # 10-period change
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # 10-period volatility
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Pad ER to match length
-    er = np.concatenate([np.full(10, np.nan), er])
-    
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Calculate KAMA
-    kama = np.full(n, np.nan)
-    kama[0] = close[0]
-    for i in range(1, n):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
-    
-    # Get 12h data for ADX trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get 1d data for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate ADX on 12h
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate Camarilla levels from prior day's OHLC
+    # R4 = C + ((H-L) * 1.500), R3 = C + ((H-L) * 1.250), R2 = C + ((H-L) * 1.166)
+    # R1 = C + ((H-L) * 1.083), S1 = C - ((H-L) * 1.083)
+    # S2 = C - ((H-L) * 1.166), S3 = C - ((H-L) * 1.250), S4 = C - ((H-L) * 1.500)
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # True Range
-    tr1 = high_12h[1:] - low_12h[1:]
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[0], tr])  # align with index 0
+    # Prior day's values (shift by 1 to avoid look-ahead)
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    # First day will use invalid data, but will be filtered out by alignment
     
-    # Directional Movement
-    dm_plus = np.where((high_12h[1:] - high_12h[:-1]) > (low_12h[:-1] - low_12h[1:]), 
-                       np.maximum(high_12h[1:] - high_12h[:-1], 0), 0)
-    dm_minus = np.where((low_12h[:-1] - low_12h[1:]) > (high_12h[1:] - high_12h[:-1]), 
-                        np.maximum(low_12h[:-1] - low_12h[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    # Calculate Camarilla levels
+    R1 = prev_close + ((prev_high - prev_low) * 1.083)
+    S1 = prev_close - ((prev_high - prev_low) * 1.083)
     
-    # Smoothed values
-    def wilders_smoothing(arr, period):
-        smoothed = np.full_like(arr, np.nan)
-        smoothed[period-1] = np.nansum(arr[:period])
-        for i in range(period, len(arr)):
-            smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + arr[i]
-        return smoothed
+    # Align Camarilla levels to 4h timeframe (wait for prior day to close)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    atr_12h = wilders_smoothing(tr, 14)
-    dm_plus_smoothed = wilders_smoothing(dm_plus, 14)
-    dm_minus_smoothed = wilders_smoothing(dm_minus, 14)
+    # Choppiness index: determines if market is ranging (CHOP > 61.8) or trending (CHOP < 38.2)
+    # Using 14-period chop
+    def calculate_chop(high_arr, low_arr, close_arr, period=14):
+        atr = []
+        tr = []
+        for i in range(len(close_arr)):
+            if i == 0:
+                tr.append(high_arr[i] - low_arr[i])
+            else:
+                tr.append(max(high_arr[i] - low_arr[i], 
+                           abs(high_arr[i] - close_arr[i-1]),
+                           abs(low_arr[i] - close_arr[i-1])))
+            if i < period:
+                atr.append(np.nan)
+            else:
+                atr.append(np.mean(tr[i-period+1:i+1]))
+        atr = np.array(atr)
+        # Avoid division by zero
+        atr_sum = np.nancumsum(atr)
+        atr_sum_shift = np.roll(atr_sum, period)
+        atr_sum_shift[:period] = 0
+        atr_period_sum = atr_sum - atr_sum_shift
+        chop = 100 * np.log10(atr_period_sum / (np.max(high_arr) - np.min(low_arr))) / np.log10(period)
+        # Handle edge cases
+        chop = np.where((np.max(high_arr) - np.min(low_arr)) == 0, 50, chop)
+        return chop
     
-    # DI+ and DI-
-    di_plus = np.where(atr_12h != 0, 100 * dm_plus_smoothed / atr_12h, 0)
-    di_minus = np.where(atr_12h != 0, 100 * dm_minus_smoothed / atr_12h, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = wilders_smoothing(dx, 14)
-    
-    # Align 12h ADX to 6h
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    # Calculate chop on 1d data then align
+    chop_1d = calculate_chop(high_1d, low_1d, close_1d, 14)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
     # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma = np.convolve(volume, np.ones(20)/20, mode='same')
-    vol_ma[:10] = np.nan  # insufficient data at start
-    vol_ma[-10:] = np.nan  # insufficient data at end
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_conf = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for KAMA and ADX
+    start_idx = 20  # Need enough data for volume MA
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(kama[i]) or np.isnan(adx_12h_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+            np.isnan(chop_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        kama_val = kama[i]
-        adx_val = adx_12h_aligned[i]
+        r1 = R1_aligned[i]
+        s1 = S1_aligned[i]
+        chop_val = chop_aligned[i]
         vol_conf_val = vol_conf[i]
+        curr_close = close[i]
         
         if position == 0:
-            # Enter long: price > KAMA, ADX > 25 (strong trend), volume confirmation
-            if close[i] > kama_val and adx_val > 25 and vol_conf_val:
+            # Enter long: price touches S1 and closes back above it (rejection) in choppy market with volume
+            if low[i] <= s1 and curr_close > s1 and chop_val > 61.8 and vol_conf_val:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price < KAMA, ADX > 25 (strong trend), volume confirmation
-            elif close[i] < kama_val and adx_val > 25 and vol_conf_val:
+            # Enter short: price touches R1 and closes back below it (rejection) in choppy market with volume
+            elif high[i] >= r1 and curr_close < r1 and chop_val > 61.8 and vol_conf_val:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price < KAMA or ADX < 20 (weakening trend)
-            if close[i] < kama_val or adx_val < 20:
+            # Exit long: price closes below S1 (breakdown) or chop drops (trending begins)
+            if close[i] < s1 or chop_val < 50:  # exit if trend emerging
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price > KAMA or ADX < 20 (weakening trend)
-            if close[i] > kama_val or adx_val < 20:
+            # Exit short: price closes above R1 (breakout) or chop drops (trending begins)
+            if close[i] > r1 or chop_val < 50:
                 signals[i] = 0.0
                 position = 0
             else:
