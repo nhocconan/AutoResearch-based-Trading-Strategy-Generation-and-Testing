@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_WilliamsVixFix_WeeklyTrend_Filter"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,27 +17,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data once for Williams Vix Fix
-    df_w = get_htf_data(prices, '1w')
-    if len(df_w) < 10:
-        return np.zeros(n)
-    
-    # Calculate Williams Vix Fix on weekly: wvf = ((highest(high, n) - low) / highest(high, n)) * 100
-    # Using 22-period lookback (approx monthly)
-    highest_high = pd.Series(df_w['high']).rolling(window=22, min_periods=22).max().values
-    wvf = ((highest_high - df_w['low'].values) / highest_high) * 100
-    wvf = np.nan_to_num(wvf, nan=0.0)
-    wvf_aligned = align_htf_to_ltf(prices, df_w, wvf)
-    
-    # Get daily data once for trend filter
+    # Get daily data once
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 20-period EMA for daily trend
+    # Calculate 1d EMA(34) for trend direction
     close_1d = df_1d['close'].values
-    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Calculate 1d ATR(14) for volatility normalization
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    tr1 = np.maximum(high_1d[1:] - low_1d[1:], 
+                     np.maximum(np.abs(high_1d[1:] - close_1d[:-1]), 
+                                np.abs(low_1d[1:] - close_1d[:-1])))
+    tr1 = np.concatenate([[np.nan], tr1])
+    
+    atr14 = pd.Series(tr1).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr14_aligned = align_htf_to_ltf(prices, df_1d, atr14)
+    
+    # Calculate 12h Camarilla levels from previous 12h bar
+    range_12h = high - low
+    camarilla_r1 = close + range_12h * 1.1 / 12
+    camarilla_s1 = close - range_12h * 1.1 / 12
+    camarilla_r4 = close + range_12h * 1.1 / 2
+    camarilla_s4 = close - range_12h * 1.1 / 2
+    
+    # Shift to get previous bar's levels (no look-ahead)
+    camarilla_r1_prev = np.roll(camarilla_r1, 1)
+    camarilla_s1_prev = np.roll(camarilla_s1, 1)
+    camarilla_r4_prev = np.roll(camarilla_r4, 1)
+    camarilla_s4_prev = np.roll(camarilla_s4, 1)
+    camarilla_r1_prev[0] = np.nan
+    camarilla_s1_prev[0] = np.nan
+    camarilla_r4_prev[0] = np.nan
+    camarilla_s4_prev[0] = np.nan
+    
+    # Volume spike detection: current volume > 2 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -46,36 +68,37 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(wvf_aligned[i]) or np.isnan(ema20_1d_aligned[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(atr14_aligned[i]) or 
+            np.isnan(camarilla_r1_prev[i]) or np.isnan(camarilla_s1_prev[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        wvf_val = wvf_aligned[i]
-        ema_val = ema20_1d_aligned[i]
+        ema_val = ema34_1d_aligned[i]
+        vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long when Vix Fix is high (fear) and price above weekly EMA
-            # High Vix Fix indicates market fear, potential reversal
-            if (wvf_val > 80 and close[i] > ema_val):
+            # Enter long: price breaks above R1 with volume spike, above 1d EMA
+            if (close[i] > camarilla_r1_prev[i] and vol_spike and 
+                close[i] > ema_val):
                 signals[i] = 0.25
                 position = 1
-            # Enter short when Vix Fix is low (complacency) and price below weekly EMA
-            # Low Vix Fix indicates complacency, potential top
-            elif (wvf_val < 20 and close[i] < ema_val):
+            # Enter short: price breaks below S1 with volume spike, below 1d EMA
+            elif (close[i] < camarilla_s1_prev[i] and vol_spike and 
+                  close[i] < ema_val):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long when fear subsides or price crosses below EMA
-            if (wvf_val < 40 or close[i] < ema_val):
+            # Exit long: price breaks below S1 OR below 1d EMA
+            if (close[i] < camarilla_s1_prev[i] or close[i] < ema_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short when complacency ends or price crosses above EMA
-            if (wvf_val > 60 or close[i] > ema_val):
+            # Exit short: price breaks above R1 OR above 1d EMA
+            if (close[i] > camarilla_r1_prev[i] or close[i] > ema_val):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -83,12 +106,14 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Uses Williams Vix Fix (fear/greed gauge) from weekly data with daily EMA trend filter.
-# - Enters long when Vix Fix > 80 (extreme fear) and price above daily EMA (contrarian entry in fear)
-# - Enters short when Vix Fix < 20 (extreme complacency/greed) and price below daily EMA (fade greed)
-# - Exits when Vix Fix normalizes or price crosses daily EMA
-# - Williams Vix Fix measures market fear: high values = fear/panic, low values = complacency
-# - Works in both bull and bear markets by fading extremes of market sentiment
-# - Weekly calculation avoids noise, daily EMA provides trend context
-# - Target: 50-120 total trades over 4 years (12-30/year) to minimize fee drag
-# - Position size: 0.25 for balanced risk/return in volatile markets
+# Hypothesis: Uses 12h Camarilla R1/S1 breakouts with volume confirmation and 1d EMA trend filter.
+# - Enters long when price breaks above R1 (previous bar) with volume spike and above 1d EMA
+# - Enters short when price breaks below S1 (previous bar) with volume spike and below 1d EMA
+# - Exits when price breaks back below S1 (long) or above R1 (short) OR crosses 1d EMA
+# - Volume spike filter ensures breakouts have conviction
+# - 1d EMA filter ensures trading with higher timeframe trend
+# - Camarilla levels provide natural support/resistance at key levels
+# - Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
+# - Position size: 0.25 for balanced risk/return
+# - Works in both bull and bear markets by following 1d trend direction
+# - Volume confirmation reduces false breakouts in low-volume environments
