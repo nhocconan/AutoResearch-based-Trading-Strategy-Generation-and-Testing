@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,15 +34,19 @@ def generate_signals(prices):
     r4 = pivot + (range_ * 1.1)
     s4 = pivot - (range_ * 1.1)
     
-    # Align daily Camarilla levels to 12h timeframe
+    # Align daily Camarilla levels to 4h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # 1d trend filter: EMA(34) on close
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 12h trend filter: EMA(50) on close
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 10:
+        return np.zeros(n)
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     # Volume confirmation: 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -56,37 +60,37 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
         if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(s4_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ratio[i])):
+            np.isnan(s4_aligned[i]) or np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above S4 with 1d uptrend and volume
+            # Long: price breaks above S4 with 12h uptrend and volume
             if (close[i] > s4_aligned[i] and 
-                close[i] > ema_34_1d_aligned[i] and
+                close[i] > ema_50_12h_aligned[i] and
                 vol_ratio[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below R3 with 1d downtrend and volume
+            # Short: price breaks below R3 with 12h downtrend and volume
             elif (close[i] < r3_aligned[i] and 
-                  close[i] < ema_34_1d_aligned[i] and
+                  close[i] < ema_50_12h_aligned[i] and
                   vol_ratio[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below S3 or reverses below 1d EMA
+            # Long exit: price breaks below S3 or reverses below 12h EMA
             if (close[i] < s3_aligned[i] or 
-                close[i] < ema_34_1d_aligned[i]):
+                close[i] < ema_50_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above R3 or reverses above 1d EMA
+            # Short exit: price breaks above R3 or reverses above 12h EMA
             if (close[i] > r3_aligned[i] or 
-                close[i] > ema_34_1d_aligned[i]):
+                close[i] > ema_50_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
