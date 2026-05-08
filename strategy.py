@@ -3,20 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Heikin_Ashi_Momentum_Divergence"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
-
-def calculate_ha(close, open_, high, low):
-    """Calculate Heikin Ashi candles"""
-    ha_close = (open_ + high + low + close) / 4
-    ha_open = np.zeros_like(close)
-    ha_open[0] = (open_[0] + close[0]) / 2
-    for i in range(1, len(close)):
-        ha_open[i] = (ha_open[i-1] + ha_close[i-1]) / 2
-    ha_high = np.maximum.reduce([high, low, ha_open, ha_close])
-    ha_low = np.minimum.reduce([high, low, ha_open, ha_close])
-    return ha_open, ha_high, ha_low, ha_close
 
 def generate_signals(prices):
     n = len(prices)
@@ -24,103 +13,79 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    open_ = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Heikin Ashi and momentum divergence
+    # Get daily data for Camarilla pivot levels, trend filter, and volume average
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate Heikin Ashi on daily
-    ha_open_1d, ha_high_1d, ha_low_1d, ha_close_1d = calculate_ha(
-        df_1d['close'].values,
-        df_1d['open'].values,
-        df_1d['high'].values,
-        df_1d['low'].values
-    )
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # Momentum: 14-period RSI on daily HA close
-    def calculate_rsi(data, period=14):
-        if len(data) < period:
-            return np.full_like(data, np.nan)
-        delta = np.diff(data)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        avg_gain = np.zeros_like(data)
-        avg_loss = np.zeros_like(data)
-        avg_gain[period] = np.mean(gain[:period])
-        avg_loss[period] = np.mean(loss[:period])
-        for i in range(period+1, len(data)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
+    # Calculate Camarilla pivot levels (R1, S1) from previous day
+    # P = (H + L + C) / 3
+    # R1 = P + (H - L) * 1.1 / 12
+    # S1 = P - (H - L) * 1.1 / 12
+    P = (high_1d + low_1d + close_1d) / 3
+    R1 = P + (high_1d - low_1d) * 1.1 / 12
+    S1 = P - (high_1d - low_1d) * 1.1 / 12
     
-    rsi_1d = calculate_rsi(ha_close_1d, 14)
+    # Align to 4h timeframe (these are fixed for the day)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # Divergence: price making higher highs but RSI making lower highs (bearish)
-    # or price making lower lows but RSI making higher lows (bullish)
-    def find_divergence(price, rsi, lookback=10):
-        bullish_div = np.zeros_like(price, dtype=bool)
-        bearish_div = np.zeros_like(price, dtype=bool)
-        for i in range(lookback, len(price)):
-            # Bullish divergence: price lower low, RSI higher low
-            if (price[i] == np.min(price[i-lookback:i+1]) and 
-                rsi[i] == np.max(rsi[i-lookback:i+1])):
-                bullish_div[i] = True
-            # Bearish divergence: price higher high, RSI lower high
-            if (price[i] == np.max(price[i-lookback:i+1]) and 
-                rsi[i] == np.min(rsi[i-lookback:i+1])):
-                bearish_div[i] = True
-        return bullish_div, bearish_div
+    # Daily EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    bull_div_1d, bear_div_1d = find_divergence(ha_close_1d, rsi_1d, 10)
+    # Daily average volume for volume confirmation
+    avg_vol_1d = np.mean(volume_1d)
+    avg_vol_aligned = np.full(n, avg_vol_1d)  # constant for the day
     
-    # Align to 6h
-    ha_close_1d_aligned = align_htf_to_ltf(prices, df_1d, ha_close_1d)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    bull_div_1d_aligned = align_htf_to_ltf(prices, df_1d, bull_div_1d.astype(float))
-    bear_div_1d_aligned = align_htf_to_ltf(prices, df_1d, bear_div_1d.astype(float))
-    
-    # 6h momentum confirmation: RSI(14) on HA close
-    ha_open, ha_high, ha_low, ha_close = calculate_ha(close, open_, high, low)
-    rsi_6h = calculate_rsi(ha_close, 14)
+    # 4h volume spike (current volume > 1.5x daily average)
+    vol_spike = volume > (avg_vol_aligned * 1.5)
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 34  # warmup for EMA34
     
     for i in range(start_idx, n):
-        if np.isnan(ha_close_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or np.isnan(rsi_6h[i]):
+        # Skip if any critical data is NaN
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+            np.isnan(ema34_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: bullish divergence on daily AND 6h RSI < 30 (oversold)
-            if bull_div_1d_aligned[i] and rsi_6h[i] < 30:
+            # Long: Close breaks above R1, above EMA34, and volume spike
+            long_cond = (close[i] > R1_aligned[i]) and (close[i] > ema34_aligned[i]) and vol_spike[i]
+            # Short: Close breaks below S1, below EMA34, and volume spike
+            short_cond = (close[i] < S1_aligned[i]) and (close[i] < ema34_aligned[i]) and vol_spike[i]
+            
+            if long_cond:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish divergence on daily AND 6h RSI > 70 (overbought)
-            elif bear_div_1d_aligned[i] and rsi_6h[i] > 70:
+            elif short_cond:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: bearish divergence OR 6h RSI > 70
-            if bear_div_1d_aligned[i] or rsi_6h[i] > 70:
+            # Exit long: Close below EMA34
+            if close[i] < ema34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: bullish divergence OR 6h RSI < 30
-            if bull_div_1d_aligned[i] or rsi_6h[i] < 30:
+            # Exit short: Close above EMA34
+            if close[i] > ema34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -128,7 +93,8 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Heikin Ashi smooths price action to filter noise, while divergence between price and momentum
-# identifies exhaustion points. Works in both bull and bear markets by catching reversals at extremes.
-# Daily HA RSI divergence provides the signal, 6h HA RSI provides entry timing confirmation.
-# Target: 50-150 trades over 4 years (12-37/year) with discrete positions to minimize fee drag.
+# Hypothesis: Camarilla R1/S1 levels act as intraday support/resistance with higher probability of continuation when broken with volume. 
+# EMA34 filter ensures we only trade in the direction of the daily trend. 
+# Volume spike confirms institutional participation. 
+# Works in bull markets (breakouts above R1 in uptrend) and bear markets (breakdowns below S1 in downtrend). 
+# Target: 20-50 trades per year (80-200 total over 4 years) to minimize fee decay.
