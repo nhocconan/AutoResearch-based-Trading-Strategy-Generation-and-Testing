@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1-day VWAP as trend filter, 12-hour Donchian(20) breakout, and volume confirmation.
-# Long when price > 1d VWAP (bullish trend), price breaks above 12h Donchian upper band, volume > 2.0x average.
-# Short when price < 1d VWAP (bearish trend), price breaks below 12h Donchian lower band, volume > 2.0x average.
-# Exit on trend reversal, Donchian break in opposite direction, or max 20 bars held.
-# Uses position size 0.28 to balance return and drawdown. Target: 80-120 total trades over 4 years (20-30/year).
-# Designed to capture trends in both bull and bear markets by using 1d VWAP filter, with volume to confirm breakout strength.
+# Hypothesis: 4h strategy using 12h EMA(50) as trend filter, 4-hour Donchian(20) breakout, and volume confirmation.
+# Long when 12h EMA > price (bullish trend), price breaks above 4h Donchian upper band, volume > 2x average.
+# Short when 12h EMA < price (bearish trend), price breaks below 4h Donchian lower band, volume > 2x average.
+# Exit on trend reversal, Donchian break in opposite direction, or max 25 bars held.
+# Uses position size 0.25 to balance return and drawdown. Target: 100-200 total trades over 4 years (25-50/year).
+# Designed to capture trends in both bull and bear markets by using 12h trend filter, with volume to confirm breakout strength.
 
-name = "12h_1dVWAP_12hDonchian_Volume"
-timeframe = "12h"
+name = "4h_12hEMA50_4hDonchian_Volume_v5"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,35 +24,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for VWAP trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
-        return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
-    
-    # Get 12h data for Donchian bands
+    # Get 12h data for EMA trend filter
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # 1-day VWAP (volume-weighted average price)
-    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
-    vwap_1d = (np.cumsum(typical_price_1d * volume_1d) / np.cumsum(volume_1d))
-    vwap_1d = np.where(np.cumsum(volume_1d) == 0, 0, vwap_1d)  # avoid division by zero
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    # Get 4h data for Donchian bands
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
     
-    # 12-hour Donchian(20) bands
-    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    
+    # 12-hour EMA(50)
+    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    
+    # 4-hour Donchian(20) bands
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
     
     # Volume average (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -66,7 +61,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(vwap_1d_aligned[i]) or np.isnan(donchian_high_aligned[i]) or
+        if (np.isnan(ema_12h_aligned[i]) or np.isnan(donchian_high_aligned[i]) or
             np.isnan(donchian_low_aligned[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -74,37 +69,37 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price > 1d VWAP (bullish trend), price breaks above 12h Donchian upper band, volume spike
-            if (close[i] > vwap_1d_aligned[i] and
+            # Long: 12h EMA bullish (price > EMA), price breaks above 4h Donchian upper band, volume spike
+            if (close[i] > ema_12h_aligned[i] and
                 close[i] > donchian_high_aligned[i] and
                 vol_ratio[i] > 2.0):
-                signals[i] = 0.28
+                signals[i] = 0.25
                 position = 1
                 entry_bar = i
-            # Short: price < 1d VWAP (bearish trend), price breaks below 12h Donchian lower band, volume spike
-            elif (close[i] < vwap_1d_aligned[i] and
+            # Short: 12h EMA bearish (price < EMA), price breaks below 4h Donchian lower band, volume spike
+            elif (close[i] < ema_12h_aligned[i] and
                   close[i] < donchian_low_aligned[i] and
                   vol_ratio[i] > 2.0):
-                signals[i] = -0.28
+                signals[i] = -0.25
                 position = -1
                 entry_bar = i
         elif position == 1:
-            # Long exit: trend reversal, price breaks below Donchian lower band, or max 20 bars held
-            if (close[i] < vwap_1d_aligned[i] or 
+            # Long exit: trend reversal, price breaks below Donchian lower band, or max 25 bars held
+            if (close[i] < ema_12h_aligned[i] or 
                 close[i] < donchian_low_aligned[i] or
-                i - entry_bar >= 20):
+                i - entry_bar >= 25):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.28
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend reversal, price breaks above Donchian upper band, or max 20 bars held
-            if (close[i] > vwap_1d_aligned[i] or 
+            # Short exit: trend reversal, price breaks above Donchian upper band, or max 25 bars held
+            if (close[i] > ema_12h_aligned[i] or 
                 close[i] > donchian_high_aligned[i] or
-                i - entry_bar >= 20):
+                i - entry_bar >= 25):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.28
+                signals[i] = -0.25
     
     return signals
