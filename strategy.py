@@ -3,20 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 4h volume spike + 1d ADX trend filter
-# Donchian breakouts capture momentum in trending markets. Volume spike confirms institutional participation.
-# 1d ADX > 25 ensures we only trade in strong trends, avoiding whipsaws in ranges.
-# Exits occur when price returns to the Donchian midpoint or trend weakens (ADX < 20).
-# Targets 20-30 trades per year (~80-120 total over 4 years) to minimize fee drag.
+# Hypothesis: 1d Donchian(55) breakout + 1w ADX trend filter + volume confirmation
+# Longer lookback reduces false breakouts, focusing on strong momentum moves.
+# Weekly ADX > 25 ensures we only trade in strong trends, avoiding whipsaws in ranges.
+# Volume spike confirms institutional participation in the breakout.
+# Exits when price returns to Donchian midpoint or trend weakens (ADX < 20).
+# Targets 15-25 trades per year (~60-100 total over 4 years) to minimize fee drag.
 # Works in both bull and bear markets by filtering for strong trends only.
 
-name = "4h_Donchian20_4hVolume_1dADX"
-timeframe = "4h"
+name = "1d_Donchian55_1wADX_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 70:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,8 +25,8 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels on 4h
-    lookback = 20
+    # Donchian channels on 1d with longer lookback
+    lookback = 55
     dc_high = np.full_like(high, np.nan)
     dc_low = np.full_like(low, np.nan)
     dc_mid = np.full_like(close, np.nan)
@@ -35,37 +36,37 @@ def generate_signals(prices):
         dc_low[i] = np.min(low[i-lookback:i])
         dc_mid[i] = (dc_high[i] + dc_low[i]) / 2.0
     
-    # Volume spike on 4h
+    # Volume confirmation: 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     vol_spike = volume > (vol_ma.values * 2.0)
     
-    # Get 1d data for ADX trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 1w data for ADX trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate ADX(14) on daily
-    plus_dm = np.zeros_like(high_1d)
-    minus_dm = np.zeros_like(high_1d)
-    tr = np.zeros_like(high_1d)
+    # Calculate ADX(14) on weekly
+    plus_dm = np.zeros_like(high_1w)
+    minus_dm = np.zeros_like(high_1w)
+    tr = np.zeros_like(high_1w)
     
-    for i in range(1, len(high_1d)):
-        plus_dm[i] = max(high_1d[i] - high_1d[i-1], 0)
-        minus_dm[i] = max(low_1d[i-1] - low_1d[i], 0)
+    for i in range(1, len(high_1w)):
+        plus_dm[i] = max(high_1w[i] - high_1w[i-1], 0)
+        minus_dm[i] = max(low_1w[i-1] - low_1w[i], 0)
         if plus_dm[i] == minus_dm[i]:
             plus_dm[i] = 0
             minus_dm[i] = 0
         tr[i] = max(
-            high_1d[i] - low_1d[i],
-            abs(high_1d[i] - close_1d[i-1]),
-            abs(low_1d[i] - close_1d[i-1])
+            high_1w[i] - low_1w[i],
+            abs(high_1w[i] - close_1w[i-1]),
+            abs(low_1w[i] - close_1w[i-1])
         )
     
-    # Smooth TR, +DM, -DM
+    # Wilder smoothing
     def wilder_smooth(arr, period):
         result = np.full_like(arr, np.nan)
         if len(arr) < period:
@@ -89,8 +90,8 @@ def generate_signals(prices):
     
     adx_strong = adx > 25
     adx_weak = adx < 20
-    adx_strong_aligned = align_htf_to_ltf(prices, df_1d, adx_strong)
-    adx_weak_aligned = align_htf_to_ltf(prices, df_1d, adx_weak)
+    adx_strong_aligned = align_htf_to_ltf(prices, df_1w, adx_strong)
+    adx_weak_aligned = align_htf_to_ltf(prices, df_1w, adx_weak)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
