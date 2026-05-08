@@ -3,20 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Choppiness Index regime filter + 1-day Donchian breakout + volume confirmation
-# Uses Choppiness Index to identify ranging (CHOP > 61.8) and trending (CHOP < 38.2) regimes
-# In trending regimes: trade Donchian(20) breakouts with volume confirmation
-# In ranging regimes: mean-revert at Bollinger Band extremes with volume confirmation
-# Weekly trend filter ensures alignment with higher timeframe momentum
-# Designed for low trade frequency to avoid fee drag on 12h timeframe
+# Hypothesis: 1h ADX + 4h Donchian breakout with volume confirmation and session filter
+# Long when 4h price breaks above Donchian(20) upper band + 1h ADX > 25 + volume spike + session (08-20 UTC)
+# Short when 4h price breaks below Donchian(20) lower band + 1h ADX > 25 + volume spike + session
+# Uses 4h for trend structure (Donchian channels), 1h for entry timing and ADX filter
+# Volume spike confirms institutional participation
+# Session filter reduces noise during low-liquidity hours
+# Targets 60-150 total trades over 4 years (15-37/year) to avoid fee drag
 
-name = "12h_Chop_Donchian_BB_WeeklyTrend_Volume"
-timeframe = "12h"
+name = "1h_ADX_DonchianBreakout_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,123 +25,97 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data once for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 4h data once for Donchian channels
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate weekly EMA(50) for trend filter
-    weekly_close = df_1w['close'].values
-    ema50_1w = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate 4h Donchian channels (20-period)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
     
-    # Get daily data for Donchian and Bollinger Bands
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # Calculate 1h ADX (14-period)
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    tr = np.zeros(n)
     
-    # Daily Donchian channels (20-period)
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    donchian_high = pd.Series(daily_high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(daily_low).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    for i in range(1, n):
+        high_diff = high[i] - high[i-1]
+        low_diff = low[i-1] - low[i]
+        
+        plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
+        minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    # Daily Bollinger Bands (20, 2)
-    daily_close = df_1d['close'].values
-    bb_middle = pd.Series(daily_close).rolling(window=20, min_periods=20).mean().values
-    bb_std = pd.Series(daily_close).rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + (2 * bb_std)
-    bb_lower = bb_middle - (2 * bb_std)
-    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper)
-    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower)
+    # Smooth with Wilder's smoothing (alpha = 1/period)
+    def wilder_smooth(arr, period):
+        result = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return result
+        result[period-1] = np.nansum(arr[1:period])  # Skip index 0
+        for i in range(period, len(arr)):
+            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
+        return result
     
-    # Choppiness Index (14-period) - measures trend vs ranging
-    # High values (>61.8) indicate ranging, low values (<38.2) indicate trending
-    tr = np.maximum(high - low, 
-                    np.maximum(np.abs(high - np.roll(close, 1)), 
-                               np.abs(np.roll(close, 1) - low)))
-    # Handle first element for rolling
-    tr[0] = high[0] - low[0]
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    plus_di = 100 * wilder_smooth(plus_dm, 14) / wilder_smooth(tr, 14)
+    minus_di = 100 * wilder_smooth(minus_dm, 14) / wilder_smooth(tr, 14)
+    dx = np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100
+    adx = wilder_smooth(dx, 14)
     
-    # Avoid division by zero
-    range_max_min = max_high - min_low
-    range_max_min = np.where(range_max_min == 0, 1e-10, range_max_min)
+    # Volume spike: current volume > 2.0 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
-    chop = 100 * np.log10(atr14 * 14 / range_max_min) / np.log10(14)
-    chop = np.where(np.isnan(chop), 50, chop)  # Default to middle when undefined
-    
-    # Volume spike: current volume > 1.5 * 30-period average
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour  # Already datetime64[ms], .hour works
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # warmup for calculations
+    start_idx = 50  # warmup for calculations
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or np.isnan(bb_upper_aligned[i]) or 
-            np.isnan(bb_lower_aligned[i]) or np.isnan(chop[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(adx[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema50_1w_val = ema50_1w_aligned[i]
-        chop_val = chop[i]
-        vol_spike = volume_spike[i]
-        
         if position == 0:
-            # Trending regime (CHOP < 38.2): Donchian breakout with volume
-            if chop_val < 38.2:
-                if close[i] > donchian_high_aligned[i] and vol_spike:
-                    signals[i] = 0.25
-                    position = 1
-                elif close[i] < donchian_low_aligned[i] and vol_spike:
-                    signals[i] = -0.25
-                    position = -1
-            # Ranging regime (CHOP > 61.8): Mean reversion at Bollinger Bands
-            elif chop_val > 61.8:
-                if close[i] < bb_lower_aligned[i] and vol_spike:
-                    signals[i] = 0.25
-                    position = 1
-                elif close[i] > bb_upper_aligned[i] and vol_spike:
-                    signals[i] = -0.25
-                    position = -1
+            # Enter long: 4h price breaks above Donchian high + ADX > 25 + volume spike + session
+            if (high[i] > donchian_high_aligned[i] and 
+                adx[i] > 25 and 
+                volume_spike[i] and 
+                session_filter[i]):
+                signals[i] = 0.20
+                position = 1
+            # Enter short: 4h price breaks below Donchian low + ADX > 25 + volume spike + session
+            elif (low[i] < donchian_low_aligned[i] and 
+                  adx[i] > 25 and 
+                  volume_spike[i] and 
+                  session_filter[i]):
+                signals[i] = -0.20
+                position = -1
         elif position == 1:
-            # Exit long: regime change or opposite signal
-            exit_signal = False
-            if chop_val < 38.2:  # Still trending
-                if close[i] < donchian_low_aligned[i]:
-                    exit_signal = True
-            else:  # Ranging or neutral
-                if close[i] > bb_middle[i]:  # Return to mean
-                    exit_signal = True
-            if exit_signal:
+            # Exit long: price breaks below Donchian low OR ADX drops below 20
+            if low[i] < donchian_low_aligned[i] or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: regime change or opposite signal
-            exit_signal = False
-            if chop_val < 38.2:  # Still trending
-                if close[i] > donchian_high_aligned[i]:
-                    exit_signal = True
-            else:  # Ranging or neutral
-                if close[i] < bb_middle[i]:  # Return to mean
-                    exit_signal = True
-            if exit_signal:
+            # Exit short: price breaks above Donchian high OR ADX drops below 20
+            if high[i] > donchian_high_aligned[i] or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
