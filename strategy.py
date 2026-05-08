@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_PivotBreakout_VolumeTrend_1d"
-timeframe = "6h"
+name = "12h_KAMA_RSI_ChopFilter"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,62 +17,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data once for pivot levels and trend filter
+    # Get 1d data once for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Previous day's OHLC for pivot calculation
-    prev_high = np.roll(df_1d['high'].values, 1)
-    prev_low = np.roll(df_1d['low'].values, 1)
-    prev_close = np.roll(df_1d['close'].values, 1)
-    prev_high[0] = df_1d['high'].values[0]
-    prev_low[0] = df_1d['low'].values[0]
-    prev_close[0] = df_1d['close'].values[0]
+    # KAMA calculation (using Efficiency Ratio)
+    def kama(close, length=10, fast=2, slow=30):
+        change = np.abs(np.diff(close, n=length))
+        volatility = np.sum(np.abs(np.diff(close)), axis=0)
+        er = np.where(volatility != 0, change / volatility, 0)
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        kama = np.zeros_like(close)
+        kama[0] = close[0]
+        for i in range(1, len(close)):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
     
-    # Pivot point and R1/S1 levels (standard calculation)
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_val = prev_high - prev_low
-    r1 = pivot + range_val
-    s1 = pivot - range_val
+    # Calculate KAMA on 1d close
+    kama_1d = kama(df_1d['close'].values, length=10, fast=2, slow=30)
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
     
-    # Align pivot levels to 6h timeframe
-    r1_6h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_6h = align_htf_to_ltf(prices, df_1d, s1)
+    # RSI calculation (14-period)
+    def rsi(close, length=14):
+        delta = np.diff(close, prepend=close[0])
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = pd.Series(gain).ewm(alpha=1/length, adjust=False, min_periods=length).mean().values
+        avg_loss = pd.Series(loss).ewm(alpha=1/length, adjust=False, min_periods=length).mean().values
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
     
-    # 1d EMA20 trend filter
-    close_1d = df_1d['close'].values
-    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    trend_1d = (close_1d > ema20_1d).astype(float)
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    rsi_1d = rsi(df_1d['close'].values, length=14)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Volume spike detection: current volume > 2.0 * 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma20 * 2.0)
+    # Choppiness Index (14-period) on 1d
+    def choppiness_index(high, low, close, length=14):
+        atr = np.zeros_like(close)
+        tr1 = high[1:] - low[1:]
+        tr2 = np.abs(high[1:] - close[:-1])
+        tr3 = np.abs(low[1:] - close[:-1])
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr = np.concatenate([[np.max(tr1[:1]) if len(tr1) > 0 else 0], tr])
+        atr = pd.Series(tr).ewm(alpha=1/length, adjust=False, min_periods=length).mean().values
+        
+        highest_high = pd.Series(high).rolling(window=length, min_periods=length).max().values
+        lowest_low = pd.Series(low).rolling(window=length, min_periods=length).min().values
+        
+        sum_atr = pd.Series(atr).rolling(window=length, min_periods=length).sum().values
+        range_hl = highest_high - lowest_low
+        cpi = 100 * np.log10(sum_atr / range_hl) / np.log10(length)
+        return np.where(range_hl != 0, cpi, 50)
     
-    # Price distance filter: require breakout to be at least 0.3% above/below level
-    price_above_r1 = close > r1_6h * 1.003
-    price_below_s1 = close < s1_6h * 0.997
+    chop_1d = choppiness_index(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, length=14)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # warmup for volume MA
+    start_idx = 30  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(kama_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or np.isnan(chop_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: price breaks above R1 with volume spike and 1d uptrend
-            long_cond = (price_above_r1[i] and vol_spike[i] and trend_1d_aligned[i] > 0.5)
+            # Long entry: price above KAMA, RSI > 50, and chop < 61.8 (trending market)
+            long_cond = (close[i] > kama_1d_aligned[i] and 
+                         rsi_1d_aligned[i] > 50 and 
+                         chop_1d_aligned[i] < 61.8)
             
-            # Short entry: price breaks below S1 with volume spike and 1d downtrend
-            short_cond = (price_below_s1[i] and vol_spike[i] and trend_1d_aligned[i] < 0.5)
+            # Short entry: price below KAMA, RSI < 50, and chop < 61.8 (trending market)
+            short_cond = (close[i] < kama_1d_aligned[i] and 
+                          rsi_1d_aligned[i] < 50 and 
+                          chop_1d_aligned[i] < 61.8)
             
             if long_cond:
                 signals[i] = 0.25
@@ -81,15 +104,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price reverses back below R1 (mean reversion)
-            if close[i] < r1_6h[i]:
+            # Long exit: price crosses below KAMA or RSI < 40
+            if close[i] < kama_1d_aligned[i] or rsi_1d_aligned[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price reverses back above S1 (mean reversion)
-            if close[i] > s1_6h[i]:
+            # Short exit: price crosses above KAMA or RSI > 60
+            if close[i] > kama_1d_aligned[i] or rsi_1d_aligned[i] > 60:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -97,10 +120,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Pivot R1/S1 breakout with volume confirmation and 1d trend filter on 6h timeframe.
-# Uses standard pivot points (not Camarilla) for cleaner breakout signals.
-# Volume spike >2x 20-period average ensures institutional participation.
-# Price distance filter (0.3%) avoids false breakouts from noise.
-# Trend filter ensures alignment with daily bias.
-# Target: 20-40 trades/year to minimize fee decay while capturing meaningful moves.
-# Works in bull markets (breakouts continue) and bear markets (mean reversion at S1/R1).
+# Hypothesis: KAMA trend filter with RSI momentum and Choppiness Index regime filter on 12h timeframe.
+# Uses 1d KAMA as trend filter (price above/below KAMA), 1d RSI for momentum (>50/<50),
+# and 1d Choppiness Index to avoid ranging markets (chop < 61.8 = trending).
+# Long when price > KAMA, RSI > 50, and trending market; short when price < KAMA, RSI < 50, and trending.
+# Exits when price crosses KAMA or RSI reaches extreme levels.
+# Designed for 12h timeframe to target 12-37 trades/year (50-150 total over 4 years).
+# Works in bull markets (trend following) and bear markets (avoids whipsaws via chop filter).
