@@ -3,14 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Williams %R with 4h trend filter and volume confirmation
-# Uses Williams %R to identify overbought/oversold conditions, filtered by 4h EMA50 trend
-# Volume spike required for entry to avoid false signals
-# Designed to work in both bull and bear markets by following higher timeframe trend
-# Target: 60-150 total trades over 4 years = 15-37/year for 1h
+# Hypothesis: 6h Choppiness Index regime filter with weekly trend direction
+# Uses Choppiness Index (14) to detect ranging (CHOP > 61.8) vs trending (CHOP < 38.2) markets
+# In ranging markets: mean reversion at Bollinger Bands (20,2)
+# In trending markets: follow weekly trend direction using EMA(34) on weekly data
+# Volume confirmation required for all entries to avoid false signals
+# Designed to work in both bull and bear markets by adapting to regime
+# Target: 50-150 total trades over 4 years = 12-37/year
 
-name = "1h_WilliamsR_4hTrend_Volume"
-timeframe = "1h"
+name = "6h_ChopRegime_WeeklyTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,28 +25,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data once
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get weekly data once
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate 4h EMA(50) for trend direction
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Calculate weekly EMA(34) for trend direction
+    close_1w = df_1w['close'].values
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Calculate Williams %R(14) on 1h data
+    # Calculate Choppiness Index (14) on 6h data
+    def true_range(h, l, pc):
+        tr1 = h - l
+        tr2 = np.abs(h - pc)
+        tr3 = np.abs(l - pc)
+        return np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Calculate true range
+    prev_close = np.roll(close, 1)
+    prev_close[0] = close[0]
+    tr = true_range(high, low, prev_close)
+    
+    # ATR(14)
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Highest high and lowest low over 14 periods
     highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
     lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
+    
+    # Chop = 100 * log10(sum(TR14) / (HH14 - LL14)) / log10(14)
+    sum_tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    range_14 = highest_high - lowest_low
+    # Avoid division by zero
+    range_14 = np.where(range_14 == 0, 1e-10, range_14)
+    chop = 100 * np.log10(sum_tr14 / range_14) / np.log10(14)
+    
+    # Bollinger Bands (20,2) for mean reversion in ranging markets
+    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma20 + 2 * std20
+    lower_bb = sma20 - 2 * std20
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -52,44 +77,52 @@ def generate_signals(prices):
     start_idx = 50  # warmup for calculations
     
     for i in range(start_idx, n):
-        # Skip if any critical data is NaN or outside session
-        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(vol_ma[i]) or not session_filter[i]):
+        # Skip if any critical data is NaN
+        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(chop[i]) or 
+            np.isnan(sma20[i]) or np.isnan(std20[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema50_4h_val = ema50_4h_aligned[i]
-        wr = williams_r[i]
+        chop_val = chop[i]
+        ema34_1w_val = ema34_1w_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: oversold + uptrend + volume spike
-            if (wr < -80 and 
-                close[i] > ema50_4h_val and 
-                vol_spike):
-                signals[i] = 0.20
-                position = 1
-            # Enter short: overbought + downtrend + volume spike
-            elif (wr > -20 and 
-                  close[i] < ema50_4h_val and 
-                  vol_spike):
-                signals[i] = -0.20
-                position = -1
+            # Ranging market: CHOP > 61.8 -> mean reversion at Bollinger Bands
+            if chop_val > 61.8:
+                if close[i] <= lower_bb[i] and vol_spike:
+                    signals[i] = 0.25
+                    position = 1
+                elif close[i] >= upper_bb[i] and vol_spike:
+                    signals[i] = -0.25
+                    position = -1
+            # Trending market: CHOP < 38.2 -> follow weekly trend
+            elif chop_val < 38.2:
+                if close[i] > ema34_1w_val and vol_spike:
+                    signals[i] = 0.25
+                    position = 1
+                elif close[i] < ema34_1w_val and vol_spike:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Exit long: overbought OR trend turns down
-            if (wr > -20 or close[i] < ema50_4h_val):
+            # Exit long: opposite signal or regime change to extreme ranging
+            if (chop_val > 61.8 and close[i] >= sma20[i]) or \
+               (chop_val < 38.2 and close[i] < ema34_1w_val) or \
+               (chop_val > 61.8 and close[i] >= upper_bb[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: oversold OR trend turns up
-            if (wr < -80 or close[i] > ema50_4h_val):
+            # Exit short: opposite signal or regime change to extreme ranging
+            if (chop_val > 61.8 and close[i] <= sma20[i]) or \
+               (chop_val < 38.2 and close[i] > ema34_1w_val) or \
+               (chop_val > 61.8 and close[i] <= lower_bb[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
