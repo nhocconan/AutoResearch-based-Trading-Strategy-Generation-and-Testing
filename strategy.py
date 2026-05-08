@@ -1,10 +1,10 @@
-# #!/usr/bin/env python3
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_Camarilla_R1S1_Breakout_Trend_Filter_v3"
-timeframe = "1d"
+name = "6h_1d_WilliamsAlligator_Trend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,43 +17,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data once for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
-    
-    # Get 1d data once for Camarilla pivot levels
+    # Get 1d data once for Alligator components
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Weekly trend: close > open (bullish) or close < open (bearish)
-    weekly_open = df_1w['open'].values
-    weekly_close = df_1w['close'].values
-    weekly_trend = np.where(weekly_close > weekly_open, 1, -1)  # 1 for uptrend, -1 for downtrend
+    # Williams Alligator components (13,8,5 periods with 8,5,3 offsets)
+    high_series = pd.Series(df_1d['high'])
+    low_series = pd.Series(df_1d['low'])
     
-    # Align weekly trend to daily timeframe
-    weekly_trend_1d = align_htf_to_ltf(prices, df_1w, weekly_trend.astype(float))
+    # Jaw: 13-period SMMA of median price, shifted 8 bars
+    median_price = (high_series + low_series) / 2
+    jaw_raw = median_price.rolling(window=13, min_periods=13).mean()
+    jaw = jaw_raw.shift(8)
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_high = np.roll(df_1d['high'].values, 1)
-    prev_low = np.roll(df_1d['low'].values, 1)
-    prev_close = np.roll(df_1d['close'].values, 1)
-    prev_high[0] = df_1d['high'].values[0]
-    prev_low[0] = df_1d['low'].values[0]
-    prev_close[0] = df_1d['close'].values[0]
+    # Teeth: 8-period SMMA of median price, shifted 5 bars
+    teeth_raw = median_price.rolling(window=8, min_periods=8).mean()
+    teeth = teeth_raw.shift(5)
     
-    # Camarilla pivot levels calculation
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_val = prev_high - prev_low
-    r1 = pivot + (range_val * 1.1 / 6)
-    s1 = pivot - (range_val * 1.1 / 6)
+    # Lips: 5-period SMMA of median price, shifted 3 bars
+    lips_raw = median_price.rolling(window=5, min_periods=5).mean()
+    lips = lips_raw.shift(3)
     
-    # Align Camarilla levels to daily timeframe
-    r1_1d = align_htf_to_ltf(prices, df_1d, r1)
-    s1_1d = align_htf_to_ltf(prices, df_1d, s1)
+    # Align to 6h timeframe
+    jaw_6h = align_htf_to_ltf(prices, df_1d, jaw.values)
+    teeth_6h = align_htf_to_ltf(prices, df_1d, teeth.values)
+    lips_6h = align_htf_to_ltf(prices, df_1d, lips.values)
     
-    # Volume spike detection: current volume > 2.0 * 20-period average
+    # Williams %R (14-period)
+    highest_high = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max()
+    lowest_low = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min()
+    williams_r = -100 * ((highest_high - df_1d['close']) / (highest_high - lowest_low))
+    williams_r_6h = align_htf_to_ltf(prices, df_1d, williams_r.values)
+    
+    # Volume spike detection on 6h
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (vol_ma20 * 2.0)
     
@@ -64,18 +61,27 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r1_1d[i]) or np.isnan(s1_1d[i]) or np.isnan(weekly_trend_1d[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(jaw_6h[i]) or np.isnan(teeth_6h[i]) or np.isnan(lips_6h[i]) or 
+            np.isnan(williams_r_6h[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Alligator alignment: Jaw > Teeth > Lips = uptrend, Jaw < Teeth < Lips = downtrend
+        jaw_val = jaw_6h[i]
+        teeth_val = teeth_6h[i]
+        lips_val = lips_6h[i]
+        
+        # Williams %R extremes: oversold < -80, overbought > -20
+        wr = williams_r_6h[i]
+        
         if position == 0:
-            # Long entry: price breaks above R1 with volume spike and weekly uptrend
-            long_cond = (close[i] > r1_1d[i] and vol_spike[i] and weekly_trend_1d[i] > 0.5)
+            # Long entry: Alligator aligned up + Williams %R oversold + volume spike
+            long_cond = (jaw_val > teeth_val > lips_val and wr < -80 and vol_spike[i])
             
-            # Short entry: price breaks below S1 with volume spike and weekly downtrend
-            short_cond = (close[i] < s1_1d[i] and vol_spike[i] and weekly_trend_1d[i] < -0.5)
+            # Short entry: Alligator aligned down + Williams %R overbought + volume spike
+            short_cond = (jaw_val < teeth_val < lips_val and wr > -20 and vol_spike[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -84,15 +90,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below S1 (reversal signal)
-            if close[i] < s1_1d[i]:
+            # Long exit: Alligator reverses down OR Williams %R overbought
+            if (jaw_val < teeth_val or wr > -20):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price reverses back above R1 (reversal signal)
-            if close[i] > r1_1d[i]:
+            # Short exit: Alligator reverses up OR Williams %R oversold
+            if (jaw_val > teeth_val or wr < -80):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -100,10 +106,12 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R1/S1 breakout strategy with volume spike confirmation and weekly trend filter on 1d timeframe.
-# Enters long when price breaks above R1 with volume spike and weekly uptrend (weekly close > weekly open).
-# Enters short when price breaks below S1 with volume spike and weekly downtrend (weekly close < weekly open).
-# Exits when price reverses back through S1/R1 respectively.
-# Uses discrete sizing (0.25) to minimize churn. Targets 15-25 trades/year on 1d timeframe.
-# Weekly trend filter ensures we only trade with the higher timeframe trend, reducing whipsaw in sideways markets.
-# Works in bull markets (trend-following breakouts) and bear markets (reversal breakouts from overextended levels).
+# Hypothesis: Williams Alligator + Williams %R on 1d timeframe with volume spike confirmation on 6h.
+# The Alligator (Jaw/Teeth/Lips) identifies trend direction on higher timeframe.
+# Williams %R identifies overbought/oversold conditions for entry timing.
+# Volume spike confirms institutional participation.
+# Long: Alligator bullish (Jaw>Teeth>Lips) + Williams %R < -80 (oversold) + volume spike.
+# Short: Alligator bearish (Jaw<Teeth<Lips) + Williams %R > -20 (overbought) + volume spike.
+# Exits when trend weakens or momentum reverses.
+# Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend).
+# Targets 15-25 trades/year on 6h timeframe. Uses discrete sizing (0.25) to minimize churn.
