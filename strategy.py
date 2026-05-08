@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Choppiness Index + Donchian breakout with volume confirmation.
-# Long when Choppiness < 38.2 (trending) AND price breaks above Donchian upper band (20) AND volume > 1.3x 20-period average.
-# Short when Choppiness < 38.2 (trending) AND price breaks below Donchian lower band (20) AND volume > 1.3x 20-period average.
-# Exit when Choppiness > 61.8 (ranging) OR price crosses back inside Donchian channel.
-# This strategy combines trend detection (Choppiness) with breakout logic to avoid false signals in ranging markets.
-# Works in both bull and bear by adapting to trending conditions only, avoiding choppy periods where breakouts fail.
+# Hypothesis: 4h Camarilla pivot R1/S1 breakout with 1d trend filter and volume spike confirmation.
+# Long when price breaks above Camarilla R1 (calculated from previous 1d) AND 1d EMA34 rising AND volume > 1.5x 20-period average.
+# Short when price breaks below Camarilla S1 (calculated from previous 1d) AND 1d EMA34 falling AND volume > 1.5x 20-period average.
+# Exit when price crosses back inside Camarilla H-L range (between H and L).
+# Camarilla pivot levels provide statistically significant support/resistance. Using previous day's levels avoids look-ahead.
+# 1d EMA34 filter ensures we trade with higher timeframe trend. Volume spike confirms institutional participation.
+# Target: 75-200 total trades over 4 years (19-50/year) with disciplined risk management.
 
-name = "4h_Chop_Donchian_Breakout_Volume"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,82 +25,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h data for Donchian calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
-    
-    # 1d data for Choppiness Index
+    # 1d data for Camarilla calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Donchian channels (20-period high/low) from 4h data
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # Calculate Camarilla levels from previous 1d (H, L, C of completed day)
+    # Using previous day's data to avoid look-ahead
+    H = df_1d['high'].shift(1).values  # Previous day high
+    L = df_1d['low'].shift(1).values   # Previous day low
+    C = df_1d['close'].shift(1).values # Previous day close
     
-    # Donchian upper band (20-period high)
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    # Donchian lower band (20-period low)
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Camarilla R1 and S1 levels
+    # R1 = C + (H - L) * 1.1 / 12
+    # S1 = C - (H - L) * 1.1 / 12
+    camarilla_R1 = C + (H - L) * 1.1 / 12
+    camarilla_S1 = C - (H - L) * 1.1 / 12
     
-    # Align Donchian levels to 4h timeframe (actually same timeframe, but keeping for consistency)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    # Align Camarilla levels to 4h timeframe (previous day's levels available at 00:00 UTC)
+    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
+    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
     
-    # Calculate Choppiness Index (14-period) from 1d data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value is NaN
+    # 1d EMA34 direction
+    ema34_rising = np.zeros_like(ema34_1d_aligned, dtype=bool)
+    ema34_falling = np.zeros_like(ema34_1d_aligned, dtype=bool)
+    ema34_rising[1:] = ema34_1d_aligned[1:] > ema34_1d_aligned[:-1]
+    ema34_falling[1:] = ema34_1d_aligned[1:] < ema34_1d_aligned[:-1]
     
-    # ATR (14-period)
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Sum of True Range over 14 periods
-    sum_tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    
-    # Highest high and lowest low over 14 periods
-    hh14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    
-    # Choppiness Index formula
-    chop = np.zeros_like(close_1d)
-    mask = (hh14 - ll14) != 0
-    chop[mask] = 100 * np.log10(sum_tr14[mask] / (hh14[mask] - ll14[mask])) / np.log10(14)
-    chop = np.where((hh14 - ll14) == 0, 50, chop)  # Neutral when no range
-    
-    # Align Choppiness to 4h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # Volume filter: current volume > 1.3x 20-period average
+    # Volume filter: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.3 * vol_ma20)
+    volume_filter = volume > (1.5 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # Sufficient warmup
+    start_idx = max(50, 34)  # Sufficient warmup for EMA34 and Camarilla
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(chop_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(camarilla_R1_aligned[i]) or np.isnan(camarilla_S1_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(ema34_rising[i]) or 
+            np.isnan(ema34_falling[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: trending market (Chop < 38.2) AND breakout above Donchian high AND volume filter
-            long_cond = (chop_aligned[i] < 38.2) and (close[i] > donchian_high_aligned[i]) and volume_filter[i]
-            # Short conditions: trending market (Chop < 38.2) AND breakdown below Donchian low AND volume filter
-            short_cond = (chop_aligned[i] < 38.2) and (close[i] < donchian_low_aligned[i]) and volume_filter[i]
+            # Long conditions: price breaks above Camarilla R1, 1d EMA34 rising, volume filter
+            long_cond = (close[i] > camarilla_R1_aligned[i]) and ema34_rising[i] and volume_filter[i]
+            # Short conditions: price breaks below Camarilla S1, 1d EMA34 falling, volume filter
+            short_cond = (close[i] < camarilla_S1_aligned[i]) and ema34_falling[i] and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -108,15 +87,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: ranging market (Chop > 61.8) OR price crosses back below Donchian low
-            if (chop_aligned[i] > 61.8) or (close[i] < donchian_low_aligned[i]):
+            # Long exit: price crosses back below Camarilla S1 (or H-L midpoint)
+            if close[i] < camarilla_S1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: ranging market (Chop > 61.8) OR price crosses back above Donchian high
-            if (chop_aligned[i] > 61.8) or (close[i] > donchian_high_aligned[i]):
+            # Short exit: price crosses back above Camarilla R1 (or H-L midpoint)
+            if close[i] > camarilla_R1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
