@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with daily trend filter and volume spike
-# Uses daily Camarilla levels for entry, 1d EMA(50) for trend, and volume > 2x 20-period average.
-# Designed for low trade frequency (20-50/year) with clear entry/exit rules.
-# Works in both bull and bear markets by following trend direction from higher timeframe.
-# Target: 40-120 total trades over 4 years (10-30/year)
+# Hypothesis: 12-hour Williams %R mean reversion with daily trend filter and volume confirmation
+# Williams %R < -80 indicates oversold (long setup), > -20 indicates overbought (short setup)
+# Trend filter: daily EMA(34) slope direction
+# Volume confirmation: current volume > 1.5 * 20-period average
+# Designed for low-frequency mean reversion in ranging markets with trend alignment
+# Target: 50-150 total trades over 4 years = 12-37/year
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_WilliamsR_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -18,53 +19,30 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data once for Camarilla levels and trend
+    # Get daily data once for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate daily Camarilla levels (based on previous day)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate daily EMA(34) for trend direction
     close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Camarilla levels: R3, R2, R1, PP, S1, S2, S3
-    # Using previous day's OHLC
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = high_1d[0]  # fill first value
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
+    # Calculate Williams %R (14-period) on 12h data
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = ((highest_high - close) / (highest_high - lowest_low)) * -100
     
-    # Calculate pivot point and ranges
-    pp = (prev_high + prev_low + prev_close) / 3.0
-    rang = prev_high - prev_low
-    
-    # Camarilla levels
-    r3 = pp + (rang * 1.1 / 4.0)
-    r1 = pp + (rang * 1.1 / 12.0)
-    s1 = pp - (rang * 1.1 / 12.0)
-    s3 = pp - (rang * 1.1 / 4.0)
-    
-    # Align Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # Daily EMA(50) for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # Volume spike: current volume > 2.0 * 20-period average (using 4h data)
+    # Volume spike: current volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -73,44 +51,40 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        r3_val = r3_aligned[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        s3_val = s3_aligned[i]
-        ema50_val = ema50_1d_aligned[i]
+        ema34_1d_val = ema34_1d_aligned[i]
+        wr = williams_r[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: price breaks above R3 + daily uptrend + volume spike
-            if (close[i] > r3_val and 
-                close[i] > ema50_val and 
+            # Enter long: Williams %R oversold (< -80) + daily uptrend + volume spike
+            if (wr < -80 and 
+                close[i] > ema34_1d_val and 
                 vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S3 + daily downtrend + volume spike
-            elif (close[i] < s3_val and 
-                  close[i] < ema50_val and 
+            # Enter short: Williams %R overbought (> -20) + daily downtrend + volume spike
+            elif (wr > -20 and 
+                  close[i] < ema34_1d_val and 
                   vol_spike):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below S1 OR daily trend turns down
-            if (close[i] < s1_val or close[i] < ema50_val):
+            # Exit long: Williams %R returns above -50 OR trend turns down
+            if (wr > -50 or close[i] < ema34_1d_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above R1 OR daily trend turns up
-            if (close[i] > r1_val or close[i] > ema50_val):
+            # Exit short: Williams %R returns below -50 OR trend turns up
+            if (wr < -50 or close[i] > ema34_1d_val):
                 signals[i] = 0.0
                 position = 0
             else:
