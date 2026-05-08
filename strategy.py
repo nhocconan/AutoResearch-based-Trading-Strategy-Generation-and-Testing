@@ -3,20 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Bollinger Band breakout with weekly trend filter and volume confirmation
-# Long when price breaks above upper Bollinger Band (20,2) with weekly uptrend and volume spike
-# Short when price breaks below lower Bollinger Band (20,2) with weekly downtrend and volume spike
-# Bollinger Bands identify volatility expansion; weekly trend filters for higher timeframe direction
-# Volume spike confirms institutional participation; avoids false signals
-# Targets 30-100 total trades over 4 years (7-25/year) to minimize fee drag
+# Hypothesis: 12-hour KAMA trend with daily RSI filter and volume confirmation
+# Long when KAMA rises above price (uptrend), RSI > 50, volume spike
+# Short when KAMA falls below price (downtrend), RSI < 50, volume spike
+# KAMA adapts to market noise, reducing false signals in choppy markets
+# RSI filter ensures momentum alignment with trend
+# Volume spike confirms institutional participation
+# Targets 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost
 
-name = "1d_BollingerBreakout_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "12h_KAMA_DailyRSI_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,21 +25,34 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data once for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get daily data once for RSI filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate weekly EMA(50) for trend filter
-    weekly_close = df_1w['close'].values
-    ema50_1w = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate daily RSI(14)
+    daily_close = df_1d['close'].values
+    delta = np.diff(daily_close, prepend=daily_close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Bollinger Bands (20,2)
-    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_band = sma20 + (2 * std20)
-    lower_band = sma20 - (2 * std20)
+    # KAMA(10,2,30): fast=2, slow=30
+    # Efficiency Ratio
+    change = np.abs(np.diff(close, k=10, prepend=close[:10]))
+    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0)
+    er = change / (volatility + 1e-10)
+    # Smoothing Constant
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
+    # KAMA
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -47,42 +61,41 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for calculations
+    start_idx = 100  # warmup for calculations
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(sma20[i]) or 
-            np.isnan(std20[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(kama[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema50_1w_val = ema50_1w_aligned[i]
-        close_price = close[i]
-        upper = upper_band[i]
-        lower = lower_band[i]
+        rsi_val = rsi_1d_aligned[i]
+        kama_val = kama[i]
+        close_val = close[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: price breaks above upper BB, weekly uptrend, volume spike
-            if close_price > upper and ema50_1w_val > 0 and vol_spike:
+            # Enter long: KAMA above price (uptrend), RSI > 50, volume spike
+            if kama_val > close_val and rsi_val > 50 and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below lower BB, weekly downtrend, volume spike
-            elif close_price < lower and ema50_1w_val < 0 and vol_spike:
+            # Enter short: KAMA below price (downtrend), RSI < 50, volume spike
+            elif kama_val < close_val and rsi_val < 50 and vol_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price falls below middle Bollinger Band (SMA20) or weekly trend turns down
-            if close_price < sma20[i] or ema50_1w_val < 0:
+            # Exit long: KAMA falls below price or RSI < 50
+            if kama_val < close_val or rsi_val < 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price rises above middle Bollinger Band (SMA20) or weekly trend turns up
-            if close_price > sma20[i] or ema50_1w_val > 0:
+            # Exit short: KAMA rises above price or RSI > 50
+            if kama_val > close_val or rsi_val > 50:
                 signals[i] = 0.0
                 position = 0
             else:
