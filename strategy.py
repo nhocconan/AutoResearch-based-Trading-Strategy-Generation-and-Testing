@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R mean reversion with 12h trend filter and volume spike
-# Williams %R(14) identifies overbought/oversold conditions. In ranging markets (CHOP > 61.8),
-# mean reversion at extremes works well. Trend filter ensures we only take mean reverting
-# trades in the direction of higher timeframe trend. Volume spike confirms momentum.
-# Target: 25-40 trades/year to avoid fee drag. Discrete sizing 0.25.
-name = "4h_WilliamsR_MeanReversion_12hTrend_VolumeSpike"
-timeframe = "4h"
+# Hypothesis: 1h mean reversion at 4h Bollinger Bands with 1d trend filter and volume confirmation
+# Uses Bollinger Band mean reversion in ranging markets (common in 2025 BTC/ETH).
+# 4h Bollinger Bands provide dynamic support/resistance. 1d EMA50 filters trend direction.
+# Volume spike >1.5 confirms mean reversion bounces. Target: 20-40 trades/year.
+# Works in bull via bounces off lower BB in uptrend, in bear via bounces off upper BB in downtrend.
+name = "1h_BB_MeanReversion_4hBB_1dEMA50_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,39 +22,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 4h data for Bollinger Bands
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 trend filter
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Calculate 4h Bollinger Bands (20, 2)
+    close_4h = df_4h['close'].values
+    ma_4h = pd.Series(close_4h).rolling(window=20, min_periods=20).mean().values
+    std_4h = pd.Series(close_4h).rolling(window=20, min_periods=20).std().values
+    upper_4h = ma_4h + 2 * std_4h
+    lower_4h = ma_4h - 2 * std_4h
     
-    # Calculate Williams %R on 4h data
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
-    williams_r = np.where((highest_high - lowest_low) != 0, williams_r, -50)  # avoid division by zero
+    # Align Bollinger Bands to 1h
+    upper_4h_aligned = align_htf_to_ltf(prices, df_4h, upper_4h)
+    lower_4h_aligned = align_htf_to_ltf(prices, df_4h, lower_4h)
+    ma_4h_aligned = align_htf_to_ltf(prices, df_4h, ma_4h)
     
-    # Calculate Choppiness Index for regime filter (14-period)
-    # CHOP = 100 * log10(sum(ATR) / (max(high) - min(low))) / log10(n)
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
-    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(pd.Series(atr).rolling(window=14, min_periods=14).sum().values / 
-                           np.maximum(max_high - min_low, 1e-10)) / np.log10(14)
-    chop = np.nan_to_num(chop, nan=50.0)
+    # Calculate 1d EMA50 trend filter
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Volume confirmation - 20-period average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation - 24-period average volume (1 day at 1h)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1.0)
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
@@ -65,11 +61,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(60, 50, 14)  # warmup period
+    start_idx = max(50, 24)  # warmup period
     
     for i in range(start_idx, n):
-        if (np.isnan(williams_r[i]) or np.isnan(ema50_12h_aligned[i]) or 
-            np.isnan(chop[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(upper_4h_aligned[i]) or np.isnan(lower_4h_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -81,40 +77,32 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Chop > 61.8 indicates ranging market (good for mean reversion)
-        if chop[i] <= 61.8:
-            # In trending markets, exit positions
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
         if position == 0:
-            # Long entry: Williams %R oversold (< -80) with uptrend and volume spike
-            if (williams_r[i] < -80 and 
-                close[i] > ema50_12h_aligned[i] and
-                vol_ratio[i] > 2.0):
-                signals[i] = 0.25
+            # Long entry: bounce off lower 4h BB with uptrend and volume confirmation
+            if (close[i] <= lower_4h_aligned[i] and 
+                close[i] > ema50_1d_aligned[i] and
+                vol_ratio[i] > 1.5):
+                signals[i] = 0.20
                 position = 1
-            # Short entry: Williams %R overbought (> -20) with downtrend and volume spike
-            elif (williams_r[i] > -20 and 
-                  close[i] < ema50_12h_aligned[i] and
-                  vol_ratio[i] > 2.0):
-                signals[i] = -0.25
+            # Short entry: bounce off upper 4h BB with downtrend and volume confirmation
+            elif (close[i] >= upper_4h_aligned[i] and 
+                  close[i] < ema50_1d_aligned[i] and
+                  vol_ratio[i] > 1.5):
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R overbought (> -20) or trend fails
-            if williams_r[i] > -20 or close[i] < ema50_12h_aligned[i]:
+            # Exit long: return to 4h mean or trend fails
+            if close[i] >= ma_4h_aligned[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: Williams %R oversold (< -80) or trend fails
-            if williams_r[i] < -80 or close[i] > ema50_12h_aligned[i]:
+            # Exit short: return to 4h mean or trend fails
+            if close[i] <= ma_4h_aligned[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
