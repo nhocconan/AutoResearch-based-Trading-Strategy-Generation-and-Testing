@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour ADX trend strength with 1-day Bollinger Bands mean reversion
-# Long when ADX > 25 (trending) and price touches lower Bollinger Band (mean reversion in trend)
-# Short when ADX > 25 (trending) and price touches upper Bollinger Band (mean reversion in trend)
-# Uses ADX for trend strength filtering and Bollinger Bands for entry/exit in trending markets
-# Works in both bull and bear markets by only trading in strong trends with mean reversion entries
-# Targets 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost
+# Hypothesis: 4-hour Donchian breakout with daily trend filter and volume confirmation
+# Long when price breaks above 20-period high, daily trend up, volume spike
+# Short when price breaks below 20-period low, daily trend down, volume spike
+# Donchian channels identify breakout strength; daily trend filters for higher timeframe direction
+# Volume spike confirms institutional participation; avoids false breakouts
+# Targets 75-200 total trades over 4 years (19-50/year) for optimal risk-reward
 
-name = "12h_ADX_Trend_BollingerMeanReversion"
-timeframe = "12h"
+name = "4h_Donchian20_DailyTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,105 +24,62 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data once for trend filter and Bollinger Bands
+    # Get daily data once for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily ADX(14) for trend strength
-    # ADX = DX smoothed, where DX = |DI+ - DI-| / (DI+ + DI-) * 100
-    # DI+ = (Current High - Previous High) smoothed, DI- = (Previous Low - Current Low) smoothed
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate daily EMA(50) for trend filter
+    daily_close = df_1d['close'].values
+    ema50_1d = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate True Range and Directional Movement
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value is NaN
+    # Donchian Channel (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    
-    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    minus_dm = np.concatenate([[np.nan], minus_dm])
-    
-    # Smooth TR, DM+, DM- using Wilder's smoothing (EMA with alpha=1/period)
-    def wilder_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nanmean(data[1:period])
-        # Subsequent values: smoothed = (prev_smoothed * (period-1) + current) / period
-        for i in range(period, len(data)):
-            if not np.isnan(result[i-1]) and not np.isnan(data[i]):
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-            else:
-                result[i] = np.nan
-        return result
-    
-    atr = wilder_smooth(tr, 14)
-    plus_di = 100 * wilder_smooth(plus_dm, 14) / atr
-    minus_di = 100 * wilder_smooth(minus_dm, 14) / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = wilder_smooth(dx, 14)
-    
-    # Calculate daily Bollinger Bands(20,2)
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + (2 * std_20)
-    lower_bb = sma_20 - (2 * std_20)
-    
-    # Align HTF data to LTF
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
+    # Volume spike: current volume > 2.0 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # warmup for calculations
+    start_idx = 20  # warmup for Donchian calculation
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(adx_aligned[i]) or np.isnan(upper_bb_aligned[i]) or 
-            np.isnan(lower_bb_aligned[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        adx_val = adx_aligned[i]
-        upper_bb_val = upper_bb_aligned[i]
-        lower_bb_val = lower_bb_aligned[i]
-        close_val = close[i]
+        ema50_1d_val = ema50_1d_aligned[i]
+        hh = highest_high[i]
+        ll = lowest_low[i]
+        vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: ADX > 25 (strong trend) and price touches or goes below lower BB (mean reversion)
-            if adx_val > 25 and close_val <= lower_bb_val:
+            # Enter long: price breaks above 20-period high, daily uptrend, volume spike
+            if close[i] > hh and ema50_1d_val > 0 and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: ADX > 25 (strong trend) and price touches or goes above upper BB (mean reversion)
-            elif adx_val > 25 and close_val >= upper_bb_val:
+            # Enter short: price breaks below 20-period low, daily downtrend, volume spike
+            elif close[i] < ll and ema50_1d_val < 0 and vol_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price touches or goes above middle (SMA) or ADX weakens
-            middle_bb = (upper_bb_val + lower_bb_val) / 2
-            if close_val >= middle_bb or adx_val < 20:
+            # Exit long: price breaks below 20-period low or daily trend turns down
+            if close[i] < ll or ema50_1d_val < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price touches or goes below middle (SMA) or ADX weakens
-            middle_bb = (upper_bb_val + lower_bb_val) / 2
-            if close_val <= middle_bb or adx_val < 20:
+            # Exit short: price breaks above 20-period high or daily trend turns up
+            if close[i] > hh or ema50_1d_val > 0:
                 signals[i] = 0.0
                 position = 0
             else:
