@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h RSI(14) divergence with 1d MACD trend filter and volume spike
-# Uses RSI divergences for high-probability reversals in both bull and bear markets.
-# Requires alignment with daily MACD histogram sign and volume spike to filter false signals.
-# Designed for low-frequency trades (<100 total) to minimize fee drag.
+# Hypothesis: 6h Weekly Pivot + 1d Trend + Volume Spike
+# Uses weekly pivot levels (R4/S4) as major support/resistance for breakouts.
+# Filters with daily EMA50 trend and volume spike to avoid false breakouts.
+# Designed for low frequency (target: 50-150 total trades over 4 years) to minimize fee drag.
+# Works in both bull and bear markets by trading breakouts in direction of higher timeframe trend.
 
-name = "4h_RSI_Divergence_1dMACD_Volume"
-timeframe = "4h"
+name = "6h_WeeklyPivot_R4S4_1dEMA50_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,94 +23,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for MACD trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    # Get weekly data for pivot levels (R4, S4)
+    df_w = get_htf_data(prices, '1w')
+    if len(df_w) < 10:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    # Calculate weekly pivot points (R4, S4)
+    high_w = df_w['high'].values
+    low_w = df_w['low'].values
+    close_w = df_w['close'].values
     
-    # Calculate daily MACD (12,26,9)
-    ema12 = pd.Series(close_1d).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema26 = pd.Series(close_1d).ewm(span=26, adjust=False, min_periods=26).mean().values
-    macd_line = ema12 - ema26
-    signal_line = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).mean().values
-    macd_hist = macd_line - signal_line
+    # Previous week's values for current week's pivot
+    prev_high_w = np.roll(high_w, 1)
+    prev_low_w = np.roll(low_w, 1)
+    prev_close_w = np.roll(close_w, 1)
+    prev_high_w[0] = np.nan
+    prev_low_w[0] = np.nan
+    prev_close_w[0] = np.nan
     
-    # Align MACD histogram to 4h timeframe
-    macd_hist_aligned = align_htf_to_ltf(prices, df_1d, macd_hist)
+    # Weekly pivot point
+    pivot_w = (prev_high_w + prev_low_w + prev_close_w) / 3.0
+    # Weekly R4 and S4 (strong breakout levels)
+    R4_w = prev_high_w + 3 * (pivot_w - prev_low_w)
+    S4_w = prev_low_w - 3 * (prev_high_w - pivot_w)
     
-    # RSI(14) on 4h
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Align weekly pivot levels to 6h timeframe
+    R4_w_aligned = align_htf_to_ltf(prices, df_w, R4_w)
+    S4_w_aligned = align_htf_to_ltf(prices, df_w, S4_w)
     
-    # Volume spike (2x 20-period EMA)
-    vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Get daily data for EMA50 trend filter
+    df_d = get_htf_data(prices, '1d')
+    if len(df_d) < 50:
+        return np.zeros(n)
+    
+    close_d = df_d['close'].values
+    ema50_d = pd.Series(close_d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_d_aligned = align_htf_to_ltf(prices, df_d, ema50_d)
+    
+    # Volume spike (2.0x 24-period EMA ≈ 4 days of 6h bars)
+    vol_ma = pd.Series(volume).ewm(span=24, adjust=False, min_periods=24).mean().values
     vol_spike = volume > (vol_ma * 2.0)
-    
-    # RSI divergence detection
-    bullish_div = np.zeros(n, dtype=bool)
-    bearish_div = np.zeros(n, dtype=bool)
-    
-    # Look for bullish divergence: price makes lower low, RSI makes higher low
-    for i in range(14, n):
-        if i < 28:  # Need at least 2 periods to compare
-            continue
-            
-        # Check for price lower low
-        if low[i] < low[i-14]:
-            # Look for higher low in RSI over same period
-            if np.any(rsi[i-14:i] > np.min(rsi[i-28:i-14])):
-                bullish_div[i] = True
-                
-        # Check for bearish divergence: price makes higher high, RSI makes lower high
-        if high[i] > high[i-14]:
-            # Look for lower high in RSI over same period
-            if np.any(rsi[i-14:i] < np.max(rsi[i-28:i-14])):
-                bearish_div[i] = True
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 35  # Ensure MACD has enough data
+    start_idx = 50  # Ensure EMA50 has enough data
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(macd_hist_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(vol_spike[i])):
+        if (np.isnan(R4_w_aligned[i]) or np.isnan(S4_w_aligned[i]) or 
+            np.isnan(ema50_d_aligned[i]) or np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: bullish RSI divergence with 1d bullish MACD and volume spike
-            if (bullish_div[i] and 
-                macd_hist_aligned[i] > 0 and vol_spike[i]):
+            # Enter long: price breaks above weekly R4 with daily uptrend and volume spike
+            if (close[i] > R4_w_aligned[i] and 
+                close[i] > ema50_d_aligned[i] and vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: bearish RSI divergence with 1d bearish MACD and volume spike
-            elif (bearish_div[i] and 
-                  macd_hist_aligned[i] < 0 and vol_spike[i]):
+            # Enter short: price breaks below weekly S4 with daily downtrend and volume spike
+            elif (close[i] < S4_w_aligned[i] and 
+                  close[i] < ema50_d_aligned[i] and vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: bearish RSI divergence or MACD turns bearish
-            if (bearish_div[i] or 
-                macd_hist_aligned[i] < 0):
+            # Exit long: price breaks below weekly S4 or trend fails
+            if (close[i] < S4_w_aligned[i] or 
+                close[i] < ema50_d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: bullish RSI divergence or MACD turns bullish
-            if (bullish_div[i] or 
-                macd_hist_aligned[i] > 0):
+            # Exit short: price breaks above weekly R4 or trend fails
+            if (close[i] > R4_w_aligned[i] or 
+                close[i] > ema50_d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
