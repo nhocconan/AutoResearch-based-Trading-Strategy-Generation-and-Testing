@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Williams %R with daily volume confirmation and weekly ADX trend filter
-# Long when Williams %R crosses above -20 from below + daily volume > 1.5x 20-period SMA + weekly ADX > 25
-# Short when Williams %R crosses below -80 from above + daily volume > 1.5x 20-period SMA + weekly ADX > 25
-# Exit when Williams %R crosses opposite threshold (-80 for long, -20 for short) or weekly ADX falls below 20
-# Williams %R identifies overbought/oversold conditions, volume confirms momentum, ADX filters for trending markets
-# Targets 15-25 trades/year to minimize fee decay while capturing mean reversion in ranging markets and momentum in trending markets
+# Hypothesis: 12-hour Donchian channel breakout with daily volume confirmation and weekly ADX trend filter
+# Long when price breaks above 20-period Donchian upper band + daily volume > 1.5x 20-period SMA + weekly ADX > 25
+# Short when price breaks below 20-period Donchian lower band + daily volume > 1.5x 20-period SMA + weekly ADX > 25
+# Exit when price returns to the 10-period Donchian middle (mean reversion) or weekly ADX falls below 20
+# Combines trend-following breakout with volume confirmation and trend strength filter
+# Targets 15-25 trades/year to minimize fee decay while capturing sustained moves in trending markets
 
-name = "12h_WilliamsR_DailyVolume_WeeklyADX"
+name = "12h_DonchianBreakout_Volume_ADX"
 timeframe = "12h"
 leverage = 1.0
 
@@ -33,8 +33,8 @@ def generate_signals(prices):
     if len(df_weekly) < 30:
         return np.zeros(n)
     
-    # Calculate 12-period Williams %R
-    lookback = 14
+    # Calculate 20-period Donchian channels
+    lookback = 20
     highest_high = np.full(n, np.nan)
     lowest_low = np.full(n, np.nan)
     
@@ -42,12 +42,16 @@ def generate_signals(prices):
         highest_high[i] = np.max(high[i-lookback+1:i+1])
         lowest_low[i] = np.min(low[i-lookback+1:i+1])
     
-    williams_r = np.full(n, np.nan)
-    for i in range(lookback - 1, n):
-        if highest_high[i] != lowest_low[i]:
-            williams_r[i] = (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i]) * -100
-        else:
-            williams_r[i] = -50  # Neutral when no range
+    # Calculate 10-period Donchian middle for exit
+    lookback_middle = 10
+    highest_high_middle = np.full(n, np.nan)
+    lowest_low_middle = np.full(n, np.nan)
+    
+    for i in range(lookback_middle - 1, n):
+        highest_high_middle[i] = np.max(high[i-lookback_middle+1:i+1])
+        lowest_low_middle[i] = np.min(low[i-lookback_middle+1:i+1])
+    
+    donchian_middle = (highest_high_middle + lowest_low_middle) / 2
     
     # Calculate weekly ADX(14) for trend strength
     weekly_high = df_weekly['high'].values
@@ -110,7 +114,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         if (np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or 
-            np.isnan(williams_r[i])):
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(donchian_middle[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -127,27 +132,27 @@ def generate_signals(prices):
             vol_filter = vol_daily_current > 1.5 * vol_ma_20_aligned[i]
         
         if position == 0:
-            # Look for Williams %R signals with volume confirmation and strong trend
-            # Long: Williams %R crosses above -20 from below (bullish momentum)
-            if i > 0 and williams_r[i-1] <= -20 and williams_r[i] > -20 and adx_aligned[i] > 25:
+            # Look for Donchian breakout with volume confirmation and strong trend
+            # Long: price breaks above 20-period upper band
+            if close[i] > highest_high[i] and adx_aligned[i] > 25:
                 if vol_filter:
                     signals[i] = 0.25
                     position = 1
-            # Short: Williams %R crosses below -80 from above (bearish momentum)
-            elif i > 0 and williams_r[i-1] >= -80 and williams_r[i] < -80 and adx_aligned[i] > 25:
+            # Short: price breaks below 20-period lower band
+            elif close[i] < lowest_low[i] and adx_aligned[i] > 25:
                 if vol_filter:
                     signals[i] = -0.25
                     position = -1
         elif position == 1:
-            # Exit long: Williams %R crosses below -80 or ADX falls below 20
-            if williams_r[i] < -80 or adx_aligned[i] < 20:
+            # Exit long: price returns to 10-period Donchian middle or ADX falls below 20
+            if close[i] <= donchian_middle[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R crosses above -20 or ADX falls below 20
-            if williams_r[i] > -20 or adx_aligned[i] < 20:
+            # Exit short: price returns to 10-period Donchian middle or ADX falls below 20
+            if close[i] >= donchian_middle[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
