@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_KAMA_Trend_RSI_Filter_v1"
+name = "12h_Camarilla_R3S3_Breakout_1wTrend_VolumeSpike"
 timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,92 +17,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data once
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get weekly data once
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate daily KAMA for trend direction
-    close_1d = df_1d['close'].values
-    # KAMA parameters
-    er_period = 10
-    fast_ema = 2
-    slow_ema = 30
+    # Calculate weekly EMA(34) for trend direction
+    close_1w = df_1w['close'].values
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Calculate Efficiency Ratio (ER)
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.abs(np.diff(close_1d))
-    change_sum = pd.Series(change).rolling(window=er_period, min_periods=er_period).sum().values
-    volatility_sum = pd.Series(volatility).rolling(window=er_period, min_periods=er_period).sum().values
-    er = np.where(volatility_sum > 0, change_sum / volatility_sum, 0)
+    # Get daily data for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Smoothing constants
-    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
-    # KAMA calculation
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # Calculate daily Camarilla levels from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_shift = df_1d['close'].shift(1).values
+    high_1d_shift = df_1d['high'].shift(1).values
+    low_1d_shift = df_1d['low'].shift(1).values
     
-    kama_1d = kama
-    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
+    # Calculate pivot and Camarilla levels using previous day's data
+    pivot = (high_1d_shift + low_1d_shift + close_1d_shift) / 3
+    range_ = high_1d_shift - low_1d_shift
+    r3 = close_1d_shift + (range_ * 1.1 / 4)
+    s3 = close_1d_shift - (range_ * 1.1 / 4)
     
-    # Calculate daily RSI(14) for overbought/oversold conditions
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_1d = rsi
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Align Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Volume spike: current volume > 2.0 * 20-period average (on 12h data)
+    # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # warmup for calculations
+    start_idx = 50  # warmup for calculations
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(kama_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        kama_val = kama_1d_aligned[i]
-        rsi_val = rsi_1d_aligned[i]
+        ema34_1w_val = ema34_1w_aligned[i]
+        r3_val = r3_aligned[i]
+        s3_val = s3_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: price above KAMA + RSI < 30 (oversold) + volume spike
-            if (close[i] > kama_val and 
-                rsi_val < 30 and 
+            # Enter long: price breaks above S3 + weekly uptrend + volume spike
+            if (close[i] > s3_val and 
+                close[i] > ema34_1w_val and 
                 vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price below KAMA + RSI > 70 (overbought) + volume spike
-            elif (close[i] < kama_val and 
-                  rsi_val > 70 and 
+            # Enter short: price breaks below R3 + weekly downtrend + volume spike
+            elif (close[i] < r3_val and 
+                  close[i] < ema34_1w_val and 
                   vol_spike):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price below KAMA OR RSI > 70 (overbought)
-            if (close[i] < kama_val or rsi_val > 70):
+            # Exit long: price breaks below S3 OR weekly trend turns down
+            if (close[i] < s3_val or close[i] < ema34_1w_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price above KAMA OR RSI < 30 (oversold)
-            if (close[i] > kama_val or rsi_val < 30):
+            # Exit short: price breaks above R3 OR weekly trend turns up
+            if (close[i] > r3_val or close[i] > ema34_1w_val):
                 signals[i] = 0.0
                 position = 0
             else:
