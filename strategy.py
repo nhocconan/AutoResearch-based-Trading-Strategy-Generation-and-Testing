@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using daily 100-period EMA for trend direction and 20-period ATR for volatility-based entries.
-# Long when price > EMA100 and breaks above ATR-based upper band; short when price < EMA100 and breaks below lower band.
-# Uses volume confirmation to filter false breakouts. Designed for moderate trade frequency (20-40/year) to balance edge and cost.
-# Works in bull markets via trend following and in bear markets via short signals during downtrends.
+# Hypothesis: 1d strategy using weekly EMA trend filter with daily Donchian breakout and volume confirmation.
+# Uses weekly EMA20 for trend direction, daily Donchian20 for entry signals, and volume spike for confirmation.
+# Designed for low trade frequency (~15-25/year) to avoid fee drag. Works in bull/bear by following higher timeframe trend.
 
-name = "4h_EMA100_ATR_Bands_Volume"
-timeframe = "4h"
+name = "1d_WeeklyEMA20_Donchian20_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,32 +21,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for EMA100 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 100:
+    # Get weekly data for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
+    close_1w = df_1w['close'].values
+    
+    # Weekly EMA20
+    ema_20w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20w_aligned = align_htf_to_ltf(prices, df_1w, ema_20w)
+    
+    # Get daily data for Donchian channel and volume
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # Calculate EMA100 on daily close
-    ema_100_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
-    # Align EMA100 to 4h timeframe
-    ema_100_aligned = align_htf_to_ltf(prices, df_1d, ema_100_1d)
+    volume_1d = df_1d['volume'].values
     
-    # Calculate ATR(20) on 4h data for volatility bands
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Daily Donchian channel (20-period)
+    def rolling_max(arr, window):
+        res = np.full_like(arr, np.nan)
+        for i in range(window - 1, len(arr)):
+            res[i] = np.max(arr[i - window + 1:i + 1])
+        return res
     
-    # Calculate upper and lower bands: EMA100 +/- 1.5 * ATR
-    upper_band = ema_100_aligned + 1.5 * atr
-    lower_band = ema_100_aligned - 1.5 * atr
+    def rolling_min(arr, window):
+        res = np.full_like(arr, np.nan)
+        for i in range(window - 1, len(arr)):
+            res[i] = np.min(arr[i - window + 1:i + 1])
+        return res
     
-    # Volume confirmation: 1.5x 20-period EMA of volume
-    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_threshold = vol_ema * 1.5
-    vol_confirm = volume > vol_threshold
+    donchian_high = rolling_max(high_1d, 20)
+    donchian_low = rolling_min(low_1d, 20)
+    
+    # Volume spike: 2x 20-day EMA
+    vol_ema = pd.Series(volume_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_spike = volume_1d > (vol_ema * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -56,34 +69,34 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_100_aligned[i]) or 
-            np.isnan(upper_band[i]) or 
-            np.isnan(lower_band[i]) or 
-            np.isnan(vol_confirm[i])):
+        if (np.isnan(ema_20w_aligned[i]) or 
+            np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or 
+            np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price > EMA100 and breaks above upper band + volume confirmation
-            if close[i] > ema_100_aligned[i] and close[i] > upper_band[i] and vol_confirm[i]:
+            # Enter long: price above weekly EMA20 + break above daily Donchian high + volume spike
+            if close[i] > ema_20w_aligned[i] and high[i] > donchian_high[i] and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price < EMA100 and breaks below lower band + volume confirmation
-            elif close[i] < ema_100_aligned[i] and close[i] < lower_band[i] and vol_confirm[i]:
+            # Enter short: price below weekly EMA20 + break below daily Donchian low + volume spike
+            elif close[i] < ema_20w_aligned[i] and low[i] < donchian_low[i] and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below EMA100
-            if close[i] < ema_100_aligned[i]:
+            # Exit long: price breaks below daily Donchian low
+            if low[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above EMA100
-            if close[i] > ema_100_aligned[i]:
+            # Exit short: price breaks above daily Donchian high
+            if high[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
