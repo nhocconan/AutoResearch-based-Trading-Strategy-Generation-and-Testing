@@ -3,15 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and ADX trend filter.
-# Long when price breaks above Donchian upper band AND 1d volume > 1.5x 20-period average AND ADX(14) > 25.
-# Short when price breaks below Donchian lower band AND 1d volume > 1.5x 20-period average AND ADX(14) > 25.
-# Uses ATR(14) for dynamic stoploss (exit when price moves against position by 2.5x ATR).
-# Target: 20-50 trades per year to minimize fee drag while capturing strong trends.
-# Works in bull markets (trend following) and avoids chop via ADX filter.
+# Hypothesis: 6h Williams Alligator + Elder Ray + momentum filter
+# Uses Alligator (jaw/teeth/lips) for trend direction, Elder Ray (bull/bear power) for momentum,
+# and RSI(14) for overbought/oversold filtering.
+# Long when price > teeth, bull power > 0, and RSI < 70.
+# Short when price < teeth, bear power < 0, and RSI > 30.
+# Exit on opposite signal or when price crosses lips.
+# Works in trending markets (Alligator aligned) and avoids chop via RSI extremes.
+# Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "4h_Donchian_Volume_ADX"
-timeframe = "4h"
+name = "6h_Alligator_ElderRay_RSI"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,119 +24,89 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for volume and ADX filters
+    # Williams Alligator (13,8,5) - smoothed with SMMA
+    def smma(arr, period):
+        result = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return result
+        result[period-1] = np.mean(arr[:period])
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
+    
+    jaw = smma(close, 13)  # Blue line
+    teeth = smma(close, 8)  # Red line
+    lips = smma(close, 5)   # Green line
+    
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    def ema(arr, period):
+        return pd.Series(arr).ewm(span=period, adjust=False, min_periods=period).mean().values
+    
+    ema13 = ema(close, 13)
+    bull_power = high - ema13
+    bear_power = low - ema13
+    
+    # RSI(14)
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.zeros_like(close)
+    avg_loss = np.zeros_like(close)
+    avg_gain[14] = np.mean(gain[:14])
+    avg_loss[14] = np.mean(loss[:14])
+    for i in range(15, len(close)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = np.concatenate([[np.nan], rsi])
+    
+    # Get 1d data for higher timeframe trend filter (optional)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
-    
-    # Donchian(20) on 4h
-    donch_high = np.full_like(high, np.nan)
-    donch_low = np.full_like(low, np.nan)
-    for i in range(20, len(high)):
-        donch_high[i] = np.max(high[i-20:i])
-        donch_low[i] = np.min(low[i-20:i])
-    
-    # ATR(14) for stoploss
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]
-    atr = np.zeros_like(close)
-    atr[14] = np.mean(tr[:15])
-    for i in range(15, len(tr)):
-        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
-    
-    # 1d volume average (20-period)
-    vol_1d = df_1d['volume'].values
-    vol_ma_20 = np.full_like(vol_1d, np.nan)
-    for i in range(20, len(vol_1d)):
-        vol_ma_20[i] = np.mean(vol_1d[i-20:i])
-    
-    # 1d ADX(14)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range for ADX
-    tr_1d = np.maximum(high_1d - low_1d, np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), np.abs(low_1d - np.roll(close_1d, 1))))
-    tr_1d[0] = high_1d[0] - low_1d[0]
-    
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed values
-    def smooth_series(data, period):
-        smoothed = np.full_like(data, np.nan)
-        if len(data) < period:
-            return smoothed
-        smoothed[period-1] = np.mean(data[:period])
-        for i in range(period, len(data)):
-            smoothed[i] = (smoothed[i-1] * (period-1) + data[i]) / period
-        return smoothed
-    
-    tr_smoothed = smooth_series(tr_1d, 14)
-    dm_plus_smoothed = smooth_series(dm_plus, 14)
-    dm_minus_smoothed = smooth_series(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = np.where(tr_smoothed != 0, 100 * dm_plus_smoothed / tr_smoothed, 0)
-    di_minus = np.where(tr_smoothed != 0, 100 * dm_minus_smoothed / tr_smoothed, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = smooth_series(dx, 14)
-    
-    # Align 1d indicators to 4h
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    if len(df_1d) >= 20:
+        ema_20_1d = ema(df_1d['close'].values, 20)
+        ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+        trend_filter = ema_20_1d_aligned  # Use as dynamic threshold
+    else:
+        trend_filter = None
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 15, 20, 14+13, 14+13)  # Donchian, ATR, vol MA, ADX smoothing
+    start_idx = max(20, 14)  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(atr[i]) or
-            np.isnan(vol_ma_20_aligned[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(rsi[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume spike condition: current 1d volume > 1.5x 20-period average
-        # Find corresponding 1d bar index for current 4h bar
-        vol_spike = False
-        if i >= 16:  # Need at least one full 1d bar (16x4h bars)
-            # Approximate: use the most recent completed 1d bar
-            vol_1d_idx = min(len(vol_1d)-1, i // 16)
-            if vol_1d_idx < len(vol_1d) and vol_1d_idx >= 0:
-                vol_spike = vol_1d[vol_1d_idx] > 1.5 * vol_ma_20[vol_1d_idx]
-        
         if position == 0:
-            # Long entry: Donchian breakout up + volume spike + ADX > 25
-            if close[i] > donch_high[i] and vol_spike and adx_aligned[i] > 25:
-                signals[i] = 0.25
-                position = 1
-            # Short entry: Donchian breakout down + volume spike + ADX > 25
-            elif close[i] < donch_low[i] and vol_spike and adx_aligned[i] > 25:
-                signals[i] = -0.25
-                position = -1
+            # Long entry: price > teeth, bull power > 0, RSI < 70 (not overbought)
+            if close[i] > teeth[i] and bull_power[i] > 0 and rsi[i] < 70:
+                # Optional 1d trend filter: only long if price > 1d EMA20
+                if trend_filter is None or close[i] > trend_filter[i]:
+                    signals[i] = 0.25
+                    position = 1
+            # Short entry: price < teeth, bear power < 0, RSI > 30 (not oversold)
+            elif close[i] < teeth[i] and bear_power[i] < 0 and rsi[i] > 30:
+                if trend_filter is None or close[i] < trend_filter[i]:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Long exit: Donchian breakdown OR adverse move of 2.5x ATR
-            if close[i] < donch_low[i] or close[i] < (prices['close'].iloc[i-1] - 2.5 * atr[i]) if i > 0 else False:
+            # Long exit: price < lips OR opposite signal (price < teeth & bear power < 0)
+            if close[i] < lips[i] or (close[i] < teeth[i] and bear_power[i] < 0 and rsi[i] > 30):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Donchian breakout OR adverse move of 2.5x ATR
-            if close[i] > donch_high[i] or close[i] > (prices['close'].iloc[i-1] + 2.5 * atr[i]) if i > 0 else False:
+            # Short exit: price > lips OR opposite signal (price > teeth & bull power > 0)
+            if close[i] > lips[i] or (close[i] > teeth[i] and bull_power[i] > 0 and rsi[i] < 70):
                 signals[i] = 0.0
                 position = 0
             else:
