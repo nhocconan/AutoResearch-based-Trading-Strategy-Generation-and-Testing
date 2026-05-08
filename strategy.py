@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_Weekly_Pivot_HighLow_Breakout"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,32 +17,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot points
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    # Get weekly data for pivot points
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate daily Camarilla pivot levels
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    range_ = high_1d - low_1d
-    r3 = pivot + (range_ * 1.1 / 2)
-    s3 = pivot - (range_ * 1.1 / 2)
-    r4 = pivot + (range_ * 1.1)
-    s4 = pivot - (range_ * 1.1)
+    # Calculate weekly pivot points (standard)
+    # Pivot = (H + L + C)/3
+    pivot = (high_1w + low_1w + close_1w) / 3.0
+    # Range = H - L
+    range_ = high_1w - low_1w
+    # Support and Resistance levels
+    r1 = pivot + range_
+    s1 = pivot - range_
+    r2 = pivot + 2 * range_
+    s2 = pivot - 2 * range_
     
-    # Align daily Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Align weekly pivot levels to daily timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
     
-    # Daily trend filter: EMA(34) on close
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Daily trend filter: EMA(50) on close
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Volume confirmation: 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -55,38 +58,38 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(s4_aligned[i]) or np.isnan(ema_34_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(ema_50[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above S4 with daily uptrend and volume
-            if (close[i] > s4_aligned[i] and 
-                close[i] > ema_34_aligned[i] and
+            # Long: price breaks above R2 with daily uptrend and volume
+            if (close[i] > r2_aligned[i] and 
+                close[i] > ema_50[i] and
                 vol_ratio[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below R3 with daily downtrend and volume
-            elif (close[i] < r3_aligned[i] and 
-                  close[i] < ema_34_aligned[i] and
+            # Short: price breaks below S2 with daily downtrend and volume
+            elif (close[i] < s2_aligned[i] and 
+                  close[i] < ema_50[i] and
                   vol_ratio[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below S3 or reverses below EMA
-            if (close[i] < s3_aligned[i] or 
-                close[i] < ema_34_aligned[i]):
+            # Long exit: price breaks below pivot or reverses below EMA
+            if (close[i] < pivot_aligned[i] or 
+                close[i] < ema_50[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above R3 or reverses above EMA
-            if (close[i] > r3_aligned[i] or 
-                close[i] > ema_34_aligned[i]):
+            # Short exit: price breaks above pivot or reverses above EMA
+            if (close[i] > pivot_aligned[i] or 
+                close[i] > ema_50[i]):
                 signals[i] = 0.0
                 position = 0
             else:
