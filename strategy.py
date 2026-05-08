@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h 15-period Exponential Moving Average (EMA15) crossover with 4h 50-period EMA (EMA50) trend filter,
-# combined with 4h volume confirmation (volume > 1.5x 20-period average) and 1d ADX regime filter (ADX > 25 for trending).
-# Long when EMA15 crosses above EMA50, volume confirms, and 1d ADX > 25.
-# Short when EMA15 crosses below EMA50, volume confirms, and 1d ADX > 25.
-# Exit when EMA15 crosses back in the opposite direction.
-# This strategy targets trending markets with momentum confirmation, avoiding choppy regimes.
-# Target: 20-50 trades per year on 4h timeframe for low friction and high signal quality.
+# Hypothesis: 12h Camarilla Pivot Breakout with Volume Spike and 1d Trend Filter
+# Long when price breaks above Camarilla R3 AND volume > 2x 20-period average AND price > 1d EMA50
+# Short when price breaks below Camarilla S3 AND volume > 2x 20-period average AND price < 1d EMA50
+# Exit when price returns to Camarilla Pivot Point (PP)
+# Uses Camarilla levels from daily timeframe for institutional reference points
+# Target: 80-120 total trades over 4 years (20-30/year) for low fee drift
 
-name = "4h_EMA15_EMA50_Volume_ADX"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,65 +24,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX trend filter
+    # 1d data for Camarilla pivots and EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate EMA15 and EMA50 on 4h data
-    ema15 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Camarilla levels from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Volume filter: current volume > 1.5x 20-period average
+    # Camarilla calculation: PP = (H+L+C)/3, Range = H-L
+    pp = (high_1d + low_1d + close_1d) / 3.0
+    rng = high_1d - low_1d
+    
+    # Camarilla levels
+    r3 = pp + (rng * 1.1 / 2.0)  # Resistance 3
+    s3 = pp - (rng * 1.1 / 2.0)  # Support 3
+    
+    # Align Camarilla levels to 12h timeframe (use previous day's levels)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    
+    # Volume filter: current volume > 2x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma20)
+    volume_filter = volume > (2.0 * vol_ma20)
     
-    # Calculate ADX on 1d data (14-period)
-    # True Range
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Movement
-    up_move = df_1d['high'] - df_1d['high'].shift(1)
-    down_move = df_1d['low'].shift(1) - df_1d['low']
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    # Smoothed DM
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / atr
-    minus_di = 100 * minus_dm_smooth / atr
-    
-    # DX and ADX
-    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Sufficient warmup for EMA50 and ADX
+    start_idx = 50  # Sufficient warmup for EMA50
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema15[i]) or np.isnan(ema50[i]) or np.isnan(volume_filter[i]) or 
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(pp_aligned[i]) or np.isnan(volume_filter[i]) or 
+            np.isnan(ema50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: EMA15 crosses above EMA50, volume confirms, ADX > 25 (trending)
-            long_cond = (ema15[i] > ema50[i]) and (ema15[i-1] <= ema50[i-1]) and volume_filter[i] and (adx_aligned[i] > 25)
-            # Short conditions: EMA15 crosses below EMA50, volume confirms, ADX > 25 (trending)
-            short_cond = (ema15[i] < ema50[i]) and (ema15[i-1] >= ema50[i-1]) and volume_filter[i] and (adx_aligned[i] > 25)
+            # Long conditions: price breaks above R3, volume spike, above 1d EMA50
+            long_cond = (close[i] > r3_aligned[i]) and (close[i-1] <= r3_aligned[i-1]) and volume_filter[i] and (close[i] > ema50_1d_aligned[i])
+            # Short conditions: price breaks below S3, volume spike, below 1d EMA50
+            short_cond = (close[i] < s3_aligned[i]) and (close[i-1] >= s3_aligned[i-1]) and volume_filter[i] and (close[i] < ema50_1d_aligned[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -92,15 +83,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: EMA15 crosses back below EMA50
-            if ema15[i] < ema50[i] and ema15[i-1] >= ema50[i-1]:
+            # Long exit: price returns to pivot point (mean reversion)
+            if close[i] <= pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: EMA15 crosses back above EMA50
-            if ema15[i] > ema50[i] and ema15[i-1] <= ema50[i-1]:
+            # Short exit: price returns to pivot point (mean reversion)
+            if close[i] >= pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
