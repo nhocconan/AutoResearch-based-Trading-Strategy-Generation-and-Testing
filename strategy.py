@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h 123 Pattern + 12h EMA50 Trend + Volume Spike
-# 123 Pattern: Price pulls back in a trend, creating a higher low (for uptrend) or lower high (for downtrend)
-# Long when: 12h EMA50 uptrend + price makes higher low + breaks above prior swing high + volume spike
-# Short when: 12h EMA50 downtrend + price makes lower high + breaks below prior swing low + volume spike
-# This pattern captures trend continuation with low-risk entries, working in both bull and bear markets.
-# Target: 20-50 trades/year to minimize fee drag.
+# Hypothesis: 6h Ichimoku Cloud with daily filter and volume confirmation
+# Uses Ichimoku system: Tenkan-sen (9), Kijun-sen (26), Senkou Span A/B (26, 52)
+# Long when: price above cloud + TK cross bullish + daily trend up + volume spike
+# Short when: price below cloud + TK cross bearish + daily trend down + volume spike
+# Ichimoku provides dynamic support/resistance and trend direction, effective in both bull/bear markets
+# Target: 15-35 trades/year to minimize fee drag while capturing major trends
 
-name = "4h_123Pattern_12hEMA50_Trend_Volume"
-timeframe = "4h"
+name = "6h_Ichimoku_Cloud_DailyTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,43 +24,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h swing points: identify swing highs and lows
-    # Swing high: high[i] is highest in window of 5 bars (2 before, 2 after)
-    # Swing low: low[i] is lowest in window of 5 bars
-    window = 2
-    swing_high = np.zeros(n, dtype=bool)
-    swing_low = np.zeros(n, dtype=bool)
+    # Ichimoku components (6h)
+    # Tenkan-sen (Conversion Line): (9-period high + low)/2
+    period_tenkan = 9
+    max_high_tenkan = pd.Series(high).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
+    min_low_tenkan = pd.Series(low).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
+    tenkan = (max_high_tenkan + min_low_tenkan) / 2
     
-    for i in range(window, n - window):
-        if high[i] == np.max(high[i-window:i+window+1]):
-            swing_high[i] = True
-        if low[i] == np.min(low[i-window:i+window+1]):
-            swing_low[i] = True
+    # Kijun-sen (Base Line): (26-period high + low)/2
+    period_kijun = 26
+    max_high_kijun = pd.Series(high).rolling(window=period_kijun, min_periods=period_kijun).max().values
+    min_low_kijun = pd.Series(low).rolling(window=period_kijun, min_periods=period_kijun).min().values
+    kijun = (max_high_kijun + min_low_kijun) / 2
     
-    # Track most recent swing high and low
-    last_swing_high = np.full(n, np.nan)
-    last_swing_low = np.full(n, np.nan)
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan + kijun) / 2)
     
-    last_high_val = np.nan
-    last_low_val = np.nan
+    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
+    period_senkou_b = 52
+    max_high_senkou_b = pd.Series(high).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
+    min_low_senkou_b = pd.Series(low).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
+    senkou_b = (max_high_senkou_b + min_low_senkou_b) / 2
     
-    for i in range(n):
-        if swing_high[i]:
-            last_high_val = high[i]
-        last_swing_high[i] = last_high_val
-        
-        if swing_low[i]:
-            last_low_val = low[i]
-        last_swing_low[i] = last_low_val
-    
-    # 12h EMA50 for trend
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Daily trend filter (1d EMA34)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
-    
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume spike: current volume > 2.0x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -69,35 +61,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 60  # Ensure enough data for Ichimoku (52 + 26 shift)
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(last_swing_high[i]) or 
-            np.isnan(last_swing_low[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
+            np.isnan(senkou_a[i]) or np.isnan(senkou_b[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Determine cloud boundaries (shifted values for current price)
+        senkou_a_shifted = senkou_a[i - 26] if i >= 26 else senkou_a[i]
+        senkou_b_shifted = senkou_b[i - 26] if i >= 26 else senkou_b[i]
+        
+        # Cloud top and bottom
+        cloud_top = max(senkou_a_shifted, senkou_b_shifted)
+        cloud_bottom = min(senkou_a_shifted, senkou_b_shifted)
+        
+        # TK cross
+        tk_cross_bullish = tenkan[i] > kijun[i]
+        tk_cross_bearish = tenkan[i] < kijun[i]
+        
         if position == 0:
-            # Long: 12h EMA50 uptrend + higher low + breaks above prior swing high + volume spike
-            # Higher low: current low > prior swing low
-            # Breakout: current close > prior swing high
-            ema_uptrend = ema_50_12h_aligned[i] > ema_50_12h_aligned[i-1]
-            higher_low = low[i] > last_swing_low[i]
-            breakout_high = close[i] > last_swing_high[i]
+            # Long: price above cloud + TK bullish + daily uptrend + volume spike
+            price_above_cloud = close[i] > cloud_top
+            daily_uptrend = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
             
-            long_cond = ema_uptrend and higher_low and breakout_high and volume_spike[i]
+            long_cond = price_above_cloud and tk_cross_bullish and daily_uptrend and volume_spike[i]
             
-            # Short: 12h EMA50 downtrend + lower high + breaks below prior swing low + volume spike
-            # Lower high: current high < prior swing high
-            # Breakdown: current close < prior swing low
-            ema_downtrend = ema_50_12h_aligned[i] < ema_50_12h_aligned[i-1]
-            lower_high = high[i] < last_swing_high[i]
-            breakdown_low = close[i] < last_swing_low[i]
+            # Short: price below cloud + TK bearish + daily downtrend + volume spike
+            price_below_cloud = close[i] < cloud_bottom
+            daily_downtrend = ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]
             
-            short_cond = ema_downtrend and lower_high and breakdown_low and volume_spike[i]
+            short_cond = price_below_cloud and tk_cross_bearish and daily_downtrend and volume_spike[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -106,15 +105,21 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below prior swing low (trend failure)
-            if close[i] < last_swing_low[i]:
+            # Long exit: price drops below cloud or TK cross bearish
+            price_below_cloud = close[i] < cloud_bottom
+            tk_cross_bearish = tenkan[i] < kijun[i]
+            
+            if price_below_cloud or tk_cross_bearish:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above prior swing high (trend failure)
-            if close[i] > last_swing_high[i]:
+            # Short exit: price rises above cloud or TK cross bullish
+            price_above_cloud = close[i] > cloud_top
+            tk_cross_bullish = tenkan[i] > kijun[i]
+            
+            if price_above_cloud or tk_cross_bullish:
                 signals[i] = 0.0
                 position = 0
             else:
