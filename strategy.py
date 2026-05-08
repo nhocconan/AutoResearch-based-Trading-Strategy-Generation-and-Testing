@@ -1,16 +1,17 @@
-# USING PROVEN PATTERNS FROM THE RESEARCH NOTES: CAMARILLA PIVOT + VOLUME SPIKE + CHOPPINESS REGIME
-# This pattern achieved ETHUSDT test Sharpe 1.47 in the research notes.
-# Adapting for 12h timeframe with 1d HTF as specified in the experiment.
-# Camarilla levels provide precise support/resistance, volume confirms breakout strength,
-# and chop filter avoids whipsaws in ranging markets.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_Volume_Chop"
-timeframe = "12h"
+# Hypothesis: 1d Donchian(20) breakout with 1w ADX trend filter and volume confirmation.
+# Long when price breaks above Donchian upper band AND 1w ADX > 25 (trending) AND volume > 1.5x 20-period average.
+# Short when price breaks below Donchian lower band AND 1w ADX > 25 AND volume > 1.5x 20-period average.
+# Exit when price crosses back below Donchian middle (for long) or above Donchian middle (for short).
+# Uses 1d timeframe to avoid overtrading, with 1w ADX to filter for trending markets only.
+# Target: 30-100 trades over 4 years (7-25/year) to minimize fee drag.
+
+name = "1d_Donchian_1wADX_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,88 +24,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 12h Camarilla levels from previous day's OHLC
-    # Using 1d data to get previous day's close, high, low
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # 1d Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_upper = highest_high
+    donchian_lower = lowest_low
+    donchian_middle = (donchian_upper + donchian_lower) / 2
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_close = df_1d['close'].shift(1).values  # Previous day's close
-    prev_high = df_1d['high'].shift(1).values    # Previous day's high
-    prev_low = df_1d['low'].shift(1).values      # Previous day's low
-    
-    # Calculate Camarilla levels for each 12h bar based on previous day's data
-    # Camarilla formulas:
-    # H4 = close + 1.5 * (high - low)
-    # H3 = close + 1.1 * (high - low)
-    # H2 = close + 0.6 * (high - low)
-    # H1 = close + 0.275 * (high - low)
-    # L1 = close - 0.275 * (high - low)
-    # L2 = close - 0.6 * (high - low)
-    # L3 = close - 1.1 * (high - low)
-    # L4 = close - 1.5 * (high - low)
-    
-    range_1d = prev_high - prev_low
-    H4 = prev_close + 1.5 * range_1d
-    H3 = prev_close + 1.1 * range_1d
-    H2 = prev_close + 0.6 * range_1d
-    H1 = prev_close + 0.275 * range_1d
-    L1 = prev_close - 0.275 * range_1d
-    L2 = prev_close - 0.6 * range_1d
-    L3 = prev_close - 1.1 * range_1d
-    L4 = prev_close - 1.5 * range_1d
-    
-    # Align 1d Camarilla levels to 12h timeframe
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    H2_aligned = align_htf_to_ltf(prices, df_1d, H2)
-    H1_aligned = align_htf_to_ltf(prices, df_1d, H1)
-    L1_aligned = align_htf_to_ltf(prices, df_1d, L1)
-    L2_aligned = align_htf_to_ltf(prices, df_1d, L2)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
-    
-    # 12h volume filter: current volume > 1.5x 20-period average
+    # Volume filter: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma20)
     
-    # Choppiness Index (14-period) on 12h data
-    # CHOP = 100 * log10(sum(TR over n) / (n * (max_high - min_low))) / log10(n)
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]  # First value
+    # 1w data for ADX trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
     
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    # Calculate ADX (14-period) on 1w data
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    chop = 100 * np.log10(atr_sum / (14 * (max_high - min_low))) / np.log10(14)
-    chop[np.isnan(chop)] = 50  # Default to middle range when undefined
+    # True Range
+    tr1 = np.abs(high_1w - low_1w)
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
     
-    # Chop regime: > 61.8 = ranging (mean revert), < 38.2 = trending (trend follow)
-    chop_ranging = chop > 61.8
-    chop_trending = chop < 38.2
+    # Directional Movement
+    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w), 
+                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)), 
+                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed values
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / atr
+    di_minus = 100 * dm_minus_smooth / atr
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    adx[np.isnan(dx)] = 0  # Handle division by zero
+    
+    # Align 1w ADX to 1d timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Sufficient warmup
+    start_idx = 30  # Sufficient warmup for ADX
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or 
-            np.isnan(volume_filter[i]) or np.isnan(chop[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(volume_filter[i]) or np.isnan(adx_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # In trending markets: breakout strategy
-            # Long when price breaks above H4 with volume spike
-            # Short when price breaks below L4 with volume spike
-            long_cond = chop_trending[i] and (close[i] > H4_aligned[i]) and volume_filter[i]
-            short_cond = chop_trending[i] and (close[i] < L4_aligned[i]) and volume_filter[i]
+            # Long conditions: break above upper band, ADX > 25, volume spike
+            long_cond = (close[i] > donchian_upper[i]) and (adx_aligned[i] > 25) and volume_filter[i]
+            # Short conditions: break below lower band, ADX > 25, volume spike
+            short_cond = (close[i] < donchian_lower[i]) and (adx_aligned[i] > 25) and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -112,20 +103,16 @@ def generate_signals(prices):
             elif short_cond:
                 signals[i] = -0.25
                 position = -1
-                
         elif position == 1:
-            # Long exit conditions
-            # Exit if: price drops below H3 (profit target) OR chop becomes ranging (avoid whipsaw)
-            if chop_ranging[i] or close[i] < H3_aligned[i]:
+            # Long exit: cross below middle band
+            if close[i] < donchian_middle[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-                
         elif position == -1:
-            # Short exit conditions
-            # Exit if: price rises above L3 (profit target) OR chop becomes ranging (avoid whipsaw)
-            if chop_ranging[i] or close[i] > L3_aligned[i]:
+            # Short exit: cross above middle band
+            if close[i] > donchian_middle[i]:
                 signals[i] = 0.0
                 position = 0
             else:
