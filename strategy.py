@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian Breakout with 1d Trend and Volume Spike
-# - Uses Donchian channel from daily timeframe (upper/lower bands)
+# Hypothesis: 4h Donchian Breakout with 1d Trend and Volume Spike
+# - Uses Donchian(20) channels from 4h timeframe (upper/lower bands)
 # - Breakout above upper band with 1d uptrend or below lower band with 1d downtrend
 # - Volume spike confirms breakout strength
 # - Works in bull/bear by using 1d trend filter to avoid counter-trend trades
-# - Target: 15-30 trades/year to minimize fee drag on 12h timeframe
+# - Target: 20-40 trades/year to minimize fee drag on 4h timeframe
 
-name = "12h_DonchianBreakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_DonchianBreakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,29 +24,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for Donchian calculation
+    # 4h data for Donchian calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    
+    # Calculate Donchian channels (20-period high/low)
+    n4h = len(high_4h)
+    donchian_upper = np.full(n4h, np.nan)
+    donchian_lower = np.full(n4h, np.nan)
+    
+    for i in range(20, n4h):
+        donchian_upper[i] = np.max(high_4h[i-20:i])
+        donchian_lower[i] = np.min(low_4h[i-20:i])
+    
+    # Align Donchian levels to 4h timeframe (already 4h, so direct copy)
+    donchian_upper_aligned = donchian_upper.copy()
+    donchian_lower_aligned = donchian_lower.copy()
+    
+    # 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 5:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Calculate Donchian channel (20-period) using previous day's data
-    n1d = len(close_1d)
-    donchian_upper = np.full(n1d, np.nan)
-    donchian_lower = np.full(n1d, np.nan)
-    
-    for i in range(20, n1d):
-        donchian_upper[i] = np.max(high_1d[i-20:i])
-        donchian_lower[i] = np.min(low_1d[i-20:i])
-    
-    # Align Donchian levels to 12h timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
-    
-    # 1d data for trend filter (EMA50)
+    # 1d EMA50 for trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
