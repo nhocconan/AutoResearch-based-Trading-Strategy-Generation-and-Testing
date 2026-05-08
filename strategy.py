@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_DailyPivot_4hDonchian_Volume_v1"
-timeframe = "4h"
+name = "6h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,82 +17,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot points
+    # Get daily data for Camarilla pivot points
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily pivot points: P = (H + L + C)/3
+    # Calculate daily Camarilla pivot levels
+    # Pivot = (H + L + C)/3
     pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
+    # Range = H - L
+    range_ = high_1d - low_1d
+    # Camarilla levels
+    r3 = pivot + (range_ * 1.1 / 2)
+    s3 = pivot - (range_ * 1.1 / 2)
+    r4 = pivot + (range_ * 1.1)
+    s4 = pivot - (range_ * 1.1)
     
-    # Get 4h data for Donchian bands
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
+    # Align daily Camarilla levels to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # Daily trend filter: EMA(34) on close
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Align daily pivot levels to 4h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # 4-hour Donchian(20) bands
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
-    
-    # Volume average (20-period)
+    # Volume confirmation: 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Ensure enough data for indicators
+    start_idx = 50  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(r4_aligned[i]) or 
+            np.isnan(s4_aligned[i]) or np.isnan(ema_34_aligned[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above S1 daily pivot and breaks above 4h Donchian upper band with volume
-            if (close[i] > s1_aligned[i] and
-                close[i] > donchian_high_aligned[i] and
-                vol_ratio[i] > 1.8):
+            # Long: price breaks above S4 with daily uptrend and volume
+            if (close[i] > s4_aligned[i] and 
+                close[i] > ema_34_aligned[i] and
+                vol_ratio[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below R1 daily pivot and breaks below 4h Donchian lower band with volume
-            elif (close[i] < r1_aligned[i] and
-                  close[i] < donchian_low_aligned[i] and
-                  vol_ratio[i] > 1.8):
+            # Short: price breaks below R3 with daily downtrend and volume
+            elif (close[i] < r3_aligned[i] and 
+                  close[i] < ema_34_aligned[i] and
+                  vol_ratio[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below S1 daily pivot or Donchian lower band
-            if (close[i] < s1_aligned[i] or 
-                close[i] < donchian_low_aligned[i]):
+            # Long exit: price breaks below S3 or reverses below EMA
+            if (close[i] < s3_aligned[i] or 
+                close[i] < ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above R1 daily pivot or Donchian upper band
-            if (close[i] > r1_aligned[i] or 
-                close[i] > donchian_high_aligned[i]):
+            # Short exit: price breaks above R3 or reverses above EMA
+            if (close[i] > r3_aligned[i] or 
+                close[i] > ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
