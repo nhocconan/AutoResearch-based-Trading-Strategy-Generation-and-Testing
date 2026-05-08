@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Donchian20_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_KAMA_RSI_1dTrend"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,22 +17,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Donchian channel (20-period) on 6h
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # KAMA on 12h close
+    close_series = pd.Series(close)
+    change = np.abs(close_series.diff(1))
+    volatility = change.rolling(window=10, min_periods=10).sum()
+    er = change.rolling(window=10, min_periods=10).sum() / volatility.replace(0, np.nan)
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        if np.isnan(sc.iloc[i]):
+            kama[i] = kama[i-1]
+        else:
+            kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
     
-    # 1d trend: EMA(50)
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # RSI(14) on 12h
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean()
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # 1d EMA(34) trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume confirmation: 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -41,41 +58,44 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data
+    start_idx = 50  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(vol_ratio[i]):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(ema_34_aligned[i]) or 
+            np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Break above upper Donchian + price > EMA50 + volume
-            if (close[i] > high_20[i] and 
-                close[i] > ema_50_aligned[i] and
-                vol_ratio[i] > 1.5):
+            # Long: price > KAMA, RSI > 50, price > 1d EMA34, volume confirmation
+            if (close[i] > kama[i] and
+                rsi[i] > 50 and
+                close[i] > ema_34_aligned[i] and
+                vol_ratio[i] > 1.3):
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below lower Donchian + price < EMA50 + volume
-            elif (close[i] < low_20[i] and 
-                  close[i] < ema_50_aligned[i] and
-                  vol_ratio[i] > 1.5):
+            # Short: price < KAMA, RSI < 50, price < 1d EMA34, volume confirmation
+            elif (close[i] < kama[i] and
+                  rsi[i] < 50 and
+                  close[i] < ema_34_aligned[i] and
+                  vol_ratio[i] > 1.3):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Break below lower Donchian or price < EMA50
-            if (close[i] < low_20[i] or
-                close[i] < ema_50_aligned[i]):
+            # Long exit: price < KAMA or RSI < 40
+            if (close[i] < kama[i] or
+                rsi[i] < 40):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Break above upper Donchian or price > EMA50
-            if (close[i] > high_20[i] or
-                close[i] > ema_50_aligned[i]):
+            # Short exit: price > KAMA or RSI > 60
+            if (close[i] > kama[i] or
+                rsi[i] > 60):
                 signals[i] = 0.0
                 position = 0
             else:
