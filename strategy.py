@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_v4"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -41,7 +41,7 @@ def generate_signals(prices):
         if i >= 29:
             vol_avg_30[i] = np.mean(vol_1d[i-29:i+1])
     
-    # Align all indicators to 12h timeframe
+    # Align all indicators to 4h timeframe
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
@@ -50,7 +50,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup
+    start_idx = 60  # warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
