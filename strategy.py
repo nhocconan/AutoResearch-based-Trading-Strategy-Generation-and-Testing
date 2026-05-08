@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_PivotReversal_1dTrend_Volume_137933"
-timeframe = "4h"
+name = "1h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,73 +17,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d trend: EMA50
+    # 1d trend: EMA34
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 1d Pivot Points
+    # 1d Camarilla R3/S3 levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = pivot * 2 - low_1d
-    s1 = pivot * 2 - high_1d
+    range_1d = high_1d - low_1d
+    r3 = close_1d + (range_1d * 1.1 / 4)
+    s3 = close_1d - (range_1d * 1.1 / 4)
     
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Volume spike: current volume > 1.8x 24-period average
-    vol_ma24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > (1.8 * vol_ma24)
+    # Volume spike: current volume > 2.0x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma20)
+    
+    # Session filter: 08-20 UTC (hours)
+    hours = prices.index.hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(volume_spike[i]) or 
+            np.isnan(session_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above R1 + uptrend (price > 1d EMA50) + volume spike
-            long_cond = (close[i] > r1_aligned[i]) and \
-                        (close[i] > ema_50_1d_aligned[i]) and \
-                        volume_spike[i]
-            # Short: break below S1 + downtrend (price < 1d EMA50) + volume spike
-            short_cond = (close[i] < s1_aligned[i]) and \
-                         (close[i] < ema_50_1d_aligned[i]) and \
-                         volume_spike[i]
+            # Long: break above R3 + uptrend (price > 1d EMA34) + volume spike + session
+            long_cond = (close[i] > r3_aligned[i]) and \
+                        (close[i] > ema_34_1d_aligned[i]) and \
+                        volume_spike[i] and \
+                        session_filter[i]
+            # Short: break below S3 + downtrend (price < 1d EMA34) + volume spike + session
+            short_cond = (close[i] < s3_aligned[i]) and \
+                         (close[i] < ema_34_1d_aligned[i]) and \
+                         volume_spike[i] and \
+                         session_filter[i]
             
             if long_cond:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             elif short_cond:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Long exit: close below pivot (mean reversion)
-            if close[i] < pivot[i]:
+            # Long exit: close below S3 (mean reversion to support)
+            if close[i] < s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: close above pivot (mean reversion)
-            if close[i] > pivot[i]:
+            # Short exit: close above R3 (mean reversion to resistance)
+            if close[i] > r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
