@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h momentum strategy using 1w EMA(8) trend filter + 1d RSI(14) for entry timing.
-# Long when 1w trend up and 1d RSI < 30 (oversold in uptrend).
-# Short when 1w trend down and 1d RSI > 70 (overbought in downtrend).
-# Uses volume confirmation (1.5x 20-period volume average) to avoid false signals.
-# Target: 80-120 total trades over 4 years (20-30/year) to balance opportunity and cost.
+# Hypothesis: 4h Williams %R with 1d trend filter and volume confirmation.
+# Williams %R identifies overbought/oversold conditions; fade extremes when 1d trend opposes (mean reversion),
+# follow breakouts when 1d trend aligns (trend continuation). Uses 1d EMA(34) for trend and 50-period volume spike.
+# Target: 60-100 total trades over 4 years (15-25/year) to minimize fee drag.
 
-name = "6h_1wEMA8_1dRSI_Volume"
-timeframe = "6h"
+name = "4h_WilliamsR_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,85 +22,97 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 8:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    
-    # 1w EMA(8) for trend filter
-    close_1w_series = pd.Series(close_1w)
-    ema_8_1w = close_1w_series.ewm(span=8, adjust=False, min_periods=8).mean().values
-    trend_up = ema_8_1w[1:] > ema_8_1w[:-1]  # Rising EMA = uptrend
-    trend_up = np.concatenate([[False], trend_up])  # Align with 1w index
-    
-    # Get 1d data for RSI
+    # Get 1d data for Williams %R and trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 14:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # 1d RSI(14)
-    delta = np.diff(close_1d)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Williams %R (14-period)
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # avoid div by zero
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # 1d EMA(34) for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_up = ema_34_1d[1:] > ema_34_1d[:-1]  # Rising EMA = uptrend
+    trend_up = np.concatenate([[False], trend_up])  # Align with 1d index
     
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = np.concatenate([[50], rsi])  # First value neutral
+    # Volume confirmation: 50-period volume spike (2.0x EMA)
+    vol_ema = pd.Series(volume).ewm(span=50, adjust=False, min_periods=50).mean().values
+    vol_confirm = volume > (vol_ema * 2.0)
     
-    # Volume confirmation: 1.5x 20-period volume average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
-    
-    # Align 1w and 1d indicators to 6h timeframe
-    trend_up_aligned = align_htf_to_ltf(prices, df_1w, trend_up.astype(float))
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # Align 1d indicators to 4h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure enough data for volume MA
+    start_idx = 50  # Ensure enough data for Williams %R and volume EMA
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(trend_up_aligned[i]) or np.isnan(rsi_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(trend_up_aligned[i]) or
+            np.isnan(vol_ema[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: 1w uptrend + 1d RSI oversold + volume confirmation
-            if (trend_up_aligned[i] > 0.5 and  # 1w uptrend
-                rsi_aligned[i] < 30 and        # 1d RSI oversold
+            # Long entry conditions
+            # Oversold bounce in downtrend (mean reversion)
+            if (trend_up_aligned[i] <= 0.5 and  # 1d downtrend
+                williams_r_aligned[i] <= -80 and  # Oversold
                 vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: 1w downtrend + 1d RSI overbought + volume confirmation
-            elif (trend_up_aligned[i] <= 0.5 and  # 1w downtrend
-                  rsi_aligned[i] > 70 and       # 1d RSI overbought
+            # Breakout above resistance in uptrend (trend follow)
+            elif (trend_up_aligned[i] > 0.5 and  # 1d uptrend
+                  williams_r_aligned[i] >= -20 and  # Overbought breakout
+                  vol_confirm[i]):
+                signals[i] = 0.25
+                position = 1
+            # Short entry conditions
+            # Overbought reversal in uptrend (mean reversion)
+            elif (trend_up_aligned[i] > 0.5 and  # 1d uptrend
+                  williams_r_aligned[i] >= -20 and  # Overbought
+                  vol_confirm[i]):
+                signals[i] = -0.25
+                position = -1
+            # Oversold breakdown in downtrend (trend follow)
+            elif (trend_up_aligned[i] <= 0.5 and  # 1d downtrend
+                  williams_r_aligned[i] <= -80 and  # Oversold breakdown
                   vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: 1w trend turns down OR RSI overbought
-            if (trend_up_aligned[i] <= 0.5 or  # 1w downtrend
-                rsi_aligned[i] > 70):          # 1d RSI overbought
+            # Long exit: reverse signal or mean reversion
+            if (trend_up_aligned[i] <= 0.5 and  # 1d downtrend
+                williams_r_aligned[i] >= -50):  # Return to mean
+                signals[i] = 0.0
+                position = 0
+            elif (trend_up_aligned[i] > 0.5 and  # 1d uptrend
+                  williams_r_aligned[i] <= -80):  # Re-extreme oversold
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: 1w trend turns up OR RSI oversold
-            if (trend_up_aligned[i] > 0.5 or   # 1w uptrend
-                rsi_aligned[i] < 30):          # 1d RSI oversold
+            # Short exit: reverse signal or mean reversion
+            if (trend_up_aligned[i] > 0.5 and  # 1d uptrend
+                williams_r_aligned[i] <= -50):  # Return to mean
+                signals[i] = 0.0
+                position = 0
+            elif (trend_up_aligned[i] <= 0.5 and  # 1d downtrend
+                  williams_r_aligned[i] >= -20):  # Re-extreme overbought
                 signals[i] = 0.0
                 position = 0
             else:
