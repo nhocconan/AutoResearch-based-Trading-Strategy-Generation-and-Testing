@@ -3,76 +3,109 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_TRIX_Zero_Cross_With_Volume_Filter"
-timeframe = "12h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
     
-    # TRIX on close (12-period EMA triple smoothed)
-    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean()
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean()
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean()
-    trix = 100 * (ema3 - ema3.shift(1)) / ema3.shift(1)
-    trix = trix.fillna(0).values
-    
-    # Daily trend filter: 50-period EMA on daily close
+    # Get daily data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume confirmation: 20-period average volume
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
+        return np.zeros(n)
+    
+    # Calculate Camarilla pivot levels from daily data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Pivot = (H + L + C) / 3
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Range = H - L
+    range_1d = high_1d - low_1d
+    # Resistance levels
+    r1_1d = close_1d + (range_1d * 1.1 / 12)
+    # Support levels
+    s1_1d = close_1d - (range_1d * 1.1 / 12)
+    
+    # Align Camarilla levels to 1h timeframe
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    
+    # 4h EMA50 for trend filter
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    
+    # Volume confirmation - 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1.0)
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 100
+    start_idx = 200
     
     for i in range(start_idx, n):
-        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ratio[i]):
+        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
+            np.isnan(s1_1d_aligned[i]) or np.isnan(ema_50_4h_aligned[i]) or
+            np.isnan(vol_ratio[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        if not in_session[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: TRIX crosses above zero + price above daily EMA50 + volume confirmation
-            if (trix[i] > 0 and trix[i-1] <= 0 and 
-                close[i] > ema_50_1d_aligned[i] and
+            # Long: price breaks above R1 + above 4h EMA50 + volume confirmation
+            if (close[i] > r1_1d_aligned[i] and 
+                close[i] > ema_50_4h_aligned[i] and
                 vol_ratio[i] > 1.5):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
-            # Short: TRIX crosses below zero + price below daily EMA50 + volume confirmation
-            elif (trix[i] < 0 and trix[i-1] >= 0 and 
-                  close[i] < ema_50_1d_aligned[i] and
+            # Short: price breaks below S1 + below 4h EMA50 + volume confirmation
+            elif (close[i] < s1_1d_aligned[i] and 
+                  close[i] < ema_50_4h_aligned[i] and
                   vol_ratio[i] > 1.5):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: TRIX crosses below zero OR price falls below daily EMA50
-            if trix[i] < 0 or close[i] < ema_50_1d_aligned[i]:
+            # Exit long: price falls back below pivot OR below 4h EMA50
+            if close[i] < pivot_1d_aligned[i] or close[i] < ema_50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: TRIX crosses above zero OR price rises above daily EMA50
-            if trix[i] > 0 or close[i] > ema_50_1d_aligned[i]:
+            # Exit short: price rises back above pivot OR above 4h EMA50
+            if close[i] > pivot_1d_aligned[i] or close[i] > ema_50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
