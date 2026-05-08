@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_KAMA_RSI_1dTrend"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,43 +17,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
+    # Get daily data for Camarilla levels (from previous day)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    # Calculate Camarilla levels from previous day's OHLC
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    prev_close = df_1d['close'].values[:-1]  # previous day close
+    prev_high = df_1d['high'].values[:-1]    # previous day high
+    prev_low = df_1d['low'].values[:-1]      # previous day low
     
-    # KAMA on 12h close
-    close_series = pd.Series(close)
-    change = np.abs(close_series.diff(1))
-    volatility = change.rolling(window=10, min_periods=10).sum()
-    er = change.rolling(window=10, min_periods=10).sum() / volatility.replace(0, np.nan)
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        if np.isnan(sc.iloc[i]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
+    # Need at least one previous day
+    if len(prev_close) == 0:
+        return np.zeros(n)
     
-    # RSI(14) on 12h
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean()
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate levels for each previous day
+    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     
-    # 1d EMA(34) trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Extend arrays to match df_1d length (first value is NaN as no previous day)
+    camarilla_r1_full = np.full(len(df_1d), np.nan)
+    camarilla_s1_full = np.full(len(df_1d), np.nan)
+    camarilla_r1_full[1:] = camarilla_r1
+    camarilla_s1_full[1:] = camarilla_s1
+    
+    # Get 12h trend filter: EMA(50)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
+    
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Volume confirmation: 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
+    
+    # Align all data to 4h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1_full)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1_full)
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -62,40 +66,38 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(ema_34_aligned[i]) or 
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price > KAMA, RSI > 50, price > 1d EMA34, volume confirmation
-            if (close[i] > kama[i] and
-                rsi[i] > 50 and
-                close[i] > ema_34_aligned[i] and
-                vol_ratio[i] > 1.3):
+            # Long: Break above R1 + above 12h EMA50 + volume confirmation
+            if (close[i] > camarilla_r1_aligned[i] and
+                close[i] > ema_50_12h_aligned[i] and
+                vol_ratio[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: price < KAMA, RSI < 50, price < 1d EMA34, volume confirmation
-            elif (close[i] < kama[i] and
-                  rsi[i] < 50 and
-                  close[i] < ema_34_aligned[i] and
-                  vol_ratio[i] > 1.3):
+            # Short: Break below S1 + below 12h EMA50 + volume confirmation
+            elif (close[i] < camarilla_s1_aligned[i] and
+                  close[i] < ema_50_12h_aligned[i] and
+                  vol_ratio[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price < KAMA or RSI < 40
-            if (close[i] < kama[i] or
-                rsi[i] < 40):
+            # Long exit: Close below S1 or below 12h EMA50
+            if (close[i] < camarilla_s1_aligned[i] or
+                close[i] < ema_50_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price > KAMA or RSI > 60
-            if (close[i] > kama[i] or
-                rsi[i] > 60):
+            # Short exit: Close above R1 or above 12h EMA50
+            if (close[i] > camarilla_r1_aligned[i] or
+                close[i] > ema_50_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
