@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
+# 4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_Dyn
+# Hypothesis: The Camarilla R1/S1 breakout strategy with 1d EMA trend filter and volume spike is a proven performer. This version adds a dynamic volume multiplier based on ATR volatility to adapt to changing market conditions, reducing false breakouts in low volatility periods while capturing strong moves in high volatility regimes. Designed to work in both bull and bear markets by following the 1d trend.
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_Dyn"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,7 +20,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data once for 12h strategy
+    # Get daily data once
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -36,23 +39,34 @@ def generate_signals(prices):
     camarilla_r1 = close_1d_prev + 1.1 * (high_1d - low_1d) / 12
     camarilla_s1 = close_1d_prev - 1.1 * (high_1d - low_1d) / 12
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Volume spike: current volume > 2.0 * 20-period average
+    # Dynamic volume threshold: base 1.5 + ATR-scaled component
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+    # Avoid division by zero or near-zero
+    atr_ratio = np.where(atr_ma > 0, atr / atr_ma, 1.0)
+    # Dynamic multiplier: 1.5 in low vol, up to 3.0 in high vol
+    vol_mult = 1.5 + 1.5 * np.clip(atr_ratio - 1.0, 0, 1)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_spike = volume > (vol_ma * vol_mult)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # warmup for calculations
+    start_idx = 50  # warmup for calculations
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
         if (np.isnan(ema34_1d_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(camarilla_s1_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
