@@ -1,17 +1,10 @@
-# 4h_Camarilla_R1S1_With_Volume_Spike_and_Chop_Filter
-# Hypothesis: Camarilla pivot levels (R1/S1) from daily chart act as strong support/resistance.
-# In ranging markets (Chop > 61.8), price tends to reverse at these levels.
-# In trending markets (Chop < 38.2), breakouts through R1/S1 continue the trend.
-# Volume spike confirms institutional participation. Works in both bull/bear via regime filter.
-# Target: 20-40 trades/year per symbol (~80-160 over 4 years).
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1S1_With_Volume_Spike_and_Chop_Filter"
-timeframe = "4h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,96 +17,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculation
+    # Get daily data for Camarilla levels and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 40:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels from previous day
-    # H, L, C = previous day's high, low, close
-    H = np.concatenate([[np.nan], high_1d[:-1]])  # shift by 1
-    L = np.concatenate([[np.nan], low_1d[:-1]])
-    C = np.concatenate([[np.nan], close_1d[:-1]])
+    # Calculate previous day's Camarilla levels (shifted by 1 to avoid look-ahead)
+    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close[0] = np.nan
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
     
-    # Camarilla R1, S1
-    R1 = C + (H - L) * 1.1 / 12
-    S1 = C - (H - L) * 1.1 / 12
+    camarilla_range = prev_high - prev_low
+    R1 = prev_close + camarilla_range * 1.1 / 12
+    S1 = prev_close - camarilla_range * 1.1 / 12
     
-    # Align to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # Chopiness Index (14-period) for regime filter
-    def true_range(high, low, close):
-        tr1 = high - low
-        tr2 = np.abs(high - np.concatenate([[np.nan], close[:-1]]))
-        tr3 = np.abs(low - np.concatenate([[np.nan], close[:-1]]))
-        return np.maximum(tr1, np.maximum(tr2, tr3))
+    # 1d trend filter: EMA(34)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    tr = true_range(high, low, close)
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate Chop: log(sum(TR14) / (max(high14) - min(low14))) * 100 / log(14)
-    tr14_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    max_high14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = np.where(
-        (max_high14 - min_low14) > 0,
-        np.log10(tr14_sum / (max_high14 - min_low14)) * 100 / np.log10(14),
-        50  # default if range is zero
-    )
-    
-    # Volume spike: 2x 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume / vol_ma20
+    # Volume confirmation: 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data
+    start_idx = 50  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
         if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(chop[i]) or np.isnan(volume_spike[i])):
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions:
-            # 1. Price crosses above S1 (support) from below
-            # 2. Volume spike > 2.0
-            # 3. Chop > 61.8 (ranging market) for mean reversion
-            if (close[i] > S1_aligned[i] and close[i-1] <= S1_aligned[i-1] and
-                volume_spike[i] > 2.0 and chop[i] > 61.8):
+            # Long: Close breaks above R1 + price > EMA34 + volume
+            if (close[i] > R1_aligned[i] and
+                close[i] > ema_34_aligned[i] and
+                vol_ratio[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions:
-            # 1. Price crosses below R1 (resistance) from above
-            # 2. Volume spike > 2.0
-            # 3. Chop > 61.8 (ranging market) for mean reversion
-            elif (close[i] < R1_aligned[i] and close[i-1] >= R1_aligned[i-1] and
-                  volume_spike[i] > 2.0 and chop[i] > 61.8):
+            # Short: Close breaks below S1 + price < EMA34 + volume
+            elif (close[i] < S1_aligned[i] and
+                  close[i] < ema_34_aligned[i] and
+                  vol_ratio[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
-        
         elif position == 1:
-            # Long exit: price reaches R1 or chop drops below 38.2 (trending) or volume drops
-            if (close[i] >= R1_aligned[i] or chop[i] < 38.2 or volume_spike[i] < 1.0):
+            # Long exit: Close breaks below S1 or price below EMA34
+            if (close[i] < S1_aligned[i] or
+                close[i] < ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        
         elif position == -1:
-            # Short exit: price reaches S1 or chop drops below 38.2 or volume drops
-            if (close[i] <= S1_aligned[i] or chop[i] < 38.2 or volume_spike[i] < 1.0):
+            # Short exit: Close breaks above R1 or price above EMA34
+            if (close[i] > R1_aligned[i] or
+                close[i] > ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
