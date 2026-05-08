@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_Weekly_Camarilla_R1_S1_Breakout_Trend_Volume"
-timeframe = "1d"
+name = "6h_WilliamsFractal_Breakout_12hTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,30 +17,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly trend: EMA34
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # 12h trend: EMA34
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 34:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    close_12h = df_12h['close'].values
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # Daily Camarilla R1/S1 levels (standard reversal points)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # 12h Williams Fractals (need 2-bar confirmation)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    r1 = close_1d + (range_1d * 1.1 / 12)
-    s1 = close_1d - (range_1d * 1.1 / 12)
+    n_12h = len(high_12h)
+    bearish_fractal = np.full(n_12h, np.nan)
+    bullish_fractal = np.full(n_12h, np.nan)
     
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    for i in range(2, n_12h - 2):
+        if (high_12h[i] > high_12h[i-1] and high_12h[i] > high_12h[i-2] and
+            high_12h[i] > high_12h[i+1] and high_12h[i] > high_12h[i+2]):
+            bearish_fractal[i] = high_12h[i]
+        if (low_12h[i] < low_12h[i-1] and low_12h[i] < low_12h[i-2] and
+            low_12h[i] < low_12h[i+1] and low_12h[i] < low_12h[i+2]):
+            bullish_fractal[i] = low_12h[i]
+    
+    # Align with 2-bar additional delay for confirmation
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_12h, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_12h, bullish_fractal, additional_delay_bars=2)
+    
+    # ATR(14) for stop loss
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Volume spike: current volume > 2.0x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -49,25 +60,27 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(ema_34_12h_aligned[i]) or 
+            np.isnan(bearish_fractal_aligned[i]) or 
+            np.isnan(bullish_fractal_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above R1 + weekly uptrend (price > weekly EMA34) + volume spike
-            long_cond = (close[i] > r1_aligned[i]) and \
-                        (close[i] > ema_34_1w_aligned[i]) and \
+            # Long: break above bearish fractal (resistance) + uptrend + volume spike
+            long_cond = (close[i] > bearish_fractal_aligned[i]) and \
+                        (close[i] > ema_34_12h_aligned[i]) and \
                         volume_spike[i]
-            # Short: break below S1 + weekly downtrend (price < weekly EMA34) + volume spike
-            short_cond = (close[i] < s1_aligned[i]) and \
-                         (close[i] < ema_34_1w_aligned[i]) and \
+            # Short: break below bullish fractal (support) + downtrend + volume spike
+            short_cond = (close[i] < bullish_fractal_aligned[i]) and \
+                         (close[i] < ema_34_12h_aligned[i]) and \
                          volume_spike[i]
             
             if long_cond:
@@ -77,15 +90,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: close below S1 (mean reversion to support)
-            if close[i] < s1_aligned[i]:
+            # Long exit: close below bullish fractal (support) or trend reversal
+            if close[i] < bullish_fractal_aligned[i] or close[i] < ema_34_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: close above R1 (mean reversion to resistance)
-            if close[i] > r1_aligned[i]:
+            # Short exit: close above bearish fractal (resistance) or trend reversal
+            if close[i] > bearish_fractal_aligned[i] or close[i] > ema_34_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
