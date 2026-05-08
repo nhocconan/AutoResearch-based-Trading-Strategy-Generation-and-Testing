@@ -1,19 +1,19 @@
-#!/usr/bin/env python3
-"""
-4h Donchian(20) breakout + volume confirmation + ATR filter
-- Breakout above 20-period high with volume > 1.5x 20-period average
-- Breakout below 20-period low with volume > 1.5x 20-period average
-- ATR(14) filter: only trade when ATR > 0.5 * ATR(50) to avoid low volatility
-- Position size: 0.25
-- Designed for fewer trades (<50/year) to minimize fee drag on 4h timeframe
-"""
+# 12h Donchian20 Breakout with 1w Trend and Volume Spike
+# - Uses 20-bar Donchian channel from 12h timeframe
+# - Trend filter: 1w EMA50 (bullish when rising, bearish when falling)
+# - Volume spike: current volume > 2.0x 20-period average
+# - Breakout above upper band with uptrend + volume spike = long
+# - Breakdown below lower band with downtrend + volume spike = short
+# - Exit when price crosses middle band (mean of upper/lower)
+# - Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag on 12h timeframe
+# - Works in bull/bear by using 1w trend filter to avoid counter-trend trades
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Donchian20_Volume_ATR_Filter"
-timeframe = "4h"
+name = "12h_Donchian20_Breakout_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,49 +26,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
+        return np.zeros(n)
     
-    # Volume filter: current volume > 1.5x 20-period average
+    close_1w = df_1w['close'].values
+    # 1w EMA50 for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # 12h Donchian channel (20-period)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_upper = high_max
+    donchian_lower = low_min
+    donchian_middle = (donchian_upper + donchian_lower) / 2.0
+    
+    # Volume spike: current volume > 2.0x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma20)
-    
-    # ATR filter to avoid low volatility periods
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
-    atr_filter = atr14 > (0.5 * atr50)
+    volume_spike = volume > (2.0 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
-            np.isnan(volume_filter[i]) or np.isnan(atr_filter[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(donchian_middle[i]) or
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: breakout above Donchian high with volume and ATR filter
-            long_cond = (close[i] > high_roll[i-1] and 
-                        volume_filter[i] and
-                        atr_filter[i])
+            # Long: price breaks above upper band with 1w uptrend + volume spike
+            long_cond = (close[i] > donchian_upper[i] and 
+                        ema_50_1w_aligned[i] > ema_50_1w_aligned[i-1] and
+                        volume_spike[i])
             
-            # Short: breakout below Donchian low with volume and ATR filter
-            short_cond = (close[i] < low_roll[i-1] and 
-                         volume_filter[i] and
-                         atr_filter[i])
+            # Short: price breaks below lower band with 1w downtrend + volume spike
+            short_cond = (close[i] < donchian_lower[i] and 
+                         ema_50_1w_aligned[i] < ema_50_1w_aligned[i-1] and
+                         volume_spike[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -77,18 +80,20 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: close below Donchian low
-            if close[i] < low_roll[i]:
+            # Long exit: price crosses below middle band
+            if close[i] < donchian_middle[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: close above Donchian high
-            if close[i] > high_roll[i]:
+            # Short exit: price crosses above middle band
+            if close[i] > donchian_middle[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
+
+#!/usr/bin/env python3
