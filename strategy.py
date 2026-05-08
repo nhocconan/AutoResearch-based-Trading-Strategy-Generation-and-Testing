@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA21 trend filter and volume confirmation
-# Long when price breaks above Donchian(20) high, 1w EMA21 rising, volume > 1.5x average
-# Short when price breaks below Donchian(20) low, 1w EMA21 falling, volume > 1.5x average
-# Uses Donchian channel for price structure, EMA21 for trend filter, volume for confirmation
-# Targets 7-25 trades per year (28-100 over 4 years) for low fee drag and high win rate
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA34 trend filter and volume confirmation
+# Long when Bull Power > 0, Bear Power < 0, price > EMA13, 1d EMA34 rising, volume > 1.5x avg
+# Short when Bear Power < 0, Bull Power > 0, price < EMA13, 1d EMA34 falling, volume > 1.5x avg
+# Uses Elder Ray for trend strength, EMA13 for entry filter, 1d EMA34 for trend filter, volume for confirmation
+# Targets 12-37 trades per year (50-150 over 4 years) for low fee drag and high win rate
 # Works in both bull and bear markets due to trend filter and volume confirmation
 
-name = "1d_Donchian20_1wEMA21_Volume"
-timeframe = "1d"
+name = "6h_ElderRay_1dEMA34_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,29 +24,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate Donchian channels from previous day's data (to avoid look-ahead)
-    high_1d = high.copy()
-    low_1d = low.copy()
+    # Calculate EMA13 for entry filter
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Previous day's values (shifted by 1 to avoid look-ahead)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_high[0] = np.nan  # First day has no previous
-    prev_low[0] = np.nan
+    # Calculate Elder Ray components
+    ema13_for_power = ema13  # EMA13 used for Bull/Bear Power calculation
+    bull_power = high - ema13_for_power
+    bear_power = low - ema13_for_power
     
-    # Donchian(20) on daily data
-    donchian_high = pd.Series(prev_high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(prev_low).rolling(window=20, min_periods=20).min().values
-    
-    # Calculate EMA21 on 1w close for trend filter
-    close_1w = df_1w['close'].values
-    ema21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
+    # Calculate EMA34 on 1d close for trend filter
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -55,43 +49,44 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need at least 20 days of data for Donchian
+    start_idx = 20  # Need at least 20 days for volume MA and EMA13
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema21_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        high_val = high[i]
-        low_val = low[i]
-        donchian_high_val = donchian_high[i]
-        donchian_low_val = donchian_low[i]
-        ema21_1w_val = ema21_1w_aligned[i]
+        ema13_val = ema13[i]
+        bull_power_val = bull_power[i]
+        bear_power_val = bear_power[i]
+        ema34_1d_val = ema34_1d_aligned[i]
         vol_conf_val = vol_conf[i]
         
         if position == 0:
-            # Enter long: price breaks above Donchian high, 1w uptrend, volume confirmation
-            if high_val > donchian_high_val and ema21_1w_val > 0 and vol_conf_val:
+            # Enter long: Bull Power > 0, Bear Power < 0, price > EMA13, 1d uptrend, volume confirmation
+            if (bull_power_val > 0 and bear_power_val < 0 and 
+                close[i] > ema13_val and ema34_1d_val > 0 and vol_conf_val):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below Donchian low, 1w downtrend, volume confirmation
-            elif low_val < donchian_low_val and ema21_1w_val < 0 and vol_conf_val:
+            # Enter short: Bear Power < 0, Bull Power > 0, price < EMA13, 1d downtrend, volume confirmation
+            elif (bear_power_val < 0 and bull_power_val > 0 and 
+                  close[i] < ema13_val and ema34_1d_val < 0 and vol_conf_val):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below Donchian low or 1w trend down
-            if low_val < donchian_low_val or ema21_1w_val < 0:
+            # Exit long: Bear Power >= 0 or price <= EMA13 or 1d trend down
+            if (bear_power_val >= 0 or close[i] <= ema13_val or ema34_1d_val < 0):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above Donchian high or 1w trend up
-            if high_val > donchian_high_val or ema21_1w_val > 0:
+            # Exit short: Bull Power <= 0 or price >= EMA13 or 1d trend up
+            if (bull_power_val <= 0 or close[i] >= ema13_val or ema34_1d_val > 0):
                 signals[i] = 0.0
                 position = 0
             else:
