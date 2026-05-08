@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_ElderRay_1dTrend_WeeklyVolatility"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,44 +17,50 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for trend filter and Camarilla calculation
+    # Get daily data for Elder Ray and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 26:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend filter
+    # Get weekly data for volatility filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
     close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Calculate 13-period EMA for Elder Ray
+    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high_1d - ema_13_1d
+    bear_power = low_1d - ema_13_1d
+    
+    # Align Elder Ray to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    
+    # Daily trend filter: EMA34 slope
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla levels from daily OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Weekly volatility filter: ATR(14) normalized by price
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Camarilla R1, R2, R3, S1, S2, S3
-    # R4 = Close + ((High - Low) * 1.1 / 2)
-    # R3 = Close + ((High - Low) * 1.1/4)
-    # R2 = Close + ((High - Low) * 1.1/6)
-    # R1 = Close + ((High - Low) * 1.1/12)
-    # S1 = Close - ((High - Low) * 1.1/12)
-    # S2 = Close - ((High - Low) * 1.1/6)
-    # S3 = Close - ((High - Low) * 1.1/4)
-    # S4 = Close - ((High - Low) * 1.1/2)
-    
-    camarilla_r1 = close_1d + ((high_1d - low_1d) * 1.1 / 12)
-    camarilla_s1 = close_1d - ((high_1d - low_1d) * 1.1 / 12)
-    camarilla_r3 = close_1d + ((high_1d - low_1d) * 1.1 / 4)
-    camarilla_s3 = close_1d - ((high_1d - low_1d) * 1.1 / 4)
-    
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Volume spike: current volume > 1.5x 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma20)
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr1[0] = high_1w[0] - low_1w[0]
+    tr2[0] = high_1w[0] - close_1w[0]
+    tr3[0] = low_1w[0] - close_1w[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_norm_1w = atr_14_1w / close_1w
+    atr_norm_aligned = align_htf_to_ltf(prices, df_1w, atr_norm_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -63,24 +69,27 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr_norm_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R1 with volume spike and daily uptrend
-            long_cond = (close[i] > camarilla_r1_aligned[i] and 
+            # Long: Bull Power > 0, Bear Power < 0 (both sides agree), 
+            #       Uptrend (EMA34 rising), Low volatility environment
+            long_cond = (bull_power_aligned[i] > 0 and 
+                        bear_power_aligned[i] < 0 and
                         ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and
-                        volume_spike[i])
+                        atr_norm_aligned[i] < 0.02)  # Below 2% weekly ATR
             
-            # Short: price breaks below S1 with volume spike and daily downtrend
-            short_cond = (close[i] < camarilla_s1_aligned[i] and 
+            # Short: Bear Power < 0, Bull Power < 0 (both negative),
+            #        Downtrend (EMA34 falling), Low volatility environment
+            short_cond = (bear_power_aligned[i] < 0 and 
+                         bull_power_aligned[i] < 0 and
                          ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and
-                         volume_spike[i])
+                         atr_norm_aligned[i] < 0.02)
             
             if long_cond:
                 signals[i] = 0.25
@@ -89,15 +98,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below S3 (strong reversal)
-            if close[i] < camarilla_s3_aligned[i]:
+            # Long exit: Bear Power becomes positive (bulls losing control) OR volatility spikes
+            if bear_power_aligned[i] > 0 or atr_norm_aligned[i] > 0.035:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above R3 (strong reversal)
-            if close[i] > camarilla_r3_aligned[i]:
+            # Short exit: Bull Power becomes positive (bears losing control) OR volatility spikes
+            if bull_power_aligned[i] > 0 or atr_norm_aligned[i] > 0.035:
                 signals[i] = 0.0
                 position = 0
             else:
