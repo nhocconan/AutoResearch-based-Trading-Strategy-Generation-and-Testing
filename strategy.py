@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,37 +29,31 @@ def generate_signals(prices):
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Daily data for Camarilla levels
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1d_vals = df_1d['close'].values
+    high_1d_vals = df_1d['high'].values
+    low_1d_vals = df_1d['low'].values
     
     # Calculate Camarilla levels from previous day
-    R3 = np.zeros(len(close_1d))
-    S3 = np.zeros(len(close_1d))
+    R3 = np.zeros(len(close_1d_vals))
+    S3 = np.zeros(len(close_1d_vals))
     
-    for i in range(1, len(close_1d)):
-        high_prev = high_1d[i-1]
-        low_prev = low_1d[i-1]
-        close_prev = close_1d[i-1]
+    for i in range(1, len(close_1d_vals)):
+        high_prev = high_1d_vals[i-1]
+        low_prev = low_1d_vals[i-1]
+        close_prev = close_1d_vals[i-1]
         range_val = high_prev - low_prev
         
-        if range_val <= 0:
-            R3[i] = R3[i-1] if i > 1 else close_prev
-            S3[i] = S3[i-1] if i > 1 else close_prev
-        else:
-            C = close_prev + (range_val * 1.1 / 6)
-            R3[i] = C + (range_val * 1.1 / 2)
-            S3[i] = C - (range_val * 1.1 / 2)
+        C = close_prev + (range_val * 1.1 / 6)
+        R3[i] = C + (range_val * 1.1 / 2)
+        S3[i] = C - (range_val * 1.1 / 2)
     
     # Align Camarilla levels to daily timeframe
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
-    # Volume spike: current volume > 1.8x 20-period average (higher threshold to reduce trades)
+    # Volume spike: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ma20)
+    volume_spike = volume > (1.5 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
