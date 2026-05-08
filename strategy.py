@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_Camarilla_R3_S3_Breakout_Trend_Volume"
-timeframe = "1d"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,28 +17,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
-    
-    # 1d data for Camarilla pivot levels (using previous day)
+    # 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
+    
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # 1d data for Camarilla pivot levels (using previous day's data)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # Previous 1d bar's Camarilla pivot levels
+    # Previous 1d bar's data (already closed)
     prev_close = np.roll(close_1d, 1)
     prev_high = np.roll(high_1d, 1)
     prev_low = np.roll(low_1d, 1)
+    # Handle first bar
     prev_close[0] = close_1d[0]
     prev_high[0] = high_1d[0]
     prev_low[0] = low_1d[0]
@@ -46,6 +44,10 @@ def generate_signals(prices):
     # Camarilla levels: R3, S3 (stronger breakout levels)
     R3 = prev_close + 1.1 * (prev_high - prev_low) / 4
     S3 = prev_close - 1.1 * (prev_high - prev_low) / 4
+    
+    # Align Camarilla levels to 12h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
     # Volume spike: current volume > 2.0x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -58,22 +60,22 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(R3[i]) or np.isnan(S3[i]) or 
-            np.isnan(ema34_1w_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above R3, price above 1w EMA34, volume spike
-            long_cond = (close[i] > R3[i] and 
-                        close[i] > ema34_1w_aligned[i] and
+            # Long: Price breaks above R3, price above 1d EMA34, volume spike
+            long_cond = (close[i] > R3_aligned[i] and 
+                        close[i] > ema34_1d_aligned[i] and
                         volume_spike[i])
             
-            # Short: Price breaks below S3, price below 1w EMA34, volume spike
-            short_cond = (close[i] < S3[i] and 
-                         close[i] < ema34_1w_aligned[i] and
+            # Short: Price breaks below S3, price below 1d EMA34, volume spike
+            short_cond = (close[i] < S3_aligned[i] and 
+                         close[i] < ema34_1d_aligned[i] and
                          volume_spike[i])
             
             if long_cond:
@@ -83,15 +85,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Price breaks below S3 OR price crosses below 1w EMA34
-            if close[i] < S3[i] or close[i] < ema34_1w_aligned[i]:
+            # Long exit: Price breaks below S3 OR price crosses below 1d EMA34
+            if close[i] < S3_aligned[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price breaks above R3 OR price crosses above 1w EMA34
-            if close[i] > R3[i] or close[i] > ema34_1w_aligned[i]:
+            # Short exit: Price breaks above R3 OR price crosses above 1d EMA34
+            if close[i] > R3_aligned[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
