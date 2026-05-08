@@ -3,20 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Bollinger Band squeeze + 4h trend + 1d volume confirmation
-# Bollinger Band squeeze identifies low volatility periods that precede breakouts.
-# 4h EMA trend filter ensures we only trade breakouts in the direction of the medium-term trend.
-# 1d volume spike confirms institutional participation in the breakout.
-# Targets 15-30 trades per year (~60-120 total over 4 years) to minimize fee drag.
-# Works in both bull and bear markets by filtering for trend-aligned breakouts only.
+# Hypothesis: 6h RSI(14) mean reversion with 1d trend filter and volume confirmation
+# In 6b markets, RSI extremes often reverse within 1-3 bars. We use 1d EMA50 to filter
+# direction (only long when above EMA50, short when below) to avoid counter-trend trades.
+# Volume spike confirms participation. This combination reduces false signals while
+# capturing mean reversion in both bull and bear markets. Targets 15-25 trades/year.
 
-name = "1h_BBSqueeze_4hTrend_1dVolume"
-timeframe = "1h"
+name = "6h_RSI14_1dEMA50_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,87 +23,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20, 2) on 1h
-    bb_period = 20
-    bb_std = 2
-    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    bb_std_dev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    bb_upper = sma + (bb_std * bb_std_dev)
-    bb_lower = sma - (bb_std * bb_std_dev)
-    bb_width = bb_upper - bb_lower
+    # RSI(14) on 6h
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Bollinger Band squeeze: width below 20-period mean
-    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
-    bb_squeeze = bb_width < bb_width_ma
+    def wilder_smooth(arr, period):
+        result = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return result
+        result[period-1] = np.nansum(arr[:period])
+        for i in range(period, len(arr)):
+            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
+        return result
     
-    # Get 4h data for EMA trend
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
+    gain_smooth = wilder_smooth(gain, 14)
+    loss_smooth = wilder_smooth(loss, 14)
+    rs = np.where(loss_smooth != 0, gain_smooth / loss_smooth, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    close_4h = df_4h['close'].values
-    ema_period = 50
-    ema_4h = pd.Series(close_4h).ewm(span=ema_period, adjust=False, min_periods=ema_period).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    
-    # Get 1d data for volume spike
+    # Get 1d data for EMA50 and volume
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = vol_1d > (vol_ma_1d * 2.0)
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # EMA50 on daily
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Volume spike (2x 20-period MA)
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume_1d > (vol_ma_20 * 2.0)
+    
+    # Align to 6h
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(bb_period, 50)
+    start_idx = max(14, 50)  # RSI and EMA warmup
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(sma[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
-            np.isnan(ema_4h_aligned[i]) or np.isnan(vol_spike_1d_aligned[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema_50_aligned[i]) or 
+            np.isnan(vol_spike_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: BB squeeze breakout up + 4h uptrend + volume spike + session
-            if (bb_squeeze[i] and 
-                close[i] > bb_upper[i] and 
-                close[i] > ema_4h_aligned[i] and 
-                vol_spike_1d_aligned[i] and 
-                session_filter[i]):
-                signals[i] = 0.20
+            # Enter long: RSI < 30 (oversold), price above 1d EMA50, volume spike
+            if rsi[i] < 30 and close[i] > ema_50_aligned[i] and vol_spike_aligned[i]:
+                signals[i] = 0.25
                 position = 1
-            # Enter short: BB squeeze breakout down + 4h downtrend + volume spike + session
-            elif (bb_squeeze[i] and 
-                  close[i] < bb_lower[i] and 
-                  close[i] < ema_4h_aligned[i] and 
-                  vol_spike_1d_aligned[i] and 
-                  session_filter[i]):
-                signals[i] = -0.20
+            # Enter short: RSI > 70 (overbought), price below 1d EMA50, volume spike
+            elif rsi[i] > 70 and close[i] < ema_50_aligned[i] and vol_spike_aligned[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to SMA or 4h trend turns down
-            if close[i] < sma[i] or close[i] < ema_4h_aligned[i]:
+            # Exit long: RSI > 50 (mean reversion complete) or price crosses below EMA50
+            if rsi[i] > 50 or close[i] < ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to SMA or 4h trend turns up
-            if close[i] > sma[i] or close[i] > ema_4h_aligned[i]:
+            # Exit short: RSI < 50 or price crosses above EMA50
+            if rsi[i] < 50 or close[i] > ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
