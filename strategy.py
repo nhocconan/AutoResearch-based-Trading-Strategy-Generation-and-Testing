@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h RSI(14) mean reversion with 1d trend filter and volume confirmation
-# In 6b markets, RSI extremes often reverse within 1-3 bars. We use 1d EMA50 to filter
-# direction (only long when above EMA50, short when below) to avoid counter-trend trades.
-# Volume spike confirms participation. This combination reduces false signals while
-# capturing mean reversion in both bull and bear markets. Targets 15-25 trades/year.
+# Hypothesis: 4h Donchian(20) breakout + 1d volume spike + 1w ADX trend filter
+# Donchian breakouts capture momentum in trending markets. Volume spike confirms institutional participation.
+# 1w ADX > 25 ensures we only trade in strong trends, avoiding whipsaws in ranges.
+# Exits occur when price returns to the Donchian midpoint or trend weakens (ADX < 20).
+# Targets 25-40 trades per year (~100-160 total over 4 years) to minimize fee drag.
+# Works in both bull and bear markets by filtering for strong trends only.
 
-name = "6h_RSI14_1dEMA50_Volume"
-timeframe = "6h"
+name = "4h_Donchian20_1dVolume_1wADX"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,11 +24,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # RSI(14) on 6h
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Donchian channels on 4h
+    lookback = 20
+    dc_high = np.full_like(high, np.nan)
+    dc_low = np.full_like(low, np.nan)
+    dc_mid = np.full_like(close, np.nan)
     
+    for i in range(lookback, n):
+        dc_high[i] = np.max(high[i-lookback:i])
+        dc_low[i] = np.min(low[i-lookback:i])
+        dc_mid[i] = (dc_high[i] + dc_low[i]) / 2.0
+    
+    # Get 1d data for volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = vol_1d > (vol_ma_1d * 2.0)
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
+    
+    # Get 1w data for ADX trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate ADX(14) on weekly
+    plus_dm = np.zeros_like(high_1w)
+    minus_dm = np.zeros_like(high_1w)
+    tr = np.zeros_like(high_1w)
+    
+    for i in range(1, len(high_1w)):
+        plus_dm[i] = max(high_1w[i] - high_1w[i-1], 0)
+        minus_dm[i] = max(low_1w[i-1] - low_1w[i], 0)
+        if plus_dm[i] == minus_dm[i]:
+            plus_dm[i] = 0
+            minus_dm[i] = 0
+        tr[i] = max(
+            high_1w[i] - low_1w[i],
+            abs(high_1w[i] - close_1w[i-1]),
+            abs(low_1w[i] - close_1w[i-1])
+        )
+    
+    # Smooth TR, +DM, -DM
     def wilder_smooth(arr, period):
         result = np.full_like(arr, np.nan)
         if len(arr) < period:
@@ -37,63 +81,57 @@ def generate_signals(prices):
             result[i] = result[i-1] - (result[i-1] / period) + arr[i]
         return result
     
-    gain_smooth = wilder_smooth(gain, 14)
-    loss_smooth = wilder_smooth(loss, 14)
-    rs = np.where(loss_smooth != 0, gain_smooth / loss_smooth, 0)
-    rsi = 100 - (100 / (1 + rs))
+    tr14 = wilder_smooth(tr, 14)
+    plus_dm14 = wilder_smooth(plus_dm, 14)
+    minus_dm14 = wilder_smooth(minus_dm, 14)
     
-    # Get 1d data for EMA50 and volume
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # Avoid division by zero
+    plus_di14 = np.where(tr14 != 0, 100 * (plus_dm14 / tr14), 0)
+    minus_di14 = np.where(tr14 != 0, 100 * (minus_dm14 / tr14), 0)
     
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    dx = np.where((plus_di14 + minus_di14) != 0, 
+                  100 * np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14), 0)
+    adx = wilder_smooth(dx, 14)
     
-    # EMA50 on daily
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Volume spike (2x 20-period MA)
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_1d > (vol_ma_20 * 2.0)
-    
-    # Align to 6h
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
+    adx_strong = adx > 25
+    adx_weak = adx < 20
+    adx_strong_aligned = align_htf_to_ltf(prices, df_1w, adx_strong)
+    adx_weak_aligned = align_htf_to_ltf(prices, df_1w, adx_weak)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(14, 50)  # RSI and EMA warmup
+    start_idx = max(lookback, 60)  # Ensure sufficient data
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(rsi[i]) or np.isnan(ema_50_aligned[i]) or 
-            np.isnan(vol_spike_aligned[i])):
+        if (np.isnan(dc_high[i]) or np.isnan(dc_low[i]) or np.isnan(dc_mid[i]) or 
+            np.isnan(vol_spike_1d_aligned[i]) or np.isnan(adx_strong_aligned[i]) or 
+            np.isnan(adx_weak_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: RSI < 30 (oversold), price above 1d EMA50, volume spike
-            if rsi[i] < 30 and close[i] > ema_50_aligned[i] and vol_spike_aligned[i]:
+            # Enter long: price breaks above Donchian high, volume spike, strong trend
+            if close[i] > dc_high[i] and vol_spike_1d_aligned[i] and adx_strong_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: RSI > 70 (overbought), price below 1d EMA50, volume spike
-            elif rsi[i] > 70 and close[i] < ema_50_aligned[i] and vol_spike_aligned[i]:
+            # Enter short: price breaks below Donchian low, volume spike, strong trend
+            elif close[i] < dc_low[i] and vol_spike_1d_aligned[i] and adx_strong_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: RSI > 50 (mean reversion complete) or price crosses below EMA50
-            if rsi[i] > 50 or close[i] < ema_50_aligned[i]:
+            # Exit long: price returns to midpoint or trend weakens
+            if close[i] < dc_mid[i] or adx_weak_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: RSI < 50 or price crosses above EMA50
-            if rsi[i] < 50 or close[i] > ema_50_aligned[i]:
+            # Exit short: price returns to midpoint or trend weakens
+            if close[i] > dc_mid[i] or adx_weak_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
