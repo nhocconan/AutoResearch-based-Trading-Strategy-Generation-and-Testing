@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 4h volume confirmation and 12h EMA trend filter.
-# Long when price breaks above Donchian(20) high AND volume > 1.5x 20-period average AND price > 12h EMA50.
-# Short when price breaks below Donchian(20) low AND volume > 1.5x 20-period average AND price < 12h EMA50.
-# Exit when price crosses back inside the Donchian channel.
-# Designed to capture strong momentum in trending markets with volume confirmation and trend alignment.
-# Target: 100-200 total trades over 4 years (25-50/year) with controlled frequency to avoid fee drag.
-# Works in both bull and bear markets by following the trend direction as defined by 12h EMA50.
+# Hypothesis: 1h strategy using 4h Donchian breakout with 1d volume confirmation.
+# Long when price breaks above 4h Donchian(20) high AND 1d volume > 1.2x 20-period average.
+# Short when price breaks below 4h Donchian(20) low AND 1d volume > 1.2x 20-period average.
+# Exit when price crosses back inside the 4h Donchian channel.
+# Uses 4h for signal direction and 1d volume for confirmation, 1h only for entry timing.
+# Target: 60-150 total trades over 4 years (15-37/year) with controlled frequency to avoid fee drag.
+# Session filter: 08-20 UTC to reduce noise trades.
 
-name = "4h_Donchian_20_Volume_12hEMA50"
-timeframe = "4h"
+name = "1h_Donchian_20_1dVolume_Session"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,69 +23,75 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Donchian(20) on 4h data
-    donchian_period = 20
-    upper_dc = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    lower_dc = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
-    
-    # Volume filter: current volume > 1.5x 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma20)
-    
-    # 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # 4h data for Donchian calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # Trend filter: price > EMA50 for long, price < EMA50 for short
-    trend_filter_long = close > ema_50_12h_aligned
-    trend_filter_short = close < ema_50_12h_aligned
+    # 4h Donchian(20)
+    donchian_period = 20
+    upper_dc_4h = pd.Series(high_4h).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    lower_dc_4h = pd.Series(low_4h).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    upper_dc = align_htf_to_ltf(prices, df_4h, upper_dc_4h)
+    lower_dc = align_htf_to_ltf(prices, df_4h, lower_dc_4h)
+    
+    # 1d data for volume filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    volume_1d = df_1d['volume'].values
+    vol_ma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_filter_1d = volume_1d > (1.2 * vol_ma20_1d)
+    volume_filter = align_htf_to_ltf(prices, df_1d, volume_filter_1d)
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(donchian_period, 20)  # Sufficient warmup
+    start_idx = max(donchian_period, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
         if (np.isnan(upper_dc[i]) or np.isnan(lower_dc[i]) or 
-            np.isnan(volume_filter[i]) or np.isnan(ema_50_12h_aligned[i])):
+            np.isnan(volume_filter[i]) or not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price breaks above Donchian upper, volume filter, above 12h EMA50
-            long_cond = (close[i] > upper_dc[i]) and volume_filter[i] and trend_filter_long[i]
-            # Short conditions: price breaks below Donchian lower, volume filter, below 12h EMA50
-            short_cond = (close[i] < lower_dc[i]) and volume_filter[i] and trend_filter_short[i]
+            # Long conditions: price breaks above 4h Donchian upper, volume filter, session active
+            long_cond = (close[i] > upper_dc[i]) and volume_filter[i]
+            # Short conditions: price breaks below 4h Donchian lower, volume filter, session active
+            short_cond = (close[i] < lower_dc[i]) and volume_filter[i]
             
             if long_cond:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             elif short_cond:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Long exit: price crosses back below Donchian lower
+            # Long exit: price crosses back below 4h Donchian lower
             if close[i] < lower_dc[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: price crosses back above Donchian upper
+            # Short exit: price crosses back above 4h Donchian upper
             if close[i] > upper_dc[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
