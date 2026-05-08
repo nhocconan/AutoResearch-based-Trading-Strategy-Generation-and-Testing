@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Weekly Pivot + 1d Trend + Volume Spike
-# Uses weekly pivot levels (R4/S4) as major support/resistance for breakouts.
-# Filters with daily EMA50 trend and volume spike to avoid false breakouts.
-# Designed for low frequency (target: 50-150 total trades over 4 years) to minimize fee drag.
-# Works in both bull and bear markets by trading breakouts in direction of higher timeframe trend.
+# Hypothesis: 4h Donchian(20) breakout with 1w trend filter and volume confirmation
+# Uses Donchian channels for breakout detection in both bull/bear markets.
+# Requires alignment with weekly EMA34 trend and volume spike to filter false signals.
+# Designed for low-frequency trades (<150 total) to minimize fee drag.
 
-name = "6h_WeeklyPivot_R4S4_1dEMA50_Volume"
-timeframe = "6h"
+name = "4h_Donchian20_1wEMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,84 +22,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot levels (R4, S4)
-    df_w = get_htf_data(prices, '1w')
-    if len(df_w) < 10:
+    # Get 1w data for EMA34 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate weekly pivot points (R4, S4)
-    high_w = df_w['high'].values
-    low_w = df_w['low'].values
-    close_w = df_w['close'].values
+    # Calculate weekly EMA34 trend
+    close_1w = df_1w['close'].values
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Previous week's values for current week's pivot
-    prev_high_w = np.roll(high_w, 1)
-    prev_low_w = np.roll(low_w, 1)
-    prev_close_w = np.roll(close_w, 1)
-    prev_high_w[0] = np.nan
-    prev_low_w[0] = np.nan
-    prev_close_w[0] = np.nan
+    # Calculate Donchian channels (20-period)
+    # Highest high and lowest low over past 20 periods (excluding current)
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
     
-    # Weekly pivot point
-    pivot_w = (prev_high_w + prev_low_w + prev_close_w) / 3.0
-    # Weekly R4 and S4 (strong breakout levels)
-    R4_w = prev_high_w + 3 * (pivot_w - prev_low_w)
-    S4_w = prev_low_w - 3 * (prev_high_w - pivot_w)
+    for i in range(20, n):
+        highest_high[i] = np.max(high[i-20:i])
+        lowest_low[i] = np.min(low[i-20:i])
     
-    # Align weekly pivot levels to 6h timeframe
-    R4_w_aligned = align_htf_to_ltf(prices, df_w, R4_w)
-    S4_w_aligned = align_htf_to_ltf(prices, df_w, S4_w)
-    
-    # Get daily data for EMA50 trend filter
-    df_d = get_htf_data(prices, '1d')
-    if len(df_d) < 50:
-        return np.zeros(n)
-    
-    close_d = df_d['close'].values
-    ema50_d = pd.Series(close_d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_d_aligned = align_htf_to_ltf(prices, df_d, ema50_d)
-    
-    # Volume spike (2.0x 24-period EMA ≈ 4 days of 6h bars)
-    vol_ma = pd.Series(volume).ewm(span=24, adjust=False, min_periods=24).mean().values
+    # Volume spike (2.0x 20-period EMA)
+    vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure EMA50 has enough data
+    start_idx = max(34, 20)  # Ensure EMA34 and Donchian have enough data
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(R4_w_aligned[i]) or np.isnan(S4_w_aligned[i]) or 
-            np.isnan(ema50_d_aligned[i]) or np.isnan(vol_spike[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above weekly R4 with daily uptrend and volume spike
-            if (close[i] > R4_w_aligned[i] and 
-                close[i] > ema50_d_aligned[i] and vol_spike[i]):
+            # Enter long: price breaks above upper Donchian with weekly uptrend and volume spike
+            if (close[i] > highest_high[i] and 
+                close[i] > ema34_1w_aligned[i] and vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below weekly S4 with daily downtrend and volume spike
-            elif (close[i] < S4_w_aligned[i] and 
-                  close[i] < ema50_d_aligned[i] and vol_spike[i]):
+            # Enter short: price breaks below lower Donchian with weekly downtrend and volume spike
+            elif (close[i] < lowest_low[i] and 
+                  close[i] < ema34_1w_aligned[i] and vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below weekly S4 or trend fails
-            if (close[i] < S4_w_aligned[i] or 
-                close[i] < ema50_d_aligned[i]):
+            # Exit long: price breaks below lower Donchian or trend fails
+            if (close[i] < lowest_low[i] or 
+                close[i] < ema34_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above weekly R4 or trend fails
-            if (close[i] > R4_w_aligned[i] or 
-                close[i] > ema50_d_aligned[i]):
+            # Exit short: price breaks above upper Donchian or trend fails
+            if (close[i] > highest_high[i] or 
+                close[i] > ema34_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
