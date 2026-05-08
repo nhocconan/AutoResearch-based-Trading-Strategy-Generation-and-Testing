@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Price_Action_Reversal_v1"
+name = "4h_KAMA_Trend_Strength_Filter_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,86 +17,95 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data once
+    # Get 1d data once for trend filter and ATR
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 1d High/Low for price action levels ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # === 1d KAMA trend direction ===
     close_1d = df_1d['close'].values
+    # Calculate Efficiency Ratio (ER)
+    change = np.abs(np.diff(close_1d, 1))
+    change = np.insert(change, 0, 0)  # align length
+    volatility = np.abs(np.diff(close_1d, 1))
+    volatility = np.insert(volatility, 0, 0)
     
-    # Previous day's high and low
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_high_1d[0] = high_1d[0]
-    prev_low_1d[0] = low_1d[0]
+    # Sum over 10 periods
+    change_sum = np.convolve(change, np.ones(10), 'same')
+    volatility_sum = np.convolve(volatility, np.ones(10), 'same')
+    volatility_sum[volatility_sum == 0] = 1e-10  # avoid division by zero
+    er = change_sum / volatility_sum
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # Calculate KAMA
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    kama_1d = kama
     
-    # === 4h Bollinger Bands for volatility and mean reversion ===
-    bb_period = 20
-    bb_std = 2.0
-    close_series = pd.Series(close)
-    bb_middle = close_series.rolling(window=bb_period, min_periods=bb_period).mean().values
-    bb_std_dev = close_series.rolling(window=bb_period, min_periods=bb_period).std().values
-    bb_upper = bb_middle + (bb_std_dev * bb_std)
-    bb_lower = bb_middle - (bb_std_dev * bb_std)
+    # === 1d ATR for volatility filter ===
+    tr = np.maximum(high_1d - low_1d, 
+                    np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), 
+                               np.abs(low_1d - np.roll(close_1d, 1))))
+    tr[0] = high_1d[0] - low_1d[0]
+    atr14_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # === 4h RSI for momentum confirmation ===
-    rsi_period = 14
-    delta = np.diff(close, prepend=close[0])
+    # Align 1d indicators to 4h
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
+    atr14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
+    
+    # === 4h RSI for entry timing ===
+    delta = np.diff(close)
+    delta = np.insert(delta, 0, 0)
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
+    
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
     rs = avg_gain / (avg_loss + 1e-10)
     rsi = 100 - (100 / (1 + rs))
     
-    # === Align 1d levels to 4h timeframe ===
-    prev_high_1d_4h = align_htf_to_ltf(prices, df_1d, prev_high_1d)
-    prev_low_1d_4h = align_htf_to_ltf(prices, df_1d, prev_low_1d)
+    # === 4h Volume filter ===
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0
     
-    start_idx = bb_period  # warmup for Bollinger Bands
+    start_idx = 30  # warmup
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(prev_high_1d_4h[i]) or np.isnan(prev_low_1d_4h[i]) or
-            np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(rsi[i])):
+        if (np.isnan(kama_1d_aligned[i]) or np.isnan(atr14_1d_aligned[i]) or 
+            np.isnan(rsi[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Look for reversal at previous day's levels with RSI confirmation
-            # Long: price near previous day's low, RSI oversold
-            long_cond = (close[i] <= prev_low_1d_4h[i] * 1.002 and  # Within 0.2% of low
-                        rsi[i] < 30)
-            
-            # Short: price near previous day's high, RSI overbought
-            short_cond = (close[i] >= prev_high_1d_4h[i] * 0.998 and  # Within 0.2% of high
-                         rsi[i] > 70)
-            
-            if long_cond:
-                signals[i] = 0.25
-                position = 1
-            elif short_cond:
-                signals[i] = -0.25
-                position = -1
+            # Trend filter: price above/below KAMA with sufficient volatility
+            if close[i] > kama_1d_aligned[i] and atr14_1d_aligned[i] > np.nanmedian(atr14_1d_aligned[max(0, i-50):i+1]):
+                # Uptrend: look for pullback to enter long
+                if rsi[i] < 40 and volume[i] > vol_ma20[i]:
+                    signals[i] = 0.25
+                    position = 1
+            elif close[i] < kama_1d_aligned[i] and atr14_1d_aligned[i] > np.nanmedian(atr14_1d_aligned[max(0, i-50):i+1]):
+                # Downtrend: look for bounce to enter short
+                if rsi[i] > 60 and volume[i] > vol_ma20[i]:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Long exit: price reaches Bollinger middle or RSI overbought
-            if close[i] >= bb_middle[i] or rsi[i] > 70:
+            # Long exit: trend reversal or overbought
+            if close[i] < kama_1d_aligned[i] or rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price reaches Bollinger middle or RSI oversold
-            if close[i] <= bb_middle[i] or rsi[i] < 30:
+            # Short exit: trend reversal or oversold
+            if close[i] > kama_1d_aligned[i] or rsi[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -104,9 +113,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Price action reversal strategy that looks for reversals at previous day's
-# high/low levels with RSI confirmation. Works in both bull and bear markets by
-# capturing mean reversion at key daily levels. Uses 4h Bollinger Bands and RSI for
-# exit timing. Targets 50-150 trades over 4 years (12-37/year) to minimize fee drag.
-# Uses discrete sizing (0.25) to reduce churn. Effective on BTC/ETH as institutions
-# often defend previous day's high/low levels.
+# Hypothesis: 4h strategy using 1d KAMA as trend filter and 4h RSI for entry timing.
+# Enters long on pullbacks in uptrend (RSI<40) and short on bounces in downtrend (RSI>60).
+# Uses volatility filter to avoid choppy markets. Designed to work in both bull
+# (trend following on pullbacks) and bear (mean reversion in downtrend bounces)
+# markets. Targets ~50-100 trades over 4 years to minimize fee drag. Uses discrete
+# sizing (0.25) to reduce churn. Works on BTC/ETH via institutional trend following
+# with mean reversion entries.
