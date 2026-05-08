@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian(20) breakout with weekly trend filter and volume confirmation
-# We go long when price breaks above 20-day high with weekly EMA(34) uptrend and volume spike.
-# We go short when price breaks below 20-day low with weekly EMA(34) downtrend and volume spike.
-# Uses daily timeframe to target 10-30 trades/year, avoiding excessive frequency.
-# Weekly trend filter ensures we trade with the higher timeframe momentum.
-# Volume spike confirms institutional participation in the breakout.
+# Hypothesis: 6-hour Elder Ray (Bull/Bear Power) with 1-day trend filter and volume confirmation
+# Long when Bull Power > 0 (close > EMA13) + daily EMA(50) uptrend + volume spike
+# Short when Bear Power < 0 (close < EMA13) + daily EMA(50) downtrend + volume spike
+# Elder Ray measures bull/bear strength relative to EMA, effective in trending and ranging markets
+# Daily trend filter ensures alignment with higher timeframe momentum
+# Volume spike confirms institutional participation
+# Targets 50-150 total trades over 4 years (12-37/year) to avoid fee drag
 
-name = "1d_Donchian20_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "6h_ElderRay_DailyTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,19 +25,22 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data once for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Get daily data once for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly EMA(34) for trend filter
-    weekly_close = df_1w['close'].values
-    ema34_1w = pd.Series(weekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Calculate daily EMA(50) for trend filter
+    daily_close = df_1d['close'].values
+    ema50_1d = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate daily Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate EMA(13) for Elder Ray (6x timeframe: 6h * 13 = 78h ≈ 3.25 days)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Elder Ray components
+    bull_power = high - ema13  # Bull Power: high - EMA13
+    bear_power = low - ema13   # Bear Power: low - EMA13
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -49,39 +53,37 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(high_20[i]) or 
-            np.isnan(low_20[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema34_1w_val = ema34_1w_aligned[i]
-        upper_channel = high_20[i]
-        lower_channel = low_20[i]
+        ema50_1d_val = ema50_1d_aligned[i]
+        bull = bull_power[i]
+        bear = bear_power[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: price breaks above upper channel + weekly uptrend + volume spike
-            if (not np.isnan(upper_channel) and close[i] > upper_channel and 
-                close[i] > ema34_1w_val and vol_spike):
+            # Enter long: Bull Power > 0 + daily uptrend + volume spike
+            if bull > 0 and close[i] > ema50_1d_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below lower channel + weekly downtrend + volume spike
-            elif (not np.isnan(lower_channel) and close[i] < lower_channel and 
-                  close[i] < ema34_1w_val and vol_spike):
+            # Enter short: Bear Power < 0 + daily downtrend + volume spike
+            elif bear < 0 and close[i] < ema50_1d_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below lower channel OR weekly trend turns down
-            if (not np.isnan(lower_channel) and close[i] < lower_channel) or close[i] < ema34_1w_val:
+            # Exit long: Bull Power <= 0 OR daily trend turns down
+            if bull <= 0 or close[i] < ema50_1d_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above upper channel OR weekly trend turns up
-            if (not np.isnan(upper_channel) and close[i] > upper_channel) or close[i] > ema34_1w_val:
+            # Exit short: Bear Power >= 0 OR daily trend turns up
+            if bear >= 0 or close[i] > ema50_1d_val:
                 signals[i] = 0.0
                 position = 0
             else:
