@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h1d_Trend_1hEntry_Session"
-timeframe = "1h"
+name = "6h_RSI_Bollinger_Band_Reversal_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,35 +17,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # 1w trend filter: EMA50 on weekly close
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    # 4h EMA50 for trend
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Get 1d data for regime filter
+    # 1d Bollinger Bands (20, 2) for mean reversion
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    # 1d EMA200 for long-term trend
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    sma20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_band = sma20_1d + 2 * std20_1d
+    lower_band = sma20_1d - 2 * std20_1d
     
-    # 1h ATR for stop loss (not used in signal but for reference)
-    tr1 = np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1]))
-    tr1 = np.maximum(tr1, np.abs(low[1:] - close[:-1]))
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], tr1])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Align BBands to 6h
+    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
+    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # RSI(14) on 6h close for momentum confirmation
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -54,41 +57,43 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(ema200_1d_aligned[i]) or 
-            np.isnan(atr[i]) or np.isnan(volume[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        if not in_session[i]:
+        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(upper_aligned[i]) or 
+            np.isnan(lower_aligned[i]) or np.isnan(rsi[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: 4h EMA50 > 1d EMA200 (bullish regime) + price > 4h EMA50
-            if ema50_4h_aligned[i] > ema200_1d_aligned[i] and close[i] > ema50_4h_aligned[i]:
-                signals[i] = 0.20
+            # Long: Price touches lower BBAND, RSI < 30 (oversold), weekly uptrend
+            long_cond = (close[i] <= lower_aligned[i] and 
+                        rsi[i] < 30 and
+                        close[i] > ema50_1w_aligned[i])
+            
+            # Short: Price touches upper BBAND, RSI > 70 (overbought), weekly downtrend
+            short_cond = (close[i] >= upper_aligned[i] and 
+                         rsi[i] > 70 and
+                         close[i] < ema50_1w_aligned[i])
+            
+            if long_cond:
+                signals[i] = 0.25
                 position = 1
-            # Short: 4h EMA50 < 1d EMA200 (bearish regime) + price < 4h EMA50
-            elif ema50_4h_aligned[i] < ema200_1d_aligned[i] and close[i] < ema50_4h_aligned[i]:
-                signals[i] = -0.20
+            elif short_cond:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price < 4h EMA50 OR regime change (4h EMA50 < 1d EMA200)
-            if close[i] < ema50_4h_aligned[i] or ema50_4h_aligned[i] < ema200_1d_aligned[i]:
+            # Long exit: Price crosses above SMA20 or RSI > 50
+            if close[i] >= sma20_1d[-1] or rsi[i] > 50:  # Use latest 1d SMA20 for exit
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price > 4h EMA50 OR regime change (4h EMA50 > 1d EMA200)
-            if close[i] > ema50_4h_aligned[i] or ema50_4h_aligned[i] > ema200_1d_aligned[i]:
+            # Short exit: Price crosses below SMA20 or RSI < 50
+            if close[i] <= sma20_1d[-1] or rsi[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
