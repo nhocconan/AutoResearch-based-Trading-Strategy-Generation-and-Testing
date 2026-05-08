@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Donchian20_Trend_Volume_Spike_v1"
-timeframe = "12h"
+name = "4h_Trix_Momentum_VolumeSpike_12hTrend"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,53 +17,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data once for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 12h data once for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 15:
         return np.zeros(n)
     
-    # 1d EMA34 trend filter
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_1d = (close_1d > ema34_1d).astype(float)
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    # Calculate TRIX (15-period EMA of EMA of EMA of close, then 1-period percent change)
+    close_series = pd.Series(close)
+    ema1 = close_series.ewm(span=15, adjust=False).mean()
+    ema2 = ema1.ewm(span=15, adjust=False).mean()
+    ema3 = ema2.ewm(span=15, adjust=False).mean()
+    trix = ema3.pct_change() * 100  # Convert to percentage
     
-    # Daily Donchian channels (20-period) for breakout levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Get 12h EMA20 for trend filter
+    close_12h = df_12h['close'].values
+    ema20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    trend_12h = (close_12h > ema20_12h).astype(float)
+    trend_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_12h)
     
-    # Calculate 20-period high and low for Donchian channels
-    high_max = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Align Donchian levels to 12h timeframe
-    donchian_high = align_htf_to_ltf(prices, df_1d, high_max)
-    donchian_low = align_htf_to_ltf(prices, df_1d, low_min)
-    
-    # Volume spike detection: current volume > 2.0 * 20-period average
+    # Volume spike: current volume > 2.0 * 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (vol_ma20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # warmup for Donchian and volume MA
+    start_idx = 20  # warmup for TRIX and volume MA
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(trix.iloc[i]) if hasattr(trix, 'iloc') else np.isnan(trix[i]) or 
+            np.isnan(trend_12h_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        trix_val = trix.iloc[i] if hasattr(trix, 'iloc') else trix[i]
+        
         if position == 0:
-            # Long entry: price breaks above Donchian high with volume spike and 1d uptrend
-            long_cond = (close[i] > donchian_high[i] and vol_spike[i] and trend_1d_aligned[i] > 0.5)
+            # Long entry: TRIX crosses above zero with volume spike and 12h uptrend
+            long_cond = (trix_val > 0 and 
+                         (i == start_idx or (trix.iloc[i-1] if hasattr(trix, 'iloc') else trix[i-1]) <= 0) and
+                         vol_spike[i] and trend_12h_aligned[i] > 0.5)
             
-            # Short entry: price breaks below Donchian low with volume spike and 1d downtrend
-            short_cond = (close[i] < donchian_low[i] and vol_spike[i] and trend_1d_aligned[i] < 0.5)
+            # Short entry: TRIX crosses below zero with volume spike and 12h downtrend
+            short_cond = (trix_val < 0 and 
+                          (i == start_idx or (trix.iloc[i-1] if hasattr(trix, 'iloc') else trix[i-1]) >= 0) and
+                          vol_spike[i] and trend_12h_aligned[i] < 0.5)
             
             if long_cond:
                 signals[i] = 0.25
@@ -72,15 +73,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below Donchian low (reversal signal)
-            if close[i] < donchian_low[i]:
+            # Long exit: TRIX crosses below zero (momentum reversal)
+            if trix_val < 0 and (i == start_idx or (trix.iloc[i-1] if hasattr(trix, 'iloc') else trix[i-1]) >= 0):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above Donchian high (reversal signal)
-            if close[i] > donchian_high[i]:
+            # Short exit: TRIX crosses above zero (momentum reversal)
+            if trix_val > 0 and (i == start_idx or (trix.iloc[i-1] if hasattr(trix, 'iloc') else trix[i-1]) <= 0):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -88,10 +89,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Donchian(20) breakout strategy on daily timeframe with volume spike confirmation and 1d EMA34 trend filter, executed on 12h timeframe.
-# Enters long when price breaks above 20-day high with volume spike and 1d uptrend (close > EMA34).
-# Enters short when price breaks below 20-day low with volume spike and 1d downtrend (close < EMA34).
-# Exits when price reverses back through the opposite Donchian level.
-# Uses 20-period volume MA with 2.0x threshold for volume confirmation to avoid overtrading.
-# Targets 15-25 trades/year on 12h timeframe to minimize fee drag. Works in both bull markets (trend-following breakouts) 
-# and bear markets (reversal breakouts from extreme levels). Uses discrete sizing (0.25) to minimize churn.
+# Hypothesis: TRIX momentum crossover strategy with volume spike confirmation and 12h EMA20 trend filter on 4h timeframe.
+# Enters long when TRIX crosses above zero (bullish momentum) with volume spike and 12h uptrend (close > EMA20).
+# Enters short when TRIX crosses below zero (bearish momentum) with volume spike and 12h downtrend (close < EMA20).
+# Exits when TRIX crosses back through zero, signaling momentum reversal.
+# Uses 20-period volume MA with 2.0x threshold for volume confirmation to avoid false signals.
+# Targets 20-30 trades/year on 4h timeframe to minimize fee drag while capturing momentum shifts.
+# Works in both bull and bear markets by following the 12h trend while using TRIX for timely entries.
+# Discrete sizing (0.25) minimizes churn from small signal fluctuations.
