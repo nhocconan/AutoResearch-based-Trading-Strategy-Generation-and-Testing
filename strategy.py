@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Angle_of_Attack_V1"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,36 +17,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data once for angle of attack and trend filter
+    # Get daily data once for Camarilla levels and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Daily close for calculations
+    # Daily close for Camarilla calculation
     close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla levels (R1, S1) from previous day's range
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # We need previous day's high, low, close
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close[0] = close_1d[0]  # first value
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    
+    # Calculate R1 and S1
+    R1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    S1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    
+    # Align Camarilla levels to 12h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    
+    # Daily trend filter: EMA34
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_1d = (close_1d > ema34_1d).astype(float)
+    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    
+    # Daily volume spike: current volume > 1.5 * 20-day average
     volume_1d = df_1d['volume'].values
-    
-    # Angle of attack: 45-degree angle from 10-period low
-    # Calculate lowest low of last 10 days
-    low_min10 = pd.Series(low_1d).rolling(window=10, min_periods=10).min().values
-    # Calculate the angle from that low to current close
-    # Angle = arctan((close - low_min10) / 10) * 180/pi
-    # We use tangent directly to avoid trig functions: (close - low_min10) / 10
-    angle_of_attack = (close_1d - low_min10) / 10.0
-    
-    # Daily trend filter: EMA50
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_1d = (close_1d > ema50_1d).astype(float)
-    
-    # Daily volume spike: current volume > 2.0 * 20-day average
     vol_ma20d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_1d > (vol_ma20d * 2.0)
-    
-    # Align all daily indicators to 6h timeframe
-    angle_aligned = align_htf_to_ltf(prices, df_1d, angle_of_attack)
-    trend_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    vol_spike = volume_1d > (vol_ma20d * 1.5)
     vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
     
     signals = np.zeros(n)
@@ -56,19 +63,19 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(angle_aligned[i]) or np.isnan(trend_aligned[i]) or 
-            np.isnan(vol_spike_aligned[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+            np.isnan(trend_1d_aligned[i]) or np.isnan(vol_spike_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: strong upward angle (>0.5) with volume spike and daily uptrend
-            long_cond = (angle_aligned[i] > 0.5 and vol_spike_aligned[i] and trend_aligned[i] > 0.5)
+            # Long entry: price breaks above R1 with volume spike and daily uptrend
+            long_cond = (close[i] > R1_aligned[i] and vol_spike_aligned[i] and trend_1d_aligned[i] > 0.5)
             
-            # Short entry: strong downward angle (<-0.5) with volume spike and daily downtrend
-            short_cond = (angle_aligned[i] < -0.5 and vol_spike_aligned[i] and trend_aligned[i] < 0.5)
+            # Short entry: price breaks below S1 with volume spike and daily downtrend
+            short_cond = (close[i] < S1_aligned[i] and vol_spike_aligned[i] and trend_1d_aligned[i] < 0.5)
             
             if long_cond:
                 signals[i] = 0.25
@@ -77,15 +84,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: angle turns negative or volume dries up
-            if angle_aligned[i] < 0.0 or not vol_spike_aligned[i]:
+            # Long exit: price closes below S1 (mean reversion to support)
+            if close[i] < S1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: angle turns positive or volume dries up
-            if angle_aligned[i] > 0.0 or not vol_spike_aligned[i]:
+            # Short exit: price closes above R1 (mean reversion to resistance)
+            if close[i] > R1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -93,7 +100,8 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Angle of attack measures the steepness of the daily trend from recent lows.
-# In bull markets: strong upward angles signal continuation; in bear markets: strong downward angles signal continuation.
-# Volume spike confirms institutional participation; daily EMA50 ensures alignment with longer-term trend.
-# Target: 15-30 trades/year to minimize fee decay while capturing strong trending moves.
+# Hypothesis: Camarilla R1/S1 breakout on 12H with volume confirmation and daily trend filter.
+# Works in bull markets (breakouts continue) and bear markets (mean reversion at opposite level).
+# Daily EMA34 ensures alignment with longer-term trend, reducing counter-trend trades.
+# Volume spike filter (1.5x 20-day average) ensures momentum confirmation.
+# Target: 20-40 trades/year to minimize fee decay while capturing significant moves.
