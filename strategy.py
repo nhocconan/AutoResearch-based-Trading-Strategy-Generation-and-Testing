@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h 4-hour Donchian breakout with volume and ADX filter for trend confirmation.
-# Long when price breaks above 4h Donchian upper (20), 4h ADX > 25, volume > 1.5x 20-period avg.
-# Short when price breaks below 4h Donchian lower (20), 4h ADX > 25, volume > 1.5x 20-period avg.
-# Exit when price crosses back inside the Donchian channel.
-# Uses 4h for trend direction and structure, 1h for precise entry timing.
-# Volume and ADX filters reduce false breakouts. Target: 60-150 total trades over 4 years (15-37/year).
+# Hypothesis: 6h price action combined with weekly pivot levels and volume confirmation.
+# Long when price breaks above weekly R2 pivot level AND volume > 1.5x 20-period average.
+# Short when price breaks below weekly S2 pivot level AND volume > 1.5x 20-period average.
+# Exit when price returns to weekly pivot (PP) level.
+# Weekly pivots capture institutional levels that hold across multiple timeframes.
+# Volume confirmation filters false breakouts. Weekly timeframe provides structural bias.
+# Designed for 60-120 total trades over 4 years (15-30/year) to minimize fee drag.
 
-name = "1h_Donchian_20_4hADX25_Volume"
-timeframe = "1h"
+name = "6h_WeeklyPivot_R2S2_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,80 +25,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h data for Donchian channels and ADX
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Weekly data for pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # 4h Donchian channels (20-period)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # Calculate weekly pivot points (standard formula)
+    # Based on previous week's OHLC
+    prev_high = df_1w['high'].shift(1).values
+    prev_low = df_1w['low'].shift(1).values
+    prev_close = df_1w['close'].shift(1).values
     
-    donchian_high = np.full_like(high_4h, np.nan, dtype=float)
-    donchian_low = np.full_like(low_4h, np.nan, dtype=float)
+    # Pivot point and support/resistance levels
+    PP = (prev_high + prev_low + prev_close) / 3.0
+    R1 = 2 * PP - prev_low
+    S1 = 2 * PP - prev_high
+    R2 = PP + (prev_high - prev_low)
+    S2 = PP - (prev_high - prev_low)
+    R3 = prev_high + 2 * (PP - prev_low)
+    S3 = prev_low - 2 * (prev_high - PP)
     
-    for i in range(20, len(high_4h)):
-        donchian_high[i] = np.max(high_4h[i-20:i])
-        donchian_low[i] = np.min(low_4h[i-20:i])
-    
-    # Align Donchian levels to 1h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
-    
-    # 4h ADX calculation (14-period)
-    # Calculate +DM, -DM, TR
-    plus_dm = np.zeros_like(high_4h)
-    minus_dm = np.zeros_like(high_4h)
-    tr = np.zeros_like(high_4h)
-    
-    for i in range(1, len(high_4h)):
-        high_diff = high_4h[i] - high_4h[i-1]
-        low_diff = low_4h[i-1] - low_4h[i]
-        
-        plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
-        minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
-        
-        tr[i] = max(
-            high_4h[i] - low_4h[i],
-            abs(high_4h[i] - high_4h[i-1]),
-            abs(low_4h[i] - low_4h[i-1])
-        )
-    
-    # Smoothed values using Wilder's smoothing (alpha = 1/period)
-    def wilder_smooth(data, period):
-        smoothed = np.full_like(data, np.nan, dtype=float)
-        if len(data) < period:
-            return smoothed
-        smoothed[period-1] = np.nansum(data[1:period])  # Initial value
-        for i in range(period, len(data)):
-            smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + data[i]
-        return smoothed
-    
-    tr14 = wilder_smooth(tr, 14)
-    plus_dm14 = wilder_smooth(plus_dm, 14)
-    minus_dm14 = wilder_smooth(minus_dm, 14)
-    
-    # DI+ and DI-
-    plus_di14 = np.where(tr14 != 0, (plus_dm14 / tr14) * 100, 0)
-    minus_di14 = np.where(tr14 != 0, (minus_dm14 / tr14) * 100, 0)
-    
-    # DX and ADX
-    dx = np.where((plus_di14 + minus_di14) != 0, 
-                  np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14) * 100, 0)
-    
-    def wilder_smooth_adx(data, period):
-        smoothed = np.full_like(data, np.nan, dtype=float)
-        if len(data) < period:
-            return smoothed
-        smoothed[period-1] = np.nansum(data[1:period])  # Initial value
-        for i in range(period, len(data)):
-            smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + data[i]
-        return smoothed
-    
-    adx14 = wilder_smooth_adx(dx, 14)
-    
-    # Align ADX to 1h timeframe
-    adx14_aligned = align_htf_to_ltf(prices, df_4h, adx14)
+    # Align weekly pivot levels to 6h timeframe
+    PP_aligned = align_htf_to_ltf(prices, df_1w, PP)
+    R2_aligned = align_htf_to_ltf(prices, df_1w, R2)
+    S2_aligned = align_htf_to_ltf(prices, df_1w, S2)
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -106,42 +57,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(35, 20)  # Sufficient warmup for Donchian and ADX
+    start_idx = max(20, 2)  # Sufficient warmup for volume MA and weekly data
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(adx14_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(PP_aligned[i]) or np.isnan(R2_aligned[i]) or 
+            np.isnan(S2_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price breaks above Donchian high, ADX > 25, volume filter
-            long_cond = (close[i] > donchian_high_aligned[i]) and (adx14_aligned[i] > 25) and volume_filter[i]
-            # Short conditions: price breaks below Donchian low, ADX > 25, volume filter
-            short_cond = (close[i] < donchian_low_aligned[i]) and (adx14_aligned[i] > 25) and volume_filter[i]
+            # Long conditions: price breaks above weekly R2, volume filter
+            long_cond = (close[i] > R2_aligned[i]) and volume_filter[i]
+            # Short conditions: price breaks below weekly S2, volume filter
+            short_cond = (close[i] < S2_aligned[i]) and volume_filter[i]
             
             if long_cond:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
             elif short_cond:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses back below Donchian low
-            if close[i] < donchian_low_aligned[i]:
+            # Long exit: price returns to weekly pivot (PP) level
+            if close[i] <= PP_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses back above Donchian high
-            if close[i] > donchian_high_aligned[i]:
+            # Short exit: price returns to weekly pivot (PP) level
+            if close[i] >= PP_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
