@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume_v3"
-timeframe = "4h"
+name = "6h_Donchian20_WeeklyPivot_Direction_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,46 +17,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla levels and trend filter
+    # Daily data for Donchian channel and weekly pivot
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # Calculate daily EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Weekly data for pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    R3 = np.zeros(len(close_1d))
-    S3 = np.zeros(len(close_1d))
-    R4 = np.zeros(len(close_1d))
-    S4 = np.zeros(len(close_1d))
+    # Donchian(20) on daily: upper/lower bands
+    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
     
-    for i in range(1, len(close_1d)):
-        high_prev = high_1d[i-1]
-        low_prev = low_1d[i-1]
-        close_prev = close_1d[i-1]
-        range_val = high_prev - low_prev
-        
-        C = close_prev + (range_val * 1.1 / 6)
-        R3[i] = C + (range_val * 1.1 / 2)
-        S3[i] = C - (range_val * 1.1 / 2)
-        R4[i] = C + (range_val * 1.1)
-        S4[i] = C - (range_val * 1.1)
+    # Weekly pivot points (using previous week)
+    pivot = np.zeros(len(df_1w))
+    R1 = np.zeros(len(df_1w))
+    S1 = np.zeros(len(df_1w))
+    R2 = np.zeros(len(df_1w))
+    S2 = np.zeros(len(df_1w))
     
-    # Align Camarilla levels to 4h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
+    for i in range(1, len(df_1w)):
+        high_prev = df_1w['high'].iloc[i-1]
+        low_prev = df_1w['low'].iloc[i-1]
+        close_prev = df_1w['close'].iloc[i-1]
+        pp = (high_prev + low_prev + close_prev) / 3.0
+        pivot[i] = pp
+        R1[i] = 2 * pp - low_prev
+        S1[i] = 2 * pp - high_prev
+        R2[i] = pp + (high_prev - low_prev)
+        S2[i] = pp - (high_prev - low_prev)
     
-    # Volume spike: current volume > 1.5x 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma20)
+    # Align weekly pivot to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    R1_aligned = align_htf_to_ltf(prices, df_1w, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1w, S1)
+    R2_aligned = align_htf_to_ltf(prices, df_1w, R2)
+    S2_aligned = align_htf_to_ltf(prices, df_1w, S2)
+    
+    # Volume spike: current volume > 1.8x 30-period average
+    vol_ma30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_spike = volume > (1.8 * vol_ma30)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -65,22 +73,23 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(R3_aligned[i]) or 
-            np.isnan(S3_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(R1_aligned[i]) or 
+            np.isnan(S1_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R3, daily uptrend, volume spike
-            long_cond = (close[i] > R3_aligned[i] and 
-                        ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and
+            # Long: price breaks above Donchian high, price above weekly pivot, volume spike
+            long_cond = (close[i] > donch_high_aligned[i] and 
+                        close[i] > pivot_aligned[i] and
                         volume_spike[i])
             
-            # Short: price breaks below S3, daily downtrend, volume spike
-            short_cond = (close[i] < S3_aligned[i] and 
-                         ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and
+            # Short: price breaks below Donchian low, price below weekly pivot, volume spike
+            short_cond = (close[i] < donch_low_aligned[i] and 
+                         close[i] < pivot_aligned[i] and
                          volume_spike[i])
             
             if long_cond:
@@ -90,15 +99,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below S3
-            if close[i] < S3_aligned[i]:
+            # Long exit: price crosses below Donchian low
+            if close[i] < donch_low_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above R3
-            if close[i] > R3_aligned[i]:
+            # Short exit: price crosses above Donchian high
+            if close[i] > donch_high_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
