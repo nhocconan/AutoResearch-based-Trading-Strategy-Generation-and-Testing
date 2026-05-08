@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_Choppiness_Reversal_Signal"
-timeframe = "1d"
+name = "6h_BullBearPower_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 20:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,66 +17,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data once for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data once for trend filter and EMA13
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 13:
         return np.zeros(n)
     
-    # 1w EMA34 trend filter
-    close_1w = df_1w['close'].values
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_1w = (close_1w > ema34_1w).astype(float)
-    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
+    # 1d EMA13 for trend filter
+    close_1d = df_1d['close'].values
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    trend_1d = (close_1d > ema13_1d).astype(float)
+    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # Choppiness Index (14-period) - chop > 61.8 = range, chop < 38.2 = trend
-    tr1 = np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1]))
-    tr2 = np.maximum(high[1:] - low[1:], np.abs(low[1:] - close[:-1]))
-    tr = np.concatenate([[np.nan], np.maximum(tr1, tr2)])  # TR for each period
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # 1d EMA13 for Elder Ray calculations (EMA13 of close)
+    ema13_1d_close = ema13_1d  # already computed
     
-    # Calculate highest high and lowest low over 14 periods
-    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    # Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high - ema13_1d_close
+    bear_power = low - ema13_1d_close
     
-    # Avoid division by zero
-    sum_tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    range_hl = hh - ll
-    chop = np.where((sum_tr14 > 0) & (range_hl > 0), 100 * np.log10(sum_tr14 / range_hl) / np.log10(14), 50)
-    chop = np.where(np.isnan(chop), 50, chop)
+    # Align Bull and Bear Power to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
     
-    # RSI(14) for mean reversion signals
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Volume spike: current volume > 1.3 * 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma20 * 1.3)
+    # Smooth the power values with 6-period EMA to reduce noise
+    bull_power_smooth = pd.Series(bull_power_aligned).ewm(span=6, adjust=False, min_periods=6).mean().values
+    bear_power_smooth = pd.Series(bear_power_aligned).ewm(span=6, adjust=False, min_periods=6).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # warmup for indicators
+    start_idx = 13  # warmup for EMA13 and smoothing
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(chop[i]) or np.isnan(rsi[i]) or np.isnan(trend_1w_aligned[i]) or 
-            np.isnan(vol_ma20[i]) or np.isnan(high[i]) or np.isnan(low[i])):
+        if (np.isnan(trend_1d_aligned[i]) or np.isnan(bull_power_smooth[i]) or np.isnan(bear_power_smooth[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: choppy market (range) + RSI oversold + volume spike + weekly uptrend
-            long_cond = (chop[i] > 61.8 and rsi[i] < 35 and vol_spike[i] and trend_1w_aligned[i] > 0.5)
+            # Long entry: Bull Power > 0 and Bear Power < 0 (both bullish) and daily uptrend
+            long_cond = (bull_power_smooth[i] > 0 and bear_power_smooth[i] < 0 and trend_1d_aligned[i] > 0.5)
             
-            # Short entry: choppy market (range) + RSI overbought + volume spike + weekly downtrend
-            short_cond = (chop[i] > 61.8 and rsi[i] > 65 and vol_spike[i] and trend_1w_aligned[i] < 0.5)
+            # Short entry: Bull Power < 0 and Bear Power > 0 (both bearish) and daily downtrend
+            short_cond = (bull_power_smooth[i] < 0 and bear_power_smooth[i] > 0 and trend_1d_aligned[i] < 0.5)
             
             if long_cond:
                 signals[i] = 0.25
@@ -85,15 +70,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: RSI overbought or chop breaks below 38.2 (trending market)
-            if rsi[i] > 70 or chop[i] < 38.2:
+            # Long exit: Bear Power becomes positive (bearish signal)
+            if bear_power_smooth[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI oversold or chop breaks below 38.2 (trending market)
-            if rsi[i] < 30 or chop[i] < 38.2:
+            # Short exit: Bull Power becomes positive (bullish signal)
+            if bull_power_smooth[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,8 +86,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Choppiness Index identifies ranging markets (chop > 61.8) where mean reversion works.
-# In ranging markets, we take RSI extremes with volume confirmation and weekly trend filter.
-# Exits when RSI reverses or market starts trending (chop < 38.2).
-# Weekly EMA34 ensures we only trade in direction of higher timeframe trend.
-# Target: 15-25 trades/year to minimize fee decay while capturing mean reversion in ranges.
+# Hypothesis: Elder Ray's Bull/Bear Power combined with daily trend filter on 6h timeframe.
+# Bull Power (High - EMA13) measures bullish strength, Bear Power (Low - EMA13) measures bearish strength.
+# Long when both powers indicate bullish bias (BP>0, BP<0) with daily uptrend.
+# Short when both indicate bearish bias (BP<0, BP>0) with daily downtrend.
+# Exits when power signals diverge, capturing trend changes early.
+# Works in bull markets (sustained bullish power) and bear markets (sustained bearish power).
+# Smoothing reduces whipsaws while maintaining responsiveness.
+# Target: 20-40 trades/year to balance signal quality with cost efficiency.
