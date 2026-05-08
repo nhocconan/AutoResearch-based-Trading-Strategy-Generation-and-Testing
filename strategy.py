@@ -3,12 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation.
-# Donchian breakouts capture momentum in trending markets; EMA50 filter ensures alignment with higher-timeframe trend.
-# Volume confirmation filters false breakouts. Works in bull markets (riding uptrends) and bear markets (riding downtrends).
-# Target: 100-200 total trades over 4 years (25-50/year) with disciplined entries.
+# Hypothesis: 4h Camarilla pivot S1/R1 touch with 12h EMA34 trend filter and volume spike confirmation.
+# Camarilla levels (S1/R1) act as strong support/resistance in ranging markets.
+# EMA34 ensures alignment with higher-timeframe trend to avoid counter-trend trades.
+# Volume spike (>2x average) confirms institutional interest at key levels.
+# Works in bull markets (buying dips at S1 in uptrend) and bear markets (selling rallies at R1 in downtrend).
+# Target: 20-50 trades/year with disciplined entries to minimize fee drag.
 
-name = "4h_Donchian_20_12hEMA50_Volume"
+name = "4h_Camarilla_S1R1_Touch_12hEMA34_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,31 +24,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Donchian channels
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get 1d data for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Donchian channels (20-period)
-    upper = np.full(len(high_4h), np.nan)
-    lower = np.full(len(low_4h), np.nan)
-    for i in range(20, len(high_4h)):
-        upper[i] = np.max(high_4h[i-20:i])
-        lower[i] = np.min(low_4h[i-20:i])
+    # Calculate Camarilla pivot levels (S1, R1)
+    P = (high_1d + low_1d + close_1d) / 3
+    R1 = close_1d + 1.1 * (high_1d - low_1d) / 12
+    S1 = close_1d - 1.1 * (high_1d - low_1d) / 12
     
-    # Get 12h data for EMA50 trend filter
+    # Get 12h data for EMA34 trend filter and volume average
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    if len(df_12h) < 34:
         return np.zeros(n)
     
     close_12h = df_12h['close'].values
     volume_12h = df_12h['volume'].values
     
-    # Calculate EMA50 for trend filter
-    ema50 = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate EMA34 for trend filter
+    ema34 = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # Calculate 20-period average volume for volume filter
     vol_ma_20 = np.full(len(volume_12h), np.nan)
@@ -54,9 +55,9 @@ def generate_signals(prices):
         vol_ma_20[i] = np.mean(volume_12h[i-20:i])
     
     # Align all indicators to 4h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_4h, upper)
-    lower_aligned = align_htf_to_ltf(prices, df_4h, lower)
-    ema50_aligned = align_htf_to_ltf(prices, df_12h, ema50)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    ema34_aligned = align_htf_to_ltf(prices, df_12h, ema34)
     vol_ma_20_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20)
     
     # Pre-compute session filter (08-20 UTC)
@@ -66,7 +67,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for indicators
+    start_idx = 34  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if outside trading session
@@ -77,14 +78,14 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or \
-           np.isnan(ema50_aligned[i]) or np.isnan(vol_ma_20_aligned[i]):
+        if np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or \
+           np.isnan(ema34_aligned[i]) or np.isnan(vol_ma_20_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume filter: current 12h volume > 1.5x 20-period average
+        # Volume filter: current 12h volume > 2.0x 20-period average
         vol_filter = False
         if not np.isnan(vol_ma_20_aligned[i]):
             # Find current 12h bar's volume
@@ -95,16 +96,18 @@ def generate_signals(prices):
             
             if idx_12h >= 0:
                 vol_12h_current = df_12h.iloc[idx_12h]['volume']
-                vol_filter = vol_12h_current > 1.5 * vol_ma_20_aligned[i]
+                vol_filter = vol_12h_current > 2.0 * vol_ma_20_aligned[i]
         
         if position == 0:
-            # Look for entry: Donchian breakout + trend + volume confirmation
-            # Long when price breaks above upper band in uptrend (price > EMA50) with volume
-            long_condition = (close[i] > upper_aligned[i]) and \
-                             (close[i] > ema50_aligned[i]) and vol_filter
-            # Short when price breaks below lower band in downtrend (price < EMA50) with volume
-            short_condition = (close[i] < lower_aligned[i]) and \
-                              (close[i] < ema50_aligned[i]) and vol_filter
+            # Look for entry: Camarilla touch + trend + volume spike
+            # Long when price touches S1 in uptrend (price > EMA34) with volume spike
+            long_condition = (close[i] <= S1_aligned[i] * 1.001) and \
+                             (close[i] >= S1_aligned[i] * 0.999) and \
+                             (close[i] > ema34_aligned[i]) and vol_filter
+            # Short when price touches R1 in downtrend (price < EMA34) with volume spike
+            short_condition = (close[i] >= R1_aligned[i] * 0.999) and \
+                              (close[i] <= R1_aligned[i] * 1.001) and \
+                              (close[i] < ema34_aligned[i]) and vol_filter
             
             if long_condition:
                 signals[i] = 0.25
@@ -113,15 +116,20 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below lower band or trend fails
-            if (close[i] < lower_aligned[i]) or (close[i] < ema50_aligned[i]):
+            # Exit long: price crosses above P or trend fails
+            # Get P level aligned
+            P = (high_1d + low_1d + close_1d) / 3
+            P_aligned = align_htf_to_ltf(prices, df_1d, P)
+            if (close[i] >= P_aligned[i]) or (close[i] < ema34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above upper band or trend fails
-            if (close[i] > upper_aligned[i]) or (close[i] > ema50_aligned[i]):
+            # Exit short: price crosses below P or trend fails
+            P = (high_1d + low_1d + close_1d) / 3
+            P_aligned = align_htf_to_ltf(prices, df_1d, P)
+            if (close[i] <= P_aligned[i]) or (close[i] > ema34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
