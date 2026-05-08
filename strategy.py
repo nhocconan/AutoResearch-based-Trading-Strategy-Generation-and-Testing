@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Camarilla Pivot Points with volume confirmation and trend filter.
-# Long when price breaks above R3 level with volume confirmation and 1d EMA50 uptrend.
-# Short when price breaks below S3 level with volume confirmation and 1d EMA50 downtrend.
-# Exit when price returns to Pivot level or opposite S1/R1 level.
-# Designed for low trade frequency (20-40/year) to avoid fee drag. Works in trending markets via trend filter.
+# Hypothesis: 4h strategy using 1d Williams %R with 14-period for mean reversion in range-bound markets.
+# Uses 1d Williams %R to detect overbought/oversold conditions with volume confirmation and 1d EMA50 trend filter.
+# Long when Williams %R < -80 and price above EMA50 with volume confirmation.
+# Short when Williams %R > -20 and price below EMA50 with volume confirmation.
+# Exit when Williams %R crosses back to -50 level.
+# Designed for low trade frequency (15-25/year) to avoid fee drag. Works in both trending and ranging markets via trend filter.
 
-name = "4h_1dCamarilla_R3S3_Breakout_Trend"
+name = "4h_1dWilliamsR_EMA50_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,55 +24,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla Pivots and EMA
+    # Get 1d data for Williams %R and EMA50
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1d Camarilla Pivot Points (using previous day's OHLC)
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_hl = high_1d - low_1d
+    # Calculate 1d Williams %R (14-period)
+    highest_high = np.maximum.accumulate(high_1d)
+    lowest_low = np.minimum.accumulate(low_1d)
     
-    # Camarilla levels
-    R1 = close_1d + (range_hl * 1.1 / 12)
-    R2 = close_1d + (range_hl * 1.1 / 6)
-    R3 = close_1d + (range_hl * 1.1 / 4)
-    R4 = close_1d + (range_hl * 1.1 / 2)
+    # For Williams %R, we need the highest high and lowest low over the last 14 periods
+    williams_r = np.full_like(close_1d, -50.0, dtype=np.float64)
     
-    S1 = close_1d - (range_hl * 1.1 / 12)
-    S2 = close_1d - (range_hl * 1.1 / 6)
-    S3 = close_1d - (range_hl * 1.1 / 4)
-    S4 = close_1d - (range_hl * 1.1 / 2)
+    for i in range(13, len(close_1d)):
+        period_high = np.max(high_1d[i-13:i+1])
+        period_low = np.min(low_1d[i-13:i+1])
+        if period_high != period_low:
+            williams_r[i] = -100 * (period_high - close_1d[i]) / (period_high - period_low)
+        else:
+            williams_r[i] = -50.0
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate 1d EMA50
     ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Align 1d indicators to 4h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    Pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Volume confirmation: 4h volume > 1.3x 20-period EMA
+    # Volume confirmation: 4h volume > 1.5x 20-period EMA
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ema * 1.3)
+    vol_confirm = volume > (vol_ema * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for EMA50
+    start_idx = 50  # Ensure enough data for Williams %R and EMA50
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(R3_aligned[i]) or 
-            np.isnan(S3_aligned[i]) or 
-            np.isnan(Pivot_aligned[i]) or
+        if (np.isnan(williams_r_aligned[i]) or 
             np.isnan(ema_50_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -79,28 +74,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Enter long: price breaks above R3 with volume confirmation and uptrend
-            if (close[i] > R3_aligned[i] and 
-                vol_confirm[i] and 
-                close[i] > ema_50_aligned[i]):
+            # Enter long: Williams %R < -80 and price above EMA50 with volume confirmation
+            if (williams_r_aligned[i] < -80 and 
+                close[i] > ema_50_aligned[i] and 
+                vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S3 with volume confirmation and downtrend
-            elif (close[i] < S3_aligned[i] and 
-                  vol_confirm[i] and 
-                  close[i] < ema_50_aligned[i]):
+            # Enter short: Williams %R > -20 and price below EMA50 with volume confirmation
+            elif (williams_r_aligned[i] > -20 and 
+                  close[i] < ema_50_aligned[i] and 
+                  vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to Pivot or drops below S1
-            if close[i] <= Pivot_aligned[i] or close[i] < S1_aligned[i]:
+            # Exit long: Williams %R crosses above -50
+            if williams_r_aligned[i] > -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to Pivot or rises above R1
-            if close[i] >= Pivot_aligned[i] or close[i] > R1_aligned[i]:
+            # Exit short: Williams %R crosses below -50
+            if williams_r_aligned[i] < -50:
                 signals[i] = 0.0
                 position = 0
             else:
