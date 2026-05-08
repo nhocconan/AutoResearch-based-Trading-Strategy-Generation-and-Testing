@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_WeeklyPivot_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Strict"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,18 +26,17 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate weekly pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Calculate 1d Camarilla pivot levels (R1, S1)
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    H_prev = np.roll(high_1w, 1)
-    L_prev = np.roll(low_1w, 1)
-    C_prev = np.roll(close_1w, 1)
+    H_prev = np.roll(high_1d, 1)
+    L_prev = np.roll(low_1d, 1)
+    C_prev = np.roll(close_1d, 1)
     H_prev[0] = np.nan
     L_prev[0] = np.nan
     C_prev[0] = np.nan
@@ -48,10 +47,10 @@ def generate_signals(prices):
     R1 = pivot + (range_hl * 1.1 / 6)
     S1 = pivot - (range_hl * 1.1 / 6)
     
-    # Align weekly pivot to 6h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1w, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1w, S1)
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    # Align Camarilla levels to 12h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
     # Volume spike: current volume > 2.0x 30-period average
     vol_ma30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
