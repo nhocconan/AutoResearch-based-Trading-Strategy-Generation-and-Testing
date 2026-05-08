@@ -9,7 +9,7 @@ leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,38 +17,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot levels, trend filter, and volume average
+    # Daily data for Camarilla levels and trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
+    # Previous day's OHLC for Camarilla levels
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Calculate Camarilla pivot levels (R1, S1) from previous day
-    # P = (H + L + C) / 3
-    # R1 = P + (H - L) * 1.1 / 12
-    # S1 = P - (H - L) * 1.1 / 12
-    P = (high_1d + low_1d + close_1d) / 3
-    R1 = P + (high_1d - low_1d) * 1.1 / 12
-    S1 = P - (high_1d - low_1d) * 1.1 / 12
+    # Camarilla R1 and S1 levels
+    R1 = prev_close + 1.1 * (prev_high - prev_low) / 12
+    S1 = prev_close - 1.1 * (prev_high - prev_low) / 12
     
-    # Align to 4h timeframe (these are fixed for the day)
+    # Align Camarilla levels to 4h timeframe (with 1-day delay for previous day's data)
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
     # Daily EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Daily average volume for volume confirmation
-    avg_vol_1d = np.mean(volume_1d)
-    avg_vol_aligned = np.full(n, avg_vol_1d)  # constant for the day
-    
-    # 4h volume spike (current volume > 1.5x daily average)
-    vol_spike = volume > (avg_vol_aligned * 1.5)
+    # Volume spike detection (20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -65,10 +58,11 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Close breaks above R1, above EMA34, and volume spike
-            long_cond = (close[i] > R1_aligned[i]) and (close[i] > ema34_aligned[i]) and vol_spike[i]
-            # Short: Close breaks below S1, below EMA34, and volume spike
-            short_cond = (close[i] < S1_aligned[i]) and (close[i] < ema34_aligned[i]) and vol_spike[i]
+            # Long breakout: price breaks above R1 with volume spike and price > EMA34 (uptrend)
+            long_cond = (close[i] > R1_aligned[i]) and vol_spike[i] and (close[i] > ema34_aligned[i])
+            
+            # Short breakdown: price breaks below S1 with volume spike and price < EMA34 (downtrend)
+            short_cond = (close[i] < S1_aligned[i]) and vol_spike[i] and (close[i] < ema34_aligned[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -77,15 +71,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Close below EMA34
-            if close[i] < ema34_aligned[i]:
+            # Long exit: price crosses below S1 (breakdown of support) or volume drops
+            if (close[i] < S1_aligned[i]) or not vol_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Close above EMA34
-            if close[i] > ema34_aligned[i]:
+            # Short exit: price crosses above R1 (breakout of resistance) or volume drops
+            if (close[i] > R1_aligned[i]) or not vol_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -93,8 +87,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R1/S1 levels act as intraday support/resistance with higher probability of continuation when broken with volume. 
-# EMA34 filter ensures we only trade in the direction of the daily trend. 
-# Volume spike confirms institutional participation. 
-# Works in bull markets (breakouts above R1 in uptrend) and bear markets (breakdowns below S1 in downtrend). 
-# Target: 20-50 trades per year (80-200 total over 4 years) to minimize fee decay.
+# Hypothesis: Camarilla R1/S1 levels act as intraday support/resistance. 
+# Long when price breaks above R1 with volume confirmation in uptrend (price > EMA34).
+# Short when price breaks below S1 with volume confirmation in downtrend (price < EMA34).
+# Exits when price retests the opposite level or volume fades.
+# Works in both bull and bear markets by following the daily trend filter.
+# Volume spike ensures breakouts are genuine, not false breaks.
+# Target: 20-50 trades per year to minimize fee decay while capturing meaningful moves.
