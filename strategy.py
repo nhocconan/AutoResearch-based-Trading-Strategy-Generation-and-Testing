@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Fractal breakout with 1d EMA34 trend filter and volume spike confirmation
-# Long when price breaks above recent bearish fractal (resistance) + price > 1d EMA34 + volume > 1.5x 20-period EMA of volume
-# Short when price breaks below recent bullish fractal (support) + price < 1d EMA34 + volume > 1.5x 20-period EMA of volume
-# Williams Fractals identify key support/resistance levels; EMA34 filters counter-trend trades; volume confirms breakout strength
-# Designed for 12h timeframe to target 15-25 trades/year (60-100 total over 4 years)
-# Focus on breakouts from proven swing points reduces whipsaw vs. indicator crossovers
+# Hypothesis: 4h Donchian breakout with 12h EMA trend filter and volume confirmation
+# Long when price breaks above Donchian(20) high + price > 12h EMA50 + volume > 1.5x 20-period EMA of volume
+# Short when price breaks below Donchian(20) low + price < 12h EMA50 + volume > 1.5x 20-period EMA of volume
+# Donchian captures breakouts, 12h EMA filters counter-trend trades, volume confirms strength
+# Designed for 4h timeframe to target 20-50 trades/year (80-200 total over 4 years)
 
-name = "12h_Williams_Fractal_Breakout_1dEMA34_Volume"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_12hEMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,41 +23,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend and volume filters
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 12h data for trend and volume filters
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 12h EMA50 for trend filter
+    ema_50 = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 1d volume EMA (20-period) for volume filter
-    vol_ema_20 = pd.Series(df_1d['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate 12h volume EMA (20-period) for volume filter
+    vol_ema_20 = pd.Series(df_12h['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align 1d indicators to 12h timeframe
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
-    vol_ema_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ema_20)
+    # Align 12h indicators to 4h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
+    vol_ema_20_aligned = align_htf_to_ltf(prices, df_12h, vol_ema_20)
     
-    # Calculate Williams Fractals on 1d timeframe
-    # Bearish fractal: high[n] > high[n-2] and high[n] > high[n-1] and high[n] > high[n+1] and high[n] > high[n+2]
-    # Bullish fractal: low[n] < low[n-2] and low[n] < low[n-1] and low[n] < low[n+1] and low[n] < low[n+2]
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate Donchian channels on 4h timeframe
+    # Upper band: 20-period high
+    # Lower band: 20-period low
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
     
-    bearish_fractal = np.zeros(len(high_1d))
-    bullish_fractal = np.zeros(len(low_1d))
-    
-    for i in range(2, len(high_1d) - 2):
-        if (high_1d[i] > high_1d[i-2] and high_1d[i] > high_1d[i-1] and 
-            high_1d[i] > high_1d[i+1] and high_1d[i] > high_1d[i+2]):
-            bearish_fractal[i] = high_1d[i]
-        if (low_1d[i] < low_1d[i-2] and low_1d[i] < low_1d[i-1] and 
-            low_1d[i] < low_1d[i+1] and low_1d[i] < low_1d[i+2]):
-            bullish_fractal[i] = low_1d[i]
-    
-    # Williams fractals need 2 extra bars for confirmation (after the center bar forms)
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
+    for i in range(20, n):
+        upper[i] = np.max(high[i-20:i])
+        lower[i] = np.min(low[i-20:i])
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -67,7 +55,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # warmup for EMA34
+    start_idx = 20  # warmup for Donchian
     
     for i in range(start_idx, n):
         # Skip if outside trading session
@@ -78,30 +66,34 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if np.isnan(ema_34_aligned[i]) or np.isnan(vol_ema_20_aligned[i]) or \
-           np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]):
+        if np.isnan(ema_50_aligned[i]) or np.isnan(vol_ema_20_aligned[i]) or \
+           np.isnan(upper[i]) or np.isnan(lower[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume filter: current 12h volume > 1.5x 20-period EMA of 1d volume
-        vol_filter = volume[i] > 1.5 * vol_ema_20_aligned[i]
+        # Volume filter: current 12h volume > 1.5x 20-period EMA
+        # Find the most recent completed 12h bar
+        idx_12h = 0
+        while idx_12h < len(df_12h) and df_12h.iloc[idx_12h]['open_time'] <= prices.iloc[i]['open_time']:
+            idx_12h += 1
+        idx_12h -= 1  # last completed 12h bar
         
-        # Fractal breakout conditions
-        # Long: price breaks above recent bearish fractal (resistance)
-        # Short: price breaks below recent bullish fractal (support)
-        resistance_level = bearish_fractal_aligned[i]
-        support_level = bullish_fractal_aligned[i]
+        if idx_12h < 0:
+            vol_filter = False
+        else:
+            vol_12h_current = df_12h.iloc[idx_12h]['volume']
+            vol_filter = vol_12h_current > 1.5 * vol_ema_20_aligned[i]
         
-        # Only consider valid fractal levels (non-zero)
-        resistance_valid = resistance_level > 0
-        support_valid = support_level > 0
+        # Donchian breakout conditions
+        breakout_up = close[i] > upper[i]
+        breakout_down = close[i] < lower[i]
         
         if position == 0:
-            # Look for entry: fractal breakout + trend + volume
-            long_condition = resistance_valid and close[i] > resistance_level and close[i] > ema_34_aligned[i] and vol_filter
-            short_condition = support_valid and close[i] < support_level and close[i] < ema_34_aligned[i] and vol_filter
+            # Look for entry: Donchian breakout + trend + volume
+            long_condition = breakout_up and close[i] > ema_50_aligned[i] and vol_filter
+            short_condition = breakout_down and close[i] < ema_50_aligned[i] and vol_filter
             
             if long_condition:
                 signals[i] = 0.25
@@ -110,21 +102,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below support level or trend fails
-            if support_valid and close[i] < support_level:
-                signals[i] = 0.0
-                position = 0
-            elif close[i] < ema_34_aligned[i]:  # trend failure
+            # Exit long: price crosses below 12h EMA50
+            if close[i] < ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above resistance level or trend fails
-            if resistance_valid and close[i] > resistance_level:
-                signals[i] = 0.0
-                position = 0
-            elif close[i] > ema_34_aligned[i]:  # trend failure
+            # Exit short: price crosses above 12h EMA50
+            if close[i] > ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
