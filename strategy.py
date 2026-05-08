@@ -3,102 +3,134 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1d volume spike + 1d chop regime
-# Long when price breaks above 20-period high AND volume > 1.5x 10-period avg AND chop > 61.8 (range)
-# Short when price breaks below 20-period low AND volume > 1.5x 10-period avg AND chop > 61.8 (range)
-# Exit when price returns to 10-period moving average
-# Uses 1d data for volume and chop to avoid noise, 12h for breakout timing
+# Hypothesis: 12h Williams Fractal breakout with 1d ATR volatility filter and 1w trend filter
+# Long when price breaks above recent bearish fractal with expanding volatility and weekly uptrend
+# Short when price breaks below recent bullish fractal with expanding volatility and weekly downtrend
+# Williams Fractals identify key support/resistance levels, ATR filters for volatility expansion,
+# Weekly trend ensures alignment with higher timeframe momentum
 # Targets 50-150 total trades over 4 years (12-37/year) to minimize fee drag
 
-name = "12h_Donchian20_1dVolume_Chop"
+name = "12h_WilliamsFractal_Breakout_ATRVol_1wTrend"
 timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data once for volume and chop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data once for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d volume average (10-period)
-    volume_1d = df_1d['volume'].values
-    vol_avg_10 = pd.Series(volume_1d).rolling(window=10, min_periods=10).mean().values
-    vol_avg_10_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_10)
+    # Calculate weekly EMA(34) for trend filter
+    weekly_close = df_1w['close'].values
+    ema34_1w = pd.Series(weekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Calculate 1d chopiness index (14-period)
+    # Get daily data for ATR and fractals
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
+    
+    # Calculate ATR(14) for volatility filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
     tr1 = np.abs(high_1d - low_1d)
     tr2 = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    tr3 = np.abs(np.diff(close_1d, prepend=close_1d[0]))
     tr3 = np.abs(np.roll(close_1d, 1) - close_1d)
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    max_high_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    min_low_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    # Calculate Williams Fractals on daily data
+    # Bearish fractal: high[n-2] < high[n-1] > high[n] and high[n-1] > high[n-3] and high[n-1] > high[n+1]
+    # Bullish fractal: low[n-2] > low[n-1] < low[n] and low[n-1] < low[n-3] and low[n-1] < low[n+1]
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    atr_sum_1d = np.zeros_like(close_1d)
-    for i in range(len(close_1d)):
-        start = max(0, i-14)
-        atr_sum_1d[i] = np.sum(atr_1d[start:i+1]) if i >= start else 0
+    bearish_fractal = np.zeros(len(high_1d), dtype=bool)
+    bullish_fractal = np.zeros(len(low_1d), dtype=bool)
     
-    denominator = max_high_1d - min_low_1d
-    chop_1d = np.where(denominator != 0, 100 * np.log10(atr_sum_1d / denominator) / np.log10(14), 50)
-    chop_1d = np.where(denominator == 0, 50, chop_1d)
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    for i in range(2, len(high_1d)-2):
+        if (high_1d[i-2] < high_1d[i-1] and 
+            high_1d[i] < high_1d[i-1] and
+            high_1d[i-3] < high_1d[i-1] and
+            high_1d[i+1] < high_1d[i-1]):
+            bearish_fractal[i-1] = True
+            
+        if (low_1d[i-2] > low_1d[i-1] and 
+            low_1d[i] > low_1d[i-1] and
+            low_1d[i-3] > low_1d[i-1] and
+            low_1d[i+1] > low_1d[i-1]):
+            bullish_fractal[i-1] = True
     
-    # 12h Donchian channels (20-period)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    ma_10 = pd.Series(close).rolling(window=10, min_periods=10).mean().values
+    # Store actual price levels of fractals
+    bearish_level = np.where(bearish_fractal, high_1d, np.nan)
+    bullish_level = np.where(bullish_fractal, low_1d, np.nan)
+    
+    # Forward fill to get the most recent fractal level
+    bearish_level = pd.Series(bearish_level).ffill().values
+    bullish_level = pd.Series(bullish_level).ffill().values
+    
+    # Align fractal levels to 12h timeframe
+    bearish_level_aligned = align_htf_to_ltf(prices, df_1d, bearish_level)
+    bullish_level_aligned = align_htf_to_ltf(prices, df_1d, bullish_level)
+    
+    # Calculate ATR-based threshold for breakout confirmation
+    atr_threshold = atr_1d_aligned * 0.5  # Half ATR for breakout confirmation
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # warmup
+    start_idx = 100  # warmup for calculations
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(ma_10[i]) or np.isnan(vol_avg_10_aligned[i]) or 
-            np.isnan(chop_1d_aligned[i])):
+        if (np.isnan(close[i]) or np.isnan(bearish_level_aligned[i]) or 
+            np.isnan(bullish_level_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(ema34_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ratio = volume_1d[i] / vol_avg_10_aligned[i] if vol_avg_10_aligned[i] > 0 else 0
+        price = close[i]
+        bear_level = bearish_level_aligned[i]
+        bull_level = bullish_level_aligned[i]
+        atr_val = atr_1d_aligned[i]
+        ema34_1w_val = ema34_1w_aligned[i]
+        threshold = atr_threshold[i]
         
         if position == 0:
-            # Enter long: break above Donchian high + volume spike + chop > 61.8
-            if close[i] > donch_high[i] and vol_ratio > 1.5 and chop_1d_aligned[i] > 61.8:
+            # Enter long: price breaks above recent bearish fractal with volatility expansion
+            if not np.isnan(bear_level) and price > bear_level + threshold and ema34_1w_val > 0:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below Donchian low + volume spike + chop > 61.8
-            elif close[i] < donch_low[i] and vol_ratio > 1.5 and chop_1d_aligned[i] > 61.8:
+            # Enter short: price breaks below recent bullish fractal with volatility expansion
+            elif not np.isnan(bull_level) and price < bull_level - threshold and ema34_1w_val < 0:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: return to 10-period MA
-            if close[i] <= ma_10[i]:
+            # Exit long: price breaks below recent bullish fractal or weekly trend down
+            if not np.isnan(bull_level) and price < bull_level - threshold or ema34_1w_val < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: return to 10-period MA
-            if close[i] >= ma_10[i]:
+            # Exit short: price breaks above recent bearish fractal or weekly trend up
+            if not np.isnan(bear_level) and price > bear_level + threshold or ema34_1w_val > 0:
                 signals[i] = 0.0
                 position = 0
             else:
