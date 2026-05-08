@@ -3,14 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot reversal with 12h EMA trend filter and volume spike.
-# Uses Camarilla R3/S3 levels for mean-reversion entries in ranging markets,
-# 12h EMA50 for trend filter (only trade with trend), and volume > 1.5x average for confirmation.
-# Works in both bull and bear by only taking trades in the direction of the 12h trend.
-# Target: 20-50 trades per year to minimize fee drag.
+# Hypothesis: 1h strategy using 4h/1d for direction and 1h for entry timing.
+# Uses 4h EMA for trend, 1d RSI for momentum, and volume confirmation.
+# Long when 4h EMA up, 1d RSI > 50, 1h close > open, and volume > 1.5x average.
+# Short when 4h EMA down, 1d RSI < 50, 1h close < open, and volume > 1.5x average.
+# Flat otherwise. Uses 4h/1d for signal direction (low trade frequency), 1h only for entry timing.
+# Target: 60-150 total trades over 4 years = 15-37/year for 1h.
+# Session filter: 08-20 UTC to reduce noise.
+# Position size: 0.20 (discrete to minimize churn).
 
-name = "4h_Camarilla_R3S3_Reversal_12hEMA50_Volume"
-timeframe = "4h"
+name = "1h_4hEMA_1dRSI_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -18,82 +21,96 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
+    # Extract arrays
+    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 4h data for trend
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    # Get 1d data for momentum
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    # Using prior day's OHLC (approximated as prior candle in 4h timeframe)
-    prev_close = np.roll(close, 1)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
+    # 4h EMA(20) for trend
+    close_4h = df_4h['close'].values
+    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    ema_20_4h_up = ema_20_4h_aligned > np.roll(ema_20_4h_aligned, 1)
+    ema_20_4h_up = np.where(np.isnan(ema_20_4h_up), False, ema_20_4h_up)
     
-    # Camarilla calculations
-    R3 = close + (high - low) * 1.1 / 4
-    S3 = close - (high - low) * 1.1 / 4
+    # 1d RSI(14) for momentum
+    close_1d = df_1d['close'].values
+    delta = np.diff(close_1d)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.zeros_like(close_1d)
+    avg_loss = np.zeros_like(close_1d)
+    avg_gain[14] = np.mean(gain[:14]) if len(gain) >= 14 else 0
+    avg_loss[14] = np.mean(loss[:14]) if len(loss) >= 14 else 0
+    for i in range(15, len(close_1d)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d = np.concatenate([[np.nan], rsi_1d])
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # 12h EMA50 for trend filter
-    close_12h_series = pd.Series(close_12h)
-    ema_50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_12h_up = ema_50_12h[1:] > ema_50_12h[:-1]
-    trend_12h_up = np.concatenate([[False], trend_12h_up])
-    
-    # Align 12h trend to 4h
-    trend_12h_up_aligned = align_htf_to_ltf(prices, df_12h, trend_12h_up.astype(float))
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # 1h volume average (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    
+    # Precompute session filter (08-20 UTC)
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for EMA
+    start_idx = 20  # Ensure enough data for volume MA
     
     for i in range(start_idx, n):
-        # Skip if any critical data is NaN
-        if (np.isnan(R3[i]) or np.isnan(S3[i]) or 
-            np.isnan(trend_12h_up_aligned[i]) or np.isnan(volume_spike[i])):
+        # Skip if not in session or critical data missing
+        if not in_session[i] or \
+           np.isnan(ema_20_4h_up[i]) or np.isnan(rsi_1d_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Only trade with 12h trend
-            if trend_12h_up_aligned[i]:
-                # Uptrend: look for reversals at S3 (support)
-                if close[i] <= S3[i] and volume_spike[i]:
-                    signals[i] = 0.25
-                    position = 1
-            else:
-                # Downtrend: look for reversals at R3 (resistance)
-                if close[i] >= R3[i] and volume_spike[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # Long conditions: 4h EMA up, 1d RSI > 50, bullish candle, volume spike
+            if (ema_20_4h_up[i] and 
+                rsi_1d_aligned[i] > 50 and 
+                close[i] > open_price[i] and 
+                volume[i] > 1.5 * vol_ma[i]):
+                signals[i] = 0.20
+                position = 1
+            # Short conditions: 4h EMA down, 1d RSI < 50, bearish candle, volume spike
+            elif (not ema_20_4h_up[i] and 
+                  rsi_1d_aligned[i] < 50 and 
+                  close[i] < open_price[i] and 
+                  volume[i] > 1.5 * vol_ma[i]):
+                signals[i] = -0.20
+                position = -1
         elif position == 1:
-            # Long exit: price reaches midpoint or trend changes
-            midpoint = (close[i-1] + S3[i]) / 2  # approximate midpoint
-            if close[i] >= midpoint or not trend_12h_up_aligned[i]:
+            # Long exit: trend reversal or momentum loss
+            if not ema_20_4h_up[i] or rsi_1d_aligned[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: price reaches midpoint or trend changes
-            midpoint = (close[i-1] + R3[i]) / 2  # approximate midpoint
-            if close[i] <= midpoint or trend_12h_up_aligned[i]:
+            # Short exit: trend reversal or momentum loss
+            if ema_20_4h_up[i] or rsi_1d_aligned[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
