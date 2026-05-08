@@ -3,14 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Turtle Trading System (Donchian Breakout) with 4h trend filter and volume confirmation
-# Long when price breaks above 20-period high + 4h close > 4h EMA50 + volume spike
-# Short when price breaks below 20-period low + 4h close < 4h EMA50 + volume spike
-# Designed to capture trends in both bull and bear markets with low trade frequency.
-# Target: 60-150 total trades over 4 years = 15-37/year for 1h.
+# Hypothesis: 6h Donchian(20) breakout with 1w pivot direction and volume confirmation
+# Long when price breaks above 20-period high AND weekly pivot shows bullish bias (close > weekly pivot)
+# Short when price breaks below 20-period low AND weekly pivot shows bearish bias (close < weekly pivot)
+# Volume confirmation: current volume > 1.5 * 20-period average
+# Weekly pivot calculated as (weekly high + weekly low + weekly close) / 3
+# Designed for low trade frequency with strong trend continuation signals
+# Target: 50-150 total trades over 4 years = 12-37/year
 
-name = "1h_TurtleBreakout_4hTrend_Volume"
-timeframe = "1h"
+name = "6h_Donchian20_1wPivot_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,69 +25,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data once
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get weekly data once
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    # Calculate 4h EMA(50) for trend direction
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Calculate weekly pivot: (high + low + close) / 3
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
     
-    # 20-period Donchian channels
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Donchian channels on 6h data
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume spike: current volume > 2.0 * 20-period average
+    # Volume confirmation: current volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_confirm = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for calculations
+    start_idx = 40  # warmup for calculations
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(high_max[i]) or 
-            np.isnan(low_min[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(weekly_pivot_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema50_4h_val = ema50_4h_aligned[i]
-        donchian_high = high_max[i]
-        donchian_low = low_min[i]
-        vol_spike = volume_spike[i]
+        weekly_pivot_val = weekly_pivot_aligned[i]
+        vol_conf = volume_confirm[i]
         
         if position == 0:
-            # Enter long: price breaks above 20-period high + 4h uptrend + volume spike
-            if (close[i] > donchian_high and 
-                close[i] > ema50_4h_val and 
-                vol_spike):
-                signals[i] = 0.20
+            # Enter long: price breaks above 20-period high AND close > weekly pivot AND volume confirmation
+            if (close[i] > high_20[i] and 
+                close[i] > weekly_pivot_val and 
+                vol_conf):
+                signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below 20-period low + 4h downtrend + volume spike
-            elif (close[i] < donchian_low and 
-                  close[i] < ema50_4h_val and 
-                  vol_spike):
-                signals[i] = -0.20
+            # Enter short: price breaks below 20-period low AND close < weekly pivot AND volume confirmation
+            elif (close[i] < low_20[i] and 
+                  close[i] < weekly_pivot_val and 
+                  vol_conf):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below 20-period low
-            if close[i] < donchian_low:
+            # Exit long: price breaks below 20-period low OR weekly pivot turns bearish
+            if (close[i] < low_20[i] or 
+                close[i] < weekly_pivot_val):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above 20-period high
-            if close[i] > donchian_high:
+            # Exit short: price breaks above 20-period high OR weekly pivot turns bullish
+            if (close[i] > high_20[i] or 
+                close[i] > weekly_pivot_val):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
