@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ADX_SuperTrend_TrendFilter"
-timeframe = "6h"
+name = "4h_KAMA_Trend_RSI_MeanReversion"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,80 +17,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 12h ADX (trend strength) and Supertrend (direction)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 14:
+    # Calculate KAMA trend (1d) for direction
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    close_1d = df_1d['close'].values
+    # KAMA parameters: ER period=10, fast=2, slow=30
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    volatility = np.abs(np.diff(close_1d)).cumsum()
+    volatility = np.diff(volatility, prepend=volatility[0])
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    kama_1d = kama
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
     
-    # Calculate ATR for ADX and Supertrend
-    tr1 = np.abs(np.diff(high_12h))
-    tr2 = np.abs(np.diff(low_12h))
-    tr3 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr = np.concatenate([[np.nan], tr])
+    # Calculate RSI (14) on 4h
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
-    
-    # Directional Movement
-    up_move = np.diff(high_12h)
-    down_move = -np.diff(low_12h)
-    up_move = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    down_move = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    up_move = np.concatenate([[0], up_move])
-    down_move = np.concatenate([[0], down_move])
-    
-    # Smoothed DM
-    atr_safe = np.where(atr == 0, np.nan, atr)
-    plus_dm_smooth = pd.Series(up_move).ewm(alpha=1/14, adjust=False).mean().values
-    minus_dm_smooth = pd.Series(down_move).ewm(alpha=1/14, adjust=False).mean().values
-    
-    # DI and ADX
-    plus_di = 100 * plus_dm_smooth / atr_safe
-    minus_di = 100 * minus_dm_smooth / atr_safe
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
-    
-    # Supertrend calculation
-    hl2 = (high_12h + low_12h) / 2
-    multiplier = 3.0
-    upperband = hl2 + (multiplier * atr)
-    lowerband = hl2 - (multiplier * atr)
-    
-    # Initialize Supertrend
-    supertrend = np.full_like(close_12h, np.nan)
-    uptrend = np.ones_like(close_12h, dtype=bool)
-    
-    for i in range(1, len(close_12h)):
-        if np.isnan(upperband[i-1]) or np.isnan(lowerband[i-1]):
-            supertrend[i] = np.nan
-            continue
-            
-        if close_12h[i] > upperband[i-1]:
-            uptrend[i] = True
-        elif close_12h[i] < lowerband[i-1]:
-            uptrend[i] = False
-        else:
-            uptrend[i] = uptrend[i-1]
-            if uptrend[i] and lowerband[i] < lowerband[i-1]:
-                lowerband[i] = lowerband[i-1]
-            if not uptrend[i] and upperband[i] > upperband[i-1]:
-                upperband[i] = upperband[i-1]
-        
-        supertrend[i] = lowerband[i] if uptrend[i] else upperband[i]
-    
-    # Align 12h indicators to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
-    supertrend_aligned = align_htf_to_ltf(prices, df_12h, supertrend)
-    uptrend_aligned = align_htf_to_ltf(prices, df_12h, uptrend.astype(float))
-    
-    # Calculate 6h momentum: price change over 3 periods
-    price_change = np.diff(close, 3)
-    price_change = np.concatenate([[np.nan, np.nan, np.nan], price_change])
-    mom_threshold = np.nanstd(price_change) * 0.5 if not np.isnan(np.nanstd(price_change)) else 0.01
+    # Volume spike: current volume > 1.8x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.8 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -99,37 +56,39 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(adx_aligned[i]) or np.isnan(supertrend_aligned[i]) or 
-            np.isnan(uptrend_aligned[i]) or np.isnan(price_change[i])):
+        if (np.isnan(kama_1d_aligned[i]) or np.isnan(rsi[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Strong trend + momentum confirmation
-        strong_trend = adx_aligned[i] > 25
-        bullish_momentum = price_change[i] > mom_threshold
-        bearish_momentum = price_change[i] < -mom_threshold
-        
         if position == 0:
-            # Long: uptrend + strong trend + bullish momentum
-            if (uptrend_aligned[i] > 0.5) and strong_trend and bullish_momentum:
+            # Long: price > KAMA (uptrend) + RSI < 40 (pullback) + volume spike
+            long_cond = (close[i] > kama_1d_aligned[i]) and \
+                        (rsi[i] < 40) and \
+                        volume_spike[i]
+            # Short: price < KAMA (downtrend) + RSI > 60 (pullback) + volume spike
+            short_cond = (close[i] < kama_1d_aligned[i]) and \
+                         (rsi[i] > 60) and \
+                         volume_spike[i]
+            
+            if long_cond:
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend + strong trend + bearish momentum
-            elif (uptrend_aligned[i] < 0.5) and strong_trend and bearish_momentum:
+            elif short_cond:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: trend reversal or weak trend
-            if (uptrend_aligned[i] < 0.5) or (adx_aligned[i] < 20):
+            # Long exit: RSI > 60 (overbought) or trend change
+            if rsi[i] > 60 or close[i] < kama_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend reversal or weak trend
-            if (uptrend_aligned[i] > 0.5) or (adx_aligned[i] < 20):
+            # Short exit: RSI < 40 (oversold) or trend change
+            if rsi[i] < 40 or close[i] > kama_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
