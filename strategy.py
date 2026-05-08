@@ -1,13 +1,17 @@
-# 4h_Camarilla_R3S3_1dVolume_1dADX
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d volume spike and 1d ADX trend filter
-# Camarilla levels identify key intraday support/resistance. Breakouts above R3 or below S3
-# indicate strong momentum. Volume spike confirms institutional participation. 1d ADX > 25
-# ensures we only trade in strong trends, avoiding whipsaws in ranges. This combination
-# works in both bull and bear markets by filtering for strong trends only.
-# Targets 15-25 trades per year (~60-100 total over 4 years) to minimize fee drag.
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3S3_1dVolume_1dADX"
-timeframe = "4h"
+# Hypothesis: 12h Williams %R with 1d volume spike and 1d ADX trend filter
+# Williams %R identifies overbought/oversold conditions. Readings below -80 indicate oversold,
+# above -20 indicate overbought. Combined with volume spikes (institutional participation) and
+# ADX > 25 (strong trend), this captures mean-reversion bounces within strong trends.
+# Works in both bull and bear markets by trading pullbacks in trending markets.
+# Targets 12-37 trades per year (~50-150 total over 4 years) to minimize fee drag.
+
+name = "12h_WilliamsR_1dVolume_1dADX"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,38 +24,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels from previous day's OHLC
-    # For each 4h bar, we use the prior day's close, high, low
-    # We need to align daily data to 4h bars
-    
-    # Get 1d data for Camarilla calculation
+    # Get 1d data for Williams %R, volume, and ADX
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate Camarilla levels for each day
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Camarilla multipliers
-    R3 = close_1d + 1.1 * (high_1d - low_1d) / 6
-    S3 = close_1d - 1.1 * (high_1d - low_1d) / 6
-    R4 = close_1d + 1.382 * (high_1d - low_1d) / 2
-    S4 = close_1d - 1.382 * (high_1d - low_1d) / 2
+    # Calculate Williams %R(14) on daily
+    highest_high = np.full_like(high_1d, np.nan)
+    lowest_low = np.full_like(low_1d, np.nan)
+    for i in range(13, len(high_1d)):
+        highest_high[i] = np.max(high_1d[i-13:i+1])
+        lowest_low[i] = np.min(low_1d[i-13:i+1])
     
-    # Align Camarilla levels to 4h timeframe (use previous day's levels)
-    R3_4h = align_htf_to_ltf(prices, df_1d, R3)
-    S3_4h = align_htf_to_ltf(prices, df_1d, S3)
-    R4_4h = align_htf_to_ltf(prices, df_1d, R4)
-    S4_4h = align_htf_to_ltf(prices, df_1d, S4)
+    williams_r = np.where((highest_high - lowest_low) != 0,
+                          -100 * (highest_high - close_1d) / (highest_high - lowest_low),
+                          -50)
+    
+    # Williams %R signals: oversold < -80, overbought > -20
+    williams_oversold = williams_r < -80
+    williams_overbought = williams_r > -20
     
     # Volume spike detection on 1d
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean()  # 24 * 4h = 4d approx
-    vol_spike = volume > (vol_ma.values * 2.0)
+    vol_ma = np.full_like(volume_1d, np.nan)
+    for i in range(14, len(volume_1d)):
+        vol_ma[i] = np.mean(volume_1d[i-14:i+1])
+    vol_spike = volume_1d > (vol_ma * 2.0)
     
-    # ADX trend filter on 1d
-    # Calculate ADX(14) on daily
+    # ADX trend filter on 1d (14-period)
     plus_dm = np.zeros_like(high_1d)
     minus_dm = np.zeros_like(high_1d)
     tr = np.zeros_like(high_1d)
@@ -82,7 +86,6 @@ def generate_signals(prices):
     plus_dm14 = wilder_smooth(plus_dm, 14)
     minus_dm14 = wilder_smooth(minus_dm, 14)
     
-    # Avoid division by zero
     plus_di14 = np.where(tr14 != 0, 100 * (plus_dm14 / tr14), 0)
     minus_di14 = np.where(tr14 != 0, 100 * (minus_dm14 / tr14), 0)
     
@@ -92,43 +95,47 @@ def generate_signals(prices):
     
     adx_strong = adx > 25
     adx_weak = adx < 20
-    adx_strong_4h = align_htf_to_ltf(prices, df_1d, adx_strong)
-    adx_weak_4h = align_htf_to_ltf(prices, df_1d, adx_weak)
+    
+    # Align all 1d indicators to 12h timeframe (use previous day's values)
+    williams_oversold_12h = align_htf_to_ltf(prices, df_1d, williams_oversold)
+    williams_overbought_12h = align_htf_to_ltf(prices, df_1d, williams_overbought)
+    vol_spike_12h = align_htf_to_ltf(prices, df_1d, vol_spike)
+    adx_strong_12h = align_htf_to_ltf(prices, df_1d, adx_strong)
+    adx_weak_12h = align_htf_to_ltf(prices, df_1d, adx_weak)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 24  # Ensure sufficient data for volume MA
+    start_idx = 28  # Ensure sufficient data for Williams %R and volume MA
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(R3_4h[i]) or np.isnan(S3_4h[i]) or np.isnan(R4_4h[i]) or 
-            np.isnan(S4_4h[i]) or np.isnan(vol_spike[i]) or 
-            np.isnan(adx_strong_4h[i]) or np.isnan(adx_weak_4h[i])):
+        if (np.isnan(williams_oversold_12h[i]) or np.isnan(williams_overbought_12h[i]) or 
+            np.isnan(vol_spike_12h[i]) or np.isnan(adx_strong_12h[i]) or np.isnan(adx_weak_12h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above R3, volume spike, strong trend
-            if close[i] > R3_4h[i] and vol_spike[i] and adx_strong_4h[i]:
+            # Enter long: Williams %R oversold, volume spike, strong trend
+            if williams_oversold_12h[i] and vol_spike_12h[i] and adx_strong_12h[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S3, volume spike, strong trend
-            elif close[i] < S3_4h[i] and vol_spike[i] and adx_strong_4h[i]:
+            # Enter short: Williams %R overbought, volume spike, strong trend
+            elif williams_overbought_12h[i] and vol_spike_12h[i] and adx_strong_12h[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to S3 or trend weakens
-            if close[i] < S3_4h[i] or adx_weak_4h[i]:
+            # Exit long: Williams %R returns above -50 or trend weakens
+            if williams_overbought_12h[i] or adx_weak_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to R3 or trend weakens
-            if close[i] > R3_4h[i] or adx_weak_4h[i]:
+            # Exit short: Williams %R returns below -50 or trend weakens
+            if williams_oversold_12h[i] or adx_weak_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
