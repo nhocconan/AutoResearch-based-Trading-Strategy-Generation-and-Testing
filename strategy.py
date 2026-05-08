@@ -3,99 +3,89 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Ichimoku_TK_Cross_Cloud_Filter"
-timeframe = "6h"
+name = "4h_Chandelier_Exit_Volume_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 40:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
     # Get daily data once
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:
+    if len(df_1d) < 22:
         return np.zeros(n)
     
-    # Calculate Ichimoku components on daily data
+    # Calculate daily ATR(22) for Chandelier Exit
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr22_1d = pd.Series(tr).rolling(window=22, min_periods=22).mean().values
+    atr22_1d_aligned = align_htf_to_ltf(prices, df_1d, atr22_1d)
     
-    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
-    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2
+    # Calculate 22-period highest high and lowest low for Chandelier Exit
+    highest_high_22 = pd.Series(high_1d).rolling(window=22, min_periods=22).max().values
+    lowest_low_22 = pd.Series(low_1d).rolling(window=22, min_periods=22).min().values
+    highest_high_22_aligned = align_htf_to_ltf(prices, df_1d, highest_high_22)
+    lowest_low_22_aligned = align_htf_to_ltf(prices, df_1d, lowest_low_22)
     
-    # Kijun-sen (Base Line): (26-period high + low) / 2
-    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2
+    # Chandelier Exit: long exit = highest_high - 3*ATR, short exit = lowest_low + 3*ATR
+    chandelier_long_exit = highest_high_22_aligned - 3.0 * atr22_1d_aligned
+    chandelier_short_exit = lowest_low_22_aligned + 3.0 * atr22_1d_aligned
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + low) / 2
-    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_b = (period52_high + period52_low) / 2
-    
-    # Align Ichimoku components to 6h timeframe
-    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan)
-    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b)
-    
-    # Cloud top and bottom
-    cloud_top = np.maximum(senkou_a_aligned, senkou_b_aligned)
-    cloud_bottom = np.minimum(senkou_a_aligned, senkou_b_aligned)
+    # Volume filter: current volume > 1.5 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # warmup for calculations
+    start_idx = 40  # warmup
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
-            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i])):
+        if (np.isnan(chandelier_long_exit[i]) or np.isnan(chandelier_short_exit[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        tenkan_val = tenkan_aligned[i]
-        kijun_val = kijun_aligned[i]
-        cloud_top_val = cloud_top[i]
-        cloud_bottom_val = cloud_bottom[i]
+        long_exit = chandelier_long_exit[i]
+        short_exit = chandelier_short_exit[i]
+        vol_filt = volume_filter[i]
         
         if position == 0:
-            # Enter long: TK cross bullish + price above cloud
-            if (tenkan_val > kijun_val and 
-                close[i] > cloud_top_val):
+            # Enter long: price above long exit + volume filter
+            if close[i] > long_exit and vol_filt:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: TK cross bearish + price below cloud
-            elif (tenkan_val < kijun_val and 
-                  close[i] < cloud_bottom_val):
+            # Enter short: price below short exit + volume filter
+            elif close[i] < short_exit and vol_filt:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: TK cross bearish OR price drops below cloud
-            if (tenkan_val < kijun_val or 
-                close[i] < cloud_top_val):
+            # Exit long: price below long exit
+            if close[i] < long_exit:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: TK cross bullish OR price rises above cloud
-            if (tenkan_val > kijun_val or 
-                close[i] > cloud_bottom_val):
+            # Exit short: price above short exit
+            if close[i] > short_exit:
                 signals[i] = 0.0
                 position = 0
             else:
