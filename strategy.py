@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h price action combined with weekly pivot levels and volume confirmation.
-# Long when price breaks above weekly R2 pivot level AND volume > 1.5x 20-period average.
-# Short when price breaks below weekly S2 pivot level AND volume > 1.5x 20-period average.
-# Exit when price returns to weekly pivot (PP) level.
-# Weekly pivots capture institutional levels that hold across multiple timeframes.
-# Volume confirmation filters false breakouts. Weekly timeframe provides structural bias.
-# Designed for 60-120 total trades over 4 years (15-30/year) to minimize fee drag.
+# Hypothesis: 12h Choppiness Index + 1d EMA34 + Volume Spike
+# Long when CHOP(12h) > 61.8 (range) AND price > 1d EMA34 (up trend) AND volume > 1.5x 20-period average
+# Short when CHOP(12h) > 61.8 (range) AND price < 1d EMA34 (down trend) AND volume > 1.5x 20-period average
+# Exit when CHOP(12h) < 38.2 (trending) OR price crosses EMA34 in opposite direction
+# Choppiness Index identifies ranging markets ideal for mean reversion to EMA.
+# EMA34 filters higher timeframe trend direction. Volume confirms institutional participation.
+# Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "6h_WeeklyPivot_R2S2_Volume"
-timeframe = "6h"
+name = "12h_Chop_1dEMA34_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,30 +25,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # 1d data for EMA34
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 35:
         return np.zeros(n)
     
-    # Calculate weekly pivot points (standard formula)
-    # Based on previous week's OHLC
-    prev_high = df_1w['high'].shift(1).values
-    prev_low = df_1w['low'].shift(1).values
-    prev_close = df_1w['close'].shift(1).values
+    # 1d EMA34
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Pivot point and support/resistance levels
-    PP = (prev_high + prev_low + prev_close) / 3.0
-    R1 = 2 * PP - prev_low
-    S1 = 2 * PP - prev_high
-    R2 = PP + (prev_high - prev_low)
-    S2 = PP - (prev_high - prev_low)
-    R3 = prev_high + 2 * (PP - prev_low)
-    S3 = prev_low - 2 * (prev_high - PP)
+    # 12h Choppiness Index (14-period)
+    # CHOP = 100 * log10( sum(ATR) / (max(high) - min(low)) ) / log10(n)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
     
-    # Align weekly pivot levels to 6h timeframe
-    PP_aligned = align_htf_to_ltf(prices, df_1w, PP)
-    R2_aligned = align_htf_to_ltf(prices, df_1w, R2)
-    S2_aligned = align_htf_to_ltf(prices, df_1w, S2)
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    range_hl = max_high - min_low
+    
+    chop = np.full(n, 50.0)  # default neutral
+    valid = (range_hl > 0) & ~np.isnan(atr_sum)
+    chop[valid] = 100 * np.log10(atr_sum[valid] / range_hl[valid]) / np.log10(14)
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -57,22 +58,22 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 2)  # Sufficient warmup for volume MA and weekly data
+    start_idx = max(35, 20, 14)  # Sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(PP_aligned[i]) or np.isnan(R2_aligned[i]) or 
-            np.isnan(S2_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(chop[i]) or 
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price breaks above weekly R2, volume filter
-            long_cond = (close[i] > R2_aligned[i]) and volume_filter[i]
-            # Short conditions: price breaks below weekly S2, volume filter
-            short_cond = (close[i] < S2_aligned[i]) and volume_filter[i]
+            # Long conditions: ranging market (CHOP > 61.8), price above EMA34, volume filter
+            long_cond = (chop[i] > 61.8) and (close[i] > ema34_1d_aligned[i]) and volume_filter[i]
+            # Short conditions: ranging market (CHOP > 61.8), price below EMA34, volume filter
+            short_cond = (chop[i] > 61.8) and (close[i] < ema34_1d_aligned[i]) and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -81,15 +82,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price returns to weekly pivot (PP) level
-            if close[i] <= PP_aligned[i]:
+            # Long exit: trending market (CHOP < 38.2) OR price crosses below EMA34
+            if (chop[i] < 38.2) or (close[i] < ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price returns to weekly pivot (PP) level
-            if close[i] >= PP_aligned[i]:
+            # Short exit: trending market (CHOP < 38.2) OR price crosses above EMA34
+            if (chop[i] < 38.2) or (close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
