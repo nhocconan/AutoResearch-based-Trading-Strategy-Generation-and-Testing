@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using daily Camarilla pivot points (R3/S3) with volume confirmation and 1w EMA trend filter.
-# Long when price breaks above daily R3 with volume surge and above 1w EMA.
-# Short when price breaks below daily S3 with volume surge and below 1w EMA.
-# Exits when price returns to daily pivot point. Designed for low trade frequency (12-37/year) to avoid fee drag.
-# Camarilla levels provide strong support/resistance that works in both trending and ranging markets.
+# Hypothesis: 1h strategy using 4h Donchian breakout with volume confirmation and 1d EMA trend filter.
+# Long when price breaks above 4h Donchian upper channel (20-period) with volume spike and above 1d EMA50.
+# Short when price breaks below 4h Donchian lower channel (20-period) with volume spike and below 1d EMA50.
+# Uses 4h for signal direction, 1h for entry timing. Session filter (08-20 UTC) reduces noise.
+# Target: 15-35 trades/year to avoid fee drag. Designed to work in both bull and bear markets via trend filter.
 
-name = "12h_Camarilla_R3_S3_VolumeTrend"
-timeframe = "12h"
+name = "1h_4hDonchian_1dEMA50_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,43 +23,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    # Get 4h data for Donchian channels
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 4h Donchian channels (20-period high/low)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    donchian_high = np.full_like(high_4h, np.nan)
+    donchian_low = np.full_like(low_4h, np.nan)
     
-    # Calculate daily Camarilla levels (R3, S3, pivot)
-    camarilla_pivot = np.full_like(close_1d, np.nan)
-    camarilla_r3 = np.full_like(close_1d, np.nan)
-    camarilla_s3 = np.full_like(close_1d, np.nan)
-    
-    for i in range(len(df_1d)):
-        # Camarilla formulas using previous day's OHLC
-        if i == 0:
-            # For first day, use same day's OHLC
-            camarilla_pivot[i] = (high_1d[i] + low_1d[i] + close_1d[i]) / 3.0
+    for i in range(len(df_4h)):
+        if i < 19:
+            donchian_high[i] = np.nan
+            donchian_low[i] = np.nan
         else:
-            camarilla_pivot[i] = (high_1d[i-1] + low_1d[i-1] + close_1d[i-1]) / 3.0
-        
-        camarilla_r3[i] = camarilla_pivot[i] + (high_1d[i-1] - low_1d[i-1]) * 1.1 / 4
-        camarilla_s3[i] = camarilla_pivot[i] - (high_1d[i-1] - low_1d[i-1]) * 1.1 / 4
+            donchian_high[i] = np.max(high_4h[i-19:i+1])
+            donchian_low[i] = np.min(low_4h[i-19:i+1])
     
-    # Calculate 1w EMA (using 1d data as proxy - 5 days ~ 1 week)
-    ema_1w = pd.Series(close_1d).ewm(span=5, adjust=False, min_periods=5).mean().values
+    # Get 1d data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Align 1d indicators to 12h timeframe
-    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1d, ema_1w)
+    # Calculate 1d EMA50
+    close_1d = df_1d['close'].values
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Volume confirmation: 12h volume spike (2x 20-period EMA)
+    # Volume confirmation: 1h volume spike (2x 20-period EMA)
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     vol_spike = volume > (vol_ema * 2.0)
+    
+    # Align 4h indicators to 1h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    
+    # Align 1d EMA to 1h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -67,38 +72,38 @@ def generate_signals(prices):
     start_idx = 50  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
-        # Skip if any critical data is NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(camarilla_pivot_aligned[i]) or 
-            np.isnan(ema_1w_aligned[i])):
+        # Skip if any critical data is NaN or outside session
+        if (np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(ema_50_aligned[i]) or
+            not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above daily R3 + volume surge + above 1w EMA
-            if close[i] > camarilla_r3_aligned[i] and vol_spike[i] and close[i] > ema_1w_aligned[i]:
-                signals[i] = 0.25
+            # Enter long: price breaks above 4h Donchian high + volume spike + above 1d EMA50
+            if close[i] > donchian_high_aligned[i] and vol_spike[i] and close[i] > ema_50_aligned[i]:
+                signals[i] = 0.20
                 position = 1
-            # Enter short: price breaks below daily S3 + volume surge + below 1w EMA
-            elif close[i] < camarilla_s3_aligned[i] and vol_spike[i] and close[i] < ema_1w_aligned[i]:
-                signals[i] = -0.25
+            # Enter short: price breaks below 4h Donchian low + volume spike + below 1d EMA50
+            elif close[i] < donchian_low_aligned[i] and vol_spike[i] and close[i] < ema_50_aligned[i]:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: price returns to daily pivot
-            if close[i] <= camarilla_pivot_aligned[i]:
+            # Exit long: price breaks below 4h Donchian low
+            if close[i] < donchian_low_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: price returns to daily pivot
-            if close[i] >= camarilla_pivot_aligned[i]:
+            # Exit short: price breaks above 4h Donchian high
+            if close[i] > donchian_high_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
