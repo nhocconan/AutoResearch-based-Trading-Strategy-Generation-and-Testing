@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Weekly Ichimoku Cloud with Tenkan/Kijun Cross and Volume Confirmation
-# Uses weekly Ichimoku cloud (from prior week) to identify support/resistance zones.
-# Tenkan-sen/Kijun-sen cross provides entry signals, with price position relative to cloud filtering direction.
-# In bullish weekly trend (price above cloud), look for long on Tenkan/Kijun cross up.
-# In bearish weekly trend (price below cloud), look for short on Tenkan/Kijun cross down.
-# Volume > 1.5x 20-period average confirms participation.
-# Target: 10-25 trades/year (40-100 over 4 years) to minimize fee drag.
+# Hypothesis: 6h Weekly Pivot Point Reversal with Volume Confirmation
+# Uses weekly pivot points (PP, R1, R2, S1, S2) calculated from prior week's OHLC.
+# In bullish regime (price above weekly PP), look for long when price rejects S1/S2 with volume.
+# In bearish regime (price below weekly PP), look for short when price rejects R1/R2 with volume.
+# Volume > 1.3x 20-period average confirms rejection strength.
+# Weekly pivot points provide institutional support/resistance levels that work in both bull/bear markets.
+# Target: 15-35 trades/year (60-140 over 4 years) to stay within optimal range.
 
-name = "6h_WeeklyIchimoku_Cross_Volume"
+name = "6h_WeeklyPivot_Reversal_Volume"
 timeframe = "6h"
 leverage = 1.0
 
@@ -25,7 +25,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Ichimoku cloud
+    # Get weekly data for pivot points
     df_weekly = get_htf_data(prices, '1w')
     if len(df_weekly) < 52:
         return np.zeros(n)
@@ -33,28 +33,22 @@ def generate_signals(prices):
     weekly_high = df_weekly['high'].values
     weekly_low = df_weekly['low'].values
     weekly_close = df_weekly['close'].values
+    weekly_open = df_weekly['open'].values
     
-    # Calculate Ichimoku components (9, 26, 52 periods)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    tenkan_sen = np.full(len(weekly_high), np.nan)
-    for i in range(8, len(weekly_high)):
-        tenkan_sen[i] = (np.max(weekly_high[i-8:i+1]) + np.min(weekly_low[i-8:i+1])) / 2
+    # Calculate weekly pivot points: PP = (H + L + C) / 3
+    weekly_pivot = np.full(len(weekly_high), np.nan)
+    weekly_r1 = np.full(len(weekly_high), np.nan)
+    weekly_s1 = np.full(len(weekly_high), np.nan)
+    weekly_r2 = np.full(len(weekly_high), np.nan)
+    weekly_s2 = np.full(len(weekly_high), np.nan)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    kijun_sen = np.full(len(weekly_high), np.nan)
-    for i in range(25, len(weekly_high)):
-        kijun_sen[i] = (np.max(weekly_high[i-25:i+1]) + np.min(weekly_low[i-25:i+1])) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
-    senkou_span_a = np.full(len(weekly_high), np.nan)
     for i in range(len(weekly_high)):
-        if not np.isnan(tenkan_sen[i]) and not np.isnan(kijun_sen[i]):
-            senkou_span_a[i] = (tenkan_sen[i] + kijun_sen[i]) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    senkou_span_b = np.full(len(weekly_high), np.nan)
-    for i in range(51, len(weekly_high)):
-        senkou_span_b[i] = (np.max(weekly_high[i-51:i+1]) + np.min(weekly_low[i-51:i+1])) / 2
+        if not (np.isnan(weekly_high[i]) or np.isnan(weekly_low[i]) or np.isnan(weekly_close[i])):
+            weekly_pivot[i] = (weekly_high[i] + weekly_low[i] + weekly_close[i]) / 3.0
+            weekly_r1[i] = 2 * weekly_pivot[i] - weekly_low[i]
+            weekly_s1[i] = 2 * weekly_pivot[i] - weekly_high[i]
+            weekly_r2[i] = weekly_pivot[i] + (weekly_high[i] - weekly_low[i])
+            weekly_s2[i] = weekly_pivot[i] - (weekly_high[i] - weekly_low[i])
     
     # Get daily data for volume filter
     df_daily = get_htf_data(prices, '1d')
@@ -67,11 +61,12 @@ def generate_signals(prices):
         for i in range(20, len(daily_volume)):
             vol_avg_20_daily[i] = np.mean(daily_volume[i-20:i])
     
-    # Align weekly Ichimoku components to 6h timeframe
-    tenkan_sen_aligned = align_htf_to_ltf(prices, df_weekly, tenkan_sen)
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_weekly, kijun_sen)
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_weekly, senkou_span_a)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_weekly, senkou_span_b)
+    # Align weekly pivot points to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_weekly, weekly_pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s1)
+    r2_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r2)
+    s2_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s2)
     
     # Align daily volume average to 6h timeframe
     vol_avg_20_daily_aligned = align_htf_to_ltf(prices, df_daily, vol_avg_20_daily)
@@ -94,15 +89,15 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or
-            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
             np.isnan(vol_avg_20_daily_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume filter: current daily volume > 1.5x 20-period average
+        # Volume filter: current daily volume > 1.3x 20-period average
         vol_filter = False
         if not np.isnan(vol_avg_20_daily_aligned[i]):
             # Find current daily bar's volume
@@ -113,27 +108,29 @@ def generate_signals(prices):
             
             if idx_daily >= 0:
                 vol_daily_current = df_daily.iloc[idx_daily]['volume']
-                vol_filter = vol_daily_current > 1.5 * vol_avg_20_daily_aligned[i]
+                vol_filter = vol_daily_current > 1.3 * vol_avg_20_daily_aligned[i]
         
-        # Determine cloud boundaries and price position
-        cloud_top = max(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
-        cloud_bottom = min(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
-        price_above_cloud = close[i] > cloud_top
-        price_below_cloud = close[i] < cloud_bottom
-        
-        # Tenkan/Kijun cross signals
-        tk_cross_up = tenkan_sen_aligned[i] > kijun_sen_aligned[i] and \
-                      tenkan_sen_aligned[i-1] <= kijun_sen_aligned[i-1]
-        tk_cross_down = tenkan_sen_aligned[i] < kijun_sen_aligned[i] and \
-                        tenkan_sen_aligned[i-1] >= kijun_sen_aligned[i-1]
+        # Determine price position relative to weekly pivot levels
+        price_above_r2 = close[i] > r2_aligned[i]
+        price_between_r1_r2 = r1_aligned[i] < close[i] < r2_aligned[i]
+        price_between_pp_r1 = pivot_aligned[i] < close[i] < r1_aligned[i]
+        price_between_s1_pp = s1_aligned[i] < close[i] < pivot_aligned[i]
+        price_between_s2_s1 = s2_aligned[i] < close[i] < s1_aligned[i]
+        price_below_s2 = close[i] < s2_aligned[i]
         
         if position == 0:
-            # Look for entry: TK cross with price position and volume
-            # Long when TK cross up and price above cloud (bullish alignment)
-            long_condition = tk_cross_up and price_above_cloud and vol_filter
+            # Look for entry: rejection at pivot levels with volume
+            # Long when price rejects S1/S2 (bounces up) in bullish regime (above PP)
+            long_condition = (
+                (close[i] > s1_aligned[i] and close[i-1] <= s1_aligned[i-1]) or  # bounce from S1
+                (close[i] > s2_aligned[i] and close[i-1] <= s2_aligned[i-1])     # bounce from S2
+            ) and close[i] > pivot_aligned[i] and vol_filter
             
-            # Short when TK cross down and price below cloud (bearish alignment)
-            short_condition = tk_cross_down and price_below_cloud and vol_filter
+            # Short when price rejects R1/R2 (bounces down) in bearish regime (below PP)
+            short_condition = (
+                (close[i] < r1_aligned[i] and close[i-1] >= r1_aligned[i-1]) or  # bounce from R1
+                (close[i] < r2_aligned[i] and close[i-1] >= r2_aligned[i-1])     # bounce from R2
+            ) and close[i] < pivot_aligned[i] and vol_filter
             
             if long_condition:
                 signals[i] = 0.25
@@ -142,15 +139,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns below cloud or TK cross down
-            if close[i] < cloud_bottom or tk_cross_down:
+            # Exit long: price breaks below S1 or reaches R1
+            if close[i] < s1_aligned[i] or close[i] > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns above cloud or TK cross up
-            if close[i] > cloud_top or tk_cross_up:
+            # Exit short: price breaks above R1 or reaches S1
+            if close[i] > r1_aligned[i] or close[i] < s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
