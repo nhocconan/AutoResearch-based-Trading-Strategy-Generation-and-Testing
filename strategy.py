@@ -1,14 +1,18 @@
-# 4h Donchian Breakout + Volume + ADX Filter with ATR Stoploss
-# Hypothesis: Donchian(20) breakouts capture momentum, volume confirms strength,
-# ADX(14) > 25 filters for trending markets, ATR-based stoploss limits drawdown.
-# Works in bull/bear by using ADX filter to avoid false breakouts in ranging markets.
-# Target: 150-250 total trades over 4 years (38-63/year) on 4h timeframe.
+#!/usr/bin/env python3
+"""
+Hypothesis: 4h Camarilla R4/S4 breakout with weekly trend filter and volume spike
+- Uses weekly trend (EMA50) to avoid counter-trend trades in any market regime
+- Enters on breakout of R4 (short) or S4 (long) with volume confirmation
+- Weekly trend filter ensures alignment with higher timeframe momentum
+- Designed for low trade frequency (<50/year) to minimize fee drag on 4h timeframe
+- Works in bull/bear by using weekly trend to filter direction
+"""
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Donchian20_Breakout_Volume_ADX_Filter"
+name = "4h_Camarilla_R4S4_Breakout_WeeklyTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,50 +26,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian(20) channels
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 1d data for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 5:
+        return np.zeros(n)
     
-    # ADX(14) for trend strength
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]
+    # Calculate Camarilla levels using previous day's data
+    # S4 = C - (H-L)*1.50, R4 = C + (H-L)*1.50
+    n1d = len(close_1d)
+    camarilla_S4 = np.full(n1d, np.nan)
+    camarilla_R4 = np.full(n1d, np.nan)
     
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    for i in range(1, n1d):
+        H = high_1d[i-1]
+        L = low_1d[i-1]
+        C = close_1d[i-1]
+        range_val = H - L
+        camarilla_S4[i] = C - range_val * 1.50
+        camarilla_R4[i] = C + range_val * 1.50
     
-    # Volume spike filter
+    # Align Camarilla levels to 4h timeframe
+    camarilla_S4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S4)
+    camarilla_R4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R4)
+    
+    # Weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    # Weekly EMA50 for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Volume spike: current volume > 2.0x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma20)
+    volume_spike = volume > (2.0 * vol_ma20)
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
-        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(adx[i]) or np.isnan(volume_spike[i]):
+        # Skip if any critical data is NaN
+        if (np.isnan(camarilla_S4_aligned[i]) or np.isnan(camarilla_R4_aligned[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above Donchian high with ADX > 25 and volume spike
-            long_cond = (close[i] > donchian_high[i] and 
-                        adx[i] > 25 and 
+            # Long: price breaks above S4 (strong support) with weekly uptrend + volume spike
+            long_cond = (close[i] > camarilla_S4_aligned[i] and 
+                        ema_50_1w_aligned[i] > ema_50_1w_aligned[i-1] and
                         volume_spike[i])
             
-            # Short: break below Donchian low with ADX > 25 and volume spike
-            short_cond = (close[i] < donchian_low[i] and 
-                         adx[i] > 25 and 
+            # Short: price breaks below R4 (strong resistance) with weekly downtrend + volume spike
+            short_cond = (close[i] < camarilla_R4_aligned[i] and 
+                         ema_50_1w_aligned[i] < ema_50_1w_aligned[i-1] and
                          volume_spike[i])
             
             if long_cond:
@@ -75,15 +99,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: break below Donchian low or ADX < 20 (trend weakening)
-            if close[i] < donchian_low[i] or adx[i] < 20:
+            # Long exit: price breaks below S3 (weaker support) or weekly trend turns down
+            if close[i] < camarilla_S4_aligned[i] * 0.995 or ema_50_1w_aligned[i] < ema_50_1w_aligned[i-5]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: break above Donchian high or ADX < 20
-            if close[i] > donchian_high[i] or adx[i] < 20:
+            # Short exit: price breaks above R4 (strong resistance) or weekly trend turns up
+            if close[i] > camarilla_R4_aligned[i] * 1.005 or ema_50_1w_aligned[i] > ema_50_1w_aligned[i-5]:
                 signals[i] = 0.0
                 position = 0
             else:
