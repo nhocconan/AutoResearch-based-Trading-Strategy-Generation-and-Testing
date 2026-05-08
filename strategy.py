@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "6h"
+name = "12h_Donchian_Breakout_Volume_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,57 +17,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data once for Camarilla levels and trend filter
+    # Get 1d data once for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # 1d EMA34 trend filter
     close_1d = df_1d['close'].values
-    
-    # Camarilla formulas
-    R3 = close_1d + (high_1d - low_1d) * 1.1 / 6
-    S3 = close_1d - (high_1d - low_1d) * 1.1 / 6
-    R4 = close_1d + (high_1d - low_1d) * 1.1 / 2
-    S4 = close_1d - (high_1d - low_1d) * 1.1 / 2
-    
-    # Align Camarilla levels to 6h
-    R3_6h = align_htf_to_ltf(prices, df_1d, R3)
-    S3_6h = align_htf_to_ltf(prices, df_1d, S3)
-    R4_6h = align_htf_to_ltf(prices, df_1d, R4)
-    S4_6h = align_htf_to_ltf(prices, df_1d, S4)
-    
-    # Daily trend filter: price above/below EMA34
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     trend_1d = (close_1d > ema34_1d).astype(float)
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # Volume spike detection: current volume > 2.0 * 24-period average (4 days)
-    vol_ma24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    vol_spike = volume > (vol_ma24 * 2.0)
+    # Donchian channel (20-period) on 12h
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume spike detection: current volume > 1.5 * 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (vol_ma20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 24  # warmup for volume MA
+    start_idx = 20  # warmup for Donchian and volume MA
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(R3_6h[i]) or np.isnan(S3_6h[i]) or np.isnan(R4_6h[i]) or 
-            np.isnan(S4_6h[i]) or np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ma24[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long breakout: price breaks above R4 with volume spike and daily uptrend
-            long_cond = (close[i] > R4_6h[i] and vol_spike[i] and trend_1d_aligned[i] > 0.5)
+            # Long entry: price breaks above 20-day high with volume spike and daily uptrend
+            long_cond = (close[i] > high_20[i] and vol_spike[i] and trend_1d_aligned[i] > 0.5)
             
-            # Short breakdown: price breaks below S4 with volume spike and daily downtrend
-            short_cond = (close[i] < S4_6h[i] and vol_spike[i] and trend_1d_aligned[i] < 0.5)
+            # Short entry: price breaks below 20-day low with volume spike and daily downtrend
+            short_cond = (close[i] < low_20[i] and vol_spike[i] and trend_1d_aligned[i] < 0.5)
             
             if long_cond:
                 signals[i] = 0.25
@@ -76,15 +63,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price closes back below R3 (mean reversion)
-            if close[i] < R3_6h[i]:
+            # Long exit: price closes below 20-day low (mean reversion)
+            if close[i] < low_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price closes back above S3 (mean reversion)
-            if close[i] > S3_6h[i]:
+            # Short exit: price closes above 20-day high (mean reversion)
+            if close[i] > high_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -92,7 +79,7 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R4/S4 breakout with volume spike and daily trend filter on 6h timeframe.
-# Works in bull markets (breakouts continue) and bear markets (mean reversion at opposite levels).
-# Target: 15-30 trades/year to minimize fee decay while capturing significant moves.
-# Uses Camarilla levels from daily timeframe for institutional reference points.
+# Hypothesis: Donchian(20) breakout with volume confirmation and daily trend filter on 12h timeframe.
+# Works in bull markets (breakouts continue) and bear markets (mean reversion at opposite band).
+# Target: 20-40 trades/year to minimize fee decay while capturing significant moves.
+# Daily EMA34 ensures alignment with longer-term trend, reducing counter-trend trades.
