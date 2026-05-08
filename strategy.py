@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Donchian_Breakout_1dTrend_VolumeSpike"
-timeframe = "6h"
+name = "4h_1d_Stochastic_Pullback_1dTrend"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,9 +26,13 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 6h Donchian channels (20-period)
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 4h Stochastic %K (14,3) - overbought/oversold
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    stoch_k = ((close - lowest_low_14) / (highest_high_14 - lowest_low_14 + 1e-10)) * 100
+    
+    # 4h SMA of %K for signal smoothing
+    stoch_k_sma = pd.Series(stoch_k).rolling(window=3, min_periods=3).mean().values
     
     # Volume spike: current volume > 2.0x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -41,20 +45,20 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(high_max[i]) or 
-            np.isnan(low_min[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(stoch_k_sma[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above Donchian high + uptrend (price > 1d EMA34) + volume spike
-            long_cond = (close[i] > high_max[i]) and \
+            # Long: Stochastic oversold (<20) + uptrend (price > 1d EMA34) + volume spike
+            long_cond = (stoch_k_sma[i] < 20) and \
                         (close[i] > ema_34_1d_aligned[i]) and \
                         volume_spike[i]
-            # Short: break below Donchian low + downtrend (price < 1d EMA34) + volume spike
-            short_cond = (close[i] < low_min[i]) and \
+            # Short: Stochastic overbought (>80) + downtrend (price < 1d EMA34) + volume spike
+            short_cond = (stoch_k_sma[i] > 80) and \
                          (close[i] < ema_34_1d_aligned[i]) and \
                          volume_spike[i]
             
@@ -65,15 +69,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: close below Donchian low (mean reversion to support)
-            if close[i] < low_min[i]:
+            # Long exit: Stochastic overbought (>80) or trend reversal
+            if stoch_k_sma[i] > 80 or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: close above Donchian high (mean reversion to resistance)
-            if close[i] > high_max[i]:
+            # Short exit: Stochastic oversold (<20) or trend reversal
+            if stoch_k_sma[i] < 20 or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
