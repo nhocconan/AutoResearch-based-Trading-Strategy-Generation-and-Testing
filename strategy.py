@@ -1,19 +1,14 @@
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+# 6h Bollinger Breakout with 1d Trend and Volume Confirmation
+# Hypothesis: Bollinger Band breakouts with 1d EMA trend filter and volume confirmation capture momentum moves.
+# Long when price breaks above upper BB (20,2) AND 1d EMA50 rising AND volume > 1.5x 20-period average.
+# Short when price breaks below lower BB (20,2) AND 1d EMA50 falling AND volume > 1.5x 20-period average.
+# Exit when price crosses back inside Bollinger Bands.
+# Uses Bollinger Bands for volatility-based breakouts, 1d EMA50 for trend alignment, volume for confirmation.
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# Works in bull markets via breakouts and bear markets via short breakdowns with trend filter.
 
-# Hypothesis: 1d RSI(14) mean reversion with volume filter and 1w trend filter.
-# Long when RSI < 30 (oversold) AND 1w EMA40 rising AND volume > 1.5x 20-period average.
-# Short when RSI > 70 (overbought) AND 1w EMA40 falling AND volume > 1.5x 20-period average.
-# Exit when RSI crosses back to neutral (40-60 range) or opposite extreme.
-# Uses 1d timeframe for mean reversion entries with 1w trend filter to avoid counter-trend trades.
-# Volume confirmation filters out low-liquidity false signals.
-# Target: 15-25 trades/year (60-100 total over 4 years) to minimize fee drag.
-# Works in both bull and bear markets by following the weekly trend direction.
-
-name = "1d_RSI14_MeanRev_1wEMA40_Volume"
-timeframe = "1d"
+name = "6h_BollingerBreakout_1dEMA50_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,30 +21,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 40:
+    # Daily data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # RSI(14) calculation
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Bollinger Bands (20,2) on 6h timeframe
+    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma20 + 2 * std20
+    lower_bb = sma20 - 2 * std20
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # 1w EMA40 for trend filter
-    ema40_1w = pd.Series(df_1w['close']).ewm(span=40, adjust=False, min_periods=40).mean().values
-    ema40_1w_aligned = align_htf_to_ltf(prices, df_1w, ema40_1w)
-    
-    # 1w EMA40 direction
-    ema40_rising = np.zeros_like(ema40_1w_aligned, dtype=bool)
-    ema40_falling = np.zeros_like(ema40_1w_aligned, dtype=bool)
-    ema40_rising[1:] = ema40_1w_aligned[1:] > ema40_1w_aligned[:-1]
-    ema40_falling[1:] = ema40_1w_aligned[1:] < ema40_1w_aligned[:-1]
+    # 1d EMA50 direction
+    ema50_rising = np.zeros_like(ema50_1d_aligned, dtype=bool)
+    ema50_falling = np.zeros_like(ema50_1d_aligned, dtype=bool)
+    ema50_rising[1:] = ema50_1d_aligned[1:] > ema50_1d_aligned[:-1]
+    ema50_falling[1:] = ema50_1d_aligned[1:] < ema50_1d_aligned[:-1]
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -58,22 +49,22 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(14, 20)  # Sufficient warmup for RSI and volume MA
+    start_idx = max(50, 20)  # Sufficient warmup for EMA50 and BB
     
     for i in range(start_idx, n):
-        if (np.isnan(rsi[i]) or np.isnan(ema40_1w_aligned[i]) or 
-            np.isnan(ema40_rising[i]) or np.isnan(ema40_falling[i]) or 
-            np.isnan(volume_filter[i])):
+        if (np.isnan(upper_bb[i]) or np.isnan(lower_bb[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(ema50_rising[i]) or 
+            np.isnan(ema50_falling[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: RSI < 30, 1w EMA40 rising, volume filter
-            long_cond = (rsi[i] < 30) and ema40_rising[i] and volume_filter[i]
-            # Short conditions: RSI > 70, 1w EMA40 falling, volume filter
-            short_cond = (rsi[i] > 70) and ema40_falling[i] and volume_filter[i]
+            # Long conditions: price breaks above upper BB, 1d EMA50 rising, volume filter
+            long_cond = (close[i] > upper_bb[i]) and ema50_rising[i] and volume_filter[i]
+            # Short conditions: price breaks below lower BB, 1d EMA50 falling, volume filter
+            short_cond = (close[i] < lower_bb[i]) and ema50_falling[i] and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -82,18 +73,23 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: RSI crosses above 40 or RSI > 70 (overbought)
-            if rsi[i] > 40 or rsi[i] > 70:
+            # Long exit: price crosses back inside Bollinger Bands (below upper band)
+            if close[i] < upper_bb[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI crosses below 60 or RSI < 30 (oversold)
-            if rsi[i] < 60 or rsi[i] < 30:
+            # Short exit: price crosses back inside Bollinger Bands (above lower band)
+            if close[i] > lower_bb[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
+
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
