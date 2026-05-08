@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_WeeklyPivot_Momentum_Filter"
-timeframe = "6h"
+name = "12h_KAMA_Trend_With_RSI_And_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,87 +17,103 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data once for pivot points and trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
-    # Get daily data for momentum and volume confirmation
+    # Get daily data once for KAMA, RSI and volume context
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly pivot points (standard formula)
-    # PP = (H + L + C) / 3
-    # R1 = 2*PP - L
-    # S1 = 2*PP - H
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Previous week's values
-    prev_close_1w = np.roll(close_1w, 1)
-    prev_high_1w = np.roll(high_1w, 1)
-    prev_low_1w = np.roll(low_1w, 1)
-    prev_close_1w[0] = close_1w[0]
-    prev_high_1w[0] = high_1w[0]
-    prev_low_1w[0] = low_1w[0]
-    
-    # Weekly pivot levels
-    PP = (prev_high_1w + prev_low_1w + prev_close_1w) / 3
-    R1 = 2 * PP - prev_low_1w
-    S1 = 2 * PP - prev_high_1w
-    
-    # Align weekly pivot levels to 6h timeframe
-    PP_aligned = align_htf_to_ltf(prices, df_1w, PP)
-    R1_aligned = align_htf_to_ltf(prices, df_1w, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1w, S1)
-    
-    # Daily momentum: RSI(14) > 50 for long, < 50 for short
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
+    
+    # KAMA (Kaufman Adaptive Moving Average) parameters
+    er_length = 10
+    fast_sc = 2 / (2 + 1)  # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    
+    # Calculate Efficiency Ratio (ER)
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    volatility = np.sum(np.abs(np.diff(close_1d, prepend=close_1d[0])), axis=0) if False else None
+    # Correct volatility calculation: sum of absolute changes over er_length period
+    volatility = np.zeros_like(close_1d)
+    for i in range(len(close_1d)):
+        if i < er_length:
+            volatility[i] = np.nan
+        else:
+            volatility[i] = np.sum(np.abs(np.diff(close_1d[i-er_length:i+1])))
+    
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Calculate KAMA
+    kama = np.full_like(close_1d, np.nan)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        if np.isnan(sc[i]) or np.isnan(kama[i-1]):
+            kama[i] = kama[i-1]
+        else:
+            kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    
+    # RSI calculation
+    rsi_length = 14
     delta = np.diff(close_1d, prepend=close_1d[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
+    
+    avg_gain = np.full_like(close_1d, np.nan)
+    avg_loss = np.full_like(close_1d, np.nan)
+    for i in range(len(close_1d)):
+        if i < rsi_length:
+            avg_gain[i] = np.nan
+            avg_loss[i] = np.nan
+        elif i == rsi_length:
+            avg_gain[i] = np.mean(gain[1:rsi_length+1])
+            avg_loss[i] = np.mean(loss[1:rsi_length+1])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * (rsi_length-1) + gain[i]) / rsi_length
+            avg_loss[i] = (avg_loss[i-1] * (rsi_length-1) + loss[i]) / rsi_length
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
     rsi = 100 - (100 / (1 + rs))
-    rsi_ma = pd.Series(rsi).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Align RSI to 6h timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_ma)
+    # Volume spike detection: current volume > 2.0 * 20-day average
+    vol_ma20 = np.full_like(volume_1d, np.nan)
+    for i in range(len(volume_1d)):
+        if i < 20:
+            vol_ma20[i] = np.nan
+        else:
+            vol_ma20[i] = np.mean(volume_1d[i-20:i])
     
-    # Daily volume confirmation: volume > 1.3 * 20-day average
-    volume_1d = df_1d['volume'].values
-    vol_ma20d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_confirmed = volume_1d > (vol_ma20d * 1.3)
-    vol_confirmed_aligned = align_htf_to_ltf(prices, df_1d, vol_confirmed)
+    volume_spike = volume_1d > (vol_ma20 * 2.0)
+    
+    # Align all indicators to 12h timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # warmup for all indicators
+    start_idx = 50  # warmup period
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(PP_aligned[i]) or np.isnan(R1_aligned[i]) or 
-            np.isnan(S1_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(vol_confirmed_aligned[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+            np.isnan(volume_spike_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: price above weekly pivot, RSI > 50, volume confirmed
-            long_cond = (close[i] > PP_aligned[i] and 
+            # Long entry: price above KAMA, RSI > 50, volume spike
+            long_cond = (close[i] > kama_aligned[i] and 
                         rsi_aligned[i] > 50 and 
-                        vol_confirmed_aligned[i])
+                        volume_spike_aligned[i])
             
-            # Short entry: price below weekly pivot, RSI < 50, volume confirmed
-            short_cond = (close[i] < PP_aligned[i] and 
+            # Short entry: price below KAMA, RSI < 50, volume spike
+            short_cond = (close[i] < kama_aligned[i] and 
                          rsi_aligned[i] < 50 and 
-                         vol_confirmed_aligned[i])
+                         volume_spike_aligned[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -106,15 +122,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below S1 (strong support break)
-            if close[i] < S1_aligned[i]:
+            # Long exit: price crosses below KAMA
+            if close[i] < kama_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above R1 (strong resistance break)
-            if close[i] > R1_aligned[i]:
+            # Short exit: price crosses above KAMA
+            if close[i] > kama_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -122,10 +138,7 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Weekly pivot points act as significant support/resistance levels.
-# In ranging markets, price tends to revert to the pivot (PP).
-# In trending markets, price breaks through R1/S1 with momentum.
-# RSI(14) filter ensures we only trade in the direction of momentum.
-# Volume confirmation (1.3x 20-day average) ensures institutional participation.
-# Works in both bull (breakouts) and bear (mean reversion) markets.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# Hypothesis: KAMA adapts to market conditions - faster in trends, slower in ranges.
+# Combined with RSI for momentum confirmation and volume spike for validation.
+# Works in both bull and bear markets by adapting to volatility.
+# Target: 15-25 trades/year to minimize fee decay while capturing significant moves.
