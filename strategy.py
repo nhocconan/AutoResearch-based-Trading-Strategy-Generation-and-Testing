@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h volume confirmation and 12h EMA(50) trend filter
-# Donchian breakouts capture momentum in trending markets. Volume confirms institutional interest.
-# EMA(50) on 12h ensures trades align with medium-term trend, reducing whipsaws.
-# Works in both bull and bear markets by filtering for trend alignment.
-# Targets 20-40 trades per year (~80-160 total over 4 years) to minimize fee drag.
+# Hypothesis: 6h Ehlers Fisher Transform with 1w trend filter and volume confirmation
+# Fisher Transform identifies turning points in price. In bull markets, long when Fisher > -1.5;
+# in bear markets, short when Fisher < +1.5. Weekly trend filter ensures we only trade
+# with the higher timeframe trend. Volume confirms institutional participation.
+# Targets 15-25 trades per year (~60-100 total over 4 years) to minimize fee drag.
 
-name = "4h_Donchian20_12hVolume_12hEMA50"
-timeframe = "4h"
+name = "6h_Fisher_1wTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,58 +23,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period) on 4h
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Fisher Transform on close prices (9-period)
+    price = (high + low) / 2
+    max_hl = np.maximum.accumulate(high)
+    min_hl = np.minimum.accumulate(low)
+    price_range = max_hl - min_hl
+    price_range = np.where(price_range == 0, 1, price_range)  # avoid division by zero
     
-    # Get 12h data for volume and EMA
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    value1 = 0.33 * 2 * ((price - min_hl) / price_range - 0.5)
+    value1 = np.where(value1 >  0.99,  0.999, value1)
+    value1 = np.where(value1 < -0.99, -0.999, value1)
+    
+    # Smooth value1
+    value2 = np.zeros_like(value1)
+    value2[0] = value1[0]
+    for i in range(1, len(value1)):
+        value2[i] = 0.5 * value1[i] + 0.5 * value2[i-1]
+    
+    # Fisher Transform
+    fish = np.zeros_like(value2)
+    fish[0] = 0
+    for i in range(1, len(value2)):
+        fish[i] = 0.5 * np.log((1 + value2[i]) / (1 - value2[i]) + 1e-10) + 0.5 * fish[i-1]
+    
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # 12h volume average (20-period)
-    vol_12h = df_12h['volume'].values
-    vol_ma_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
+    close_1w = df_1w['close'].values
+    # Weekly EMA50 for trend
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_up_1w = close_1w > ema50_1w
+    trend_down_1w = close_1w < ema50_1w
     
-    # 12h EMA(50)
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Align weekly trend to 6h
+    trend_up_6h = align_htf_to_ltf(prices, df_1w, trend_up_1w)
+    trend_down_6h = align_htf_to_ltf(prices, df_1w, trend_down_1w)
+    
+    # Volume spike detection (20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    vol_spike = volume > (vol_ma.values * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure sufficient data for EMA
+    start_idx = 30  # Ensure sufficient data for Fisher and MA
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ma_12h_aligned[i]) or np.isnan(ema_50_12h_aligned[i])):
+        if (np.isnan(fish[i]) or np.isnan(trend_up_6h[i]) or np.isnan(trend_down_6h[i]) or 
+            np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above Donchian upper, volume above average, price above EMA
-            if close[i] > highest_high[i] and volume[i] > vol_ma_12h_aligned[i] and close[i] > ema_50_12h_aligned[i]:
+            # Enter long: Fisher crosses above -1.5, weekly uptrend, volume spike
+            if fish[i] > -1.5 and fish[i-1] <= -1.5 and trend_up_6h[i] and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below Donchian lower, volume above average, price below EMA
-            elif close[i] < lowest_low[i] and volume[i] > vol_ma_12h_aligned[i] and close[i] < ema_50_12h_aligned[i]:
+            # Enter short: Fisher crosses below +1.5, weekly downtrend, volume spike
+            elif fish[i] < 1.5 and fish[i-1] >= 1.5 and trend_down_6h[i] and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to Donchian lower or below EMA
-            if close[i] < lowest_low[i] or close[i] < ema_50_12h_aligned[i]:
+            # Exit long: Fisher crosses below -1.5 or trend changes
+            if fish[i] < -1.5 or not trend_up_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to Donchian upper or above EMA
-            if close[i] > highest_high[i] or close[i] > ema_50_12h_aligned[i]:
+            # Exit short: Fisher crosses above +1.5 or trend changes
+            if fish[i] > 1.5 or not trend_down_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
