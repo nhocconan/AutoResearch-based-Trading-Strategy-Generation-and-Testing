@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily VWAP reversion with weekly trend filter and volume confirmation
-# Long when price closes below VWAP, weekly trend up, and volume above average
-# Short when price closes above VWAP, weekly trend down, and volume above average
-# VWAP acts as dynamic support/resistance; mean reversion in ranging markets
-# Weekly trend filter ensures alignment with higher timeframe momentum
-# Volume confirmation avoids low-liquidity false signals
-# Targets 30-80 total trades over 4 years (7-20/year) for low frequency and high edge
+# Hypothesis: 6-hour time-weighted average price (TWAP) with 1-day volume-weighted VWAP trend filter
+# Long when 6h price > 6h TWAP and 1d VWAP rising, short when 6h price < 6h TWAP and 1d VWAP falling
+# Uses volume-weighted average price for institutional trend detection
+# TWAP provides dynamic support/resistance based on volume distribution
+# Targets 50-150 total trades over 4 years (12-37/year) with disciplined entries
+# Works in both bull and bear markets by following institutional volume flow
 
-name = "1d_VWAP_Reversion_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "6h_TWAP_VWAP_Trend"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,67 +24,68 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data once for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get daily data once for VWAP trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly EMA(20) for trend filter
-    weekly_close = df_1w['close'].values
-    ema20_1w = pd.Series(weekly_close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # Calculate daily VWAP
+    typical_price_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    vwap_1d = (typical_price_1d * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
+    vwap_1d_vals = vwap_1d.values
     
-    # Calculate VWAP: cumulative (price * volume) / cumulative volume
-    # Using typical price = (high + low + close) / 3
-    typical_price = (high + low + close) / 3.0
-    pv = typical_price * volume
-    cum_pv = np.cumsum(pv)
-    cum_vol = np.cumsum(volume)
-    # Avoid division by zero
-    vwap = np.divide(cum_pv, cum_vol, out=np.zeros_like(cum_pv), where=cum_vol!=0)
+    # Calculate daily VWAP slope (trend)
+    vwap_slope = np.diff(vwap_1d_vals, prepend=vwap_1d_vals[0])
+    vwap_rising = vwap_slope > 0
+    vwap_falling = vwap_slope < 0
     
-    # Volume filter: current volume > 1.5 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma)
+    # Align VWAP trend to 6h timeframe
+    vwap_rising_aligned = align_htf_to_ltf(prices, df_1d, vwap_rising)
+    vwap_falling_aligned = align_htf_to_ltf(prices, df_1d, vwap_falling)
+    
+    # Calculate 6-period TWAP (time-weighted average price)
+    # Typical price weighted by time (equal weight per bar) - equivalent to VWAP with unit volume
+    typical_price = (high + low + close) / 3
+    twap = pd.Series(typical_price).rolling(window=6, min_periods=6).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for VWAP and EMA stability
+    start_idx = 6  # warmup for TWAP
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema20_1w_aligned[i]) or np.isnan(vwap[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(twap[i]) or np.isnan(vwap_rising_aligned[i]) or 
+            np.isnan(vwap_falling_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema20_1w_val = ema20_1w_aligned[i]
         price = close[i]
-        vwap_val = vwap[i]
-        vol_filt = volume_filter[i]
+        twap_val = twap[i]
+        vwap_rising_val = vwap_rising_aligned[i]
+        vwap_falling_val = vwap_falling_aligned[i]
         
         if position == 0:
-            # Enter long: price closes below VWAP, weekly uptrend, volume confirmation
-            if price < vwap_val and price > ema20_1w_val and vol_filt:
+            # Enter long: price above TWAP and daily VWAP rising
+            if price > twap_val and vwap_rising_val:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price closes above VWAP, weekly downtrend, volume confirmation
-            elif price > vwap_val and price < ema20_1w_val and vol_filt:
+            # Enter short: price below TWAP and daily VWAP falling
+            elif price < twap_val and vwap_falling_val:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses back above VWAP or weekly trend turns down
-            if price > vwap_val or price < ema20_1w_val:
+            # Exit long: price falls below TWAP or VWAP stops rising
+            if price < twap_val or not vwap_rising_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses back below VWAP or weekly trend turns up
-            if price < vwap_val or price > ema20_1w_val:
+            # Exit short: price rises above TWAP or VWAP stops falling
+            if price > twap_val or not vwap_falling_val:
                 signals[i] = 0.0
                 position = 0
             else:
