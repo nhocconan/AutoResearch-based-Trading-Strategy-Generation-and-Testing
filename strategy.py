@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_PivotBreakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_TRIX_VolumeSpike_ChopFilter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,74 +17,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    close_1d = df_1d['close'].values
-    
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Daily data for Pivot Points (PP, R1, S1)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    n1d = len(close_1d)
-    pivot_pp = np.full(n1d, np.nan)
-    pivot_r1 = np.full(n1d, np.nan)
-    pivot_s1 = np.full(n1d, np.nan)
-    
-    for i in range(1, n1d):
-        PH = high_1d[i-1]
-        PL = low_1d[i-1]
-        PC = close_1d[i-1]
-        
-        PP = (PH + PL + PC) / 3.0
-        R1 = 2 * PP - PL
-        S1 = 2 * PP - PH
-        
-        pivot_pp[i] = PP
-        pivot_r1[i] = R1
-        pivot_s1[i] = S1
-    
-    # Align Pivot levels to 12h timeframe
-    pivot_pp_aligned = align_htf_to_ltf(prices, df_1d, pivot_pp)
-    pivot_r1_aligned = align_htf_to_ltf(prices, df_1d, pivot_r1)
-    pivot_s1_aligned = align_htf_to_ltf(prices, df_1d, pivot_s1)
+    # Calculate TRIX on close (12-period EMA of EMA of EMA)
+    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean()
+    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
+    trix = ema3.pct_change() * 100  # percentage change
+    trix_values = trix.values
     
     # Volume spike: current volume > 2.0x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma20)
     
+    # Choppiness Index (14-period) for regime filter
+    atr = np.abs(np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1)))))
+    atr[0] = np.abs(high[0] - low[0])  # first value
+    tr_sum = pd.Series(atr).rolling(window=14, min_periods=14).sum()
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(tr_sum / (np.log14(14) * (highest_high - lowest_low))) / np.log10(14)
+    # Handle division by zero and invalid values
+    chop = np.where((highest_high - lowest_low) != 0, chop, 50.0)
+    chop = np.nan_to_num(chop, nan=50.0)
+    
+    # Daily trend filter using EMA34
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(pivot_pp_aligned[i]) or np.isnan(pivot_r1_aligned[i]) or 
-            np.isnan(pivot_s1_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(trix_values[i]) or np.isnan(volume_spike[i]) or 
+            np.isnan(chop[i]) or np.isnan(ema_34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R1 with 1d uptrend + volume spike
-            long_cond = (close[i] > pivot_r1_aligned[i] and 
-                        ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1] and
-                        volume_spike[i])
+            # Long: TRIX crosses above zero with volume spike and chop < 61.8 (trending) and daily uptrend
+            long_cond = (trix_values[i] > 0 and trix_values[i-1] <= 0 and
+                        volume_spike[i] and chop[i] < 61.8 and
+                        ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1])
             
-            # Short: price breaks below S1 with 1d downtrend + volume spike
-            short_cond = (close[i] < pivot_s1_aligned[i] and 
-                         ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1] and
-                         volume_spike[i])
+            # Short: TRIX crosses below zero with volume spike and chop < 61.8 (trending) and daily downtrend
+            short_cond = (trix_values[i] < 0 and trix_values[i-1] >= 0 and
+                         volume_spike[i] and chop[i] < 61.8 and
+                         ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1])
             
             if long_cond:
                 signals[i] = 0.25
@@ -93,18 +79,21 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below PP (reversion to mean)
-            if close[i] < pivot_pp_aligned[i]:
+            # Long exit: TRIX crosses below zero
+            if trix_values[i] < 0 and trix_values[i-1] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above PP (reversion to mean)
-            if close[i] > pivot_pp_aligned[i]:
+            # Short exit: TRIX crosses above zero
+            if trix_values[i] > 0 and trix_values[i-1] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
+
+def np_log10(x):
+    return np.log(x) / np.log(10)
