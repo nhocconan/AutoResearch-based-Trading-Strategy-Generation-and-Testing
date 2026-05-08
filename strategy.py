@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h/1d trend filters with volume confirmation
-# Uses 4h Supertrend for trend direction and 1d volume spike for entry timing
-# Designed for low trade frequency (15-37/year) to avoid fee drag on 1h timeframe
-# Works in both bull/bear markets by following higher timeframe trends
+# Hypothesis: 12h Donchian breakout with 1d trend filter and volume confirmation
+# Uses daily trend (price > 200 EMA) to filter direction, 12h Donchian breakout for entry,
+# and volume spike confirmation. Designed for low trade frequency (12-37/year) on 12h timeframe
+# Works in bull markets via breakouts and bear markets via trend-filtered short opportunities
 
-name = "1h_Supertrend_4h_1dVol"
-timeframe = "1h"
+name = "12h_Donchian20_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,102 +22,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Supertrend trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
-    
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # Calculate ATR for Supertrend (period=10)
-    tr1 = np.abs(high_4h - low_4h)
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    
-    atr = np.zeros_like(tr)
-    atr[0] = tr[0]
-    for i in range(1, len(tr)):
-        atr[i] = (atr[i-1] * 9 + tr[i]) / 10  # Wilder's smoothing
-    
-    # Supertrend calculation
-    hl2 = (high_4h + low_4h) / 2
-    upper = hl2 + (3 * atr)
-    lower = hl2 - (3 * atr)
-    
-    supertrend = np.zeros_like(close_4h)
-    direction = np.ones_like(close_4h)  # 1 for uptrend, -1 for downtrend
-    
-    supertrend[0] = upper[0]
-    direction[0] = 1
-    
-    for i in range(1, len(close_4h)):
-        if close_4h[i] > supertrend[i-1]:
-            supertrend[i] = max(upper[i], supertrend[i-1])
-            direction[i] = 1
-        else:
-            supertrend[i] = min(lower[i], supertrend[i-1])
-            direction[i] = -1
-    
-    # Align Supertrend direction to 1h timeframe
-    supertrend_dir_aligned = align_htf_to_ltf(prices, df_4h, direction)
-    
-    # Get 1d data for volume spike filter
+    # Get 1d data for trend filter and volume
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
+    close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
-    vol_ma = pd.Series(volume_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike_1d = volume_1d > (vol_ma * 2.0)  # 2x volume spike
     
-    # Align volume spike to 1h timeframe
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
+    # Calculate 200 EMA for daily trend
+    ema_200 = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Calculate 12h Donchian channels (20 periods)
+    donchian_high = np.zeros(n)
+    donchian_low = np.zeros(n)
+    
+    for i in range(n):
+        if i < 20:
+            donchian_high[i] = np.max(high[:i+1])
+            donchian_low[i] = np.min(low[:i+1])
+        else:
+            donchian_high[i] = np.max(high[i-19:i+1])
+            donchian_low[i] = np.min(low[i-19:i+1])
+    
+    # Calculate volume spike (2x 20-period EMA)
+    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_spike = volume > (vol_ema * 2.0)
+    
+    # Align 1d trend to 12h timeframe
+    trend_1d = (close_1d > ema_200).astype(int) * 2 - 1  # 1 for uptrend, -1 for downtrend
+    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Ensure enough data for indicators
+    start_idx = 200  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
-        # Skip if any critical data is NaN or outside session
-        if (np.isnan(supertrend_dir_aligned[i]) or 
-            np.isnan(vol_spike_1d_aligned[i]) or 
-            not in_session[i]):
+        # Skip if any critical data is invalid
+        if np.isnan(trend_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: 4h uptrend + 1d volume spike
-            if supertrend_dir_aligned[i] == 1 and vol_spike_1d_aligned[i]:
-                signals[i] = 0.20
+            # Enter long: price breaks above Donchian high + uptrend + volume spike
+            if (close[i] > donchian_high[i] and 
+                trend_1d_aligned[i] == 1 and 
+                volume_spike[i]):
+                signals[i] = 0.25
                 position = 1
-            # Enter short: 4h downtrend + 1d volume spike
-            elif supertrend_dir_aligned[i] == -1 and vol_spike_1d_aligned[i]:
-                signals[i] = -0.20
+            # Enter short: price breaks below Donchian low + downtrend + volume spike
+            elif (close[i] < donchian_low[i] and 
+                  trend_1d_aligned[i] == -1 and 
+                  volume_spike[i]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: 4h trend changes to downtrend
-            if supertrend_dir_aligned[i] == -1:
+            # Exit long: price breaks below Donchian low or trend changes
+            if (close[i] < donchian_low[i] or trend_1d_aligned[i] == -1):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: 4h trend changes to uptrend
-            if supertrend_dir_aligned[i] == 1:
+            # Exit short: price breaks above Donchian high or trend changes
+            if (close[i] > donchian_high[i] or trend_1d_aligned[i] == 1):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
