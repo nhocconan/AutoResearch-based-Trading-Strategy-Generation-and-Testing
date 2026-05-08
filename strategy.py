@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Confirm"
-timeframe = "12h"
+name = "6h_WilliamsVixFix_1wTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,85 +17,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter and volatility
+    # Get weekly data for trend filter and VixFix calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # Get daily data for VixFix calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Get 12h data for price action
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
+    # Calculate Williams VixFix on daily data
+    # VixFix = ((Highest Close in period - Low) / Highest Close in period) * 100
+    lookback = 22
+    highest_close = pd.Series(df_1d['close']).rolling(window=lookback, min_periods=lookback).max().values
+    vixfix = ((highest_close - df_1d['low'].values) / highest_close) * 100
+    vixfix = np.nan_to_num(vixfix, nan=0.0)
     
-    # Calculate daily EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # VixFix moving average for signal generation
+    vixfix_ma = pd.Series(vixfix).rolling(window=10, min_periods=10).mean().values
     
-    # Calculate daily ATR for volatility filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Weekly EMA for trend filter
+    weekly_close = df_1w['close'].values
+    ema_20_1w = pd.Series(weekly_close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate 12h volatility (ATR) for position sizing adjustment
-    tr1_12h = high - low
-    tr2_12h = np.abs(high - np.roll(close, 1))
-    tr3_12h = np.abs(low - np.roll(close, 1))
-    tr_12h = np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))
-    tr_12h[0] = tr1_12h[0]
-    atr_12h = pd.Series(tr_12h).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Volume confirmation - 20-period average volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1.0)
+    vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
-    # Calculate 12h average volume for confirmation
-    vol_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_12h = volume / np.where(vol_ma_12h > 0, vol_ma_12h, 1.0)
-    vol_ratio_12h = np.nan_to_num(vol_ratio_12h, nan=1.0)
+    # Align weekly trend and daily indicators to 6h timeframe
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    vixfix_ma_aligned = align_htf_to_ltf(prices, df_1d, vixfix_ma)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 100
+    start_idx = 200
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or
-            np.isnan(vol_ratio_12h[i]) or np.isnan(atr_12h[i])):
+        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(vixfix_ma_aligned[i]) or
+            np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volatility filter: only trade when volatility is above average
-        vol_filter = atr_12h[i] > (atr_12h[i-20:i].mean() * 0.8) if i >= 20 else True
-        
         if position == 0:
-            # Long: price above daily EMA34 + volume confirmation + volatility filter
-            if (close[i] > ema_34_1d_aligned[i] and 
-                vol_ratio_12h[i] > 1.3 and
-                vol_filter):
+            # Long: VixFix spikes high (fear) + above weekly EMA + volume confirmation
+            if (vixfix_ma_aligned[i] > 30 and 
+                close[i] > ema_20_1w_aligned[i] and
+                vol_ratio[i] > 1.8):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below daily EMA34 + volume confirmation + volatility filter
-            elif (close[i] < ema_34_1d_aligned[i] and 
-                  vol_ratio_12h[i] > 1.3 and
-                  vol_filter):
+            # Short: VixFix spikes high (fear) + below weekly EMA + volume confirmation
+            elif (vixfix_ma_aligned[i] > 30 and 
+                  close[i] < ema_20_1w_aligned[i] and
+                  vol_ratio[i] > 1.8):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below daily EMA34
-            if close[i] < ema_34_1d_aligned[i]:
+            # Exit long: VixFix drops below threshold OR price crosses below weekly EMA
+            if vixfix_ma_aligned[i] < 20 or close[i] < ema_20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above daily EMA34
-            if close[i] > ema_34_1d_aligned[i]:
+            # Exit short: VixFix drops below threshold OR price crosses above weekly EMA
+            if vixfix_ma_aligned[i] < 20 or close[i] > ema_20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
