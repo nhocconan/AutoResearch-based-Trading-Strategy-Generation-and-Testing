@@ -1,15 +1,14 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h RSI with Daily Trend and Volume Spike
-# Uses 12h RSI(14) for overbought/oversold signals, filtered by daily EMA50 trend and volume spike (>2x 20-period average).
-# Designed to capture mean reversals in both bull and bear markets with strict entry conditions to limit trades.
-# Target: 12-37 trades/year (50-150 total over 4 years). Uses RSI for precise entries and trend/volume filters to reduce whipsaw.
+# Hypothesis: 12h Donchian breakout with daily trend filter and volume spike
+# Uses Donchian(20) on 12h for breakout signals, filtered by daily EMA50 trend and volume spike (>2x 20-period average).
+# Designed to capture trends in both bull and bear markets with strict entry conditions to limit trades.
+# Target: 12-37 trades/year (50-150 total over 4 years). Uses price channel breakouts for clear structure.
 
-name = "12h_RSI_DailyTrend_VolumeSpike"
+name = "12h_Donchian20_DailyTrend_VolumeSpike"
 timeframe = "12h"
 leverage = 1.0
 
@@ -36,26 +35,13 @@ def generate_signals(prices):
         for i in range(50, len(close_daily)):
             ema50_daily[i] = (close_daily[i] * 2 + ema50_daily[i-1] * 48) / 50
     
-    # Calculate 12h RSI(14)
-    def rsi(close_arr, period):
-        rsi_arr = np.full(len(close_arr), np.nan)
-        if len(close_arr) < period:
-            return rsi_arr
-        delta = np.diff(close_arr)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        avg_gain = np.full(len(close_arr), np.nan)
-        avg_loss = np.full(len(close_arr), np.nan)
-        avg_gain[period] = np.mean(gain[:period])
-        avg_loss[period] = np.mean(loss[:period])
-        for i in range(period + 1, len(close_arr)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
-        rs = avg_gain / avg_loss
-        rsi_arr = 100 - (100 / (1 + rs))
-        return rsi_arr
-    
-    rsi14 = rsi(close, 14)
+    # Calculate 12h Donchian(20)
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    if n >= 20:
+        for i in range(20, n):
+            donchian_high[i] = np.max(high[i-20:i])
+            donchian_low[i] = np.min(low[i-20:i])
     
     # Calculate 12h volume average for volume spike
     vol_avg_20 = np.full(n, np.nan)
@@ -84,7 +70,7 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if np.isnan(rsi14[i]) or np.isnan(ema50_daily_aligned[i]) or np.isnan(vol_avg_20[i]):
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(ema50_daily_aligned[i]) or np.isnan(vol_avg_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -113,23 +99,25 @@ def generate_signals(prices):
         vol_spike = volume[i] > 2.0 * vol_avg_20[i]
         
         if position == 0:
-            # Look for entry: RSI oversold/overbought with trend and volume confirmation
-            if rsi14[i] < 30 and price_above_ema and vol_spike:
+            # Look for entry: Donchian breakout with trend and volume confirmation
+            if close[i] > donchian_high[i] and price_above_ema and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            elif rsi14[i] > 70 and price_below_ema and vol_spike:
+            elif close[i] < donchian_low[i] and price_below_ema and vol_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: RSI overbought or trend fails or volume drops
-            if rsi14[i] > 70 or not price_above_ema or not vol_spike:
+            # Exit long: price retrace to Donchian midpoint or trend fails or volume drops
+            midpoint = (donchian_high[i] + donchian_low[i]) / 2
+            if close[i] < midpoint or not price_above_ema or not vol_spike:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: RSI oversold or trend fails or volume drops
-            if rsi14[i] < 30 or not price_below_ema or not vol_spike:
+            # Exit short: price retrace to Donchian midpoint or trend fails or volume drops
+            midpoint = (donchian_high[i] + donchian_low[i]) / 2
+            if close[i] > midpoint or not price_below_ema or not vol_spike:
                 signals[i] = 0.0
                 position = 0
             else:
