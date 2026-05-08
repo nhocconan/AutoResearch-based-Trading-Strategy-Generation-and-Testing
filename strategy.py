@@ -3,126 +3,92 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h momentum strategy using 4h Supertrend for direction and 1h RSI for entry timing, filtered by session (08-20 UTC).
-# Long when 4h Supertrend is bullish AND 1h RSI < 30 (oversold) AND session active.
-# Short when 4h Supertrend is bearish AND 1h RSI > 70 (overbought) AND session active.
-# Exit when RSI crosses back to neutral (40 for long, 60 for short) or Supertrend flips.
-# Uses lower position size (0.20) to control drawdown and session filter to reduce noise trades.
-# Target: 60-150 total trades over 4 years (15-37/year) with controlled frequency to avoid fee drag.
+# Hypothesis: 12h Daily VWAP Reversion with Volume Spike and ATR Filter.
+# Long when price pulls back to daily VWAP (support) with volume spike and ATR > 0.5*ATR(50).
+# Short when price rallies to daily VWAP (resistance) with volume spike and ATR > 0.5*ATR(50).
+# Exit when price moves 1.5*ATR away from VWAP in opposite direction.
+# Uses daily VWAP as dynamic support/resistance, effective in both trending and ranging markets.
+# Target: 60-120 total trades over 4 years (15-30/year) to avoid fee drag.
 
-name = "1h_Supertrend_RSI_Session"
-timeframe = "1h"
+name = "12h_DailyVWAP_Reversion_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # 4h data for Supertrend calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 10:
+    # Daily data for VWAP calculation
+    df_d = get_htf_data(prices, '1d')
+    if len(df_d) < 2:
         return np.zeros(n)
     
-    # Supertrend parameters
-    atr_period = 10
-    multiplier = 3.0
+    # Calculate daily VWAP: typical price * volume / cumulative volume
+    typical_price = (df_d['high'] + df_d['low'] + df_d['close']) / 3
+    vwap = (typical_price * df_d['volume']).cumsum() / df_d['volume'].cumsum()
+    vwap_prev = vwap.shift(1).values  # Use previous day's VWAP as support/resistance
     
-    # Calculate ATR for 4h
-    tr4h = np.maximum(df_4h['high'] - df_4h['low'], 
-                      np.maximum(np.abs(df_4h['high'] - np.roll(df_4h['close'], 1)),
-                                 np.abs(df_4h['low'] - np.roll(df_4h['close'], 1))))
-    tr4h[0] = df_4h['high'].iloc[0] - df_4h['low'].iloc[0]
-    atr4h = pd.Series(tr4h).rolling(window=atr_period, min_periods=atr_period).mean().values
+    # Align daily VWAP to 12h timeframe
+    vwap_aligned = align_htf_to_ltf(prices, df_d, vwap_prev)
     
-    # Calculate basic upper and lower bands
-    hl4h = (df_4h['high'] + df_4h['low']) / 2
-    upper_band = hl4h + (multiplier * atr4h)
-    lower_band = hl4h - (multiplier * atr4h)
+    # Volume filter: current volume > 2.0x 20-period average (higher threshold for fewer trades)
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (2.0 * vol_ma20)
     
-    # Initialize Supertrend
-    supertrend = np.full_like(df_4h['close'], np.nan, dtype=float)
-    direction = np.full_like(df_4h['close'], 1, dtype=int)  # 1 for up, -1 for down
-    
-    for i in range(1, len(df_4h)):
-        if np.isnan(atr4h[i-1]) or np.isnan(upper_band[i-1]) or np.isnan(lower_band[i-1]):
-            continue
-            
-        if df_4h['close'].iloc[i] > upper_band[i-1]:
-            direction[i] = 1
-        elif df_4h['close'].iloc[i] < lower_band[i-1]:
-            direction[i] = -1
-        else:
-            direction[i] = direction[i-1]
-            if direction[i] == 1 and lower_band[i] < lower_band[i-1]:
-                lower_band[i] = lower_band[i-1]
-            if direction[i] == -1 and upper_band[i] > upper_band[i-1]:
-                upper_band[i] = upper_band[i-1]
-        
-        if direction[i] == 1:
-            supertrend[i] = lower_band[i]
-        else:
-            supertrend[i] = upper_band[i]
-    
-    # Align Supertrend direction to 1h timeframe
-    direction_aligned = align_htf_to_ltf(prices, df_4h, direction)
-    
-    # 1h RSI calculation
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # ATR filter: ensure sufficient volatility (ATR > 0.5 * ATR(50))
+    atr_period = 14
+    tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
+    tr2 = np.maximum(np.absolute(low - np.roll(close, 1)), tr1)
+    tr = np.where(np.arange(len(close)) == 0, high - low, tr2)
+    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    atr50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    atr_filter = atr > (0.5 * atr50)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(14, 20)  # RSI and session warmup
+    start_idx = max(50, 20)  # Wait for ATR50 and volume MA
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(direction_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(session_filter[i])):
+        if (np.isnan(vwap_aligned[i]) or np.isnan(volume_filter[i]) or 
+            np.isnan(atr_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: 4h Supertrend bullish, 1h RSI oversold, session active
-            long_cond = (direction_aligned[i] == 1) and (rsi[i] < 30) and session_filter[i]
-            # Short conditions: 4h Supertrend bearish, 1h RSI overbought, session active
-            short_cond = (direction_aligned[i] == -1) and (rsi[i] > 70) and session_filter[i]
+            # Long: price at or below VWAP support with volume spike and sufficient volatility
+            long_cond = (close[i] <= vwap_aligned[i] * 1.005) and volume_filter[i] and atr_filter[i]
+            # Short: price at or above VWAP resistance with volume spike and sufficient volatility
+            short_cond = (close[i] >= vwap_aligned[i] * 0.995) and volume_filter[i] and atr_filter[i]
             
             if long_cond:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
             elif short_cond:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: RSI crosses above 40 OR Supertrend turns bearish
-            if rsi[i] > 40 or direction_aligned[i] == -1:
+            # Long exit: price moves 1.5*ATR above VWAP (failed support)
+            if close[i] > vwap_aligned[i] + (1.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI crosses below 60 OR Supertrend turns bullish
-            if rsi[i] < 60 or direction_aligned[i] == 1:
+            # Short exit: price moves 1.5*ATR below VWAP (failed resistance)
+            if close[i] < vwap_aligned[i] - (1.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
