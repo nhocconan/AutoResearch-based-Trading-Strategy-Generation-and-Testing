@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian channel breakout with 1d EMA50 trend filter and volume confirmation.
-# Long when price breaks above 20-period high AND price > EMA50(1d) AND volume > 1.5x 20-period average.
-# Short when price breaks below 20-period low AND price < EMA50(1d) AND volume > 1.5x 20-period average.
-# Exit when price crosses back below the 20-period moving average (for long) or above it (for short).
-# Donchian provides clear breakout levels. EMA50 filters trend direction on higher timeframe.
-# Volume confirmation ensures institutional participation. Target: 50-150 total trades over 4 years.
+# Hypothesis: 4h Williams Fractal breakout with 1d EMA50 trend filter and volume confirmation.
+# Long when price breaks above bearish fractal resistance AND price > EMA50(1d) AND volume > 1.5x 20-period average.
+# Short when price breaks below bullish fractal support AND price < EMA50(1d) AND volume > 1.5x 20-period average.
+# Exit when price crosses back below fractal resistance (for long) or above fractal support (for short).
+# Williams Fractals identify key swing points. EMA50 filters trend direction. Volume confirms participation.
+# Target: 80-120 total trades over 4 years (20-30/year).
 
-name = "12h_Donchian_1dEMA50_Volume"
-timeframe = "12h"
+name = "4h_WilliamsFractal_1dEMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,24 +24,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h Donchian channel (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    avg_roll = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    
-    # 12h volume filter: current volume > 1.5x 20-period average
+    # Volume filter: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma20)
     
-    # 1d data for EMA50 trend filter
+    # 1d data for Williams Fractals and EMA50
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # EMA50 on 1d close
-    ema_50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align 1d EMA50 to 12h timeframe
+    # Williams Fractals: bearish (resistance) and bullish (support)
+    # Bearish fractal: high[n-2] < high[n-1] > high[n] and high[n-3] < high[n-2] and high[n+1] < high[n]
+    # Bullish fractal: low[n-2] > low[n-1] < low[n] and low[n-3] > low[n-2] and low[n+1] > low[n]
+    n_1d = len(high_1d)
+    bearish_fractal = np.full(n_1d, np.nan)
+    bullish_fractal = np.full(n_1d, np.nan)
+    
+    for i in range(2, n_1d - 2):
+        # Bearish fractal (resistance)
+        if (high_1d[i-2] < high_1d[i-1] and 
+            high_1d[i] > high_1d[i-1] and 
+            high_1d[i-3] < high_1d[i-2] and 
+            high_1d[i+1] < high_1d[i]):
+            bearish_fractal[i] = high_1d[i]
+        
+        # Bullish fractal (support)
+        if (low_1d[i-2] > low_1d[i-1] and 
+            low_1d[i] < low_1d[i-1] and 
+            low_1d[i-3] > low_1d[i-2] and 
+            low_1d[i+1] > low_1d[i]):
+            bullish_fractal[i] = low_1d[i]
+    
+    # EMA50 on 1d close
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align 1d indicators to 4h timeframe
+    # Williams Fractals need 2 extra bars for confirmation (standard practice)
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
     signals = np.zeros(n)
@@ -51,7 +75,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or np.isnan(avg_roll[i]) or 
+        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or 
             np.isnan(ema_50_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -59,10 +83,10 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: break above Donchian high, price > EMA50, volume filter
-            long_cond = (close[i] > high_roll[i]) and (close[i] > ema_50_aligned[i]) and volume_filter[i]
-            # Short conditions: break below Donchian low, price < EMA50, volume filter
-            short_cond = (close[i] < low_roll[i]) and (close[i] < ema_50_aligned[i]) and volume_filter[i]
+            # Long conditions: break above bearish fractal resistance, price > EMA50, volume filter
+            long_cond = (close[i] > bearish_fractal_aligned[i]) and (close[i] > ema_50_aligned[i]) and volume_filter[i]
+            # Short conditions: break below bullish fractal support, price < EMA50, volume filter
+            short_cond = (close[i] < bullish_fractal_aligned[i]) and (close[i] < ema_50_aligned[i]) and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -71,15 +95,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: cross below 20-period average
-            if close[i] < avg_roll[i]:
+            # Long exit: cross below bearish fractal resistance
+            if close[i] < bearish_fractal_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: cross above 20-period average
-            if close[i] > avg_roll[i]:
+            # Short exit: cross above bullish fractal support
+            if close[i] > bullish_fractal_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
