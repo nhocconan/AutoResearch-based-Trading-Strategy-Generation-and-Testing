@@ -3,8 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_Camarilla_Pivot_Volume_Trend_v1"
-timeframe = "4h"
+# Hypothesis: Use 4h RSI and 1d ADX for trend strength and momentum, with 1h for entry timing.
+# RSI < 30 for oversold long, RSI > 70 for overbought short, filtered by ADX > 25 for trending markets.
+# Session filter (08-20 UTC) reduces noise. Position size 0.20 to manage drawdown.
+# This combination should work in both bull and bear markets by capturing mean reversion in trends.
+
+name = "1h_RSI_ADX_Trend_Filter_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -15,99 +20,107 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get daily data for trend filter
+    # Get 4h data for RSI
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
+        return np.zeros(n)
+    
+    # Get 1d data for ADX
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Get 12h data for Camarilla pivots
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
+    # Calculate RSI on 4h close
+    close_4h = df_4h['close'].values
+    delta = np.diff(close_4h, prepend=close_4h[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / np.where(avg_loss != 0, avg_loss, 1e-10)
+    rsi_4h = 100 - (100 / (1 + rs))
+    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
     
-    # Daily EMA50 for trend filter
+    # Calculate ADX on 1d data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 12h Camarilla pivot levels
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = high_1d[0] - low_1d[0]  # first period
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Pivot = (H + L + C) / 3
-    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
-    # Range = H - L
-    range_12h = high_12h - low_12h
-    # Camarilla levels
-    r4_12h = close_12h + range_12h * 1.1 / 2
-    r3_12h = close_12h + range_12h * 1.1 / 4
-    r2_12h = close_12h + range_12h * 1.1 / 6
-    r1_12h = close_12h + range_12h * 1.1 / 12
-    s1_12h = close_12h - range_12h * 1.1 / 12
-    s2_12h = close_12h - range_12h * 1.1 / 6
-    s3_12h = close_12h - range_12h * 1.1 / 4
-    s4_12h = close_12h - range_12h * 1.1 / 2
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Align 12h Camarilla levels to 4h timeframe
-    pivot_12h_aligned = align_htf_to_ltf(prices, df_12h, pivot_12h)
-    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
-    r4_12h_aligned = align_htf_to_ltf(prices, df_12h, r4_12h)
-    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
-    s4_12h_aligned = align_htf_to_ltf(prices, df_12h, s4_12h)
+    # Smoothed values
+    tr14 = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_plus_14 = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_minus_14 = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Volume confirmation - 20-period average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1.0)
-    vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
+    # DI values
+    di_plus = 100 * dm_plus_14 / np.where(tr14 != 0, tr14, 1e-10)
+    di_minus = 100 * dm_minus_14 / np.where(tr14 != 0, tr14, 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / np.where((di_plus + di_minus) != 0, (di_plus + di_minus), 1e-10)
+    adx_1d = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 50
+    start_idx = 50  # enough for indicators to stabilize
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(pivot_12h_aligned[i]) or 
-            np.isnan(r3_12h_aligned[i]) or np.isnan(r4_12h_aligned[i]) or
-            np.isnan(s3_12h_aligned[i]) or np.isnan(s4_12h_aligned[i]) or
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(rsi_4h_aligned[i]) or np.isnan(adx_1d_aligned[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        in_session = (8 <= hours[i] <= 20)
+        
+        if not in_session:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above R3 + above daily EMA50 + volume confirmation
-            if (close[i] > r3_12h_aligned[i] and 
-                close[i] > ema_50_1d_aligned[i] and
-                vol_ratio[i] > 1.5):
-                # Avoid extreme extension beyond R4
-                if close[i] <= r4_12h_aligned[i] * 1.02:
-                    signals[i] = 0.25
-                    position = 1
-            # Short: price below S3 + below daily EMA50 + volume confirmation
-            elif (close[i] < s3_12h_aligned[i] and 
-                  close[i] < ema_50_1d_aligned[i] and
-                  vol_ratio[i] > 1.5):
-                # Avoid extreme extension beyond S4
-                if close[i] >= s4_12h_aligned[i] * 0.98:
-                    signals[i] = -0.25
-                    position = -1
+            # Long: RSI < 30 (oversold) and ADX > 25 (trending)
+            if rsi_4h_aligned[i] < 30 and adx_1d_aligned[i] > 25:
+                signals[i] = 0.20
+                position = 1
+            # Short: RSI > 70 (overbought) and ADX > 25 (trending)
+            elif rsi_4h_aligned[i] > 70 and adx_1d_aligned[i] > 25:
+                signals[i] = -0.20
+                position = -1
         elif position == 1:
-            # Exit long: price below R3 OR below daily EMA50
-            if close[i] < r3_12h_aligned[i] or close[i] < ema_50_1d_aligned[i]:
+            # Exit long: RSI > 50 (mean reversion) or ADX < 20 (trend weak)
+            if rsi_4h_aligned[i] > 50 or adx_1d_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: price above S3 OR above daily EMA50
-            if close[i] > s3_12h_aligned[i] or close[i] > ema_50_1d_aligned[i]:
+            # Exit short: RSI < 50 (mean reversion) or ADX < 20 (trend weak)
+            if rsi_4h_aligned[i] < 50 or adx_1d_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
