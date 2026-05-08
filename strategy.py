@@ -3,33 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Keltner Channel breakout with 1d ADX trend filter and volume confirmation
-# Keltner Channel uses ATR-based bands around EMA. Breakout above upper band signals bullish momentum,
-# breakdown below lower band signals bearish momentum. Confirmed by 1d ADX > 25 (trending market)
-# and volume spike (>1.5x 20-period average). Designed for low trade frequency in both bull and bear markets.
-# Target: 50-150 total trades over 4 years = 12-37/year
+# Hypothesis: 4h Exponential Moving Average crossover with 1d trend filter and volume confirmation
+# Uses EMA(21) crossing EMA(55) for momentum, confirmed by 1d EMA(34) trend and volume spike.
+# Designed to capture trending moves in both bull and bear markets while avoiding whipsaws.
+# Target: 60-120 total trades over 4 years (15-30/year) to stay within optimal range.
 
-name = "12h_Keltner_1dADX_Volume"
-timeframe = "12h"
+name = "4h_EMACross_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
-
-def ema(data, period):
-    """Exponential Moving Average"""
-    return pd.Series(data).ewm(span=period, adjust=False, min_periods=period).mean().values
-
-def atr(high, low, close, period):
-    """Average True Range"""
-    high_low = high - low
-    high_close = np.abs(high - np.roll(close, 1))
-    low_close = np.abs(low - np.roll(close, 1))
-    high_close[0] = high_low[0]  # first value
-    low_close[0] = high_low[0]   # first value
-    tr = np.maximum(high_low, np.maximum(high_close, low_close))
-    return pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -39,90 +24,66 @@ def generate_signals(prices):
     
     # Get daily data once
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate daily ADX(14) for trend strength
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate daily EMA(34) for trend direction
     close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate +DI and -DI
-    high_diff = np.diff(high_1d, prepend=high_1d[0])
-    low_diff = -np.diff(low_1d, prepend=low_1d[0])
-    plus_dm = np.where((high_diff > low_diff) & (high_diff > 0), high_diff, 0)
-    minus_dm = np.where((low_diff > high_diff) & (low_diff > 0), low_diff, 0)
+    # EMA crossover components on 4h data
+    ema_fast = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_slow = pd.Series(close).ewm(span=55, adjust=False, min_periods=55).mean().values
     
-    # Calculate TR for ADX
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    plus_di_1d = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_1d
-    minus_di_1d = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_1d
-    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
-    dx_1d = np.where((plus_di_1d + minus_di_1d) == 0, 0, dx_1d)
-    adx_1d = pd.Series(dx_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Keltner Channel on 12h data
-    ema20 = ema(close, 20)
-    atr10 = atr(high, low, close, 10)
-    upper_keltner = ema20 + (2.0 * atr10)
-    lower_keltner = ema20 - (2.0 * atr10)
-    
-    # Volume spike: current volume > 1.5 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume spike: current volume > 1.5 * 30-period average
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for calculations
+    start_idx = 100  # warmup for calculations
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(adx_1d_aligned[i]) or np.isnan(upper_keltner[i]) or 
-            np.isnan(lower_keltner[i]) or np.isnan(ema20[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(ema_fast[i]) or 
+            np.isnan(ema_slow[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        adx_val = adx_1d_aligned[i]
-        upper_keltner_val = upper_keltner[i]
-        lower_keltner_val = lower_keltner[i]
-        ema20_val = ema20[i]
+        ema34_1d_val = ema34_1d_aligned[i]
+        fast_val = ema_fast[i]
+        slow_val = ema_slow[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: Close above upper Keltner + strong trend (ADX > 25) + volume spike
-            if (close[i] > upper_keltner_val and 
-                adx_val > 25 and 
+            # Enter long: EMA(21) crosses above EMA(55) + uptrend + volume spike
+            if (fast_val > slow_val and 
+                ema_fast[i-1] <= ema_slow[i-1] and  # crossed this bar
+                close[i] > ema34_1d_val and 
                 vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Close below lower Keltner + strong trend (ADX > 25) + volume spike
-            elif (close[i] < lower_keltner_val and 
-                  adx_val > 25 and 
+            # Enter short: EMA(21) crosses below EMA(55) + downtrend + volume spike
+            elif (fast_val < slow_val and 
+                  ema_fast[i-1] >= ema_slow[i-1] and  # crossed this bar
+                  close[i] < ema34_1d_val and 
                   vol_spike):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Close below EMA20 OR trend weakens (ADX < 20)
-            if close[i] < ema20_val or adx_val < 20:
+            # Exit long: EMA(21) crosses below EMA(55) OR price breaks below trend
+            if (fast_val < slow_val and ema_fast[i-1] >= ema_slow[i-1]) or close[i] < ema34_1d_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Close above EMA20 OR trend weakens (ADX < 20)
-            if close[i] > ema20_val or adx_val < 20:
+            # Exit short: EMA(21) crosses above EMA(55) OR price breaks above trend
+            if (fast_val > slow_val and ema_fast[i-1] <= ema_slow[i-1]) or close[i] > ema34_1d_val:
                 signals[i] = 0.0
                 position = 0
             else:
