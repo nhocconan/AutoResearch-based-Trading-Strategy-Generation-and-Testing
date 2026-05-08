@@ -3,19 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1-day Bollinger Bands with 1-week ADX trend filter.
-# Long when price touches lower BB in uptrend (ADX>25), short when touches upper BB in downtrend.
-# Uses Bollinger Band width to filter ranging markets (BW<0.05 = range, BW>0.08 = trend).
-# Designed for low trade frequency (20-40/year) with mean reversion in trends.
-# BB touch provides precise entry, ADX ensures trend alignment, BW filter avoids chop.
+# Hypothesis: 12h strategy using Donchian(20) breakout with 1d trend filter and volume confirmation.
+# Breakouts above/below 20-period Donchian channel provide clear entry signals.
+# Trend filter using 1d EMA(50) ensures alignment with higher timeframe trend.
+# Volume confirmation requires current volume > 1.5x 20-period EMA of volume.
+# Designed for low trade frequency (12-37/year) to minimize fee drag while capturing trend moves.
+# Works in both bull and bear markets by following the 1d trend direction.
 
-name = "4h_1dBB_1wADX_TrendMeanReversion"
-timeframe = "4h"
+name = "12h_Donchian20_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,151 +24,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Bollinger Bands
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Bollinger Bands (20, 2)
-    bb_middle = np.zeros_like(close_1d)
-    bb_std = np.zeros_like(close_1d)
-    bb_upper = np.zeros_like(close_1d)
-    bb_lower = np.zeros_like(close_1d)
+    # Calculate 1d EMA(50) for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    for i in range(19, len(close_1d)):
-        bb_middle[i] = np.mean(close_1d[i-19:i+1])
-        bb_std[i] = np.std(close_1d[i-19:i+1])
-        bb_upper[i] = bb_middle[i] + 2 * bb_std[i]
-        bb_lower[i] = bb_middle[i] - 2 * bb_std[i]
+    # Calculate Donchian(20) on 12h data
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # First 19 days have no data
-    bb_middle[:19] = bb_std[:19] = bb_upper[:19] = bb_lower[:19] = np.nan
-    
-    # Align Bollinger Bands to 4h timeframe
-    bb_middle_4h = align_htf_to_ltf(prices, df_1d, bb_middle)
-    bb_upper_4h = align_htf_to_ltf(prices, df_1d, bb_upper)
-    bb_lower_4h = align_htf_to_ltf(prices, df_1d, bb_lower)
-    
-    # Get weekly data for ADX
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate ADX (14)
-    def calculate_adx(high, low, close, period=14):
-        n = len(high)
-        if n < period * 2:
-            return np.full(n, np.nan)
-        
-        # True Range
-        tr = np.zeros(n)
-        tr[0] = high[0] - low[0]
-        for i in range(1, n):
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        # Directional Movement
-        plus_dm = np.zeros(n)
-        minus_dm = np.zeros(n)
-        for i in range(1, n):
-            high_diff = high[i] - high[i-1]
-            low_diff = low[i-1] - low[i]
-            if high_diff > low_diff and high_diff > 0:
-                plus_dm[i] = high_diff
-            else:
-                plus_dm[i] = 0
-            if low_diff > high_diff and low_diff > 0:
-                minus_dm[i] = low_diff
-            else:
-                minus_dm[i] = 0
-        
-        # Smoothed values
-        atr = np.zeros(n)
-        plus_dm_smooth = np.zeros(n)
-        minus_dm_smooth = np.zeros(n)
-        
-        # Initial values
-        atr[period-1] = np.mean(tr[:period])
-        plus_dm_smooth[period-1] = np.mean(plus_dm[:period])
-        minus_dm_smooth[period-1] = np.mean(minus_dm[:period])
-        
-        # Wilder smoothing
-        for i in range(period, n):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-            plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
-            minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
-        
-        # Directional Indicators
-        plus_di = np.zeros(n)
-        minus_di = np.zeros(n)
-        dx = np.zeros(n)
-        for i in range(period, n):
-            if atr[i] != 0:
-                plus_di[i] = plus_dm_smooth[i] / atr[i] * 100
-                minus_di[i] = minus_dm_smooth[i] / atr[i] * 100
-                if plus_di[i] + minus_di[i] != 0:
-                    dx[i] = abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i]) * 100
-        
-        # ADX
-        adx = np.full(n, np.nan)
-        adx[2*period-1] = np.mean(dx[period:2*period])
-        for i in range(2*period, n):
-            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx
-    
-    adx_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
-    adx_1w_4h = align_htf_to_ltf(prices, df_1w, adx_1w)
-    
-    # Bollinger Band Width (for regime filter)
-    bb_width = (bb_upper_4h - bb_lower_4h) / bb_middle_4h
+    # Volume confirmation: 12h volume > 1.5x 20-period EMA
+    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ema * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Ensure enough data for all indicators
+    start_idx = 50  # Ensure enough data for EMA(50) and Donchian(20)
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(bb_lower_4h[i]) or np.isnan(bb_upper_4h[i]) or 
-            np.isnan(bb_middle_4h[i]) or np.isnan(adx_1w_4h[i]) or
-            np.isnan(bb_width[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema_50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Regime filter: only trade when BB width indicates trend (not range)
-        is_trending = bb_width[i] > 0.08
-        
         if position == 0:
-            # Mean reversion entries in trending markets
-            if is_trending:
-                # Long when price touches lower BB in uptrend (ADX>25 and price above middle)
-                if close[i] <= bb_lower_4h[i] and adx_1w_4h[i] > 25 and close[i] > bb_middle_4h[i]:
-                    signals[i] = 0.25
-                    position = 1
-                # Short when price touches upper BB in downtrend (ADX>25 and price below middle)
-                elif close[i] >= bb_upper_4h[i] and adx_1w_4h[i] > 25 and close[i] < bb_middle_4h[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # Long entry: price breaks above Donchian high with volume confirmation and uptrend
+            if close[i] > donchian_high[i] and vol_confirm[i] and close[i] > ema_50_1d_aligned[i]:
+                signals[i] = 0.25
+                position = 1
+            # Short entry: price breaks below Donchian low with volume confirmation and downtrend
+            elif close[i] < donchian_low[i] and vol_confirm[i] and close[i] < ema_50_1d_aligned[i]:
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Long exit: price returns to middle BB or trend weakens
-            if close[i] >= bb_middle_4h[i] or adx_1w_4h[i] < 20:
+            # Long exit: price breaks below Donchian low or trend turns down
+            if close[i] < donchian_low[i] or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price returns to middle BB or trend weakens
-            if close[i] <= bb_middle_4h[i] or adx_1w_4h[i] < 20:
+            # Short exit: price breaks above Donchian high or trend turns up
+            if close[i] > donchian_high[i] or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
