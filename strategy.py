@@ -1,18 +1,17 @@
-# 2025-06-08
-# Hypothesis: 6h EMA crossover with 1d volume confirmation and 1d volatility filter
-# Uses EMA(13) and EMA(34) crossover for trend detection on 6h timeframe
-# Confirms with 1d volume spike (2x 20-period average) to ensure institutional participation
-# Filters out low volatility periods using 1d ATR ratio (< 0.5 indicates chop)
-# Designed for 5-15 trades per year (~20-60 total over 4 years) to minimize fee drag
-# Works in both bull and bear markets by requiring volume confirmation and volatility filter
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_EMA13_34_1dVol_VolFilter"
-timeframe = "6h"
+# Hypothesis: 12h Williams %R (14) with 1w trend filter and volume spike
+# Williams %R identifies overbought/oversold conditions. Buy when %R crosses above -80 from below (oversold bounce),
+# sell when crosses below -20 from above (overbought reversal). 1w EMA50 ensures we trade with the weekly trend
+# to avoid counter-trend whipsaws. Volume spike confirms institutional participation. This combines mean reversion
+# with trend filtering, working in both bull (buy dips in uptrend) and bear (sell rallies in downtrend) markets.
+# Targets 12-30 trades per year (~50-120 total over 4 years) to minimize fee drag.
+
+name = "12h_WilliamsR_1wEMA50_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,78 +24,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate EMA crossover on 6h
-    close_series = pd.Series(close)
-    ema13 = close_series.ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema34 = close_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Get 1d data for volume and volatility filters
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Volume spike detection on 1d (2x 20-period average)
-    vol_1d = df_1d['volume'].values
-    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike = vol_1d > (vol_ma_20 * 2.0)
-    vol_spike_6h = align_htf_to_ltf(prices, df_1d, vol_spike)
+    # Williams %R (14) on 12h data
+    period = 14
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # avoid division by zero
     
-    # Volatility filter: ATR ratio < 0.5 indicates choppy market
-    # Calculate ATR(14) on 1d
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 1w EMA50 trend filter
+    ema_50 = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h = align_htf_to_ltf(prices, df_1w, ema_50)
     
-    tr = np.maximum(
-        high_1d - low_1d,
-        np.maximum(
-            np.abs(high_1d - np.roll(close_1d, 1)),
-            np.abs(low_1d - np.roll(close_1d, 1))
-        )
-    )
-    tr[0] = high_1d[0] - low_1d[0]  # First period
-    
-    atr14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    # ATR ratio: current ATR / 20-period average ATR
-    atr_ma_20 = pd.Series(atr14).rolling(window=20, min_periods=20).mean().values
-    atr_ratio = atr14 / atr_ma_20
-    # Filter: only trade when volatility is elevated (ratio > 0.5)
-    vol_filter = atr_ratio > 0.5
-    vol_filter_6h = align_htf_to_ltf(prices, df_1d, vol_filter)
+    # Volume spike detection (24 periods = 12 days of 12h data)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Ensure sufficient data for all indicators
+    start_idx = max(24, period)  # Ensure sufficient data
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema13[i]) or np.isnan(ema34[i]) or 
-            np.isnan(vol_spike_6h[i]) or np.isnan(vol_filter_6h[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_50_12h[i]) or np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: EMA13 crosses above EMA34, volume spike, volatility filter
-            if ema13[i] > ema34[i] and ema13[i-1] <= ema34[i-1] and vol_spike_6h[i] and vol_filter_6h[i]:
+            # Enter long: Williams %R crosses above -80 from below (oversold bounce) 
+            # AND price above weekly EMA50 (uptrend) AND volume spike
+            if (williams_r[i] > -80 and williams_r[i-1] <= -80 and 
+                close[i] > ema_50_12h[i] and vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: EMA13 crosses below EMA34, volume spike, volatility filter
-            elif ema13[i] < ema34[i] and ema13[i-1] >= ema34[i-1] and vol_spike_6h[i] and vol_filter_6h[i]:
+            # Enter short: Williams %R crosses below -20 from above (overbought reversal)
+            # AND price below weekly EMA50 (downtrend) AND volume spike
+            elif (williams_r[i] < -20 and williams_r[i-1] >= -20 and 
+                  close[i] < ema_50_12h[i] and vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: EMA13 crosses below EMA34 or volatility drops
-            if ema13[i] < ema34[i] or not vol_filter_6h[i]:
+            # Exit long: Williams %R crosses above -20 (overbought) OR trend weakens
+            if williams_r[i] > -20 or close[i] < ema_50_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: EMA13 crosses above EMA34 or volatility drops
-            if ema13[i] > ema34[i] or not vol_filter_6h[i]:
+            # Exit short: Williams %R crosses below -80 (oversold) OR trend weakens
+            if williams_r[i] < -80 or close[i] > ema_50_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
