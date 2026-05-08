@@ -3,20 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Weekly pivot levels act as strong support/resistance in trending markets.
-# In bull markets, price tends to stay above weekly pivot; in bear markets, below.
-# Combined with daily EMA trend filter and volume confirmation, this creates
-# a low-frequency, high-conviction strategy suitable for 1d timeframe.
-# Weekly pivot provides multi-day context, reducing whipsaw vs intraday levels.
-# Target: 15-25 trades/year per symbol with disciplined risk control.
-
-name = "1d_WeeklyPivot_Trend_Volume_Confirm_v3"
-timeframe = "1d"
+name = "6h_RiverFlow_RiverBank_Trend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,45 +17,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for indicators
+    # Get 1d data for trend filter and volume
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 100:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Get weekly data for pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 12h data for river flow (momentum)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Daily EMA34 for trend filter
+    # River Bank: 1d EMA50 as dynamic support/resistance
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate weekly pivot points
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # River Flow: 12h RSI(14) for momentum
+    close_12h = df_12h['close'].values
+    delta = np.diff(close_12h, prepend=close_12h[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_12h = 100 - (100 / (1 + rs))
+    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
     
-    # Pivot = (H + L + C) / 3
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    # Support 1 = (2 * Pivot) - High
-    s1_1w = (2 * pivot_1w) - high_1w
-    # Resistance 1 = (2 * Pivot) - Low
-    r1_1w = (2 * pivot_1w) - low_1w
-    # Support 2 = Pivot - (High - Low)
-    s2_1w = pivot_1w - (high_1w - low_1w)
-    # Resistance 2 = Pivot + (High - Low)
-    r2_1w = pivot_1w + (high_1w - low_1w)
-    
-    # Align weekly pivots to daily timeframe
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
-    
-    # Volume confirmation - 20-period average volume
+    # Volume confirmation: 6h volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1.0)
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
@@ -70,12 +51,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 200
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(pivot_1w_aligned[i]) or 
-            np.isnan(r1_1w_aligned[i]) or np.isnan(r2_1w_aligned[i]) or
-            np.isnan(s1_1w_aligned[i]) or np.isnan(s2_1w_aligned[i]) or
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(rsi_12h_aligned[i]) or
             np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -83,32 +62,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price above weekly pivot + above daily EMA34 + volume confirmation
-            if (close[i] > pivot_1w_aligned[i] and 
-                close[i] > ema_34_1d_aligned[i] and
+            # Long: price above river bank (EMA50) + river flow bullish (RSI>55) + volume
+            if (close[i] > ema_50_1d_aligned[i] and 
+                rsi_12h_aligned[i] > 55 and
                 vol_ratio[i] > 1.5):
-                # Avoid extreme extension beyond R2
-                if close[i] <= r2_1w_aligned[i] * 1.03:
-                    signals[i] = 0.25
-                    position = 1
-            # Short: price below weekly pivot + below daily EMA34 + volume confirmation
-            elif (close[i] < pivot_1w_aligned[i] and 
-                  close[i] < ema_34_1d_aligned[i] and
+                signals[i] = 0.25
+                position = 1
+            # Short: price below river bank + river flow bearish (RSI<45) + volume
+            elif (close[i] < ema_50_1d_aligned[i] and 
+                  rsi_12h_aligned[i] < 45 and
                   vol_ratio[i] > 1.5):
-                # Avoid extreme extension beyond S2
-                if close[i] >= s2_1w_aligned[i] * 0.97:
-                    signals[i] = -0.25
-                    position = -1
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Exit long: price below weekly pivot OR below daily EMA34
-            if close[i] < pivot_1w_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            # Exit long: price below river bank OR river flow turns bearish
+            if close[i] < ema_50_1d_aligned[i] or rsi_12h_aligned[i] < 45:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price above weekly pivot OR above daily EMA34
-            if close[i] > pivot_1w_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            # Exit short: price above river bank OR river flow turns bullish
+            if close[i] > ema_50_1d_aligned[i] or rsi_12h_aligned[i] > 55:
                 signals[i] = 0.0
                 position = 0
             else:
