@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA200 filter and volume spike confirmation.
-# Long when Bull Power > 0, price > 1d EMA200, and volume > 1.5x 20-period average.
-# Short when Bear Power < 0, price < 1d EMA200, and volume > 1.5x 20-period average.
-# Exit when Elder Power crosses zero or volume condition fails.
-# Uses 6h timeframe as specified, with 1d EMA and volume for higher timeframe context.
-# Target: 50-150 total trades over 4 years (12-37/year) with controlled frequency to avoid fee drag.
+# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and ADX trend filter.
+# Long when price breaks above Donchian(20) high AND 1d volume > 1.3x 20-period average AND ADX(14) > 25.
+# Short when price breaks below Donchian(20) low AND 1d volume > 1.3x 20-period average AND ADX(14) > 25.
+# Exit when price crosses back inside the Donchian channel.
+# Uses 4h timeframe as specified, with 1d volume and ADX for higher timeframe context.
+# Target: 75-200 total trades over 4 years (19-50/year) with controlled frequency to avoid fee drag.
 
-name = "6h_ElderRay_1dEMA200_Volume"
-timeframe = "6h"
+name = "4h_Donchian_20_1dVolume_ADX"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,45 +23,81 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Daily data for EMA and volume
+    # Daily data for volume and ADX
     df_d = get_htf_data(prices, '1d')
-    if len(df_d) < 50:
+    if len(df_d) < 2:
         return np.zeros(n)
     
-    # Elder Ray components on 6h data
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Donchian(20) on 4h data
+    donchian_period = 20
+    upper_dc = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    lower_dc = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
     
-    # Daily EMA200 filter
-    ema200_d = pd.Series(df_d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200 = align_htf_to_ltf(prices, df_d, ema200_d)
-    
-    # Daily volume filter: current volume > 1.5x 20-period average
+    # Daily volume filter: current volume > 1.3x 20-period average
     volume_d = df_d['volume'].values
     vol_ma20_d = pd.Series(volume_d).rolling(window=20, min_periods=20).mean().values
-    volume_filter_d = volume_d > (1.5 * vol_ma20_d)
+    volume_filter_d = volume_d > (1.3 * vol_ma20_d)
     volume_filter = align_htf_to_ltf(prices, df_d, volume_filter_d)
+    
+    # Daily ADX(14) for trend strength
+    high_d = df_d['high'].values
+    low_d = df_d['low'].values
+    close_d = df_d['close'].values
+    
+    # True Range
+    tr1 = high_d - low_d
+    tr2 = np.abs(high_d - np.roll(close_d, 1))
+    tr3 = np.abs(low_d - np.roll(close_d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = high_d[0] - low_d[0]  # First TR
+    
+    # Directional Movement
+    plus_dm = np.where((high_d - np.roll(high_d, 1)) > (np.roll(low_d, 1) - low_d), 
+                       np.maximum(high_d - np.roll(high_d, 1), 0), 0)
+    minus_dm = np.where((np.roll(low_d, 1) - low_d) > (high_d - np.roll(high_d, 1)), 
+                        np.maximum(np.roll(low_d, 1) - low_d, 0), 0)
+    plus_dm[0] = 0
+    minus_dm[0] = 0
+    
+    # Smoothed values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / atr
+    minus_di = 100 * minus_dm_smooth / atr
+    
+    # ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx[np.isnan(adx)] = 0
+    
+    # Align ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_d, adx)
+    
+    # Trend filter: ADX > 25
+    trend_filter = adx_aligned > 25
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(13, 200)  # Sufficient warmup for EMA13 and EMA200
+    start_idx = max(donchian_period, 20)  # Sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(ema200[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(upper_dc[i]) or np.isnan(lower_dc[i]) or 
+            np.isnan(volume_filter[i]) or np.isnan(trend_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: Bull Power > 0, price > 1d EMA200, volume spike
-            long_cond = (bull_power[i] > 0) and (close[i] > ema200[i]) and volume_filter[i]
-            # Short conditions: Bear Power < 0, price < 1d EMA200, volume spike
-            short_cond = (bear_power[i] < 0) and (close[i] < ema200[i]) and volume_filter[i]
+            # Long conditions: price breaks above Donchian upper, volume filter, trending market
+            long_cond = (close[i] > upper_dc[i]) and volume_filter[i] and trend_filter[i]
+            # Short conditions: price breaks below Donchian lower, volume filter, trending market
+            short_cond = (close[i] < lower_dc[i]) and volume_filter[i] and trend_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -70,15 +106,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Bull Power crosses below zero OR volume condition fails
-            if (bull_power[i] <= 0) or (not volume_filter[i]):
+            # Long exit: price crosses back below Donchian lower
+            if close[i] < lower_dc[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Bear Power crosses above zero OR volume condition fails
-            if (bear_power[i] >= 0) or (not volume_filter[i]):
+            # Short exit: price crosses back above Donchian upper
+            if close[i] > upper_dc[i]:
                 signals[i] = 0.0
                 position = 0
             else:
