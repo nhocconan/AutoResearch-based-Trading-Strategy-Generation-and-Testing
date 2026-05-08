@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Keltner_Channel_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for ATR and trend
+    # Daily data for Camarilla levels and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -26,32 +26,27 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # Calculate daily ATR(20)
-    tr = np.maximum(high_1d[1:] - low_1d[1:], 
-                    np.maximum(np.abs(high_1d[1:] - close_1d[:-1]),
-                               np.abs(low_1d[1:] - close_1d[:-1])))
-    tr = np.concatenate([[np.nan], tr])
-    atr_20_1d = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    # Calculate daily EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate daily EMA(20) for trend and Keltner center
-    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Calculate Keltner bands from previous day
-    upper = np.zeros(len(close_1d))
-    lower = np.zeros(len(close_1d))
+    # Calculate Camarilla levels from previous day
+    R3 = np.zeros(len(close_1d))
+    S3 = np.zeros(len(close_1d))
     
     for i in range(1, len(close_1d)):
-        if np.isnan(atr_20_1d[i]) or np.isnan(ema_20_1d[i]):
-            upper[i] = np.nan
-            lower[i] = np.nan
-        else:
-            upper[i] = ema_20_1d[i] + 2.0 * atr_20_1d[i]
-            lower[i] = ema_20_1d[i] - 2.0 * atr_20_1d[i]
+        high_prev = high_1d[i-1]
+        low_prev = low_1d[i-1]
+        close_prev = close_1d[i-1]
+        range_val = high_prev - low_prev
+        
+        C = close_prev + (range_val * 1.1 / 6)
+        R3[i] = C + (range_val * 1.1 / 2)
+        S3[i] = C - (range_val * 1.1 / 2)
     
-    # Align Keltner bands to 6h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower)
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    # Align Camarilla levels to 4h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
     # Volume spike: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -64,22 +59,22 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
-            np.isnan(ema_20_1d_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(R3_aligned[i]) or 
+            np.isnan(S3_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above upper band, daily uptrend, volume spike
-            long_cond = (close[i] > upper_aligned[i] and 
-                        ema_20_1d_aligned[i] > ema_20_1d_aligned[i-1] and
+            # Long: price breaks above R3, daily uptrend, volume spike
+            long_cond = (close[i] > R3_aligned[i] and 
+                        ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and
                         volume_spike[i])
             
-            # Short: price breaks below lower band, daily downtrend, volume spike
-            short_cond = (close[i] < lower_aligned[i] and 
-                         ema_20_1d_aligned[i] < ema_20_1d_aligned[i-1] and
+            # Short: price breaks below S3, daily downtrend, volume spike
+            short_cond = (close[i] < S3_aligned[i] and 
+                         ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and
                          volume_spike[i])
             
             if long_cond:
@@ -89,15 +84,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below EMA(20)
-            if close[i] < ema_20_1d_aligned[i]:
+            # Long exit: price crosses below S3
+            if close[i] < S3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above EMA(20)
-            if close[i] > ema_20_1d_aligned[i]:
+            # Short exit: price crosses above R3
+            if close[i] > R3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
