@@ -3,17 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot reversal with 1d volume spike and 1d ADX trend filter.
-# Long when price crosses above Camarilla S1 pivot level AND 1d volume > 1.5x 20-period average AND ADX(14) > 20.
-# Short when price crosses below Camarilla R1 pivot level AND 1d volume > 1.5x 20-period average AND ADX(14) > 20.
-# Exit when price crosses back to the opposite pivot level (S1 for long exit, R1 for short exit).
-# Uses Camarilla pivot points from daily data for structural support/resistance.
-# Volume and ADX filters ensure trades occur in trending, high-volume environments.
-# Designed for low-frequency, high-conviction trades to minimize fee drag.
-# Target: 50-150 total trades over 4 years (12-37/year) with controlled frequency.
+# Hypothesis: 4h Donchian breakout with 1d volume confirmation and ADX trend filter.
+# Long when price breaks above Donchian(20) high AND 1d volume > 1.3x 20-period average AND ADX(14) > 25 (trending market).
+# Short when price breaks below Donchian(20) low AND 1d volume > 1.3x 20-period average AND ADX(14) > 25.
+# Exit when price crosses back inside the Donchian channel.
+# Uses 4h timeframe as specified, with 1d volume and ADX for higher timeframe context.
+# Target: 75-200 total trades over 4 years (19-50/year) with controlled frequency to avoid fee drag.
 
-name = "12h_Camarilla_S1R1_1dVolume_ADX"
-timeframe = "12h"
+name = "4h_Donchian_20_1dVolume_ADX"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,40 +23,20 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Daily data for Camarilla pivots, volume, and ADX
+    # Daily data for volume and ADX
     df_d = get_htf_data(prices, '1d')
-    if len(df_d) < 20:
+    if len(df_d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous day's OHLC
-    # Using previous day's data to avoid look-ahead
-    high_d = df_d['high'].values
-    low_d = df_d['low'].values
-    close_d = df_d['close'].values
+    # Donchian(20) on 4h data
+    donchian_period = 20
+    upper_dc = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    lower_dc = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
     
-    # Shift by 1 to use previous day's data for today's pivot calculation
-    high_d_prev = np.roll(high_d, 1)
-    low_d_prev = np.roll(low_d, 1)
-    close_d_prev = np.roll(close_d, 1)
-    
-    # First day has no previous data
-    high_d_prev[0] = high_d[0]
-    low_d_prev[0] = low_d[0]
-    close_d_prev[0] = close_d[0]
-    
-    # Camarilla pivot calculation
-    range_prev = high_d_prev - low_d_prev
-    camarilla_s1 = close_d_prev + 1.1 * range_prev * 1.0 / 12
-    camarilla_r1 = close_d_prev + 1.1 * range_prev * 11.0 / 12
-    
-    # Align Camarilla levels to 12h timeframe
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_d, camarilla_s1)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_d, camarilla_r1)
-    
-    # Daily volume filter: current volume > 1.5x 20-period average
+    # Daily volume filter: current volume > 1.3x 20-period average
     volume_d = df_d['volume'].values
     vol_ma20_d = pd.Series(volume_d).rolling(window=20, min_periods=20).mean().values
-    volume_filter_d = volume_d > (1.5 * vol_ma20_d)
+    volume_filter_d = volume_d > (1.3 * vol_ma20_d)
     volume_filter = align_htf_to_ltf(prices, df_d, volume_filter_d)
     
     # Daily ADX(14) for trend strength
@@ -90,28 +68,25 @@ def generate_signals(prices):
     plus_di = 100 * plus_dm_smooth / atr
     minus_di = 100 * minus_dm_smooth / atr
     
-    # Avoid division by zero
-    di_sum = plus_di + minus_di
-    dx = np.where(di_sum != 0, 100 * np.abs(plus_di - minus_di) / di_sum, 0)
-    
     # ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     adx[np.isnan(adx)] = 0
     
-    # Align ADX to 12h timeframe
+    # Align ADX to 4h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_d, adx)
     
-    # Trend filter: ADX > 20
-    trend_filter = adx_aligned > 20
+    # Trend filter: ADX > 25
+    trend_filter = adx_aligned > 25
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Sufficient warmup for daily indicators
+    start_idx = max(donchian_period, 20)  # Sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(camarilla_s1_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or 
+        if (np.isnan(upper_dc[i]) or np.isnan(lower_dc[i]) or 
             np.isnan(volume_filter[i]) or np.isnan(trend_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -119,10 +94,10 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: price crosses above Camarilla S1, volume filter, trending market
-            long_cond = (close[i] > camarilla_s1_aligned[i]) and volume_filter[i] and trend_filter[i]
-            # Short conditions: price crosses below Camarilla R1, volume filter, trending market
-            short_cond = (close[i] < camarilla_r1_aligned[i]) and volume_filter[i] and trend_filter[i]
+            # Long conditions: price breaks above Donchian upper, volume filter, trending market
+            long_cond = (close[i] > upper_dc[i]) and volume_filter[i] and trend_filter[i]
+            # Short conditions: price breaks below Donchian lower, volume filter, trending market
+            short_cond = (close[i] < lower_dc[i]) and volume_filter[i] and trend_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -131,15 +106,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses back below Camarilla S1
-            if close[i] < camarilla_s1_aligned[i]:
+            # Long exit: price crosses back below Donchian lower
+            if close[i] < lower_dc[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses back above Camarilla R1
-            if close[i] > camarilla_r1_aligned[i]:
+            # Short exit: price crosses back above Donchian upper
+            if close[i] > upper_dc[i]:
                 signals[i] = 0.0
                 position = 0
             else:
