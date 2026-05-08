@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 12h EMA trend filter
-# Donchian breakouts capture breakout momentum. Volume confirms institutional participation.
-# 12h EMA filter ensures we only trade in the direction of the intermediate trend.
-# This combination works in both bull and bear markets by filtering for trend-aligned breakouts.
-# Targets 20-50 trades per year (~80-200 total over 4 years) to minimize fee drag.
+# Hypothesis: 12h Donchian(20) breakout with 1d volume confirmation and 1d ADX trend filter
+# Donchian breakouts capture strong momentum moves. Volume confirmation ensures institutional participation.
+# ADX > 25 filters for trending markets, avoiding whipsaws in ranges. This combination works in both
+# bull and bear markets by focusing on strong trends only. Targets 10-20 trades per year (~40-80 total)
+# to minimize fee drag on 12h timeframe.
 
-name = "4h_Donchian20_Volume_12hEMA"
-timeframe = "4h"
+name = "12h_Donchian20_1dVolume_1dADX"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,76 +23,104 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period)
-    lookback = 20
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
-    for i in range(lookback-1, n):
-        highest_high[i] = np.max(high[i-lookback+1:i+1])
-        lowest_low[i] = np.min(low[i-lookback+1:i+1])
-    
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma = np.full(n, np.nan)
-    for i in range(20-1, n):
-        vol_ma[i] = np.mean(volume[i-20+1:i+1])
-    vol_confirm = volume > (vol_ma * 1.5)
-    
-    # Get 12h data for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 1d data for volume and ADX
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    # Calculate EMA(50) on 12h
-    ema_50 = np.full(len(close_12h), np.nan)
-    if len(close_12h) >= 50:
-        ema_50[49] = np.mean(close_12h[:50])
-        multiplier = 2 / (50 + 1)
-        for i in range(50, len(close_12h)):
-            ema_50[i] = (close_12h[i] - ema_50[i-1]) * multiplier + ema_50[i-1]
+    # Calculate 20-period Donchian channels on 12h data
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Trend: close > EMA50 = uptrend, close < EMA50 = downtrend
-    trend_up = close_12h > ema_50
-    trend_down = close_12h < ema_50
+    # Volume spike detection on 1d (2x 4-day average)
+    vol_ma = pd.Series(volume).rolling(window=48, min_periods=48).mean()  # 48 * 12h = 24d approx
+    vol_spike = volume > (vol_ma.values * 2.0)
     
-    # Align to 4h timeframe
-    trend_up_4h = align_htf_to_ltf(prices, df_12h, trend_up)
-    trend_down_4h = align_htf_to_ltf(prices, df_12h, trend_down)
+    # ADX calculation on 1d
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # True Range and Directional Movement
+    tr = np.zeros_like(high_1d)
+    plus_dm = np.zeros_like(high_1d)
+    minus_dm = np.zeros_like(high_1d)
+    
+    for i in range(1, len(high_1d)):
+        tr[i] = max(
+            high_1d[i] - low_1d[i],
+            abs(high_1d[i] - close_1d[i-1]),
+            abs(low_1d[i] - close_1d[i-1])
+        )
+        plus_dm[i] = max(high_1d[i] - high_1d[i-1], 0)
+        minus_dm[i] = max(low_1d[i-1] - low_1d[i], 0)
+        if plus_dm[i] == minus_dm[i]:
+            plus_dm[i] = 0
+            minus_dm[i] = 0
+    
+    # Wilder smoothing
+    def wilder_smooth(arr, period):
+        result = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return result
+        result[period-1] = np.nansum(arr[:period])
+        for i in range(period, len(arr)):
+            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
+        return result
+    
+    tr14 = wilder_smooth(tr, 14)
+    plus_dm14 = wilder_smooth(plus_dm, 14)
+    minus_dm14 = wilder_smooth(minus_dm, 14)
+    
+    # Avoid division by zero
+    plus_di14 = np.where(tr14 != 0, 100 * (plus_dm14 / tr14), 0)
+    minus_di14 = np.where(tr14 != 0, 100 * (minus_dm14 / tr14), 0)
+    
+    dx = np.where((plus_di14 + minus_di14) != 0, 
+                  100 * np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14), 0)
+    adx = wilder_smooth(dx, 14)
+    
+    # Align indicators to 12h timeframe
+    highest_high_12h = align_htf_to_ltf(prices, pd.Series(highest_high).to_frame('high'), highest_high)
+    lowest_low_12h = align_htf_to_ltf(prices, pd.Series(lowest_low).to_frame('low'), lowest_low)
+    vol_spike_12h = align_htf_to_ltf(prices, df_1d, vol_spike)
+    adx_strong_12h = align_htf_to_ltf(prices, df_1d, adx > 25)
+    adx_weak_12h = align_htf_to_ltf(prices, df_1d, adx < 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(lookback-1, 20-1)  # Ensure sufficient data
+    start_idx = 48  # Ensure sufficient data for volume MA
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_confirm[i]) or np.isnan(trend_up_4h[i]) or 
-            np.isnan(trend_down_4h[i])):
+        if (np.isnan(highest_high_12h[i]) or np.isnan(lowest_low_12h[i]) or 
+            np.isnan(vol_spike_12h[i]) or np.isnan(adx_strong_12h[i]) or 
+            np.isnan(adx_weak_12h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above upper Donchian, volume confirms, uptrend
-            if close[i] > highest_high[i] and vol_confirm[i] and trend_up_4h[i]:
+            # Enter long: price breaks above Donchian high, volume spike, strong trend
+            if close[i] > highest_high_12h[i] and vol_spike_12h[i] and adx_strong_12h[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below lower Donchian, volume confirms, downtrend
-            elif close[i] < lowest_low[i] and vol_confirm[i] and trend_down_4h[i]:
+            # Enter short: price breaks below Donchian low, volume spike, strong trend
+            elif close[i] < lowest_low_12h[i] and vol_spike_12h[i] and adx_strong_12h[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to lower Donchian or trend turns down
-            if close[i] < lowest_low[i] or trend_down_4h[i]:
+            # Exit long: price returns to Donchian low or trend weakens
+            if close[i] < lowest_low_12h[i] or adx_weak_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to upper Donchian or trend turns up
-            if close[i] > highest_high[i] or trend_up_4h[i]:
+            # Exit short: price returns to Donchian high or trend weakens
+            if close[i] > highest_high_12h[i] or adx_weak_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
