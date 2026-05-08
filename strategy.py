@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_WeeklyCamarilla_R1_S1_Breakout_Trend_Volume"
-timeframe = "1d"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeFilter_v4"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,46 +17,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w data for trend filter and volatility
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # 1d data for trend filter and volatility
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # 1w EMA200 for trend filter
-    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    # 1d EMA200 for trend filter
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # 1w ATR for volatility filter
-    tr = np.maximum(high_1w - low_1w, 
-                    np.maximum(np.abs(high_1w - np.roll(close_1w, 1)), 
-                               np.abs(low_1w - np.roll(close_1w, 1))))
-    tr[0] = high_1w[0] - low_1w[0]
-    atr14_1w = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr14_1w_aligned = align_htf_to_ltf(prices, df_1w, atr14_1w)
+    # 1d ATR for volatility filter
+    tr = np.maximum(high_1d - low_1d, 
+                    np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), 
+                               np.abs(low_1d - np.roll(close_1d, 1))))
+    tr[0] = high_1d[0] - low_1d[0]
+    atr14_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
     
-    # 1w data for Camarilla pivot (previous week)
-    # Use previous week's data to avoid look-ahead
-    prev_high_1w = np.roll(high_1w, 1)
-    prev_low_1w = np.roll(low_1w, 1)
-    prev_close_1w = np.roll(close_1w, 1)
-    prev_high_1w[0] = high_1w[0]  # first bar uses current
-    prev_low_1w[0] = low_1w[0]
-    prev_close_1w[0] = close_1w[0]
+    # 1d data for Camarilla pivot (previous day)
+    # Use previous day's data to avoid look-ahead
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d[0] = high_1d[0]  # first bar uses current
+    prev_low_1d[0] = low_1d[0]
+    prev_close_1d[0] = close_1d[0]
     
-    pivot = (prev_high_1w + prev_low_1w + prev_close_1w) / 3.0
-    range_1w = prev_high_1w - prev_low_1w
-    r1 = pivot + (range_1w * 1.1 / 12)
-    s1 = pivot - (range_1w * 1.1 / 12)
+    pivot = (prev_high_1d + prev_low_1d + prev_close_1d) / 3.0
+    range_1d = prev_high_1d - prev_low_1d
+    r1 = pivot + (range_1d * 1.1 / 12)
+    s1 = pivot - (range_1d * 1.1 / 12)
     
-    # Align Camarilla levels to 1d timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    # Align Camarilla levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume filter: 1d volume > 20-period average
+    # Volume filter: 4h volume > 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -67,7 +67,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema200_1w_aligned[i]) or np.isnan(atr14_1w_aligned[i]) or
+            np.isnan(ema200_1d_aligned[i]) or np.isnan(atr14_1d_aligned[i]) or
             np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -75,14 +75,14 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above R1, price above 1w EMA200, volume above average
+            # Long: Price breaks above R1, price above 1d EMA200, volume above average
             long_cond = (close[i] > r1_aligned[i] and 
-                        close[i] > ema200_1w_aligned[i] and
+                        close[i] > ema200_1d_aligned[i] and
                         volume[i] > vol_ma20[i])
             
-            # Short: Price breaks below S1, price below 1w EMA200, volume above average
+            # Short: Price breaks below S1, price below 1d EMA200, volume above average
             short_cond = (close[i] < s1_aligned[i] and 
-                         close[i] < ema200_1w_aligned[i] and
+                         close[i] < ema200_1d_aligned[i] and
                          volume[i] > vol_ma20[i])
             
             if long_cond:
@@ -92,15 +92,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Price closes below S1 OR price crosses below 1w EMA200
-            if close[i] < s1_aligned[i] or close[i] < ema200_1w_aligned[i]:
+            # Long exit: Price closes below S1 OR price crosses below 1d EMA200
+            if close[i] < s1_aligned[i] or close[i] < ema200_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price closes above R1 OR price crosses above 1w EMA200
-            if close[i] > r1_aligned[i] or close[i] > ema200_1w_aligned[i]:
+            # Short exit: Price closes above R1 OR price crosses above 1d EMA200
+            if close[i] > r1_aligned[i] or close[i] > ema200_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -108,7 +108,7 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Weekly Camarilla R1/S1 breakout with 1w EMA200 trend filter and volume confirmation.
+# Hypothesis: Camarilla R1/S1 breakout with 1d EMA200 trend filter and volume confirmation.
 # Works in bull markets via breakout continuation, in bear via mean reversion at S1/R1.
-# 1d timeframe targets 7-25 trades/year to avoid fee drag. Volume filter ensures participation.
-# Discrete sizing (0.25) minimizes churn. Works on BTC/ETH/SOL via institutional weekly pivot levels.
+# 4h timeframe targets 20-50 trades/year to avoid fee drag. Volume filter ensures participation.
+# Discrete sizing (0.25) minimizes churn. Works on BTC/ETH/SOL via institutional pivot levels.
