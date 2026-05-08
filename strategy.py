@@ -3,18 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using Donchian channel breakout (20) with volume confirmation and ADX trend filter.
-# Donchian breakouts capture trend continuation; volume confirms institutional participation; ADX > 25 filters for trending markets.
-# Designed for low trade frequency (20-30/year) to minimize fee drift while capturing strong trends in both bull and bear markets.
-# Uses 1d timeframe for ADX calculation to avoid whipsaw on lower timeframes.
+# Hypothesis: 6h strategy using weekly pivot levels and daily volatility regime.
+# Weekly pivots provide key institutional levels; daily ATR regime filters for trending vs ranging.
+# Long when price breaks above weekly R1 with daily ATR expansion (trending).
+# Short when price breaks below weekly S1 with daily ATR expansion.
+# In low volatility regime (ATR contraction), fade at weekly R2/S2 for mean reversion.
+# Designed for low trade frequency (15-25/year) to work in both bull and bear markets.
 
-name = "4h_Donchian20_Breakout_Volume_ADX"
-timeframe = "4h"
+name = "6h_WeeklyPivot_ATRRegime"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,103 +24,133 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ADX calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data for pivot calculation
+    df_w = get_htf_data(prices, '1w')
+    if len(df_w) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_w = df_w['high'].values
+    low_w = df_w['low'].values
+    close_w = df_w['close'].values
     
-    # Calculate ADX(14) on daily timeframe
-    def calculate_adx(high, low, close, period=14):
-        plus_dm = np.zeros_like(high)
-        minus_dm = np.zeros_like(high)
-        tr = np.zeros_like(high)
-        
-        for i in range(1, len(high)):
-            up = high[i] - high[i-1]
-            down = low[i-1] - low[i]
-            plus_dm[i] = up if up > down and up > 0 else 0
-            minus_dm[i] = down if down > up and down > 0 else 0
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        atr = np.zeros_like(high)
-        atr[period] = np.mean(tr[1:period+1])
-        for i in range(period+1, len(high)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        
-        plus_di = np.zeros_like(high)
-        minus_di = np.zeros_like(high)
-        dx = np.zeros_like(high)
-        
-        for i in range(period, len(high)):
-            plus_di[i] = 100 * (np.mean(plus_dm[i-period+1:i+1]) / atr[i]) if atr[i] != 0 else 0
-            minus_di[i] = 100 * (np.mean(minus_dm[i-period+1:i+1]) / atr[i]) if atr[i] != 0 else 0
-            dx[i] = (abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])) * 100 if (plus_di[i] + minus_di[i]) != 0 else 0
-        
-        adx = np.zeros_like(high)
-        adx[2*period-1] = np.mean(dx[period:2*period])
-        for i in range(2*period, len(high)):
-            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        return adx
+    # Calculate weekly pivot points (standard floor trader's method)
+    pivot_w = np.zeros_like(close_w)
+    r1_w = np.zeros_like(close_w)
+    s1_w = np.zeros_like(close_w)
+    r2_w = np.zeros_like(close_w)
+    s2_w = np.zeros_like(close_w)
     
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    for i in range(1, len(close_w)):
+        # Previous week's high, low, close
+        ph = high_w[i-1]
+        pl = low_w[i-1]
+        pc = close_w[i-1]
+        
+        # Pivot point and support/resistance levels
+        pivot_w[i] = (ph + pl + pc) / 3.0
+        r1_w[i] = 2 * pivot_w[i] - pl
+        s1_w[i] = 2 * pivot_w[i] - ph
+        r2_w[i] = pivot_w[i] + (ph - pl)
+        s2_w[i] = pivot_w[i] - (ph - pl)
     
-    # Donchian channel (20) on 4h
-    def donchian_channels(high, low, period=20):
-        upper = np.zeros_like(high)
-        lower = np.zeros_like(high)
-        for i in range(len(high)):
-            if i < period:
-                upper[i] = np.nan
-                lower[i] = np.nan
-            else:
-                upper[i] = np.max(high[i-period+1:i+1])
-                lower[i] = np.min(low[i-period+1:i+1])
-        return upper, lower
+    # First week has no previous data
+    pivot_w[0] = r1_w[0] = s1_w[0] = r2_w[0] = s2_w[0] = np.nan
     
-    dc_upper, dc_lower = donchian_channels(high, low, 20)
+    # Align weekly pivots to 6h timeframe
+    pivot_w_aligned = align_htf_to_ltf(prices, df_w, pivot_w)
+    r1_w_aligned = align_htf_to_ltf(prices, df_w, r1_w)
+    s1_w_aligned = align_htf_to_ltf(prices, df_w, s1_w)
+    r2_w_aligned = align_htf_to_ltf(prices, df_w, r2_w)
+    s2_w_aligned = align_htf_to_ltf(prices, df_w, s2_w)
     
-    # Volume confirmation: 4h volume > 1.5x 20-period EMA
-    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ema * 1.5)
+    # Get daily data for ATR (volatility regime)
+    df_d = get_htf_data(prices, '1d')
+    if len(df_d) < 14:
+        return np.zeros(n)
+    
+    high_d = df_d['high'].values
+    low_d = df_d['low'].values
+    close_d = df_d['close'].values
+    
+    # Calculate True Range and ATR(14)
+    tr1 = high_d[1:] - low_d[1:]
+    tr2 = np.abs(high_d[1:] - close_d[:-1])
+    tr3 = np.abs(low_d[1:] - close_d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # Align with same length
+    
+    atr_14 = np.full_like(close_d, np.nan)
+    for i in range(14, len(tr)):
+        if np.isnan(tr[i-13:i+1]).any():
+            atr_14[i] = np.nan
+        else:
+            atr_14[i] = np.mean(tr[i-13:i+1])
+    
+    # Align ATR to 6h timeframe
+    atr_14_aligned = align_htf_to_ltf(prices, df_d, atr_14)
+    
+    # Calculate ATR ratio (current vs 20-period average) for regime detection
+    atr_ma_20 = np.full_like(atr_14_aligned, np.nan)
+    for i in range(20, len(atr_14_aligned)):
+        if np.isnan(atr_14_aligned[i-20:i]).any():
+            atr_ma_20[i] = np.nan
+        else:
+            atr_ma_20[i] = np.mean(atr_14_aligned[i-20:i])
+    
+    atr_ratio = atr_14_aligned / atr_ma_20
+    # High volatility (trending) when ATR ratio > 1.2
+    # Low volatility (ranging) when ATR ratio < 0.8
+    vol_expanding = atr_ratio > 1.2
+    vol_contracting = atr_ratio < 0.8
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Ensure enough data for ADX and Donchian
+    start_idx = 50  # Ensure enough data for ATR calculations
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(dc_upper[i]) or np.isnan(dc_lower[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ema[i])):
+        if (np.isnan(pivot_w_aligned[i]) or np.isnan(r1_w_aligned[i]) or 
+            np.isnan(s1_w_aligned[i]) or np.isnan(r2_w_aligned[i]) or
+            np.isnan(s2_w_aligned[i]) or np.isnan(atr_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long breakout: price above upper Donchian with volume and ADX > 25
-            if close[i] > dc_upper[i] and vol_confirm[i] and adx_aligned[i] > 25:
-                signals[i] = 0.25
-                position = 1
-            # Short breakout: price below lower Donchian with volume and ADX > 25
-            elif close[i] < dc_lower[i] and vol_confirm[i] and adx_aligned[i] > 25:
-                signals[i] = -0.25
-                position = -1
+            # Expanding volatility: trend following breakouts
+            if vol_expanding[i]:
+                if close[i] > r1_w_aligned[i]:
+                    signals[i] = 0.25
+                    position = 1
+                elif close[i] < s1_w_aligned[i]:
+                    signals[i] = -0.25
+                    position = -1
+            # Contracting volatility: mean reversion at wider levels
+            elif vol_contracting[i]:
+                if close[i] > r2_w_aligned[i]:
+                    signals[i] = -0.20
+                    position = -1
+                elif close[i] < s2_w_aligned[i]:
+                    signals[i] = 0.20
+                    position = 1
         elif position == 1:
-            # Long exit: price below lower Donchian or ADX < 20 (trend weakening)
-            if close[i] < dc_lower[i] or adx_aligned[i] < 20:
+            # Long exit: volatility contraction and price at S1, or volatility expansion below pivot
+            if vol_contracting[i] and close[i] < s1_w_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            elif vol_expanding[i] and close[i] < pivot_w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price above upper Donchian or ADX < 20 (trend weakening)
-            if close[i] > dc_upper[i] or adx_aligned[i] < 20:
+            # Short exit: volatility contraction and price at R1, or volatility expansion above pivot
+            if vol_contracting[i] and close[i] > r1_w_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            elif vol_expanding[i] and close[i] > pivot_w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
