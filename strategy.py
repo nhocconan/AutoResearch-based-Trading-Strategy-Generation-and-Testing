@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d EMA trend filter and volume confirmation
-# Uses 1d EMA50 for trend direction, Donchian(20) breakout for entry, and volume > 1.5x 20-period average for confirmation.
-# Designed to capture strong trends in both bull and bear markets while avoiding false breakouts in low-volume conditions.
-# Target: 20-40 trades/year to minimize fee drag.
+# Hypothesis: 6h Camarilla pivot breakout with 1d trend filter and volume confirmation
+# Uses daily EMA34 for trend direction, 1d Camarilla levels for entry/exit signals,
+# and volume breakout (>1.5x average) for confirmation. Designed to work in both bull and bear
+# markets by following daily trend while using Camarilla levels as dynamic support/resistance.
+# Target: 12-30 trades/year (50-120 total over 4 years).
 
-name = "4h_Donchian_1dEMA50_VolumeConfirm"
-timeframe = "4h"
+name = "6h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,57 +23,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for EMA trend filter
+    # Get daily data for trend filter and Camarilla levels
     df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 50:
+    if len(df_daily) < 34:
         return np.zeros(n)
     
-    # Calculate daily EMA50 for trend filter
+    # Calculate daily EMA34 for trend filter
     close_daily = df_daily['close'].values
-    ema50_daily = np.full(len(close_daily), np.nan)
-    if len(close_daily) >= 50:
-        ema50_daily[49] = np.mean(close_daily[:50])
-        for i in range(50, len(close_daily)):
-            ema50_daily[i] = (close_daily[i] * 2 + ema50_daily[i-1] * 48) / 50
+    ema34_daily = np.full(len(close_daily), np.nan)
+    if len(close_daily) >= 34:
+        ema34_daily[33] = np.mean(close_daily[:34])
+        for i in range(34, len(close_daily)):
+            ema34_daily[i] = (close_daily[i] * 2 + ema34_daily[i-1] * 32) / 34
     
-    # Calculate daily ATR(14) for Donchian width context
+    # Calculate daily Camarilla levels (using previous day's OHLC)
     high_daily = df_daily['high'].values
     low_daily = df_daily['low'].values
     close_daily = df_daily['close'].values
     
-    tr = np.maximum(high_daily[1:] - low_daily[1:], 
-                    np.maximum(np.abs(high_daily[1:] - close_daily[:-1]),
-                               np.abs(low_daily[1:] - close_daily[:-1])))
-    tr = np.concatenate([[np.nan], tr])
+    # Camarilla levels: based on previous day's range
+    camarilla_r4 = np.full(len(close_daily), np.nan)
+    camarilla_r3 = np.full(len(close_daily), np.nan)
+    camarilla_s3 = np.full(len(close_daily), np.nan)
+    camarilla_s4 = np.full(len(close_daily), np.nan)
     
-    atr14_daily = np.full(len(tr), np.nan)
-    if len(tr) >= 14:
-        atr14_daily[13] = np.nanmean(tr[:14])
-        for i in range(14, len(tr)):
-            if np.isnan(atr14_daily[i-1]):
-                atr14_daily[i] = np.nanmean(tr[i-13:i+1])
-            else:
-                atr14_daily[i] = (atr14_daily[i-1] * 13 + tr[i]) / 14
+    for i in range(1, len(close_daily)):
+        # Use previous day's OHLC to calculate today's levels
+        prev_high = high_daily[i-1]
+        prev_low = low_daily[i-1]
+        prev_close = close_daily[i-1]
+        range_val = prev_high - prev_low
+        
+        if range_val > 0:
+            camarilla_r4[i] = prev_close + range_val * 1.5
+            camarilla_r3[i] = prev_close + range_val * 1.25
+            camarilla_s3[i] = prev_close - range_val * 1.25
+            camarilla_s4[i] = prev_close - range_val * 1.5
+        else:
+            camarilla_r4[i] = camarilla_r3[i] = camarilla_s3[i] = camarilla_s4[i] = prev_close
     
-    # Calculate daily Donchian channels (20-period)
-    highest_high_20 = np.full(len(close_daily), np.nan)
-    lowest_low_20 = np.full(len(close_daily), np.nan)
-    if len(close_daily) >= 20:
-        for i in range(20, len(close_daily)):
-            highest_high_20[i] = np.max(high_daily[i-19:i+1])
-            lowest_low_20[i] = np.min(low_daily[i-19:i+1])
-    
-    # Calculate daily volume average for confirmation
+    # Calculate daily volume average for volume breakout
     vol_daily = df_daily['volume'].values
     vol_avg_20_daily = np.full(len(vol_daily), np.nan)
     if len(vol_daily) >= 20:
         for i in range(20, len(vol_daily)):
             vol_avg_20_daily[i] = np.mean(vol_daily[i-20:i])
     
-    # Align daily indicators to 4h timeframe
-    ema50_daily_aligned = align_htf_to_ltf(prices, df_daily, ema50_daily)
-    highest_high_20_aligned = align_htf_to_ltf(prices, df_daily, highest_high_20)
-    lowest_low_20_aligned = align_htf_to_ltf(prices, df_daily, lowest_low_20)
+    # Align daily indicators to 6h timeframe
+    ema34_daily_aligned = align_htf_to_ltf(prices, df_daily, ema34_daily)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_daily, camarilla_r4)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_daily, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_daily, camarilla_s3)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_daily, camarilla_s4)
     vol_avg_20_daily_aligned = align_htf_to_ltf(prices, df_daily, vol_avg_20_daily)
     
     # Pre-compute session filter (08-20 UTC)
@@ -82,7 +84,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # warmup for indicators
+    start_idx = max(34, 20, 1)  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if outside trading session
@@ -93,51 +95,52 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(ema50_daily_aligned[i]) or np.isnan(highest_high_20_aligned[i]) or
-            np.isnan(lowest_low_20_aligned[i]) or np.isnan(vol_avg_20_daily_aligned[i])):
+        if (np.isnan(ema34_daily_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(vol_avg_20_daily_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current 4h volume > 1.5x 20-period average of daily volume
-        vol_confirm = False
+        # Volume breakout: current 6h volume > 1.5x 20-period average of daily volume
+        vol_breakout = False
         if not np.isnan(vol_avg_20_daily_aligned[i]):
-            vol_4h_current = volume[i]
-            vol_confirm = vol_4h_current > 1.5 * vol_avg_20_daily_aligned[i]
+            vol_breakout = volume[i] > 1.5 * vol_avg_20_daily_aligned[i]
         
         if position == 0:
-            # Look for entry: Donchian breakout in direction of daily EMA trend with volume confirmation
-            # Long when price breaks above 20-day high and above daily EMA50 (bullish bias)
-            long_condition = (
-                high[i] > highest_high_20_aligned[i] and   # price breaks above 20-day high
-                close[i] > ema50_daily_aligned[i] and      # price above daily EMA50 (bullish bias)
-                vol_confirm                                # volume confirmation
+            # Look for entry: breakout of Camarilla R3/S3 in direction of daily trend
+            # Bullish breakout: price breaks above R3 with daily uptrend
+            bullish_breakout = (
+                close[i] > camarilla_r3_aligned[i] and   # price above R3
+                close[i-1] <= camarilla_r3_aligned[i-1] and  # was below or at R3 (breakout)
+                ema34_daily_aligned[i] > close[i] * 0.995 and  # daily EMA above price (uptrend filter)
+                vol_breakout
             )
             
-            # Short when price breaks below 20-day low and below daily EMA50 (bearish bias)
-            short_condition = (
-                low[i] < lowest_low_20_aligned[i] and      # price breaks below 20-day low
-                close[i] < ema50_daily_aligned[i] and      # price below daily EMA50 (bearish bias)
-                vol_confirm                                # volume confirmation
+            # Bearish breakout: price breaks below S3 with daily downtrend
+            bearish_breakout = (
+                close[i] < camarilla_s3_aligned[i] and   # price below S3
+                close[i-1] >= camarilla_s3_aligned[i-1] and  # was above or at S3 (breakdown)
+                ema34_daily_aligned[i] < close[i] * 1.005 and  # daily EMA below price (downtrend filter)
+                vol_breakout
             )
             
-            if long_condition:
+            if bullish_breakout:
                 signals[i] = 0.25
                 position = 1
-            elif short_condition:
+            elif bearish_breakout:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns below 20-day low or below daily EMA50
-            if low[i] < lowest_low_20_aligned[i] or close[i] < ema50_daily_aligned[i]:
+            # Exit long: price returns below R3 or reaches R4 (take profit)
+            if close[i] < camarilla_r3_aligned[i] or close[i] > camarilla_r4_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns above 20-day high or above daily EMA50
-            if high[i] > highest_high_20_aligned[i] or close[i] > ema50_daily_aligned[i]:
+            # Exit short: price returns above S3 or reaches S4 (take profit)
+            if close[i] > camarilla_s3_aligned[i] or close[i] < camarilla_s4_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
