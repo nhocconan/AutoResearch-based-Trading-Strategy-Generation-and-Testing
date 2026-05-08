@@ -3,18 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with 1d EMA trend filter and volume confirmation.
-# Long when price breaks above 12h Donchian upper channel (20) AND 1d EMA34 rising AND volume > 1.5x 20-period average.
-# Short when price breaks below 12h Donchian lower channel (20) AND 1d EMA34 falling AND volume > 1.5x 20-period average.
+# Hypothesis: 4h Donchian(20) breakout with 12h trend filter and volume confirmation.
+# Long when price breaks above Donchian upper (20-period high) AND 12h EMA50 rising AND volume > 1.5x 20-period average.
+# Short when price breaks below Donchian lower (20-period low) AND 12h EMA50 falling AND volume > 1.5x 20-period average.
 # Exit when price crosses back inside Donchian channel.
-# This strategy captures trend continuation with institutional volume confirmation.
-# Donchian channels identify breakouts from consolidation. The 1d EMA34 filter ensures
-# we trade with the daily trend direction. Volume filter confirms institutional participation.
-# Target: 20-30 trades/year (80-120 total over 4 years) to minimize fee drag.
-# Works in both bull and bear markets by following the 1d trend direction.
+# Donchian channels capture breakouts with clear risk definition. 12h EMA50 ensures trend alignment. Volume filter confirms participation.
+# Target: 25-40 trades/year (100-160 total over 4 years) to minimize fee drag.
+# Works in both bull and bear markets by following the 12h trend direction.
 
-name = "12h_Donchian_20_1dEMA34_Volume"
-timeframe = "12h"
+name = "4h_Donchian_20_12hEMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,24 +25,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # 12h Donchian channels (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Donchian channel (20-period)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # 12h EMA50 for trend filter
+    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # 1d EMA34 direction
-    ema34_rising = np.zeros_like(ema34_1d_aligned, dtype=bool)
-    ema34_falling = np.zeros_like(ema34_1d_aligned, dtype=bool)
-    ema34_rising[1:] = ema34_1d_aligned[1:] > ema34_1d_aligned[:-1]
-    ema34_falling[1:] = ema34_1d_aligned[1:] < ema34_1d_aligned[:-1]
+    # 12h EMA50 direction
+    ema50_rising = np.zeros_like(ema50_12h_aligned, dtype=bool)
+    ema50_falling = np.zeros_like(ema50_12h_aligned, dtype=bool)
+    ema50_rising[1:] = ema50_12h_aligned[1:] > ema50_12h_aligned[:-1]
+    ema50_falling[1:] = ema50_12h_aligned[1:] < ema50_12h_aligned[:-1]
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -53,22 +51,22 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Sufficient warmup for EMA34 and Donchian
+    start_idx = max(50, 20)  # Sufficient warmup for EMA50 and Donchian
     
     for i in range(start_idx, n):
-        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(ema34_rising[i]) or 
-            np.isnan(ema34_falling[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
+            np.isnan(ema50_12h_aligned[i]) or np.isnan(ema50_rising[i]) or 
+            np.isnan(ema50_falling[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price breaks above upper Donchian, 1d EMA34 rising, volume filter
-            long_cond = (close[i] > high_roll[i]) and ema34_rising[i] and volume_filter[i]
-            # Short conditions: price breaks below lower Donchian, 1d EMA34 falling, volume filter
-            short_cond = (close[i] < low_roll[i]) and ema34_falling[i] and volume_filter[i]
+            # Long conditions: price breaks above Donchian upper, 12h EMA50 rising, volume filter
+            long_cond = (close[i] > high_max[i]) and ema50_rising[i] and volume_filter[i]
+            # Short conditions: price breaks below Donchian lower, 12h EMA50 falling, volume filter
+            short_cond = (close[i] < low_min[i]) and ema50_falling[i] and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -77,15 +75,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses back below lower Donchian
-            if close[i] < low_roll[i]:
+            # Long exit: price crosses back below Donchian lower
+            if close[i] < low_min[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses back above upper Donchian
-            if close[i] > high_roll[i]:
+            # Short exit: price crosses back above Donchian upper
+            if close[i] > high_max[i]:
                 signals[i] = 0.0
                 position = 0
             else:
