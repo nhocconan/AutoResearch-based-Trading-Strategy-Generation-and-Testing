@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Bollinger Band width expansion breakout with 1-day trend filter and volume confirmation
-# Long when price breaks above upper BB during BB width expansion + daily EMA(50) uptrend + volume spike
-# Short when price breaks below lower BB during BB width expansion + daily EMA(50) downtrend + volume spike
-# Bollinger Band width expansion indicates increasing volatility and potential trend start
+# Hypothesis: 6-hour Williams %R with 1-day trend filter and volume confirmation
+# Long when Williams %R < -80 (oversold) + daily EMA(50) uptrend + volume spike
+# Short when Williams %R > -20 (overbought) + daily EMA(50) downtrend + volume spike
+# Williams %R identifies overbought/oversold conditions with mean reversion tendency
 # Daily trend filter ensures alignment with higher timeframe momentum
 # Volume spike confirms institutional participation
-# Targets 75-200 total trades over 4 years (19-50/year) to avoid fee drag
+# Targets 50-150 total trades over 4 years (12-37/year) to avoid fee drag
 
-name = "4h_BBWidthExpansion_Breakout_DailyTrend_Volume"
-timeframe = "4h"
+name = "6h_WilliamsR_DailyTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,18 +35,10 @@ def generate_signals(prices):
     ema50_1d = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Bollinger Bands (20, 2)
-    bb_period = 20
-    bb_std = 2.0
-    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_band = sma + (bb_std * std)
-    lower_band = sma - (bb_std * std)
-    
-    # Bollinger Band width
-    bb_width = (upper_band - lower_band) / sma
-    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
-    bb_width_expanding = bb_width > bb_width_ma  # Width expanding above average
+    # Calculate Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -59,8 +51,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(upper_band[i]) or 
-            np.isnan(lower_band[i]) or np.isnan(bb_width_expanding[i]) or 
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(williams_r[i]) or 
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -68,30 +59,28 @@ def generate_signals(prices):
             continue
         
         ema50_1d_val = ema50_1d_aligned[i]
-        upper = upper_band[i]
-        lower = lower_band[i]
-        width_expanding = bb_width_expanding[i]
+        wr = williams_r[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: price breaks above upper BB + width expanding + daily uptrend + volume spike
-            if close[i] > upper and width_expanding and close[i] > ema50_1d_val and vol_spike:
+            # Enter long: Williams %R < -80 (oversold) + daily uptrend + volume spike
+            if wr < -80 and close[i] > ema50_1d_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below lower BB + width expanding + daily downtrend + volume spike
-            elif close[i] < lower and width_expanding and close[i] < ema50_1d_val and vol_spike:
+            # Enter short: Williams %R > -20 (overbought) + daily downtrend + volume spike
+            elif wr > -20 and close[i] < ema50_1d_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price closes below middle BB OR daily trend turns down
-            if close[i] < sma[i] or close[i] < ema50_1d_val:
+            # Exit long: Williams %R > -50 (return to mean) OR daily trend turns down
+            if wr > -50 or close[i] < ema50_1d_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price closes above middle BB OR daily trend turns up
-            if close[i] > sma[i] or close[i] > ema50_1d_val:
+            # Exit short: Williams %R < -50 (return to mean) OR daily trend turns up
+            if wr < -50 or close[i] > ema50_1d_val:
                 signals[i] = 0.0
                 position = 0
             else:
