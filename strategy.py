@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeSpike"
-timeframe = "4h"
+name = "1d_Weekly_RSI_Trend_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,71 +17,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data once for Camarilla pivot levels and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data once for RSI and MA
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous day
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Weekly RSI (14-period)
+    close_1w = df_1w['close'].values
+    delta = np.diff(close_1w, prepend=close_1w[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Previous day's values for today's pivot calculation
-    prev_close = np.roll(close_1d, 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close[0] = close_1d[0]  # first day uses same day
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
+    # Wilder's smoothing
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
+    for i in range(14, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # Camarilla levels
-    range_ = prev_high - prev_low
-    R1 = prev_close + (range_ * 1.0 / 12)
-    S1 = prev_close - (range_ * 1.0 / 12)
-    R3 = prev_close + (range_ * 3.0 / 12)
-    S3 = prev_close - (range_ * 3.0 / 12)
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi_1w = 100 - (100 / (1 + rs))
     
-    # Align Camarilla levels to 4h timeframe
-    R1_4h = align_htf_to_ltf(prices, df_1d, R1)
-    S1_4h = align_htf_to_ltf(prices, df_1d, S1)
-    R3_4h = align_htf_to_ltf(prices, df_1d, R3)
-    S3_4h = align_htf_to_ltf(prices, df_1d, S3)
+    # Weekly 50-period SMA for trend
+    sma50_1w = np.convolve(close_1w, np.ones(50)/50, mode='same')
     
-    # 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    
-    # Volume spike detection (20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 2.0)  # volume > 2x average
+    # Align weekly indicators to daily timeframe
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    sma50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup
+    start_idx = 60  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(R1_4h[i]) or np.isnan(S1_4h[i]) or 
-            np.isnan(R3_4h[i]) or np.isnan(S3_4h[i]) or 
-            np.isnan(ema50_12h_aligned[i])):
+        if (np.isnan(rsi_1w_aligned[i]) or np.isnan(sma50_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: price breaks above R1 with volume spike AND above 12h EMA50 (uptrend)
-            long_cond = (close[i] > R1_4h[i]) and vol_spike[i] and (close[i] > ema50_12h_aligned[i])
+            # Long: RSI > 50 and price above weekly SMA50 (bullish bias)
+            long_cond = (rsi_1w_aligned[i] > 50) and (close[i] > sma50_1w_aligned[i])
             
-            # Short entry: price breaks below S1 with volume spike AND below 12h EMA50 (downtrend)
-            short_cond = (close[i] < S1_4h[i]) and vol_spike[i] and (close[i] < ema50_12h_aligned[i])
+            # Short: RSI < 50 and price below weekly SMA50 (bearish bias)
+            short_cond = (rsi_1w_aligned[i] < 50) and (close[i] < sma50_1w_aligned[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -90,15 +74,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price closes below S1 (reversal to support)
-            if close[i] < S1_4h[i]:
+            # Exit long: RSI < 40 (momentum loss) or price below SMA50
+            if (rsi_1w_aligned[i] < 40) or (close[i] < sma50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price closes above R1 (reversal to resistance)
-            if close[i] > R1_4h[i]:
+            # Exit short: RSI > 60 (momentum loss) or price above SMA50
+            if (rsi_1w_aligned[i] > 60) or (close[i] > sma50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,10 +90,13 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R1/S1 breakouts with volume confirmation and 12h EMA50 trend filter.
-# Long when price breaks above R1 with volume spike AND above 12h EMA50 (uptrend).
-# Short when price breaks below S1 with volume spike AND below 12h EMA50 (downtrend).
-# Exits when price returns to opposite S1/R1 level.
-# Uses 12h EMA50 to filter trades in direction of higher timeframe trend.
-# Volume spike ensures institutional participation.
-# Target: 20-50 trades/year to minimize fee decay while capturing meaningful moves.
+# Hypothesis: Weekly RSI > 50 indicates bullish momentum bias, < 50 bearish.
+# Price relative to weekly SMA50 confirms trend alignment.
+# Long when RSI > 50 and price above weekly SMA50.
+# Short when RSI < 50 and price below weekly SMA50.
+# Exits when RSI shows momentum exhaustion (RSI < 40 for longs, > 60 for shorts)
+# or price crosses weekly SMA50 in opposite direction.
+# Weekly timeframe filters noise, daily execution provides timely entries.
+# Works in bull markets (follow RSI > 50) and bear markets (follow RSI < 50).
+# Conservative position sizing (0.25) limits drawdown in volatile markets.
+# Target: 20-60 trades over 4 years = 5-15/year to minimize fee decay.
