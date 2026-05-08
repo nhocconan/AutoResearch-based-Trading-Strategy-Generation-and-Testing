@@ -1,17 +1,16 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla Pivot R3/S3 breakout with 1d trend filter (EMA34) and volume confirmation
-# Long when price breaks above R3 on 12h, 1d EMA34 rising, volume > 1.5x average
-# Short when price breaks below S3 on 12h, 1d EMA34 falling, volume > 1.5x average
-# Uses 12h for entry timing, 1d for trend filter to avoid whipsaws in choppy markets
-# Targets 50-150 total trades over 4 years (12-37/year) for low fee drag and high win rate
+# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume spike
+# Long when price breaks above R3 on 4h, 12h EMA50 rising, volume > 1.5x average
+# Short when price breaks below S3 on 4h, 12h EMA50 falling, volume > 1.5x average
+# Camarilla levels provide strong support/resistance; EMA50 filters whipsaws; volume confirms momentum
+# Targets 75-200 total trades over 4 years (19-50/year) for low fee drag and high win rate
 
-name = "12h_Camarilla_R3S3_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_12hEMA50_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,36 +23,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Camarilla calculations (primary timeframe)
+    # Get 4h data for Camarilla pivot levels
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
+        return np.zeros(n)
+    
+    # Calculate Camarilla levels on 4h OHLC
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    # Camarilla formula: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4)
+    # S3 = C - ((H-L)*1.1/4), S4 = C - ((H-L)*1.1/2)
+    HLC_diff = high_4h - low_4h
+    camarilla_r3 = close_4h + (HLC_diff * 1.1 / 4)
+    camarilla_s3 = close_4h - (HLC_diff * 1.1 / 4)
+    
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s3)
+    
+    # Get 12h data for trend filter (EMA50)
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels on 12h high/low/close
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Calculate EMA50 on 12h close for trend filter
     close_12h = df_12h['close'].values
-    
-    pivot = (high_12h + low_12h + close_12h) / 3
-    range_12h = high_12h - low_12h
-    
-    # R3 = close + (high - low) * 1.1 / 2
-    r3 = close_12h + range_12h * 1.1 / 2
-    # S3 = close - (high - low) * 1.1 / 2
-    s3 = close_12h - range_12h * 1.1 / 2
-    
-    r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
-    
-    # Get 1d data for trend filter (EMA34)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
-        return np.zeros(n)
-    
-    # Calculate EMA34 on 1d close for trend filter
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
     # Volume spike: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -62,12 +59,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 1  # warmup for Camarilla (need at least 2 bars for calculation)
+    start_idx = 50  # warmup for EMA50
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,30 +72,30 @@ def generate_signals(prices):
         
         high_val = high[i]
         low_val = low[i]
-        r3_val = r3_aligned[i]
-        s3_val = s3_aligned[i]
-        ema34_1d_val = ema34_1d_aligned[i]
+        r3_val = camarilla_r3_aligned[i]
+        s3_val = camarilla_s3_aligned[i]
+        ema50_12h_val = ema50_12h_aligned[i]
         vol_spike_val = vol_spike[i]
         
         if position == 0:
-            # Enter long: price breaks above R3, 1d uptrend, volume spike
-            if high_val > r3_val and ema34_1d_val > 0 and vol_spike_val:
+            # Enter long: price breaks above R3, 12h uptrend, volume spike
+            if high_val > r3_val and ema50_12h_val > 0 and vol_spike_val:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S3, 1d downtrend, volume spike
-            elif low_val < s3_val and ema34_1d_val < 0 and vol_spike_val:
+            # Enter short: price breaks below S3, 12h downtrend, volume spike
+            elif low_val < s3_val and ema50_12h_val < 0 and vol_spike_val:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below S3 or 1d trend down
-            if low_val < s3_val or ema34_1d_val < 0:
+            # Exit long: price breaks below S3 or 12h trend down
+            if low_val < s3_val or ema50_12h_val < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above R3 or 1d trend up
-            if high_val > r3_val or ema34_1d_val > 0:
+            # Exit short: price breaks above R3 or 12h trend up
+            if high_val > r3_val or ema50_12h_val > 0:
                 signals[i] = 0.0
                 position = 0
             else:
