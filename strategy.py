@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_TrendFilter"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,9 +25,6 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # 4h trend: EMA50 for trend filter
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # ATR(14) for stop loss
     tr1 = high[1:] - low[1:]
@@ -55,12 +52,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(ema_50[i]) or 
-            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -68,15 +66,13 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: break above R3 + uptrend (price > 1d EMA34 AND price > 4h EMA50) + volume spike
+            # Long: break above R3 + uptrend (price > 1d EMA34) + volume spike
             long_cond = (close[i] > r3_aligned[i]) and \
                         (close[i] > ema_34_1d_aligned[i]) and \
-                        (close[i] > ema_50[i]) and \
                         volume_spike[i]
-            # Short: break below S3 + downtrend (price < 1d EMA34 AND price < 4h EMA50) + volume spike
+            # Short: break below S3 + downtrend (price < 1d EMA34) + volume spike
             short_cond = (close[i] < s3_aligned[i]) and \
                          (close[i] < ema_34_1d_aligned[i]) and \
-                         (close[i] < ema_50[i]) and \
                          volume_spike[i]
             
             if long_cond:
