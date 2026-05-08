@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h KAMA trend with 1d RSI mean-reversion filter and volume confirmation.
-# Long when KAMA slope > 0 (up trend), RSI(14) < 40 (oversold), and 1d volume > 1.5x 20-period average.
-# Short when KAMA slope < 0 (down trend), RSI(14) > 60 (overbought), and 1d volume > 1.5x 20-period average.
-# Exit when KAMA slope changes sign or volume filter fails.
-# Uses 12h timeframe with 1d RSI and volume for higher timeframe context.
-# Target: 50-150 total trades over 4 years (12-37/year) with controlled frequency to avoid fee drag.
+# Hypothesis: 4-hour Donchian(20) breakout with 12-hour EMA(50) trend filter and 1-day volume confirmation.
+# Long when price breaks above Donchian upper band, price > EMA50 (12h), and 1d volume > 1.4x 20-period average.
+# Short when price breaks below Donchian lower band, price < EMA50 (12h), and 1d volume > 1.4x 20-period average.
+# Exit when price crosses back inside the Donchian channel.
+# Uses 4h timeframe with volume confirmation from higher timeframe to reduce false breakouts.
+# Target: 80-160 total trades over 4 years (20-40/year) with controlled frequency to avoid fee drag.
 
-name = "12h_KAMA_RSI_Volume"
-timeframe = "12h"
+name = "4h_Donchian_20_12hEMA50_1dVolume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,65 +23,50 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Daily data for RSI and volume
+    # Daily data for volume filter
     df_d = get_htf_data(prices, '1d')
-    if len(dfd) < 2:
+    if len(df_d) < 25:
         return np.zeros(n)
     
-    # KAMA on 12h data
-    def kama(close, er_period=10, fast=2, slow=30):
-        change = np.abs(close - np.roll(close, er_period))
-        volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0)
-        er = np.where(volatility != 0, change / volatility, 0)
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        kama = np.zeros_like(close)
-        kama[0] = close[0]
-        for i in range(1, len(close)):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        return kama
+    # 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
     
-    kama_values = kama(close)
-    kama_slope = np.diff(kama_values, prepend=kama_values[0])
+    # Donchian(20) on 4h data
+    donchian_period = 20
+    upper_dc = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    lower_dc = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
     
-    # Daily RSI(14)
-    close_d = df_d['close'].values
-    delta = np.diff(close_d, prepend=close_d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi[np.isnan(rsi)] = 50  # Neutral when undefined
+    # EMA50 on 12h close
+    ema_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Daily volume filter: current volume > 1.5x 20-period average
+    # Daily volume filter: current volume > 1.4x 20-period average
     volume_d = df_d['volume'].values
     vol_ma20_d = pd.Series(volume_d).rolling(window=20, min_periods=20).mean().values
-    volume_filter_d = volume_d > (1.5 * vol_ma20_d)
+    volume_filter_d = volume_d > (1.4 * vol_ma20_d)
     volume_filter = align_htf_to_ltf(prices, df_d, volume_filter_d)
-    
-    # Align RSI to 12h timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_d, rsi)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Sufficient warmup for KAMA and RSI
+    start_idx = max(donchian_period, 50)  # Sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(kama_slope[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(volume_filter[i])):
+        if (np.isnan(upper_dc[i]) or np.isnan(lower_dc[i]) or 
+            np.isnan(ema_12h_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: KAMA up, RSI oversold, volume confirmation
-            long_cond = (kama_slope[i] > 0) and (rsi_aligned[i] < 40) and volume_filter[i]
-            # Short conditions: KAMA down, RSI overbought, volume confirmation
-            short_cond = (kama_slope[i] < 0) and (rsi_aligned[i] > 60) and volume_filter[i]
+            # Long conditions: price breaks above Donchian upper, price > EMA50 (12h), volume confirmation
+            long_cond = (close[i] > upper_dc[i]) and (close[i] > ema_12h_aligned[i]) and volume_filter[i]
+            # Short conditions: price breaks below Donchian lower, price < EMA50 (12h), volume confirmation
+            short_cond = (close[i] < lower_dc[i]) and (close[i] < ema_12h_aligned[i]) and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -90,15 +75,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: KAMA turns down or volume filter fails
-            if (kama_slope[i] <= 0) or not volume_filter[i]:
+            # Long exit: price crosses back below Donchian lower
+            if close[i] < lower_dc[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: KAMA turns up or volume filter fails
-            if (kama_slope[i] >= 0) or not volume_filter[i]:
+            # Short exit: price crosses back above Donchian upper
+            if close[i] > upper_dc[i]:
                 signals[i] = 0.0
                 position = 0
             else:
