@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume_Spike"
-timeframe = "4h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_1dVolatility_Filter"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,7 +17,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla pivot calculation
+    # 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
+        return np.zeros(n)
+    
+    close_4h = df_4h['close'].values
+    sma50_4h = pd.Series(close_4h).rolling(window=50, min_periods=50).mean().values
+    sma50_4h_aligned = align_htf_to_ltf(prices, df_4h, sma50_4h)
+    
+    # 1d data for Camarilla pivot and volatility filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 1:
         return np.zeros(n)
@@ -32,22 +41,20 @@ def generate_signals(prices):
     r1 = pivot + (range_1d * 1.1 / 12)
     s1 = pivot - (range_1d * 1.1 / 12)
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 1h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # 12h EMA34 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
-        return np.zeros(n)
+    # 1d ATR for volatility filter (avoid choppy markets)
+    tr1 = np.maximum(high_1d - low_1d, 
+                     np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), 
+                                np.abs(low_1d - np.roll(close_1d, 1))))
+    tr1[0] = high_1d[0] - low_1d[0]
+    atr14_1d = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
+    atr14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
     
-    close_12h = df_12h['close'].values
-    ema34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
-    
-    # Volume spike: current volume > 2.0x 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma20)
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -55,44 +62,45 @@ def generate_signals(prices):
     start_idx = 100
     
     for i in range(start_idx, n):
-        # Skip if any critical data is NaN
+        # Skip if any critical data is NaN or outside session
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema34_12h_aligned[i]) or np.isnan(volume_spike[i])):
+            np.isnan(sma50_4h_aligned[i]) or np.isnan(atr14_1d_aligned[i]) or
+            not (8 <= hours[i] <= 20)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above R1, price above 12h EMA34, volume spike
+            # Long: Price breaks above R1, price above 4h SMA50, low volatility
             long_cond = (close[i] > r1_aligned[i] and 
-                        close[i] > ema34_12h_aligned[i] and
-                        volume_spike[i])
+                        close[i] > sma50_4h_aligned[i] and
+                        atr14_1d_aligned[i] < np.mean(atr14_1d_aligned[max(0, i-50):i+1]))
             
-            # Short: Price breaks below S1, price below 12h EMA34, volume spike
+            # Short: Price breaks below S1, price below 4h SMA50, low volatility
             short_cond = (close[i] < s1_aligned[i] and 
-                         close[i] < ema34_12h_aligned[i] and
-                         volume_spike[i])
+                         close[i] < sma50_4h_aligned[i] and
+                         atr14_1d_aligned[i] < np.mean(atr14_1d_aligned[max(0, i-50):i+1]))
             
             if long_cond:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             elif short_cond:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Long exit: Price closes below S1 OR price crosses below 12h EMA34
-            if close[i] < s1_aligned[i] or close[i] < ema34_12h_aligned[i]:
+            # Long exit: Price closes below S1 OR price crosses below 4h SMA50
+            if close[i] < s1_aligned[i] or close[i] < sma50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: Price closes above R1 OR price crosses above 12h EMA34
-            if close[i] > r1_aligned[i] or close[i] > ema34_12h_aligned[i]:
+            # Short exit: Price closes above R1 OR price crosses above 4h SMA50
+            if close[i] > r1_aligned[i] or close[i] > sma50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
