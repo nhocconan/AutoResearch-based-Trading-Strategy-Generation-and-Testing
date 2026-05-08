@@ -50,7 +50,7 @@ def generate_signals(prices):
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
     # Session filter: 08-20 UTC
-    hours = prices.index.hour
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
