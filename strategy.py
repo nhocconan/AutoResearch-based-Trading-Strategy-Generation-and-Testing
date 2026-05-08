@@ -3,26 +3,46 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with 1d trend filter and volume confirmation
-# Williams Alligator uses three smoothed moving averages (Jaw, Teeth, Lips) to identify trends.
-# We go long when Lips > Teeth > Jaw (bullish alignment) and short when Lips < Teeth < Jaw (bearish alignment),
-# confirmed by 1d EMA(34) trend direction and volume spike.
+# Hypothesis: 4h KAMA trend with 1d RSI filter and volume spike
+# KAMA adapts to market noise - slow in ranging markets, fast in trends.
+# We go long when KAMA slope > 0 and RSI(14) < 30 (oversold bounce in uptrend)
+# Short when KAMA slope < 0 and RSI(14) > 70 (overbought rejection in downtrend)
+# Volume spike confirms institutional participation.
 # Designed for low trade frequency in both bull and bear markets.
 # Target: 50-150 total trades over 4 years = 12-37/year
 
-name = "12h_WilliamsAlligator_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_KAMA_1dRSI_Volume"
+timeframe = "4h"
 leverage = 1.0
 
-def smma(data, period):
-    """Smoothed Moving Average (SMMA)"""
-    sma = pd.Series(data).rolling(window=period, min_periods=period).mean().values
-    smma_vals = np.full_like(data, np.nan, dtype=float)
-    if len(data) >= period:
-        smma_vals[period-1] = sma[period-1]
-        for i in range(period, len(data)):
-            smma_vals[i] = (smma_vals[i-1] * (period-1) + data[i]) / period
-    return smma_vals
+def kama(close, er_period=10, fast_sc=2, slow_sc=30):
+    """Kaufman Adaptive Moving Average"""
+    close_s = pd.Series(close)
+    change = abs(close_s - close_s.shift(er_period))
+    volatility = abs(close_s - close_s.shift(1)).rolling(window=er_period, min_periods=1).sum()
+    er = change / volatility.replace(0, np.nan)
+    sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1))**2
+    sc = sc.fillna((2/(slow_sc+1))**2)  # fill first values with slow SC
+    kama_vals = np.full_like(close, np.nan, dtype=float)
+    kama_vals[0] = close[0]
+    for i in range(1, len(close)):
+        if not np.isnan(sc.iloc[i]):
+            kama_vals[i] = kama_vals[i-1] + sc.iloc[i] * (close[i] - kama_vals[i-1])
+        else:
+            kama_vals[i] = kama_vals[i-1]
+    return kama_vals
+
+def rsi(close, period=14):
+    """Relative Strength Index"""
+    close_s = pd.Series(close)
+    delta = close_s.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window=period, min_periods=period).mean()
+    avg_loss = loss.rolling(window=period, min_periods=period).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi_vals = 100 - (100 / (1 + rs))
+    return rsi_vals.fillna(50).values  # neutral RSI when undefined
 
 def generate_signals(prices):
     n = len(prices)
@@ -36,30 +56,18 @@ def generate_signals(prices):
     
     # Get daily data once
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate daily EMA(34) for trend direction
+    # Calculate daily RSI(14) for overbought/oversold conditions
     close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    rsi14_1d = rsi(close_1d, 14)
+    rsi14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi14_1d)
     
-    # Williams Alligator components on 12h data
-    jaw = smma(close, 13)  # 13-period SMMA
-    teeth = smma(close, 8)  # 8-period SMMA
-    lips = smma(close, 5)   # 5-period SMMA
-    
-    # Shift the averages as per Alligator definition
-    jaw_shifted = np.full_like(jaw, np.nan)
-    teeth_shifted = np.full_like(teeth, np.nan)
-    lips_shifted = np.full_like(lips, np.nan)
-    
-    if len(jaw) >= 8:
-        jaw_shifted[8:] = jaw[:-8]
-    if len(teeth) >= 5:
-        teeth_shifted[5:] = teeth[:-5]
-    if len(lips) >= 3:
-        lips_shifted[3:] = lips[:-3]
+    # KAMA on 4h data
+    kama_vals = kama(close, 10, 2, 30)
+    # Calculate KAMA slope (1-period change)
+    kama_slope = np.diff(kama_vals, prepend=kama_vals[0])
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -72,43 +80,40 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(jaw_shifted[i]) or 
-            np.isnan(teeth_shifted[i]) or np.isnan(lips_shifted[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(rsi14_1d_aligned[i]) or np.isnan(kama_vals[i]) or 
+            np.isnan(kama_slope[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema34_1d_val = ema34_1d_aligned[i]
-        jaw_val = jaw_shifted[i]
-        teeth_val = teeth_shifted[i]
-        lips_val = lips_shifted[i]
+        rsi_val = rsi14_1d_aligned[i]
+        kama_slope_val = kama_slope[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: Lips > Teeth > Jaw (bullish alignment) + uptrend + volume spike
-            if (lips_val > teeth_val > jaw_val and 
-                close[i] > ema34_1d_val and 
+            # Enter long: KAMA rising (uptrend) + RSI oversold + volume spike
+            if (kama_slope_val > 0 and 
+                rsi_val < 30 and 
                 vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Lips < Teeth < Jaw (bearish alignment) + downtrend + volume spike
-            elif (lips_val < teeth_val < jaw_val and 
-                  close[i] < ema34_1d_val and 
+            # Enter short: KAMA falling (downtrend) + RSI overbought + volume spike
+            elif (kama_slope_val < 0 and 
+                  rsi_val > 70 and 
                   vol_spike):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Bullish alignment breaks OR price breaks below trend
-            if not (lips_val > teeth_val > jaw_val) or close[i] < ema34_1d_val:
+            # Exit long: KAMA slope turns negative OR RSI becomes overbought
+            if kama_slope_val <= 0 or rsi_val >= 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Bearish alignment breaks OR price breaks above trend
-            if not (lips_val < teeth_val < jaw_val) or close[i] > ema34_1d_val:
+            # Exit short: KAMA slope turns positive OR RSI becomes oversold
+            if kama_slope_val >= 0 or rsi_val <= 30:
                 signals[i] = 0.0
                 position = 0
             else:
