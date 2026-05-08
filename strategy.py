@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with 1d volume confirmation and ADX trend filter.
-# Long when price breaks above Donchian(20) high AND 1d volume > 1.3x 20-period average AND ADX(14) > 25 (trending market).
-# Short when price breaks below Donchian(20) low AND 1d volume > 1.3x 20-period average AND ADX(14) > 25.
+# Hypothesis: 4h Donchian(20) breakout with 1d volume spike confirmation and 1d ADX(14) trend filter.
+# Long when price breaks above Donchian high + 1d volume > 1.5x 20-period avg + ADX > 25.
+# Short when price breaks below Donchian low + 1d volume > 1.5x 20-period avg + ADX > 25.
 # Exit when price crosses back inside the Donchian channel.
-# Uses 12h timeframe as specified, with 1d volume and ADX for higher timeframe context.
-# Target: 50-150 total trades over 4 years (12-37/year) with controlled frequency to avoid fee drag.
+# Uses 4h timeframe as specified, with 1d volume and ADX for higher timeframe context.
+# Target: 100-200 total trades over 4 years (25-50/year) with controlled frequency to avoid fee drag.
 
-name = "12h_Donchian_20_1dVolume_ADX"
-timeframe = "12h"
+name = "4h_Donchian_20_1dVolume_ADX_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,15 +28,15 @@ def generate_signals(prices):
     if len(df_d) < 2:
         return np.zeros(n)
     
-    # Donchian(20) on 12h data
+    # Donchian(20) on 4h data
     donchian_period = 20
     upper_dc = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
     lower_dc = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
     
-    # Daily volume filter: current volume > 1.3x 20-period average
+    # Daily volume filter: current volume > 1.5x 20-period average
     volume_d = df_d['volume'].values
     vol_ma20_d = pd.Series(volume_d).rolling(window=20, min_periods=20).mean().values
-    volume_filter_d = volume_d > (1.3 * vol_ma20_d)
+    volume_filter_d = volume_d > (1.5 * vol_ma20_d)
     volume_filter = align_htf_to_ltf(prices, df_d, volume_filter_d)
     
     # Daily ADX(14) for trend strength
@@ -73,7 +73,7 @@ def generate_signals(prices):
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     adx[np.isnan(adx)] = 0
     
-    # Align ADX to 12h timeframe
+    # Align ADX to 4h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_d, adx)
     
     # Trend filter: ADX > 25
@@ -100,10 +100,10 @@ def generate_signals(prices):
             short_cond = (close[i] < lower_dc[i]) and volume_filter[i] and trend_filter[i]
             
             if long_cond:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             elif short_cond:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
             # Long exit: price crosses back below Donchian lower
@@ -111,13 +111,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
             # Short exit: price crosses back above Donchian upper
             if close[i] > upper_dc[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
