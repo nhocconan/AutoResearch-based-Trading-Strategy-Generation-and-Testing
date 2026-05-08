@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_v3"
-timeframe = "4h"
+name = "1d_Weekly_Camarilla_R3S3_Breakout_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,19 +17,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data once for trend filter
+    # Get weekly data once for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    # Weekly EMA21 trend filter
+    close_1w = df_1w['close'].values
+    ema21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    trend_1w = (close_1w > ema21_1w).astype(float)
+    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
+    
+    # Get daily data once for Camarilla pivot levels (using previous day's OHLC)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 1d EMA34 trend filter
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_1d = (close_1d > ema34_1d).astype(float)
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
-    
-    # Get 1d data once for Camarilla pivot levels (previous day's OHLC)
-    # Already have df_1d from above
+    # Previous day's OHLC for Camarilla calculation (R3/S3 levels)
     prev_high = np.roll(df_1d['high'].values, 1)
     prev_low = np.roll(df_1d['low'].values, 1)
     prev_close = np.roll(df_1d['close'].values, 1)
@@ -43,17 +47,18 @@ def generate_signals(prices):
     r3 = pivot + (range_val * 1.1 / 2)  # R3 level
     s3 = pivot - (range_val * 1.1 / 2)  # S3 level
     
-    # Align Camarilla levels to 4h timeframe
-    r3_4h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_4h = align_htf_to_ltf(prices, df_1d, s3)
+    # Align Camarilla levels to daily timeframe (no alignment needed as both are daily)
+    # But we still use the helper for consistency and to handle any potential index issues
+    r3_1d = align_htf_to_ltf(prices, df_1d, r3)
+    s3_1d = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Volume spike detection: current volume > 2.5 * 20-period average
+    # Volume spike detection: current volume > 2.0 * 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma20 * 2.5)
+    vol_spike = volume > (vol_ma20 * 2.0)
     
-    # Price distance filter: require breakout to be at least 0.5% above/below level
-    price_above_r3 = close > r3_4h * 1.005
-    price_below_s3 = close < s3_4h * 0.995
+    # Price distance filter: require breakout to be at least 0.3% above/below level
+    price_above_r3 = close > r3_1d * 1.003
+    price_below_s3 = close < s3_1d * 0.997
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -62,18 +67,18 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(r3_1d[i]) or np.isnan(s3_1d[i]) or np.isnan(trend_1w_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: price breaks above R3 with volume spike and 1d uptrend
-            long_cond = (price_above_r3[i] and vol_spike[i] and trend_1d_aligned[i] > 0.5)
+            # Long entry: price breaks above R3 with volume spike and weekly uptrend
+            long_cond = (price_above_r3[i] and vol_spike[i] and trend_1w_aligned[i] > 0.5)
             
-            # Short entry: price breaks below S3 with volume spike and 1d downtrend
-            short_cond = (price_below_s3[i] and vol_spike[i] and trend_1d_aligned[i] < 0.5)
+            # Short entry: price breaks below S3 with volume spike and weekly downtrend
+            short_cond = (price_below_s3[i] and vol_spike[i] and trend_1w_aligned[i] < 0.5)
             
             if long_cond:
                 signals[i] = 0.25
@@ -83,14 +88,14 @@ def generate_signals(prices):
                 position = -1
         elif position == 1:
             # Long exit: price reverses back below R3 (mean reversion)
-            if close[i] < r3_4h[i]:
+            if close[i] < r3_1d[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short exit: price reverses back above S3 (mean reversion)
-            if close[i] > s3_4h[i]:
+            if close[i] > s3_1d[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -98,6 +103,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R3/S3 breakout with 1d EMA34 trend filter, volume spike (2.5x 20-period MA), and 0.5% price distance filter.
-# Uses 1d trend for multi-timeframe alignment and tighter entry conditions to reduce trade frequency.
-# Position size 0.25 to manage risk. Target: 20-40 trades/year to avoid fee drag while capturing breaks in both bull and bear markets.
+# Hypothesis: Daily Camarilla R3/S3 breakout with weekly EMA21 trend filter and volume confirmation.
+# Uses daily timeframe to reduce trade frequency (target: 15-25 trades/year) to minimize fee drag.
+# Weekly trend filter ensures alignment with higher timeframe momentum.
+# Volume spike (2x 20-day average) confirms institutional participation.
+# Price distance filter (0.3%) avoids false breakouts from minor noise.
+# Position size 0.25 balances return potential with drawdown control.
+# Designed to work in both bull and bear markets by following weekly trend direction.
