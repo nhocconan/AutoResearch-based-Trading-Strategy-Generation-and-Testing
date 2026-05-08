@@ -3,20 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Bands mean reversion with 12h trend filter and volume confirmation.
-# Long when price touches lower BB and 12h trend is down (fade in downtrend).
-# Short when price touches upper BB and 12h trend is up (fade in uptrend).
-# Exit when price crosses middle band (mean reversion complete).
-# Uses Bollinger Bands (20, 2) on 6h, 12h EMA(34) for trend, 60-period volume spike.
-# Target: 80-120 total trades over 4 years (20-30/year) to balance opportunity and cost.
+# Hypothesis: 4h Camarilla R3/S3 reversal with 1d trend filter and volume confirmation.
+# Fade at R3/S3 when 1d trend is opposite (mean reversion in range),
+# Breakout continuation at R4/S4 when 1d trend aligns (trend follow).
+# Uses 1d EMA(34) for trend and 60-period volume spike for confirmation.
+# Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
 
-name = "6h_BB_MeanReversion_12hTrend_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Reversal_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,80 +23,113 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # Get 1d data for Camarilla levels and trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Bollinger Bands (20, 2) on 6h
-    bb_period = 20
-    bb_std = 2
-    close_series = pd.Series(close)
-    bb_ma = close_series.rolling(window=bb_period, min_periods=bb_period).mean()
-    bb_std_dev = close_series.rolling(window=bb_period, min_periods=bb_period).std()
-    bb_upper = bb_ma + (bb_std_dev * bb_std)
-    bb_middle = bb_ma
-    bb_lower = bb_ma - (bb_std_dev * bb_std)
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
     
-    # 12h EMA(34) for trend filter
-    close_12h_series = pd.Series(close_12h)
-    ema_34_12h = close_12h_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_up = ema_34_12h[1:] > ema_34_12h[:-1]  # Rising EMA = uptrend
-    trend_up = np.concatenate([[False], trend_up])  # Align with 12h index
+    # Camarilla levels
+    range_ = prev_high - prev_low
+    R3 = prev_close + (range_ * 1.1 / 2)
+    S3 = prev_close - (range_ * 1.1 / 2)
+    R4 = prev_close + (range_ * 1.1)
+    S4 = prev_close - (range_ * 1.1)
     
-    # Volume confirmation: 60-period volume spike (1.8x EMA)
+    # 1d EMA(34) for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_up = ema_34_1d[1:] > ema_34_1d[:-1]  # Rising EMA = uptrend
+    trend_up = np.concatenate([[False], trend_up])  # Align with 1d index
+    
+    # Volume confirmation: 60-period volume spike (2.0x EMA)
     vol_ema = pd.Series(volume).ewm(span=60, adjust=False, min_periods=60).mean().values
-    vol_confirm = volume > (vol_ema * 1.8)
+    vol_confirm = volume > (vol_ema * 2.0)
     
-    # Align indicators to 6h timeframe
-    bb_upper_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), bb_upper.values)
-    bb_middle_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), bb_middle.values)
-    bb_lower_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), bb_lower.values)
-    trend_up_aligned = align_htf_to_ltf(prices, df_12h, trend_up.astype(float))
+    # Align 1d indicators to 4h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
+    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
+    trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(bb_period, 60)  # Ensure enough data for BB and volume EMA
+    start_idx = 60  # Ensure enough data for volume EMA
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(bb_upper_aligned[i]) or np.isnan(bb_middle_aligned[i]) or
-            np.isnan(bb_lower_aligned[i]) or np.isnan(trend_up_aligned[i]) or
-            np.isnan(vol_ema[i])):
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or
+            np.isnan(R4_aligned[i]) or np.isnan(S4_aligned[i]) or
+            np.isnan(trend_up_aligned[i]) or np.isnan(vol_ema[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: price at or below lower BB in downtrend (fade)
-            if (trend_up_aligned[i] <= 0.5 and  # 12h downtrend
-                close[i] <= bb_lower_aligned[i] and
+            # Long entry conditions
+            # Fade at S3 in downtrend (mean reversion)
+            if (trend_up_aligned[i] <= 0.5 and  # 1d downtrend
+                close[i] <= S3_aligned[i] and
                 vol_confirm[i]):
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
-            # Short entry: price at or above upper BB in uptrend (fade)
-            elif (trend_up_aligned[i] > 0.5 and  # 12h uptrend
-                  close[i] >= bb_upper_aligned[i] and
+            # Breakout above R4 in uptrend (trend follow)
+            elif (trend_up_aligned[i] > 0.5 and  # 1d uptrend
+                  close[i] >= R4_aligned[i] and
                   vol_confirm[i]):
-                signals[i] = -0.25
+                signals[i] = 0.30
+                position = 1
+            # Short entry conditions
+            # Fade at R3 in uptrend (mean reversion)
+            elif (trend_up_aligned[i] > 0.5 and  # 1d uptrend
+                  close[i] >= R3_aligned[i] and
+                  vol_confirm[i]):
+                signals[i] = -0.30
+                position = -1
+            # Breakdown below S4 in downtrend (trend follow)
+            elif (trend_up_aligned[i] <= 0.5 and  # 1d downtrend
+                  close[i] <= S4_aligned[i] and
+                  vol_confirm[i]):
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Long exit: price crosses above middle BB (mean reversion complete)
-            if close[i] >= bb_middle_aligned[i]:
+            # Long exit: reverse signal or stop
+            if (trend_up_aligned[i] <= 0.5 and  # 1d downtrend
+                close[i] >= R3_aligned[i]):  # Hit R3 or above
+                signals[i] = 0.0
+                position = 0
+            elif (trend_up_aligned[i] > 0.5 and  # 1d uptrend
+                  close[i] <= S4_aligned[i]):  # Break below S4
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Short exit: price crosses below middle BB (mean reversion complete)
-            if close[i] <= bb_middle_aligned[i]:
+            # Short exit: reverse signal or stop
+            if (trend_up_aligned[i] > 0.5 and  # 1d uptrend
+                close[i] <= S3_aligned[i]):  # Hit S3 or below
+                signals[i] = 0.0
+                position = 0
+            elif (trend_up_aligned[i] <= 0.5 and  # 1d downtrend
+                  close[i] >= R4_aligned[i]):  # Break above R4
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
