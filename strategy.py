@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_WeeklyPivot_CongestionBreakout"
-timeframe = "12h"
+name = "6h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -12,74 +12,78 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
-    
-    # Weekly data for congestion detection
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    
-    # Weekly range and congestion detection
-    weekly_range = high_1w - low_1w
-    range_ma = pd.Series(weekly_range).rolling(window=4, min_periods=4).mean().values
-    congestion = weekly_range < (0.6 * range_ma)
-    
-    # Daily data for price levels
+    # 1D data for trend filter and Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Previous day's high, low, close for pivot calculation
-    prev_high = df_1d['high'].values
-    prev_low = df_1d['low'].values
-    prev_close = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Standard pivot point
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    # Support and resistance levels
-    r1 = 2 * pivot - prev_low
-    s1 = 2 * pivot - prev_high
+    # Calculate previous day's Camarilla pivot levels
+    # R4 = C + ((H-L) * 1.1/2)
+    # R3 = C + ((H-L) * 1.1/4)
+    # S3 = C - ((H-L) * 1.1/4)
+    # S4 = C - ((H-L) * 1.1/2)
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close[0] = np.nan
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
     
-    # Align to 12h timeframe
-    congestion_aligned = align_htf_to_ltf(prices, df_1w, congestion)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    R4 = prev_close + ((prev_high - prev_low) * 1.1 / 2)
+    R3 = prev_close + ((prev_high - prev_low) * 1.1 / 4)
+    S3 = prev_close - ((prev_high - prev_low) * 1.1 / 4)
+    S4 = prev_close - ((prev_high - prev_low) * 1.1 / 2)
     
-    # Volume confirmation
-    vol_ma = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
-    volume_filter = volume > (1.3 * vol_ma)
+    # Align Camarilla levels to 6h timeframe
+    R3_6h = align_htf_to_ltf(prices, df_1d, R3)
+    S3_6h = align_htf_to_ltf(prices, df_1d, S3)
+    R4_6h = align_htf_to_ltf(prices, df_1d, R4)
+    S4_6h = align_htf_to_ltf(prices, df_1d, S4)
+    
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume spike: current volume > 1.8x 20-period average
+    volume = prices['volume'].values
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.8 * vol_ma20)
+    
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(congestion_aligned[i]) or np.isnan(pivot_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(R3_6h[i]) or np.isnan(S3_6h[i]) or np.isnan(R4_6h[i]) or 
+            np.isnan(S4_6h[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above R1 during weekly congestion
-            long_cond = (close[i] > r1_aligned[i] and 
-                        congestion_aligned[i] and
-                        volume_filter[i])
+            # Long breakout: price breaks above R3 with volume and uptrend
+            long_cond = (high[i] > R3_6h[i] and 
+                        close[i] > R3_6h[i] and
+                        ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and
+                        volume_spike[i])
             
-            # Short: break below S1 during weekly congestion
-            short_cond = (close[i] < s1_aligned[i] and 
-                         congestion_aligned[i] and
-                         volume_filter[i])
+            # Short breakdown: price breaks below S3 with volume and downtrend
+            short_cond = (low[i] < S3_6h[i] and 
+                         close[i] < S3_6h[i] and
+                         ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and
+                         volume_spike[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -88,15 +92,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price returns to pivot or congestion ends
-            if (close[i] < pivot_aligned[i]) or (not congestion_aligned[i]):
+            # Long exit: price drops back below R3 or trend reverses
+            if close[i] < R3_6h[i] or ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price returns to pivot or congestion ends
-            if (close[i] > pivot_aligned[i]) or (not congestion_aligned[i]):
+            # Short exit: price rises back above S3 or trend reverses
+            if close[i] > S3_6h[i] or ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
