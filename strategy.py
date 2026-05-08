@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla Pivot R1/S1 Breakout + 1d Trend + Volume Spike
-# Uses daily Camarilla levels from prior day for mean reversion breakouts.
-# Enters on break of R1 (long) or S1 (short) with volume confirmation and 1d trend filter.
-# Exits when price returns to pivot point or trend reverses.
-# Targets 20-40 trades per year (~80-160 total over 4 years) to minimize fee drag.
+# Hypothesis: 6h RSI divergence detection with 1d ADX trend filter and volume confirmation
+# RSI divergence (price making new high/low while RSI does not) signals weakening momentum and potential reversal.
+# Combined with 1d ADX > 25 to ensure we only trade in trending markets (avoiding false signals in ranges).
+# Volume confirmation ensures institutional participation. Targets 20-40 trades per year to minimize fee drift.
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_RSIDivergence_1dADX_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,78 +22,102 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation and trend filter
+    # RSI calculation (14-period)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Get 1d data for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily Camarilla levels from previous day's OHLC
-    # Pivot = (H + L + C) / 3
-    # R1 = Pivot + (H - L) * 1.1/12
-    # S1 = Pivot - (H - L) * 1.1/12
+    # Calculate ADX on 1d data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = pivot_1d + (high_1d - low_1d) * 1.1 / 12.0
-    s1_1d = pivot_1d - (high_1d - low_1d) * 1.1 / 12.0
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Align Camarilla levels to 4h timeframe (use previous day's levels)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]])) > 
+                       (np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d), 
+                       np.maximum(high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]]), 0), 0)
+    dm_minus = np.where((np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d) > 
+                        (high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]])), 
+                        np.maximum(np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d, 0), 0)
     
-    # 1d trend filter: EMA25 slope
-    ema25_1d = pd.Series(close_1d).ewm(span=25, adjust=False, min_periods=25).mean().values
-    ema25_slope = ema25_1d[1:] - ema25_1d[:-1]
-    ema25_slope = np.concatenate([[0], ema25_slope])
-    ema25_aligned = align_htf_to_ltf(prices, df_1d, ema25_1d)
-    ema25_slope_aligned = align_htf_to_ltf(prices, df_1d, ema25_slope)
+    # Smoothed values
+    tr_ma = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
+    dm_plus_ma = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False).mean().values
+    dm_minus_ma = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False).mean().values
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_ma / (tr_ma + 1e-10)
+    di_minus = 100 * dm_minus_ma / (tr_ma + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
+    
+    # Align 1d ADX to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Volume confirmation: current volume > 1.8x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_conf = volume > (vol_ma * 1.5)
+    vol_conf = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Need enough data for indicators
+    start_idx = 30  # Need enough data for RSI and ADX
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema25_slope_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(rsi[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        pivot_val = pivot_aligned[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        ema25_slope_val = ema25_slope_aligned[i]
+        rsi_val = rsi[i]
+        adx_val = adx_aligned[i]
         vol_conf_val = vol_conf[i]
         
         if position == 0:
-            # Enter long: break above R1 with volume confirmation and 1d uptrend
-            if close[i] > r1_val and vol_conf_val and ema25_slope_val > 0:
+            # Bullish divergence: price makes new low, RSI does not (higher low)
+            # Only in uptrend (ADX > 25) with volume confirmation
+            if (i >= 10 and low[i] < low[i-10] and 
+                rsi[i] > rsi[i-10] and  # RSI higher low
+                adx_val > 25 and vol_conf_val):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below S1 with volume confirmation and 1d downtrend
-            elif close[i] < s1_val and vol_conf_val and ema25_slope_val < 0:
+            # Bearish divergence: price makes new high, RSI does not (lower high)
+            # Only in downtrend (ADX > 25) with volume confirmation
+            elif (i >= 10 and high[i] > high[i-10] and 
+                  rsi[i] < rsi[i-10] and  # RSI lower high
+                  adx_val > 25 and vol_conf_val):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: return to pivot or trend turns down
-            if close[i] < pivot_val or ema25_slope_val < 0:
+            # Exit long: RSI becomes overbought or divergence breaks down
+            if rsi_val > 70 or (i >= 5 and low[i] < low[i-5] and rsi[i] < rsi[i-5]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: return to pivot or trend turns up
-            if close[i] > pivot_val or ema25_slope_val > 0:
+            # Exit short: RSI becomes oversold or divergence breaks down
+            if rsi_val < 30 or (i >= 5 and high[i] > high[i-5] and rsi[i] > rsi[i-5]):
                 signals[i] = 0.0
                 position = 0
             else:
