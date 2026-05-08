@@ -3,17 +3,29 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with weekly pivot context and volume confirmation
-# Long when price breaks above Donchian(20) high and weekly pivot > prior weekly pivot (uptrend)
-# Short when price breaks below Donchian(20) low and weekly pivot < prior weekly pivot (downtrend)
-# Weekly pivot provides higher-timeframe trend bias to avoid counter-trend trades
-# Volume confirmation ensures breakout authenticity
-# Designed for low trade frequency in both bull and bear markets
+# Hypothesis: 12h Keltner Channel breakout with 1d ADX trend filter and volume confirmation
+# Keltner Channel uses ATR-based bands around EMA. Breakout above upper band signals bullish momentum,
+# breakdown below lower band signals bearish momentum. Confirmed by 1d ADX > 25 (trending market)
+# and volume spike (>1.5x 20-period average). Designed for low trade frequency in both bull and bear markets.
 # Target: 50-150 total trades over 4 years = 12-37/year
 
-name = "6h_Donchian20_WeeklyPivot_Volume"
-timeframe = "6h"
+name = "12h_Keltner_1dADX_Volume"
+timeframe = "12h"
 leverage = 1.0
+
+def ema(data, period):
+    """Exponential Moving Average"""
+    return pd.Series(data).ewm(span=period, adjust=False, min_periods=period).mean().values
+
+def atr(high, low, close, period):
+    """Average True Range"""
+    high_low = high - low
+    high_close = np.abs(high - np.roll(close, 1))
+    low_close = np.abs(low - np.roll(close, 1))
+    high_close[0] = high_low[0]  # first value
+    low_close[0] = high_low[0]   # first value
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    return pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def generate_signals(prices):
     n = len(prices)
@@ -25,27 +37,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data once
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get daily data once
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate weekly pivot points (standard formula)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate daily ADX(14) for trend strength
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Pivot Point = (High + Low + Close) / 3
-    pivot = (high_1w + low_1w + close_1w) / 3.0
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    # Calculate +DI and -DI
+    high_diff = np.diff(high_1d, prepend=high_1d[0])
+    low_diff = -np.diff(low_1d, prepend=low_1d[0])
+    plus_dm = np.where((high_diff > low_diff) & (high_diff > 0), high_diff, 0)
+    minus_dm = np.where((low_diff > high_diff) & (low_diff > 0), low_diff, 0)
     
-    # Donchian(20) channels on 6h data
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate TR for ADX
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Volume spike: current volume > 2.0 * 20-period average
+    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    plus_di_1d = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_1d
+    minus_di_1d = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_1d
+    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
+    dx_1d = np.where((plus_di_1d + minus_di_1d) == 0, 0, dx_1d)
+    adx_1d = pd.Series(dx_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Keltner Channel on 12h data
+    ema20 = ema(close, 20)
+    atr10 = atr(high, low, close, 10)
+    upper_keltner = ema20 + (2.0 * atr10)
+    lower_keltner = ema20 - (2.0 * atr10)
+    
+    # Volume spike: current volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -54,41 +86,43 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(pivot_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(adx_1d_aligned[i]) or np.isnan(upper_keltner[i]) or 
+            np.isnan(lower_keltner[i]) or np.isnan(ema20[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        pivot_val = pivot_aligned[i]
-        donch_high = donchian_high[i]
-        donch_low = donchian_low[i]
+        adx_val = adx_1d_aligned[i]
+        upper_keltner_val = upper_keltner[i]
+        lower_keltner_val = lower_keltner[i]
+        ema20_val = ema20[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: break above Donchian high + weekly pivot up + volume spike
-            if (close[i] > donch_high and 
-                i > 0 and pivot_val > pivot_aligned[i-1] and 
+            # Enter long: Close above upper Keltner + strong trend (ADX > 25) + volume spike
+            if (close[i] > upper_keltner_val and 
+                adx_val > 25 and 
                 vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below Donchian low + weekly pivot down + volume spike
-            elif (close[i] < donch_low and 
-                  i > 0 and pivot_val < pivot_aligned[i-1] and 
+            # Enter short: Close below lower Keltner + strong trend (ADX > 25) + volume spike
+            elif (close[i] < lower_keltner_val and 
+                  adx_val > 25 and 
                   vol_spike):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: break below Donchian low
-            if close[i] < donch_low:
+            # Exit long: Close below EMA20 OR trend weakens (ADX < 20)
+            if close[i] < ema20_val or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: break above Donchian high
-            if close[i] > donch_high:
+            # Exit short: Close above EMA20 OR trend weakens (ADX < 20)
+            if close[i] > ema20_val or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
