@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_CCI_Trend_Filter_With_Volume"
-timeframe = "4h"
+name = "12h_Donchian_20_Volume_Spike_Trend_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,29 +17,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for trend filter and CCI
+    # Daily trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    daily_ema34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    daily_ema34_aligned = align_htf_to_ltf(prices, df_1d, daily_ema34)
     
-    # Calculate daily CCI(20)
-    tp = (high_1d + low_1d + close_1d) / 3
-    sma_tp = pd.Series(tp).rolling(window=20, min_periods=20).mean()
-    mad = pd.Series(tp).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
-    cci = (tp - sma_tp) / (0.015 * mad)
-    cci = cci.fillna(0).values
+    # 12h Donchian channel (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Daily EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Volume spike: current volume > 2x 20-period average
+    # Volume spike: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma20)
+    volume_spike = volume > (1.5 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -48,22 +43,22 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(cci[i-1]) if i-1 >= 0 else True or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(daily_ema34_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: CCI > 100, price above EMA50, volume spike
-            long_cond = (cci[i-1] > 100 and 
-                        close[i] > ema_50_1d_aligned[i] and
+            # Long: price breaks above Donchian high, daily uptrend, volume spike
+            long_cond = (close[i] > donchian_high[i] and 
+                        daily_ema34_aligned[i] > daily_ema34_aligned[i-1] and
                         volume_spike[i])
             
-            # Short: CCI < -100, price below EMA50, volume spike
-            short_cond = (cci[i-1] < -100 and 
-                         close[i] < ema_50_1d_aligned[i] and
+            # Short: price breaks below Donchian low, daily downtrend, volume spike
+            short_cond = (close[i] < donchian_low[i] and 
+                         daily_ema34_aligned[i] < daily_ema34_aligned[i-1] and
                          volume_spike[i])
             
             if long_cond:
@@ -73,15 +68,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: CCI < 0 or price crosses below EMA50
-            if cci[i-1] < 0 or close[i] < ema_50_1d_aligned[i]:
+            # Long exit: price crosses below Donchian low
+            if close[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: CCI > 0 or price crosses above EMA50
-            if cci[i-1] > 0 or close[i] > ema_50_1d_aligned[i]:
+            # Short exit: price crosses above Donchian high
+            if close[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
