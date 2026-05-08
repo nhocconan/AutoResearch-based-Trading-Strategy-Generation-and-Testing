@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "4h"
+name = "1d_Camarilla_R3_S3_Breakout_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -12,59 +12,60 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data once for Camarilla levels and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    # Get 1w data once for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day's range
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    range_1d = high_1d - low_1d
+    # 1w EMA34 trend filter
+    close_1w = df_1w['close'].values
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_1w = (close_1w > ema34_1w).astype(float)
+    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
     
-    # Camarilla R1 (resistance 1) and S1 (support 1)
-    camarilla_r1 = close_1d + 1.1 * range_1d / 12
-    camarilla_s1 = close_1d - 1.1 * range_1d / 12
+    # Camarilla levels (based on previous day's range)
+    # Calculate previous day's high, low, close
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = high[0]  # fill first value
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
     
-    # Align Camarilla levels to 4h timeframe (use previous day's levels)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Camarilla levels: R3, S3 (most significant levels)
+    # R3 = close + 1.1*(high - low)
+    # S3 = close - 1.1*(high - low)
+    R3 = prev_close + 1.1 * (prev_high - prev_low)
+    S3 = prev_close - 1.1 * (prev_high - prev_low)
     
-    # 1d EMA34 trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_1d = (close_1d > ema34_1d).astype(float)
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
-    
-    # Volume spike: current volume > 2.0 * 24-period average (6 trading days)
-    vol_ma24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    vol_spike = volume > (vol_ma24 * 2.0)
+    # Volume spike detection: current volume > 1.5 * 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (vol_ma20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 24  # warmup for volume MA
+    start_idx = 20  # warmup for volume MA and to ensure previous day data
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) 
-            or np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ma24[i])):
+        if (np.isnan(R3[i]) or np.isnan(S3[i]) or np.isnan(trend_1w_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: price breaks above Camarilla R1 with volume spike and daily uptrend
-            long_cond = (close[i] > camarilla_r1_aligned[i] and vol_spike[i] and trend_1d_aligned[i] > 0.5)
+            # Long entry: price breaks above R3 with volume spike and weekly uptrend
+            long_cond = (close[i] > R3[i] and vol_spike[i] and trend_1w_aligned[i] > 0.5)
             
-            # Short entry: price breaks below Camarilla S1 with volume spike and daily downtrend
-            short_cond = (close[i] < camarilla_s1_aligned[i] and vol_spike[i] and trend_1d_aligned[i] < 0.5)
+            # Short entry: price breaks below S3 with volume spike and weekly downtrend
+            short_cond = (close[i] < S3[i] and vol_spike[i] and trend_1w_aligned[i] < 0.5)
             
             if long_cond:
                 signals[i] = 0.25
@@ -73,15 +74,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price closes below Camarilla S1 (mean reversion to support)
-            if close[i] < camarilla_s1_aligned[i]:
+            # Long exit: price closes below S3 (mean reversion to opposite level)
+            if close[i] < S3[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price closes above Camarilla R1 (mean reversion to resistance)
-            if close[i] > camarilla_r1_aligned[i]:
+            # Short exit: price closes above R3 (mean reversion to opposite level)
+            if close[i] > R3[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -89,8 +90,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R1/S1 breakout with volume confirmation and daily trend filter on 4h timeframe.
+# Hypothesis: Camarilla R3/S3 breakout with volume confirmation and weekly trend filter on daily timeframe.
 # Works in bull markets (breakouts continue) and bear markets (mean reversion at opposite level).
-# Target: 20-40 trades/year to minimize fee decay while capturing significant moves.
-# Daily EMA34 ensures alignment with longer-term trend, reducing counter-trend trades.
-# Volume spike requirement (2x average) filters out low-conviction breakouts.
+# Camarilla levels provide natural support/resistance based on previous day's range.
+# Weekly EMA34 ensures alignment with longer-term trend, reducing counter-trend trades.
+# Volume spike confirms institutional participation in breakouts.
+# Target: 15-25 trades/year to minimize fee decay while capturing significant moves.
