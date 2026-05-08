@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_RSI_EMA200_Trend_Scalper"
-timeframe = "4h"
+name = "1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeFilter"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,62 +17,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for RSI and EMA200
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    # 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # 1d EMA200 for trend filter
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # 1w EMA50 for trend filter
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # 1d RSI(14) for momentum
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # 1w ATR for volatility filter
+    tr_w = np.maximum(high_1w - low_1w, 
+                      np.maximum(np.abs(high_1w - np.roll(close_1w, 1)), 
+                                 np.abs(low_1w - np.roll(close_1w, 1))))
+    tr_w[0] = high_1w[0] - low_1w[0]
+    atr14_1w = pd.Series(tr_w).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr14_1w_aligned = align_htf_to_ltf(prices, df_1w, atr14_1w)
     
-    # 4h RSI(14) for entry timing
-    delta_4h = np.diff(close, prepend=close[0])
-    gain_4h = np.where(delta_4h > 0, delta_4h, 0)
-    loss_4h = np.where(delta_4h < 0, -delta_4h, 0)
-    avg_gain_4h = pd.Series(gain_4h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss_4h = pd.Series(loss_4h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs_4h = avg_gain_4h / (avg_loss_4h + 1e-10)
-    rsi_4h = 100 - (100 / (1 + rs_4h))
+    # 1d data for Camarilla pivot (previous day)
+    prev_high_1d = np.roll(high, 1)
+    prev_low_1d = np.roll(low, 1)
+    prev_close_1d = np.roll(close, 1)
+    prev_high_1d[0] = high[0]  # first bar uses current
+    prev_low_1d[0] = low[0]
+    prev_close_1d[0] = close[0]
     
-    # Volume filter: 4h volume > 20-period average
+    pivot = (prev_high_1d + prev_low_1d + prev_close_1d) / 3.0
+    range_1d = prev_high_1d - prev_low_1d
+    r1 = pivot + (range_1d * 1.1 / 12)
+    s1 = pivot - (range_1d * 1.1 / 12)
+    
+    # Volume filter: 1d volume > 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # warmup for EMA200
+    start_idx = 200  # warmup for EMA50
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema200_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(rsi_4h[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(r1[i]) or np.isnan(s1[i]) or 
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(atr14_1w_aligned[i]) or
+            np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: RSI oversold (<30) on 1d, price above EMA200, volume above average
-            long_cond = (rsi_1d_aligned[i] < 30 and 
-                        close[i] > ema200_1d_aligned[i] and
+            # Long: Price breaks above R1, price above 1w EMA50, volume above average
+            long_cond = (close[i] > r1[i] and 
+                        close[i] > ema50_1w_aligned[i] and
                         volume[i] > vol_ma20[i])
             
-            # Short: RSI overbought (>70) on 1d, price below EMA200, volume above average
-            short_cond = (rsi_1d_aligned[i] > 70 and 
-                         close[i] < ema200_1d_aligned[i] and
+            # Short: Price breaks below S1, price below 1w EMA50, volume above average
+            short_cond = (close[i] < s1[i] and 
+                         close[i] < ema50_1w_aligned[i] and
                          volume[i] > vol_ma20[i])
             
             if long_cond:
@@ -82,15 +87,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: RSI overbought (>70) on 1d OR price crosses below EMA200
-            if rsi_1d_aligned[i] > 70 or close[i] < ema200_1d_aligned[i]:
+            # Long exit: Price closes below S1 OR price crosses below 1w EMA50
+            if close[i] < s1[i] or close[i] < ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI oversold (<30) on 1d OR price crosses above EMA200
-            if rsi_1d_aligned[i] < 30 or close[i] > ema200_1d_aligned[i]:
+            # Short exit: Price closes above R1 OR price crosses above 1w EMA50
+            if close[i] > r1[i] or close[i] > ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -98,9 +103,7 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: RSI mean reversion on daily timeframe with EMA200 trend filter.
-# In bull markets: buy dips in uptrend (RSI<30 + price>EMA200). 
-# In bear markets: sell rallies in downtrend (RSI>70 + price<EMA200).
-# 4h timeframe targets 20-50 trades/year to avoid fee drag.
-# Volume filter ensures institutional participation. Discrete sizing (0.25) minimizes churn.
-# Works on BTC/ETH via mean reversion at extremes with trend alignment.
+# Hypothesis: Camarilla R1/S1 breakout with 1w EMA50 trend filter and volume confirmation.
+# Works in bull markets via breakout continuation, in bear via mean reversion at S1/R1.
+# Daily timeframe targets 7-25 trades/year to avoid fee drag. Volume filter ensures participation.
+# Discrete sizing (0.25) minimizes churn. Works on BTC/ETH/SOL via institutional pivot levels.
