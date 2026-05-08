@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour price position within daily Bollinger Bands combined with weekly trend filter
-# We go long when price is in the lower 20% of daily Bollinger Bands (oversold) with weekly EMA(50) uptrend
-# We go short when price is in the upper 20% of daily Bollinger Bands (overbought) with weekly EMA(50) downtrend
-# Uses mean reversion in ranging markets and trend following in trending markets via weekly filter
-# Targets 12-37 trades per year on 6H timeframe to avoid excessive trading
-# Bollinger Bands provide dynamic support/resistance that adapts to volatility
-# Weekly trend filter ensures we trade with higher timeframe momentum
+# Hypothesis: 12-hour Donchian(20) breakout with weekly trend filter and volume confirmation
+# We go long when price breaks above the 20-period high with weekly EMA(34) uptrend and volume spike.
+# We go short when price breaks below the 20-period low with weekly EMA(34) downtrend and volume spike.
+# Uses 12h timeframe to target 12-37 trades/year, avoiding excessive frequency.
+# Donchian channels provide clear breakout levels that work in both trending and ranging markets.
+# Weekly trend filter ensures we trade with the higher timeframe momentum.
+# Volume spike confirms institutional participation in the breakout.
 
-name = "6h_BollingerPosition_WeeklyTrend"
-timeframe = "6h"
+name = "12h_Donchian20_WeeklyTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,36 +20,28 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
     # Get weekly data once for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate weekly EMA(50) for trend filter
+    # Calculate weekly EMA(34) for trend filter
     weekly_close = df_1w['close'].values
-    ema50_1w = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    ema34_1w = pd.Series(weekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Get daily data for Bollinger Bands
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # Donchian(20) on price data
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate daily Bollinger Bands (20, 2)
-    daily_close = df_1d['close'].values
-    sma20 = pd.Series(daily_close).rolling(window=20, min_periods=20).mean().values
-    std20 = pd.Series(daily_close).rolling(window=20, min_periods=20).std().values
-    upper_band = sma20 + (2 * std20)
-    lower_band = sma20 - (2 * std20)
-    
-    # Align Bollinger Bands to 6H timeframe
-    upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
-    lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
-    sma20_aligned = align_htf_to_ltf(prices, df_1d, sma20)
+    # Volume spike: current volume > 2.0 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -58,41 +50,37 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(upper_band_aligned[i]) or 
-            np.isnan(lower_band_aligned[i]) or np.isnan(sma20_aligned[i])):
+        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema50_1w_val = ema50_1w_aligned[i]
-        upper_band_val = upper_band_aligned[i]
-        lower_band_val = lower_band_aligned[i]
-        sma20_val = sma20_aligned[i]
-        close_val = close[i]
+        ema34_1w_val = ema34_1w_aligned[i]
+        upper = donchian_high[i]
+        lower = donchian_low[i]
+        vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: price in lower 20% of Bollinger Bands + weekly uptrend
-            band_width = upper_band_val - lower_band_val
-            if band_width > 0:  # avoid division by zero
-                position_in_bands = (close_val - lower_band_val) / band_width
-                if position_in_bands < 0.2 and close_val > ema50_1w_val:
-                    signals[i] = 0.25
-                    position = 1
-            # Enter short: price in upper 20% of Bollinger Bands + weekly downtrend
-            elif position_in_bands > 0.8 and close_val < ema50_1w_val:
+            # Enter long: price breaks above Donchian high + weekly uptrend + volume spike
+            if close[i] > upper and close[i] > ema34_1w_val and vol_spike:
+                signals[i] = 0.25
+                position = 1
+            # Enter short: price breaks below Donchian low + weekly downtrend + volume spike
+            elif close[i] < lower and close[i] < ema34_1w_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses above SMA(20) or weekly trend turns down
-            if close_val > sma20_val or close_val < ema50_1w_val:
+            # Exit long: price breaks below Donchian low OR weekly trend turns down
+            if close[i] < lower or close[i] < ema34_1w_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses below SMA(20) or weekly trend turns up
-            if close_val < sma20_val or close_val > ema50_1w_val:
+            # Exit short: price breaks above Donchian high OR weekly trend turns up
+            if close[i] > upper or close[i] > ema34_1w_val:
                 signals[i] = 0.0
                 position = 0
             else:
