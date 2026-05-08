@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Advanced_Channel_Breakout_with_Volume"
-timeframe = "4h"
+name = "12h_KAMA_Direction_RSI_ChopFilter"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,99 +17,105 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data once
+    # Get daily data once for trend and chop filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d EMA(34) for trend direction
+    # Calculate 1d KAMA for trend direction
     close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Efficiency ratio
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    volatility = np.abs(np.diff(close_1d))
+    er = np.zeros_like(close_1d)
+    er[1:] = change[1:] / (np.sum(volatility[1:], axis=0) if np.sum(volatility[1:]) > 0 else 1)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    kama_1d = kama
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
     
-    # Calculate 1d ATR(14) for volatility normalization
+    # Calculate 1d RSI(14) for overbought/oversold
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_1d = rsi
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    
+    # Calculate 1d Choppiness Index for regime filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    tr1 = np.maximum(high_1d[1:] - low_1d[1:], 
-                     np.maximum(np.abs(high_1d[1:] - close_1d[:-1]), 
-                                np.abs(low_1d[1:] - close_1d[:-1])))
-    tr1 = np.concatenate([[np.nan], tr1])
-    
-    atr14 = pd.Series(tr1).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr14_aligned = align_htf_to_ltf(prices, df_1d, atr14)
-    
-    # Calculate 4-hour Donchian channels (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    upper_channel = high_roll
-    lower_channel = low_roll
-    
-    # Shift to get previous bar's channels (no look-ahead)
-    upper_channel_prev = np.roll(upper_channel, 1)
-    lower_channel_prev = np.roll(lower_channel, 1)
-    upper_channel_prev[0] = np.nan
-    lower_channel_prev[0] = np.nan
-    
-    # Volume spike detection: current volume > 2 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2 * vol_ma)
+    atr1 = np.maximum(high_1d[1:] - low_1d[1:], 
+                      np.maximum(np.abs(high_1d[1:] - close_1d[:-1]), 
+                                 np.abs(low_1d[1:] - close_1d[:-1])))
+    atr1 = np.concatenate([[np.nan], atr1])
+    atr_sum = pd.Series(atr1).rolling(window=14, min_periods=14).sum().values
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
+    chop_1d = chop
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # warmup
+    start_idx = 40  # warmup
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(upper_channel_prev[i]) or 
-            np.isnan(lower_channel_prev[i])):
+        if (np.isnan(kama_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(chop_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema_val = ema34_1d_aligned[i]
-        vol_spike = volume_spike[i]
+        kama_val = kama_1d_aligned[i]
+        rsi_val = rsi_1d_aligned[i]
+        chop_val = chop_1d_aligned[i]
         
         if position == 0:
-            # Enter long: price breaks above upper channel with volume spike, above 1d EMA
-            if (close[i] > upper_channel_prev[i] and vol_spike and 
-                close[i] > ema_val):
-                signals[i] = 0.30
+            # Enter long: price above KAMA, RSI not overbought, chop indicates trend (not too choppy)
+            if (close[i] > kama_val and rsi_val < 70 and chop_val < 61.8):
+                signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below lower channel with volume spike, below 1d EMA
-            elif (close[i] < lower_channel_prev[i] and vol_spike and 
-                  close[i] < ema_val):
-                signals[i] = -0.30
+            # Enter short: price below KAMA, RSI not oversold, chop indicates trend
+            elif (close[i] < kama_val and rsi_val > 30 and chop_val < 61.8):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below lower channel OR below 1d EMA
-            if (close[i] < lower_channel_prev[i] or close[i] < ema_val):
+            # Exit long: price crosses below KAMA OR RSI overbought OR chop too high (range)
+            if (close[i] < kama_val or rsi_val > 70 or chop_val > 61.8):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above upper channel OR above 1d EMA
-            if (close[i] > upper_channel_prev[i] or close[i] > ema_val):
+            # Exit short: price crosses above KAMA OR RSI oversold OR chop too high
+            if (close[i] > kama_val or rsi_val < 30 or chop_val > 61.8):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-# Hypothesis: Uses 4-hour Donchian channel breakouts with volume confirmation and 1d EMA trend filter.
-# - Enters long when price breaks above upper Donchian channel (previous bar) with volume spike and above 1d EMA
-# - Enters short when price breaks below lower Donchian channel (previous bar) with volume spike and below 1d EMA
-# - Exits when price breaks back below lower channel (long) or above upper channel (short) OR crosses 1d EMA
-# - Volume spike filter ensures breakouts have conviction
-# - 1d EMA filter ensures trading with higher timeframe trend
-# - Donchian channels provide clear breakout levels for trend continuation
-# - Target: 80-160 total trades over 4 years (20-40/year) to minimize fee drag
-# - Position size: 0.30 for balanced risk/return
-# - Works in both bull and bear markets by following 1d trend direction
-# - Volume confirmation reduces false breakouts in low-volume environments
-# - Focus on BTC and ETH as primary targets (not SOL-only)
+# Hypothesis: Uses 12-hour timeframe with KAMA trend filter, RSI momentum, and Choppiness Index regime filter.
+# - Enters long when price above 1d KAMA, RSI < 70, and chop < 61.8 (trending market)
+# - Enters short when price below 1d KAMA, RSI > 30, and chop < 61.8
+# - Exits when price crosses KAMA, RSI becomes extreme, or market becomes too choppy (chop > 61.8)
+# - KAML provides adaptive trend following that reduces whipsaw
+# - RSI filter prevents buying into overbought conditions or selling into oversold
+# - Chop filter ensures we only trade in trending markets, avoiding range-bound losses
+# - Position size 0.25 balances risk and return while minimizing fee churn
+# - Designed to work in both bull and bear markets by following 1d trend direction
+# - Target: 60-120 total trades over 4 years (15-30/year) to minimize fee drag
+# - Works on BTC and ETH as primary targets (not SOL-only)
