@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams Alligator with 1d trend filter and volume confirmation
+# Hypothesis: 1d Williams Alligator with weekly trend filter and volume confirmation
 # Williams Alligator uses three smoothed moving averages (Jaw, Teeth, Lips) to identify trends.
 # We go long when Lips > Teeth > Jaw (bullish alignment) and short when Lips < Teeth < Jaw (bearish alignment),
-# confirmed by 1d EMA(34) trend direction and volume spike.
+# confirmed by weekly EMA(34) trend direction and volume spike.
 # Designed for low trade frequency in both bull and bear markets.
-# Target: 50-150 total trades over 4 years = 12-37/year
+# Target: 30-100 total trades over 4 years = 7-25/year
 
-name = "4h_WilliamsAlligator_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_WilliamsAlligator_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def smma(data, period):
@@ -26,7 +26,7 @@ def smma(data, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -34,17 +34,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data once
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get weekly data once
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate daily EMA(34) for trend direction
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate weekly EMA(34) for trend direction
+    close_1w = df_1w['close'].values
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Williams Alligator components on 4h data
+    # Williams Alligator components on 1d data
     jaw = smma(close, 13)  # 13-period SMMA
     teeth = smma(close, 8)  # 8-period SMMA
     lips = smma(close, 5)   # 5-period SMMA
@@ -68,11 +68,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for calculations
+    start_idx = 60  # warmup for calculations
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(jaw_shifted[i]) or 
+        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(jaw_shifted[i]) or 
             np.isnan(teeth_shifted[i]) or np.isnan(lips_shifted[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
@@ -80,7 +80,7 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        ema34_1d_val = ema34_1d_aligned[i]
+        ema34_1w_val = ema34_1w_aligned[i]
         jaw_val = jaw_shifted[i]
         teeth_val = teeth_shifted[i]
         lips_val = lips_shifted[i]
@@ -89,26 +89,26 @@ def generate_signals(prices):
         if position == 0:
             # Enter long: Lips > Teeth > Jaw (bullish alignment) + uptrend + volume spike
             if (lips_val > teeth_val > jaw_val and 
-                close[i] > ema34_1d_val and 
+                close[i] > ema34_1w_val and 
                 vol_spike):
                 signals[i] = 0.25
                 position = 1
             # Enter short: Lips < Teeth < Jaw (bearish alignment) + downtrend + volume spike
             elif (lips_val < teeth_val < jaw_val and 
-                  close[i] < ema34_1d_val and 
+                  close[i] < ema34_1w_val and 
                   vol_spike):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Exit long: Bullish alignment breaks OR price breaks below trend
-            if not (lips_val > teeth_val > jaw_val) or close[i] < ema34_1d_val:
+            if not (lips_val > teeth_val > jaw_val) or close[i] < ema34_1w_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Exit short: Bearish alignment breaks OR price breaks above trend
-            if not (lips_val < teeth_val < jaw_val) or close[i] > ema34_1d_val:
+            if not (lips_val < teeth_val < jaw_val) or close[i] > ema34_1w_val:
                 signals[i] = 0.0
                 position = 0
             else:
