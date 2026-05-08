@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Choppiness Index regime filter + 1d RSI mean reversion.
-# In ranging markets (CHOP > 61.8), enter long when 1d RSI < 30 and short when RSI > 70.
-# Exit when RSI crosses back above 50 (long) or below 50 (short).
-# Choppiness Index filters out trending markets where mean reversion fails.
-# RSI provides mean-reversion signals in ranging regimes.
-# Target: 50-150 total trades over 4 years (12-37/year).
+# Hypothesis: 1d Donchian breakout (20-day) with weekly EMA50 trend filter and volume confirmation.
+# Long when price breaks above Donchian upper (20-day high) AND weekly EMA50 rising AND volume > 1.5x 20-day average.
+# Short when price breaks below Donchian lower (20-day low) AND weekly EMA50 falling AND volume > 1.5x 20-day average.
+# Exit when price crosses back inside the Donchian channel (between upper and lower).
+# Donchian breakouts capture momentum; weekly EMA50 filters higher timeframe trend; volume confirms institutional participation.
+# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe.
 
-name = "12h_Chop_RSI_MeanReversion_1d"
-timeframe = "12h"
+name = "1d_Donchian_20_1wEMA50_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,83 +22,68 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # 1d data for RSI calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # 1w data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 14-period RSI on daily close
-    delta = pd.Series(df_1d['close']).diff().values
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate Donchian channels from daily OHLC (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    # 1w EMA50 for trend filter
+    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = np.where(avg_loss == 0, 100, rsi)  # Handle no loss case
+    # 1w EMA50 direction
+    ema50_rising = np.zeros_like(ema50_1w_aligned, dtype=bool)
+    ema50_falling = np.zeros_like(ema50_1w_aligned, dtype=bool)
+    ema50_rising[1:] = ema50_1w_aligned[1:] > ema50_1w_aligned[:-1]
+    ema50_falling[1:] = ema50_1w_aligned[1:] < ema50_1w_aligned[:-1]
     
-    # Align RSI to 12h timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    
-    # Calculate 14-period Choppiness Index on 12h data
-    atr = np.zeros(n)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], 
-                         np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    
-    # Avoid division by zero
-    range_hl = highest_high - lowest_low
-    chop = np.where(range_hl != 0, 
-                    100 * np.log10(np.sum(atr) / range_hl) / np.log10(14), 
-                    50)
-    
-    # Choppiness regime: > 61.8 = ranging (good for mean reversion)
-    chop_ranging = chop > 61.8
+    # Volume filter: current volume > 1.5x 20-day average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 14)  # Sufficient warmup for RSI and CHOP
+    start_idx = max(50, 20)  # Sufficient warmup for EMA50 and Donchian
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(rsi_aligned[i]) or np.isnan(chop_ranging[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(ema50_rising[i]) or 
+            np.isnan(ema50_falling[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Only trade in ranging markets
-            if chop_ranging[i]:
-                # Long when RSI oversold (< 30)
-                if rsi_aligned[i] < 30:
-                    signals[i] = 0.25
-                    position = 1
-                # Short when RSI overbought (> 70)
-                elif rsi_aligned[i] > 70:
-                    signals[i] = -0.25
-                    position = -1
+            # Long conditions: price breaks above Donchian upper, weekly EMA50 rising, volume filter
+            long_cond = (close[i] > high_20[i]) and ema50_rising[i] and volume_filter[i]
+            # Short conditions: price breaks below Donchian lower, weekly EMA50 falling, volume filter
+            short_cond = (close[i] < low_20[i]) and ema50_falling[i] and volume_filter[i]
+            
+            if long_cond:
+                signals[i] = 0.25
+                position = 1
+            elif short_cond:
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Long exit: RSI crosses back above 50
-            if rsi_aligned[i] > 50:
+            # Long exit: price crosses back below Donchian lower (stop/reversal)
+            if close[i] < low_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI crosses back below 50
-            if rsi_aligned[i] < 50:
+            # Short exit: price crosses back above Donchian upper (stop/reversal)
+            if close[i] > high_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
