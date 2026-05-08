@@ -1,103 +1,82 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian(20) breakout with weekly volume confirmation and ADX trend filter.
-# Long when price breaks above Donchian(20) high AND weekly volume > 1.3x 20-period average AND ADX(14) > 25 (trending market).
-# Short when price breaks below Donchian(20) low AND weekly volume > 1.3x 20-period average AND ADX(14) > 25.
-# Exit when price crosses back inside the Donchian channel.
-# Uses 1d timeframe as specified, with 1w volume and ADX for higher timeframe context.
-# Target: 50-150 total trades over 4 years (12-37/year) with controlled frequency to avoid fee drag.
+# Hypothesis: 6h Williams %R with 1d trend filter and volume spike.
+# Long when Williams %R crosses above -80 from oversold AND 1d EMA200 uptrend AND volume spike.
+# Short when Williams %R crosses below -20 from overbought AND 1d EMA200 downtrend AND volume spike.
+# Williams %R(14) measures momentum extremes; 1d EMA200 filters trend direction; volume spike confirms momentum.
+# Designed to work in both bull and bear markets by using 1d trend for direction and Williams %R for mean reversion within trend.
 
-name = "1d_Donchian_20_1wVolume_ADX"
-timeframe = "1d"
+name = "6h_WilliamsR_1dTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Weekly data for volume and ADX
-    df_w = get_htf_data(prices, '1w')
-    if len(df_w) < 2:
+    # Daily data for trend filter and volume context
+    df_d = get_htf_data(prices, '1d')
+    if len(df_d) < 50:
         return np.zeros(n)
     
-    # Donchian(20) on daily data
-    donchian_period = 20
-    upper_dc = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    lower_dc = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    # Williams %R(14) on 6h data
+    williams_period = 14
+    highest_high = pd.Series(high).rolling(window=williams_period, min_periods=williams_period).max().values
+    lowest_low = pd.Series(low).rolling(window=williams_period, min_periods=williams_period).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    williams_r[highest_high == lowest_low] = -50  # Avoid division by zero
     
-    # Weekly volume filter: current volume > 1.3x 20-period average
-    volume_w = df_w['volume'].values
-    vol_ma20_w = pd.Series(volume_w).rolling(window=20, min_periods=20).mean().values
-    volume_filter_w = volume_w > (1.3 * vol_ma20_w)
-    volume_filter = align_htf_to_ltf(prices, df_w, volume_filter_w)
+    # Daily EMA200 for trend direction
+    close_d = df_d['close'].values
+    ema200_d = pd.Series(close_d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_prev_d = np.roll(ema200_d, 1)
+    ema200_prev_d[0] = ema200_d[0]
+    ema200_uptrend = ema200_d > ema200_prev_d
+    ema200_downtrend = ema200_d < ema200_prev_d
     
-    # Weekly ADX(14) for trend strength
-    high_w = df_w['high'].values
-    low_w = df_w['low'].values
-    close_w = df_w['close'].values
+    # Daily volume spike: current volume > 2.0 x 20-period average
+    volume_d = df_d['volume'].values
+    vol_ma20_d = pd.Series(volume_d).rolling(window=20, min_periods=20).mean().values
+    volume_spike_d = volume_d > (2.0 * vol_ma20_d)
     
-    # True Range
-    tr1 = high_w - low_w
-    tr2 = np.abs(high_w - np.roll(close_w, 1))
-    tr3 = np.abs(low_w - np.roll(close_w, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = high_w[0] - low_w[0]  # First TR
-    
-    # Directional Movement
-    plus_dm = np.where((high_w - np.roll(high_w, 1)) > (np.roll(low_w, 1) - low_w), 
-                       np.maximum(high_w - np.roll(high_w, 1), 0), 0)
-    minus_dm = np.where((np.roll(low_w, 1) - low_w) > (high_w - np.roll(high_w, 1)), 
-                        np.maximum(np.roll(low_w, 1) - low_w, 0), 0)
-    plus_dm[0] = 0
-    minus_dm[0] = 0
-    
-    # Smoothed values
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / atr
-    minus_di = 100 * minus_dm_smooth / atr
-    
-    # ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    adx[np.isnan(adx)] = 0
-    
-    # Align ADX to daily timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_w, adx)
-    
-    # Trend filter: ADX > 25
-    trend_filter = adx_aligned > 25
+    # Align daily indicators to 6h timeframe
+    ema200_uptrend_aligned = align_htf_to_ltf(prices, df_d, ema200_uptrend)
+    ema200_downtrend_aligned = align_htf_to_ltf(prices, df_d, ema200_downtrend)
+    volume_spike = align_htf_to_ltf(prices, df_d, volume_spike_d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(donchian_period, 20)  # Sufficient warmup
+    start_idx = max(williams_period, 200, 20)  # Sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(upper_dc[i]) or np.isnan(lower_dc[i]) or 
-            np.isnan(volume_filter[i]) or np.isnan(trend_filter[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(williams_r[i-1]) or 
+            np.isnan(ema200_uptrend_aligned[i]) or np.isnan(ema200_downtrend_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price breaks above Donchian upper, volume filter, trending market
-            long_cond = (close[i] > upper_dc[i]) and volume_filter[i] and trend_filter[i]
-            # Short conditions: price breaks below Donchian lower, volume filter, trending market
-            short_cond = (close[i] < lower_dc[i]) and volume_filter[i] and trend_filter[i]
+            # Long conditions: Williams %R crosses above -80 (exit oversold) AND 1d uptrend AND volume spike
+            williams_cross_up = (williams_r[i-1] <= -80) and (williams_r[i] > -80)
+            long_cond = williams_cross_up and ema200_uptrend_aligned[i] and volume_spike[i]
+            
+            # Short conditions: Williams %R crosses below -20 (exit overbought) AND 1d downtrend AND volume spike
+            williams_cross_down = (williams_r[i-1] >= -20) and (williams_r[i] < -20)
+            short_cond = williams_cross_down and ema200_downtrend_aligned[i] and volume_spike[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -106,15 +85,19 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses back below Donchian lower
-            if close[i] < lower_dc[i]:
+            # Long exit: Williams %R crosses below -50 (momentum weakening) OR 1d trend turns down
+            williams_cross_down_mid = (williams_r[i-1] >= -50) and (williams_r[i] < -50)
+            trend_turned_down = ema200_uptrend_aligned[i-1] and not ema200_uptrend_aligned[i]
+            if williams_cross_down_mid or trend_turned_down:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses back above Donchian upper
-            if close[i] > upper_dc[i]:
+            # Short exit: Williams %R crosses above -50 (momentum weakening) OR 1d trend turns up
+            williams_cross_up_mid = (williams_r[i-1] <= -50) and (williams_r[i] > -50)
+            trend_turned_up = ema200_downtrend_aligned[i-1] and not ema200_downtrend_aligned[i]
+            if williams_cross_up_mid or trend_turned_up:
                 signals[i] = 0.0
                 position = 0
             else:
