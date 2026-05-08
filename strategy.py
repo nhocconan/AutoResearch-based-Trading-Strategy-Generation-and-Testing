@@ -3,20 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d volume confirmation and 1d ADX trend filter
-# Donchian channels identify breakout points from price consolidation. Breakouts above upper
-# band or below lower band indicate strong momentum. Volume surge confirms institutional
-# participation. 1d ADX > 25 filters for strong trends only, avoiding whipsaws in ranges.
-# This strategy works in both bull and bear markets by targeting strong directional moves.
-# Targets ~15-25 trades per year (~60-100 total over 4 years) to minimize fee drag.
+# Hypothesis: 4-hour Donchian(20) breakout with 1-day volume spike and 1-day ADX trend filter
+# Donchian breakouts capture momentum in trending markets. Volume spike confirms institutional participation.
+# ADX > 25 ensures we only trade in strong trends, avoiding whipsaws in ranges.
+# This combination works in both bull and bear markets by filtering for strong trends only.
+# Targets 20-40 trades per year (~80-160 total over 4 years) to minimize fee drag.
 
-name = "12h_Donchian20_1dVolume_1dADX"
-timeframe = "12h"
+name = "4h_Donchian20_1dVolume_1dADX"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,67 +23,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for indicators
+    # Get 1d data for volume and ADX
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Donchian(20) channels on 12h data (lookback 20 periods)
-    # Using pandas rolling for efficiency
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate 4-hour Donchian channels (20-period)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume spike detection on 1d
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = vol_1d > (vol_ma_1d * 2.0)
-    vol_spike_12h = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
+    # Align Donchian levels to current 4h bar (use previous bar's levels to avoid look-ahead)
+    high_max_shifted = np.roll(high_max, 1)
+    low_min_shifted = np.roll(low_min, 1)
+    high_max_shifted[0] = np.nan
+    low_min_shifted[0] = np.nan
     
-    # ADX trend filter on 1d
+    # Volume spike detection on 1d (24-period MA for ~4 days)
+    vol_ma = pd.Series(df_1d['volume'].values).rolling(window=24, min_periods=24).mean().values
+    vol_spike = df_1d['volume'].values > (vol_ma * 2.0)
+    vol_spike_4h = align_htf_to_ltf(prices, df_1d, vol_spike)
+    
+    # ADX calculation on 1d
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate True Range and Directional Movement
-    tr = np.maximum(
-        high_1d - low_1d,
-        np.maximum(
-            np.abs(high_1d - np.roll(close_1d, 1)),
-            np.abs(low_1d - np.roll(close_1d, 1))
+    plus_dm = np.zeros_like(high_1d)
+    minus_dm = np.zeros_like(high_1d)
+    tr = np.zeros_like(high_1d)
+    
+    for i in range(1, len(high_1d)):
+        plus_dm[i] = max(high_1d[i] - high_1d[i-1], 0)
+        minus_dm[i] = max(low_1d[i-1] - low_1d[i], 0)
+        if plus_dm[i] == minus_dm[i]:
+            plus_dm[i] = 0
+            minus_dm[i] = 0
+        tr[i] = max(
+            high_1d[i] - low_1d[i],
+            abs(high_1d[i] - close_1d[i-1]),
+            abs(low_1d[i] - close_1d[i-1])
         )
-    )
-    # Set first TR to high-low (no previous close)
-    tr[0] = high_1d[0] - low_1d[0]
     
-    plus_dm = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    minus_dm = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    # Set first values to 0
-    plus_dm[0] = 0
-    minus_dm[0] = 0
-    
-    # Wilder smoothing (using exponential moving average as approximation)
+    # Wilder smoothing function
     def wilder_smooth(arr, period):
         result = np.full_like(arr, np.nan)
         if len(arr) < period:
             return result
-        alpha = 1.0 / period
-        result[period-1] = np.nanmean(arr[:period])
+        result[period-1] = np.nansum(arr[:period])
         for i in range(period, len(arr)):
-            if np.isnan(result[i-1]):
-                result[i] = np.nanmean(arr[i-period+1:i+1])
-            else:
-                result[i] = result[i-1] + alpha * (arr[i] - result[i-1])
+            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
         return result
     
     tr14 = wilder_smooth(tr, 14)
     plus_dm14 = wilder_smooth(plus_dm, 14)
     minus_dm14 = wilder_smooth(minus_dm, 14)
     
-    # Avoid division by zero
     plus_di14 = np.where(tr14 != 0, 100 * (plus_dm14 / tr14), 0)
     minus_di14 = np.where(tr14 != 0, 100 * (minus_dm14 / tr14), 0)
     
@@ -93,41 +86,44 @@ def generate_signals(prices):
     adx = wilder_smooth(dx, 14)
     
     adx_strong = adx > 25
-    adx_strong_12h = align_htf_to_ltf(prices, df_1d, adx_strong)
+    adx_weak = adx < 20
+    adx_strong_4h = align_htf_to_ltf(prices, df_1d, adx_strong)
+    adx_weak_4h = align_htf_to_ltf(prices, df_1d, adx_weak)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure sufficient data for Donchian channels
+    start_idx = 50  # Ensure sufficient data for Donchian and volume MA
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(vol_spike_12h[i]) or np.isnan(adx_strong_12h[i])):
+        if (np.isnan(high_max_shifted[i]) or np.isnan(low_min_shifted[i]) or 
+            np.isnan(vol_spike_4h[i]) or np.isnan(adx_strong_4h[i]) or 
+            np.isnan(adx_weak_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above upper Donchian band, volume spike, strong trend
-            if close[i] > donchian_high[i] and vol_spike_12h[i] and adx_strong_12h[i]:
+            # Enter long: price breaks above Donchian high, volume spike, strong trend
+            if close[i] > high_max_shifted[i] and vol_spike_4h[i] and adx_strong_4h[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below lower Donchian band, volume spike, strong trend
-            elif close[i] < donchian_low[i] and vol_spike_12h[i] and adx_strong_12h[i]:
+            # Enter short: price breaks below Donchian low, volume spike, strong trend
+            elif close[i] < low_min_shifted[i] and vol_spike_4h[i] and adx_strong_4h[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to lower Donchian band or trend weakens
-            if close[i] < donchian_low[i]:
+            # Exit long: price returns to Donchian low or trend weakens
+            if close[i] < low_min_shifted[i] or adx_weak_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to upper Donchian band or trend weakens
-            if close[i] > donchian_high[i]:
+            # Exit short: price returns to Donchian high or trend weakens
+            if close[i] > high_max_shifted[i] or adx_weak_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
