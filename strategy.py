@@ -3,20 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1w EMA(50) as trend filter, 12h Donchian(20) breakout, and volume confirmation.
-# Long when 1w EMA(50) is rising (trend up), price breaks above 12h Donchian upper band, volume > 1.8x average.
-# Short when 1w EMA(50) is falling (trend down), price breaks below 12h Donchian lower band, volume > 1.8x average.
+# Hypothesis: 4h strategy using 1d ADX for trend strength, 4h Donchian(20) breakout for entry,
+# and volume confirmation. Long when ADX > 25, price breaks above 4h Donchian upper band,
+# volume > 1.5x average. Short when ADX > 25, price breaks below 4h Donchian lower band,
+# volume > 1.5x average. Exit when price crosses opposite Donchian band or ADX < 20.
 # Position size fixed at 0.25 to limit risk and reduce trade frequency.
-# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and fee drag.
-# Works in bull (trend follow) and bear (trend still exists in downtrends).
+# Target: 20-50 trades/year to avoid fee drag. Works in trending markets (ADX > 25).
+# Avoids range-bound markets where breakouts fail.
 
-name = "12h_1wEMA50_12hDonchian_Volume"
-timeframe = "12h"
+name = "4h_ADX25_Donchian20_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,35 +25,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA(50) trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for ADX trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Get 12h data for Donchian bands
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 4h data for Donchian bands
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # 1w EMA(50)
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_rising = ema_50_1w[1:] > ema_50_1w[:-1]
-    ema_rising = np.concatenate([[False], ema_rising])  # align to same length
+    # Calculate ADX(14) on 1d
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # 12h Donchian(20) bands
-    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # Directional Movement
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
     
-    # Align 1w EMA rising to 12h
-    ema_rising_aligned = align_htf_to_ltf(prices, df_1w, ema_rising.astype(float))
-    # Align 12h Donchian bands to 12h
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+    # Smooth TR, +DM, -DM
+    tr_smooth = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / np.where(tr_smooth == 0, 1e-10, tr_smooth)
+    minus_di = 100 * minus_dm_smooth / np.where(tr_smooth == 0, 1e-10, tr_smooth)
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / np.where((plus_di + minus_di) == 0, 1e-10, (plus_di + minus_di))
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    adx_above_25 = adx > 25
+    adx_below_20 = adx < 20
+    
+    # 4h Donchian(20) bands
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    
+    # Align 1d ADX to 4h
+    adx_above_25_aligned = align_htf_to_ltf(prices, df_1d, adx_above_25.astype(float))
+    adx_below_20_aligned = align_htf_to_ltf(prices, df_1d, adx_below_20.astype(float))
+    # Align 4h Donchian bands to 4h
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
     
     # Volume average (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -62,46 +92,45 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_bar = 0
     
-    start_idx = 60  # Ensure enough data for indicators
+    start_idx = 40  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_rising_aligned[i]) or np.isnan(donchian_high_aligned[i]) or
-            np.isnan(donchian_low_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(adx_above_25_aligned[i]) or np.isnan(adx_below_20_aligned[i]) or
+            np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: 1w EMA rising, price breaks above 12h Donchian upper band, volume spike
-            if (ema_rising_aligned[i] and
+            # Long: ADX > 25, price breaks above 4h Donchian upper band, volume spike
+            if (adx_above_25_aligned[i] and
                 close[i] > donchian_high_aligned[i] and
-                vol_ratio[i] > 1.8):
+                vol_ratio[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
                 entry_bar = i
-            # Short: 1w EMA falling, price breaks below 12h Donchian lower band, volume spike
-            elif (not ema_rising_aligned[i] and
+            # Short: ADX > 25, price breaks below 4h Donchian lower band, volume spike
+            elif (adx_above_25_aligned[i] and
                   close[i] < donchian_low_aligned[i] and
-                  vol_ratio[i] > 1.8):
+                  vol_ratio[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
                 entry_bar = i
         elif position == 1:
-            # Long exit: EMA trend change, price breaks below Donchian lower band, or max 20 bars held
-            if (not ema_rising_aligned[i] or 
-                close[i] < donchian_low_aligned[i] or
-                i - entry_bar >= 20):
+            # Long exit: ADX < 20 (trend weak) or price breaks below 4h Donchian lower band
+            if (adx_below_20_aligned[i] or 
+                close[i] < donchian_low_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: EMA trend change, price breaks above Donchian upper band, or max 20 bars held
-            if (ema_rising_aligned[i] or 
-                close[i] > donchian_high_aligned[i] or
-                i - entry_bar >= 20):
+            # Short exit: ADX < 20 (trend weak) or price breaks above 4h Donchian upper band
+            if (adx_below_20_aligned[i] or 
+                close[i] > donchian_high_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
