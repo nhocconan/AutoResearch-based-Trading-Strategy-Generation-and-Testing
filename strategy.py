@@ -3,176 +3,96 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h RSI and 1d Supertrend for direction, 1h for entry timing
-# Long when 4h RSI > 50 (bullish) and 1h price pulls back to 1h EMA21 with bullish engulfing candle
-# Short when 4h RSI < 50 (bearish) and 1h price pulls back to 1h EMA21 with bearish engulfing candle
-# 1d Supertrend acts as regime filter: only take long when Supertrend is uptrend, short when downtrend
-# Targets 15-35 trades per year (~60-140 total over 4 years) to minimize fee drag
-# Uses multi-timeframe alignment: 4h for momentum, 1d for trend regime, 1h for precise entry
+# Hypothesis: 6h Williams Alligator + 1d EMA21 trend filter + volume confirmation
+# The Williams Alligator (Jaw/Teeth/Lips) identifies trend direction and strength.
+# In strong trends, the lines are well-separated and aligned (Jaw > Teeth > Lips for uptrend, reverse for downtrend).
+# We enter when the Lips cross the Teeth in the direction of the trend, confirmed by 1d EMA21 slope and volume spike.
+# Exits occur when the Alligator lines re-cross or trend weakens.
+# This combines trend-following with momentum confirmation to avoid whipsaws in ranging markets.
+# Targets 15-35 trades per year (~60-140 total over 4 years) to minimize fee drag.
 
-name = "1h_RSI4EMA21_Supertrend1d"
-timeframe = "1h"
+name = "6h_WilliamsAlligator_1dEMA21_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    open_price = prices['open'].values
+    volume = prices['volume'].values
     
-    # Get 4h data for RSI momentum filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 14:
-        return np.zeros(n)
+    # Williams Alligator: Smoothed Moving Average (SMMA) with specific periods
+    # Jaw: SMMA(13, 8), Teeth: SMMA(8, 5), Lips: SMMA(5, 3)
+    # Using EMA as proxy for SMMA with same smoothing effect
+    jaw = pd.Series(close).ewm(span=13, adjust=False).mean().values
+    teeth = pd.Series(close).ewm(span=8, adjust=False).mean().values
+    lips = pd.Series(close).ewm(span=5, adjust=False).mean().values
     
-    # Calculate RSI(14) on 4h close
-    close_4h = df_4h['close'].values
-    delta = np.diff(close_4h)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_4h = 100 - (100 / (1 + rs))
-    rsi_4h = np.concatenate([[np.nan], rsi_4h])  # align with close_4h
-    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
-    
-    # Get 1d data for Supertrend trend filter
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate Supertrend on 1d data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate EMA21 on 1d close for trend filter
     close_1d = df_1d['close'].values
+    ema21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema21_1d_slope = ema21_1d[1:] - ema21_1d[:-1]  # slope: positive = uptrend
+    ema21_1d_slope = np.concatenate([[0], ema21_1d_slope])  # align length
+    ema21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema21_1d)
+    ema21_1d_slope_aligned = align_htf_to_ltf(prices, df_1d, ema21_1d_slope)
     
-    atr_period = 10
-    multiplier = 3.0
-    
-    # Calculate True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    atr = pd.Series(tr).ewm(alpha=1/atr_period, adjust=False, min_periods=atr_period).mean().values
-    
-    # Calculate basic upper and lower bands
-    hl2 = (high_1d + low_1d) / 2
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
-    
-    # Initialize Supertrend
-    supertrend = np.full_like(close_1d, np.nan, dtype=float)
-    direction = np.full_like(close_1d, 1, dtype=int)  # 1 for uptrend, -1 for downtrend
-    
-    supertrend[0] = upper_band[0] if not np.isnan(upper_band[0]) else close_1d[0]
-    
-    for i in range(1, len(close_1d)):
-        if np.isnan(atr[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]):
-            supertrend[i] = supertrend[i-1]
-            direction[i] = direction[i-1]
-            continue
-            
-        if close_1d[i] > upper_band[i-1]:
-            direction[i] = 1
-        elif close_1d[i] < lower_band[i-1]:
-            direction[i] = -1
-        else:
-            direction[i] = direction[i-1]
-            if direction[i] == 1 and lower_band[i] < lower_band[i-1]:
-                lower_band[i] = lower_band[i-1]
-            if direction[i] == -1 and upper_band[i] > upper_band[i-1]:
-                upper_band[i] = upper_band[i-1]
-        
-        if direction[i] == 1:
-            supertrend[i] = lower_band[i]
-        else:
-            supertrend[i] = upper_band[i]
-    
-    # Supertrend signal: 1 for uptrend, -1 for downtrend
-    supertrend_signal = direction
-    supertrend_aligned = align_htf_to_ltf(prices, df_1d, supertrend_signal)
-    
-    # 1h EMA21 for pullback entries
-    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    
-    # Bullish and bearish engulfing candle detection
-    bullish_engulfing = (close > open_price) & (open_price > close) & (close > open_price) & (open_price < close)
-    bearish_engulfing = (close < open_price) & (open_price < close) & (close < open_price) & (open_price > close)
-    # Fix: proper engulfing conditions
-    bullish_engulfing = (close > open_price) & (open_price < close) & (close > open_price) & (open_price < close)
-    bullish_engulfing = (close > open_price) & (open_price < close[1:]) & (close > open_price) & (open_price < close)
-    # Correct implementation
-    bullish_engulfing = (close > open_price) & (open_price < close) & (close > open_price) & (open_price < close)
-    bullish_engulfing = (close > open_price) & (open_price < close)  # Simplified: current candle bullish
-    bearish_engulfing = (close < open_price) & (open_price > close)  # Current candle bearish
-    # Proper engulfing: current body completely engulfs previous body
-    bullish_engulfing = (close > open_price) & (close >= open_price) & (open_price <= close) & (close >= open_price)
-    bullish_engulfing = (close > open_price) & (open_price < close)  # Current bullish
-    bullish_engulfing = bullish_engulfing & (close > open_price) & (open_price < close[1:])  # Engulfs previous bearish
-    # Simplified but effective: bullish engulfing when current bullish candle closes above previous open
-    bullish_engulfing = (close > open_price) & (close > open_price) & (open_price < close)  # Current bullish
-    bullish_engulfing = (close > open_price) & (open_price < close)  # Current bullish candle
-    bullish_engulfing = bullish_engulfing & (close > np.roll(open_price, 1))  # Close above previous open
-    bearish_engulfing = (close < open_price) & (open_price > close)  # Current bearish candle
-    bearish_engulfing = bearish_engulfing & (open_price > np.roll(close, 1))  # Open above previous close
-    
-    # Handle first element
-    bullish_engulfing[0] = False
-    bearish_engulfing[0] = False
+    # Volume confirmation: current volume > 2.0x 20-period average (higher threshold for fewer trades)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_conf = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for all indicators
+    start_idx = 60  # Need enough data for Alligator and EMA
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(rsi_4h_aligned[i]) or np.isnan(supertrend_aligned[i]) or 
-            np.isnan(ema21[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(ema21_1d_aligned[i]) or np.isnan(ema21_1d_slope_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        rsi_val = rsi_4h_aligned[i]
-        supertrend_val = supertrend_aligned[i]
-        ema21_val = ema21[i]
-        close_val = close[i]
-        bull_eng = bullish_engulfing[i]
-        bear_eng = bearish_engulfing[i]
+        jaw_val = jaw[i]
+        teeth_val = teeth[i]
+        lips_val = lips[i]
+        ema21_val = ema21_1d_aligned[i]
+        ema21_slope = ema21_1d_slope_aligned[i]
+        vol_conf_val = vol_conf[i]
         
         if position == 0:
-            # Enter long: 4h RSI > 50 (bullish momentum), 1d Supertrend uptrend, price at EMA21 with bullish engulfing
-            if (rsi_val > 50 and supertrend_val == 1 and 
-                abs(close_val - ema21_val) / ema21_val < 0.01 and bull_eng):
-                signals[i] = 0.20
+            # Enter long: Lips cross above Teeth, Alligator aligned bullish (Lips > Teeth > Jaw), volume confirmation, 1d uptrend
+            if lips_val > teeth_val and lips_val > jaw_val and teeth_val > jaw_val and vol_conf_val and ema21_slope > 0:
+                signals[i] = 0.25
                 position = 1
-            # Enter short: 4h RSI < 50 (bearish momentum), 1d Supertrend downtrend, price at EMA21 with bearish engulfing
-            elif (rsi_val < 50 and supertrend_val == -1 and 
-                  abs(close_val - ema21_val) / ema21_val < 0.01 and bear_eng):
-                signals[i] = -0.20
+            # Enter short: Lips cross below Teeth, Alligator aligned bearish (Lips < Teeth < Jaw), volume confirmation, 1d downtrend
+            elif lips_val < teeth_val and lips_val < jaw_val and teeth_val < jaw_val and vol_conf_val and ema21_slope < 0:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: 4h RSI < 40 or 1d Supertrend turns down
-            if rsi_val < 40 or supertrend_val == -1:
+            # Exit long: Lips cross below Teeth or Alligator loses alignment or 1d trend turns down
+            if lips_val < teeth_val or lips_val < jaw_val or teeth_val < jaw_val or ema21_slope < 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: 4h RSI > 60 or 1d Supertrend turns up
-            if rsi_val > 60 or supertrend_val == 1:
+            # Exit short: Lips cross above Teeth or Alligator loses alignment or 1d trend turns up
+            if lips_val > teeth_val or lips_val > jaw_val or teeth_val > jaw_val or ema21_slope > 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
