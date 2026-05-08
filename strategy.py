@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_TrendFilter"
-timeframe = "4h"
+name = "6h_RSI_Stochastic_1dTrend_Volume_Spike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,31 +26,24 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 4h trend: EMA50 for trend filter
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # RSI(14) on close
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # ATR(14) for stop loss
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Stochastic Oscillator %K(14,3)
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    k_raw = 100 * (close - lowest_low) / (highest_high - lowest_low + 1e-10)
+    k = pd.Series(k_raw).rolling(window=3, min_periods=3).mean().values
     
-    # 1d Camarilla R3/S3 levels (stronger reversal points)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    r3 = close_1d + (range_1d * 1.1 / 4)
-    s3 = close_1d - (range_1d * 1.1 / 4)
-    
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # Volume spike: current volume > 2.5x 20-period average
+    # Volume spike: current volume > 2x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.5 * vol_ma20)
+    volume_spike = volume > (2.0 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -59,24 +52,23 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(ema_50[i]) or 
-            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(rsi[i]) or 
+            np.isnan(k[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above R3 + uptrend (price > 1d EMA34 AND price > 4h EMA50) + volume spike
-            long_cond = (close[i] > r3_aligned[i]) and \
+            # Long: RSI < 30 (oversold) AND Stochastic K < 20 AND price > 1d EMA34 (uptrend) + volume spike
+            long_cond = (rsi[i] < 30) and \
+                        (k[i] < 20) and \
                         (close[i] > ema_34_1d_aligned[i]) and \
-                        (close[i] > ema_50[i]) and \
                         volume_spike[i]
-            # Short: break below S3 + downtrend (price < 1d EMA34 AND price < 4h EMA50) + volume spike
-            short_cond = (close[i] < s3_aligned[i]) and \
+            # Short: RSI > 70 (overbought) AND Stochastic K > 80 AND price < 1d EMA34 (downtrend) + volume spike
+            short_cond = (rsi[i] > 70) and \
+                         (k[i] > 80) and \
                          (close[i] < ema_34_1d_aligned[i]) and \
-                         (close[i] < ema_50[i]) and \
                          volume_spike[i]
             
             if long_cond:
@@ -86,15 +78,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: close below S3 (mean reversion to support)
-            if close[i] < s3_aligned[i]:
+            # Long exit: RSI > 50 (momentum fade) OR Stochastic K > 80 (overbought)
+            if rsi[i] > 50 or k[i] > 80:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: close above R3 (mean reversion to resistance)
-            if close[i] > r3_aligned[i]:
+            # Short exit: RSI < 50 (momentum fade) OR Stochastic K < 20 (oversold)
+            if rsi[i] < 50 or k[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
