@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-hour 4-hour Bollinger Band breakout with daily trend filter and volume confirmation
-# We go long when price breaks above upper BB(20,2) on 4h with daily EMA(50) uptrend and volume spike on 1h.
-# We go short when price breaks below lower BB(20,2) on 4h with daily EMA(50) downtrend and volume spike on 1h.
-# Uses 1h timeframe for precise entry timing, 4h for signal direction, and daily for trend filter.
-# Bollinger Bands capture volatility-based support/resistance levels.
-# Daily trend filter ensures we trade with higher timeframe momentum.
-# Volume spike confirms institutional participation in the breakout.
-# Designed to generate 15-37 trades per year on 1h timeframe to avoid fee drag.
+# Hypothesis: 6-hour Williams %R mean reversion with weekly trend filter and volume confirmation
+# We go long when Williams %R(14) < -80 (oversold) with weekly EMA(34) uptrend and volume spike.
+# We go short when Williams %R(14) > -20 (overbought) with weekly EMA(34) downtrend and volume spike.
+# Uses 6h timeframe to target 12-37 trades/year, avoiding excessive frequency.
+# Williams %R identifies overextended moves likely to reverse.
+# Weekly trend filter ensures we trade with the higher timeframe momentum.
+# Volume spike confirms institutional participation in the reversal.
 
-name = "1h_BollingerBreakout_4hTrend_Volume"
-timeframe = "1h"
+name = "6h_WilliamsR_WeeklyTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,33 +25,30 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data once for Bollinger Bands
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get weekly data once for Williams %R and trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate Bollinger Bands on 4h close
-    close_4h = df_4h['close'].values
-    bb_ma = pd.Series(close_4h).rolling(window=20, min_periods=20).mean().values
-    bb_std = pd.Series(close_4h).rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_ma + 2 * bb_std
-    bb_lower = bb_ma - 2 * bb_std
+    # Calculate weekly EMA(34) for trend filter
+    weekly_close = df_1w['close'].values
+    ema34_1w = pd.Series(weekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Align Bollinger Bands to 1h timeframe
-    bb_upper_aligned = align_htf_to_ltf(prices, df_4h, bb_upper)
-    bb_lower_aligned = align_htf_to_ltf(prices, df_4h, bb_lower)
+    # Calculate Williams %R(14) on weekly data
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close_vals = df_1w['close'].values
     
-    # Get daily data once for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    highest_high = pd.Series(weekly_high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(weekly_low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - weekly_close_vals) / (highest_high - lowest_low) * -100
     
-    # Calculate daily EMA(50) for trend filter
-    daily_close = df_1d['close'].values
-    ema50_1d = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Align Williams %R to 6h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1w, williams_r)
     
-    # Volume spike: current 1h volume > 2.0 * 20-period average
+    # Volume spike: current volume > 2.0 * 20-period average on 6h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
@@ -63,42 +59,41 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(bb_upper_aligned[i]) or np.isnan(bb_lower_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(williams_r_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        bb_upper_val = bb_upper_aligned[i]
-        bb_lower_val = bb_lower_aligned[i]
-        ema50_1d_val = ema50_1d_aligned[i]
+        ema34_1w_val = ema34_1w_aligned[i]
+        wr_value = williams_r_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: price breaks above upper BB + daily uptrend + volume spike
-            if (not np.isnan(bb_upper_val) and close[i] > bb_upper_val and 
-                close[i] > ema50_1d_val and vol_spike):
-                signals[i] = 0.20
+            # Enter long: Williams %R oversold (< -80) + weekly uptrend + volume spike
+            if (not np.isnan(wr_value) and wr_value < -80 and 
+                close[i] > ema34_1w_val and vol_spike):
+                signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below lower BB + daily downtrend + volume spike
-            elif (not np.isnan(bb_lower_val) and close[i] < bb_lower_val and 
-                  close[i] < ema50_1d_val and vol_spike):
-                signals[i] = -0.20
+            # Enter short: Williams %R overbought (> -20) + weekly downtrend + volume spike
+            elif (not np.isnan(wr_value) and wr_value > -20 and 
+                  close[i] < ema34_1w_val and vol_spike):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below lower BB OR daily trend turns down
-            if (not np.isnan(bb_lower_val) and close[i] < bb_lower_val) or close[i] < ema50_1d_val:
+            # Exit long: Williams %R returns to neutral (> -50) OR weekly trend turns down
+            if (not np.isnan(wr_value) and wr_value > -50) or close[i] < ema34_1w_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above upper BB OR daily trend turns up
-            if (not np.isnan(bb_upper_val) and close[i] > bb_upper_val) or close[i] > ema50_1d_val:
+            # Exit short: Williams %R returns to neutral (< -50) OR weekly trend turns up
+            if (not np.isnan(wr_value) and wr_value < -50) or close[i] > ema34_1w_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
