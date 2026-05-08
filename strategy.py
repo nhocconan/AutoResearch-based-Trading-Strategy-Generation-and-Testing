@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla Pivot R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
-# Long when price breaks above Camarilla R3, 1d EMA34 rising, volume > 2x average
-# Short when price breaks below Camarilla S3, 1d EMA34 falling, volume > 2x average
-# Uses Camarilla levels for precision entries, EMA34 for trend filter, volume spike for momentum confirmation
-# Targets 20-50 trades per year (80-200 over 4 years) for optimal balance of edge and low fee drag
-# Works in both bull and bear markets due to trend filter and volume confirmation requiring strong momentum
+# Hypothesis: 6h ADX(14) + Bollinger Bands(20,2) with mean reversion logic
+# Long when price touches lower BB, ADX < 20 (low volatility regime), and volume > 1.2x average
+# Short when price touches upper BB, ADX < 20, and volume > 1.2x average
+# Exit when price crosses middle BB (20-period SMA) or ADX rises above 25 (trend begins)
+# Uses ADX for regime detection (range vs trend) and Bollinger Bands for mean reversion entries
+# Works in both bull and bear markets by focusing on range-bound conditions
+# Targets 15-35 trades per year (60-140 over 4 years) for low fee drag
 
-name = "4h_Camarilla_R3S3_1dEMA34_VolumeSpike"
-timeframe = "4h"
+name = "6h_ADX_BB_MeanReversion"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,85 +20,112 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and EMA trend
+    # Get 1d data for ADX calculation (more stable than 6h)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day's data (to avoid look-ahead)
+    # Calculate ADX on daily data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's values (shifted by 1 to avoid look-ahead)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
     
-    # Camarilla calculation: R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
-    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
-    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Calculate EMA34 on 1d close for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Smoothed values
+    def wilder_smooth(data, period):
+        result = np.zeros_like(data)
+        result[period-1] = np.nansum(data[:period])
+        for i in range(period, len(data)):
+            result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
     
-    # Volume confirmation: current volume > 2x 20-period average
+    period = 14
+    atr = wilder_smooth(tr, period)
+    dm_plus_smooth = wilder_smooth(dm_plus, period)
+    dm_minus_smooth = wilder_smooth(dm_minus, period)
+    
+    # DI+ and DI-
+    di_plus = np.where(atr != 0, dm_plus_smooth / atr * 100, 0)
+    di_minus = np.where(atr != 0, dm_minus_smooth / atr * 100, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
+    adx = wilder_smooth(dx, period)
+    adx_1d = adx
+    
+    # Align ADX to 6t
+    adx_6h = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Calculate Bollinger Bands on 6h data
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    bb_upper = sma_20 + (2 * std_20)
+    bb_lower = sma_20 - (2 * std_20)
+    bb_middle = sma_20
+    
+    # Volume confirmation: current volume > 1.2x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 2.0)
-    
-    # Align 1d indicators to 4h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    vol_conf = volume > (vol_ma * 1.2)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Need EMA34 warmup
+    start_idx = 30  # Need enough data for ADX and BB
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(adx_6h[i]) or np.isnan(sma_20[i]) or np.isnan(std_20[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        high_val = high[i]
-        low_val = low[i]
-        camarilla_r3_val = camarilla_r3_aligned[i]
-        camarilla_s3_val = camarilla_s3_aligned[i]
-        ema34_1d_val = ema34_1d_aligned[i]
-        vol_spike_val = vol_spike[i]
+        close_val = close[i]
+        adx_val = adx_6h[i]
+        bb_upper_val = bb_upper[i]
+        bb_lower_val = bb_lower[i]
+        bb_middle_val = bb_middle[i]
+        vol_conf_val = vol_conf[i]
         
         if position == 0:
-            # Enter long: price breaks above Camarilla R3, 1d uptrend, volume spike
-            if high_val > camarilla_r3_val and ema34_1d_val > 0 and vol_spike_val:
+            # Enter long: price at or below lower BB, low volatility (ADX < 20), volume confirmation
+            if close_val <= bb_lower_val and adx_val < 20 and vol_conf_val:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below Camarilla S3, 1d downtrend, volume spike
-            elif low_val < camarilla_s3_val and ema34_1d_val < 0 and vol_spike_val:
+            # Enter short: price at or above upper BB, low volatility (ADX < 20), volume confirmation
+            elif close_val >= bb_upper_val and adx_val < 20 and vol_conf_val:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below Camarilla S3 or 1d trend down
-            if low_val < camarilla_s3_val or ema34_1d_val < 0:
+            # Exit long: price crosses above middle BB or volatility increases (ADX > 25)
+            if close_val >= bb_middle_val or adx_val > 25:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above Camarilla R3 or 1d trend up
-            if high_val > camarilla_r3_val or ema34_1d_val > 0:
+            # Exit short: price crosses below middle BB or volatility increases (ADX > 25)
+            if close_val <= bb_middle_val or adx_val > 25:
                 signals[i] = 0.0
                 position = 0
             else:
