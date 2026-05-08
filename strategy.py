@@ -1,23 +1,23 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w trend filter and volume confirmation.
-# Buy when price breaks above upper Donchian channel in 1w uptrend with volume spike.
-# Sell when price breaks below lower Donchian channel in 1w downtrend with volume spike.
-# Uses 1w EMA(21) for trend and 30-period volume spike for confirmation.
-# Target: 30-80 total trades over 4 years (7-20/year) to minimize fee drag.
-# Works in both bull (trend following) and bear (counter-trend at extremes) markets.
+# Hypothesis: 6h Williams %R reversal with 1d trend filter and volume confirmation.
+# Uses Williams %R(14) on 6m for overbought/oversold conditions.
+# Fades at extreme levels when 1d trend is opposite (mean reversion in range).
+# Takes continuation signals when 1d trend aligns and price breaks recent highs/lows.
+# Volume confirmation requires 20-period volume spike (1.5x EMA).
+# Target: 60-100 total trades over 4 years (15-25/year) to minimize fee drag.
+# Works in both bull and bear markets via trend-adaptive logic.
 
-name = "1d_Donchian20_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "6h_WilliamsR_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,73 +25,105 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
     
-    # 1w EMA(21) for trend filter
-    close_1w_series = pd.Series(close_1w)
-    ema_21_1w = close_1w_series.ewm(span=21, adjust=False, min_periods=21).mean().values
-    trend_up = ema_21_1w[1:] > ema_21_1w[:-1]  # Rising EMA = uptrend
-    trend_up = np.concatenate([[False], trend_up])  # Align with 1w index
+    # 6m Williams %R(14)
+    lookback = 14
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    for i in range(lookback - 1, n):
+        highest_high[i] = np.max(high[i - lookback + 1:i + 1])
+        lowest_low[i] = np.min(low[i - lookback + 1:i + 1])
     
-    # Donchian channels (20-period) on 1d data
-    # Upper channel: highest high of past 20 periods
-    # Lower channel: lowest low of past 20 periods
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    upper_channel = high_series.rolling(window=20, min_periods=20).max().values
-    lower_channel = low_series.rolling(window=20, min_periods=20).min().values
+    williams_r = np.full(n, np.nan)
+    for i in range(lookback - 1, n):
+        if highest_high[i] != lowest_low[i]:
+            williams_r[i] = -100 * (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i])
+        else:
+            williams_r[i] = -50  # Neutral when no range
     
-    # Volume confirmation: 30-period volume spike (2.0x EMA)
-    vol_ema = pd.Series(volume).ewm(span=30, adjust=False, min_periods=30).mean().values
-    vol_confirm = volume > (vol_ema * 2.0)
+    # 1d EMA(34) for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_up = ema_34_1d[1:] > ema_34_1d[:-1]  # Rising EMA = uptrend
+    trend_up = np.concatenate([[False], trend_up])  # Align with 1d index
     
-    # Align 1w trend to 1d timeframe
-    trend_up_aligned = align_htf_to_ltf(prices, df_1w, trend_up.astype(float))
+    # Volume confirmation: 20-period volume spike (1.5x EMA)
+    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ema * 1.5)
+    
+    # Align 1d indicators to 6h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Ensure enough data for Donchian and volume EMA
+    start_idx = max(20, 14)  # Ensure enough data for Williams %R and volume EMA
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or
-            np.isnan(trend_up_aligned[i]) or np.isnan(vol_ema[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(trend_up_aligned[i]) or
+            np.isnan(vol_ema[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: break above upper channel in uptrend with volume
-            if (trend_up_aligned[i] > 0.5 and  # 1w uptrend
-                close[i] >= upper_channel[i] and
+            # Long entry conditions
+            # Oversold reversal in downtrend (mean reversion)
+            if (trend_up_aligned[i] <= 0.5 and  # 1d downtrend
+                williams_r_aligned[i] <= -80 and  # Oversold
                 vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: break below lower channel in downtrend with volume
-            elif (trend_up_aligned[i] <= 0.5 and  # 1w downtrend
-                  close[i] <= lower_channel[i] and
+            # Continuation breakout in uptrend
+            elif (trend_up_aligned[i] > 0.5 and  # 1d uptrend
+                  williams_r_aligned[i] >= -20 and  # Overbought (momentum)
+                  close[i] > np.max(high[i-5:i]) and  # Break recent high
+                  vol_confirm[i]):
+                signals[i] = 0.25
+                position = 1
+            # Short entry conditions
+            # Overbought reversal in uptrend (mean reversion)
+            elif (trend_up_aligned[i] > 0.5 and  # 1d uptrend
+                  williams_r_aligned[i] >= -20 and  # Overbought
+                  vol_confirm[i]):
+                signals[i] = -0.25
+                position = -1
+            # Continuation breakdown in downtrend
+            elif (trend_up_aligned[i] <= 0.5 and  # 1d downtrend
+                  williams_r_aligned[i] <= -80 and  # Oversold (momentum)
+                  close[i] < np.min(low[i-5:i]) and  # Break recent low
                   vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: reverse signal (break below lower channel)
-            if (trend_up_aligned[i] <= 0.5 and  # 1w downtrend
-                close[i] <= lower_channel[i]):
+            # Long exit: reverse signal or stop
+            if (trend_up_aligned[i] <= 0.5 and  # 1d downtrend
+                williams_r_aligned[i] >= -20):  # Overbought or momentum shift
+                signals[i] = 0.0
+                position = 0
+            elif (trend_up_aligned[i] > 0.5 and  # 1d uptrend
+                  close[i] < np.min(low[i-5:i])):  # Break recent low
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: reverse signal (break above upper channel)
-            if (trend_up_aligned[i] > 0.5 and  # 1w uptrend
-                  close[i] >= upper_channel[i]):
+            # Short exit: reverse signal or stop
+            if (trend_up_aligned[i] > 0.5 and  # 1d uptrend
+                williams_r_aligned[i] <= -80):  # Oversold or momentum shift
+                signals[i] = 0.0
+                position = 0
+            elif (trend_up_aligned[i] <= 0.5 and  # 1d downtrend
+                  close[i] > np.max(high[i-5:i])):  # Break recent high
                 signals[i] = 0.0
                 position = 0
             else:
