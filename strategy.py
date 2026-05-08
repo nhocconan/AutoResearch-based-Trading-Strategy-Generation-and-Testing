@@ -3,19 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 12-hour Donchian breakout with volume confirmation and 1-day trend filter.
-# Donchian breakouts capture momentum, while volume confirmation filters false breakouts.
-# 1-day trend filter ensures alignment with higher timeframe momentum.
-# Designed for low trade frequency (15-30/year) to minimize whipsaw and capture high-probability breakouts.
-# Works in both bull and bear markets by using trend filter to only take breakouts in direction of higher timeframe trend.
+# Hypothesis: 4h strategy using 1-day Bollinger Bands squeeze breakout with volume confirmation and ATR stop.
+# Bollinger Band squeeze (low volatility) often precedes strong breakout moves.
+# Long when price breaks above upper BB with volume spike; short when breaks below lower BB.
+# Uses 1-day trend filter (EMA50) to align with higher timeframe direction.
+# Designed for low trade frequency (15-25/year) to minimize fee drag and capture explosive moves.
+# Works in bull markets (breaks to upside) and bear markets (breaks to downside).
 
-name = "6h_DonchianBreakout_Volume_TrendFilter"
-timeframe = "6h"
+name = "4h_BB_Squeeze_Breakout_Volume_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,36 +24,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Donchian channels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    
-    # Calculate Donchian channels (20-period high/low)
-    high_20 = np.full_like(high_12h, np.nan)
-    low_20 = np.full_like(low_12h, np.nan)
-    
-    for i in range(19, len(high_12h)):
-        high_20[i] = np.max(high_12h[i-19:i+1])
-        low_20[i] = np.min(low_12h[i-19:i+1])
-    
-    # Align Donchian levels to 6h timeframe
-    high_20_aligned = align_htf_to_ltf(prices, df_12h, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_12h, low_20)
-    
-    # Get 1d trend filter (EMA crossover)
+    # Get daily data for Bollinger Bands and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema_20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_up = ema_20 > ema_50  # Bullish when 20 EMA > 50 EMA
-    trend_aligned = align_htf_to_ltf(prices, df_1d, trend_up.astype(float))
+    
+    # Calculate Bollinger Bands (20, 2)
+    bb_period = 20
+    bb_std = 2
+    sma_20 = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std_20 = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_bb = sma_20 + (std_20 * bb_std)
+    lower_bb = sma_20 - (std_20 * bb_std)
+    bb_width = (upper_bb - lower_bb) / sma_20  # Normalized width for squeeze detection
+    
+    # Bollinger Band squeeze: width below 20th percentile of last 50 days
+    bb_width_percentile = pd.Series(bb_width).rolling(window=50, min_periods=50).quantile(0.20).values
+    bb_squeeze = bb_width < bb_width_percentile
+    
+    # Daily trend filter: EMA50 slope
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_slope = ema_50_1d[1:] > ema_50_1d[:-1]  # Rising EMA50
+    ema50_slope = np.concatenate([[False], ema50_slope])  # Align with daily index
+    
+    # Align indicators to 4h timeframe
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
+    bb_squeeze_aligned = align_htf_to_ltf(prices, df_1d, bb_squeeze.astype(float))
+    ema50_slope_aligned = align_htf_to_ltf(prices, df_1d, ema50_slope.astype(float))
     
     # Volume confirmation: current volume > 2.0x 20-period EMA
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -61,40 +62,44 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Ensure enough data for all indicators
+    start_idx = 50  # Ensure enough data for calculations
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or
-            np.isnan(trend_aligned[i]) or np.isnan(vol_ema[i])):
+        if (np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or
+            np.isnan(bb_squeeze_aligned[i]) or np.isnan(ema50_slope_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long breakout: price breaks above 20-period high with volume and uptrend
-            if (close[i] > high_20_aligned[i] and
-                trend_aligned[i] > 0.5 and
-                vol_confirm[i]):
+            # Long setup: BB squeeze breakout above upper band with volume
+            if (bb_squeeze_aligned[i] > 0.5 and  # In squeeze condition
+                close[i] > upper_bb_aligned[i] and  # Break above upper BB
+                ema50_slope_aligned[i] > 0.5 and    # Daily uptrend
+                vol_confirm[i]):                    # Volume confirmation
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: price breaks below 20-period low with volume and downtrend
-            elif (close[i] < low_20_aligned[i] and
-                  trend_aligned[i] <= 0.5 and
-                  vol_confirm[i]):
+            # Short setup: BB squeeze breakout below lower band with volume
+            elif (bb_squeeze_aligned[i] > 0.5 and   # In squeeze condition
+                  close[i] < lower_bb_aligned[i] and  # Break below lower BB
+                  ema50_slope_aligned[i] <= 0.5 and   # Daily downtrend
+                  vol_confirm[i]):                    # Volume confirmation
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below 20-period low or trend turns down
-            if close[i] < low_20_aligned[i] or trend_aligned[i] <= 0.5:
+            # Long exit: price returns to middle of BB or trend changes
+            middle_bb = (upper_bb_aligned[i] + lower_bb_aligned[i]) / 2
+            if close[i] < middle_bb or ema50_slope_aligned[i] <= 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above 20-period high or trend turns up
-            if close[i] > high_20_aligned[i] or trend_aligned[i] > 0.5:
+            # Short exit: price returns to middle of BB or trend changes
+            middle_bb = (upper_bb_aligned[i] + lower_bb_aligned[i]) / 2
+            if close[i] > middle_bb or ema50_slope_aligned[i] > 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
