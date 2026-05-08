@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_Choppiness_Regime_Donchian_Breakout_1wTrend"
-timeframe = "1d"
+name = "12h_Camarilla_Pivot_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,37 +17,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1w trend: EMA21
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
+    # Calculate 1d trend: EMA34
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate ATR(14) for position sizing and stop loss
+    # Calculate ATR(14) for stop loss
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Donchian channels (20-period)
-    high_max20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d Camarilla pivot levels: H4, L4 (resistance/support)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    h4 = close_1d + (range_1d * 1.1 / 2)
+    l4 = close_1d - (range_1d * 1.1 / 2)
     
-    # Calculate Choppiness Index (14-period)
-    # Chop = 100 * log10(sum(ATR(1)) / (n * log10(highest_high - lowest_low)))
-    atr1 = tr  # ATR(1) is true range
-    sum_atr1 = pd.Series(atr1).rolling(window=14, min_periods=14).sum().values
-    highest_high14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    range14 = highest_high14 - lowest_low14
-    # Avoid division by zero
-    range14 = np.where(range14 == 0, 1e-10, range14)
-    chop = 100 * np.log10(sum_atr1 / (14 * np.log10(range14)))
-    chop = np.where(np.isnan(chop), 50, chop)  # fill NaN with neutral value
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    
+    # Volume spike: current volume > 2x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -56,22 +56,22 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_21_1w_aligned[i]) or np.isnan(high_max20[i]) or 
-            np.isnan(low_min20[i]) or np.isnan(chop[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(h4_aligned[i]) or 
+            np.isnan(l4_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Donchian breakout + uptrend (price > 1w EMA21) + chop > 61.8 (range)
-            long_cond = (close[i] > high_max20[i]) and \
-                        (close[i] > ema_21_1w_aligned[i]) and \
-                        (chop[i] > 61.8)
-            # Short: Donchian breakdown + downtrend (price < 1w EMA21) + chop > 61.8 (range)
-            short_cond = (close[i] < low_min20[i]) and \
-                         (close[i] < ema_21_1w_aligned[i]) and \
-                         (chop[i] > 61.8)
+            # Long: break above H4 + uptrend (price > 1d EMA34) + volume spike
+            long_cond = (close[i] > h4_aligned[i]) and \
+                        (close[i] > ema_34_1d_aligned[i]) and \
+                        volume_spike[i]
+            # Short: break below L4 + downtrend (price < 1d EMA34) + volume spike
+            short_cond = (close[i] < l4_aligned[i]) and \
+                         (close[i] < ema_34_1d_aligned[i]) and \
+                         volume_spike[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -80,15 +80,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: close below Donchian low OR chop < 38.2 (trending)
-            if close[i] < low_min20[i] or chop[i] < 38.2:
+            # Long exit: close below L4 (mean reversion to support)
+            if close[i] < l4_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: close above Donchian high OR chop < 38.2 (trending)
-            if close[i] > high_max20[i] or chop[i] < 38.2:
+            # Short exit: close above H4 (mean reversion to resistance)
+            if close[i] > h4_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
