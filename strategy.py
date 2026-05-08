@@ -3,13 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Choppiness Index regime filter with 1-day EMA trend filter and 12h momentum
-# Uses 1d EMA34 for trend filter, 12h Choppiness Index for regime detection, and 12h RSI for momentum
-# Works in bull/bear via trend filter and regime filter - mean reversion in range (CHOP>61.8), trend following in trend (CHOP<38.2)
+# Hypothesis: 6h ADX + Williams Alligator combination with volume confirmation
+# Uses 1d for Williams Alligator (trend) and volume filters, 6h for ADX (momentum)
+# Williams Alligator uses smoothed medians (Jaw/Teeth/Lips) for trend direction
+# ADX > 25 indicates strong trend for entry, with Alligator alignment for direction
+# Volume confirmation reduces false signals
+# Works in bull/bear via trend-following logic with volume filter
 # Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
 
-name = "12h_Choppiness_Index_EMA34_RSI_Momentum"
-timeframe = "12h"
+name = "6h_ADX_WilliamsAlligator_1dVolume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,117 +25,141 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for EMA trend filter
+    # Get daily data for Williams Alligator and volume average
     df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 34:
+    if len(df_daily) < 13:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend filter
-    close_daily = df_daily['close'].values
-    ema_daily_34 = pd.Series(close_daily).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate Williams Alligator components (all use median price)
+    # Median price = (high + low) / 2
+    median_price = (df_daily['high'].values + df_daily['low'].values) / 2
     
-    # Calculate 12h True Range for Choppiness Index
-    prev_close = np.roll(close, 1)
-    prev_close[0] = close[0]
-    tr1 = high - low
-    tr2 = np.abs(high - prev_close)
-    tr3 = np.abs(low - prev_close)
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Jaw (Blue): 13-period SMMA, shifted 8 bars forward
+    jaw_raw = pd.Series(median_price).ewm(alpha=1/13, adjust=False).mean().values
+    jaw = np.roll(jaw_raw, 8)
+    jaw[:8] = jaw_raw[7]  # fill shifted values with last valid
     
-    # Calculate 12h ATR(14) for Choppiness Index denominator
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Teeth (Red): 8-period SMMA, shifted 5 bars forward
+    teeth_raw = pd.Series(median_price).ewm(alpha=1/8, adjust=False).mean().values
+    teeth = np.roll(teeth_raw, 5)
+    teeth[:5] = teeth_raw[4]  # fill shifted values with last valid
     
-    # Calculate 12h highest high and lowest low over 14 periods for Choppiness Index numerator
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    range_14 = highest_high_14 - lowest_low_14
+    # Lips (Green): 5-period SMMA, shifted 3 bars forward
+    lips_raw = pd.Series(median_price).ewm(alpha=1/5, adjust=False).mean().values
+    lips = np.roll(lips_raw, 3)
+    lips[:3] = lips_raw[2]  # fill shifted values with last valid
     
-    # Calculate 12h Choppiness Index (CHOP)
-    # CHOP = 100 * log10(sum(ATR(14)) / (HHV(14) - LLV(14))) / log10(14)
-    # Avoid division by zero and log of zero
-    sum_atr_14 = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
-    chop = 100 * np.log10(sum_atr_14 / np.maximum(range_14, 1e-10)) / np.log10(14)
-    chop = np.where(np.isfinite(chop), chop, 50)  # Replace inf/NaN with neutral value
+    # Calculate daily volume average for volume confirmation
+    daily_volume = df_daily['volume'].values
+    vol_ma_13 = pd.Series(daily_volume).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate 12h RSI(14) for momentum
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Align daily indicators to 6h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_daily, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_daily, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_daily, lips)
+    vol_ma_13_aligned = align_htf_to_ltf(prices, df_daily, vol_ma_13)
     
-    # Align daily EMA to 12h timeframe
-    ema_daily_34_aligned = align_htf_to_ltf(prices, df_daily, ema_daily_34)
+    # Calculate 6h ADX (14-period)
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Pre-compute session filter (08-20 UTC) - though less critical for 12h
+    # Directional Movement
+    dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Smoothed values
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nansum(data[:period]) / period
+        # Subsequent values
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    atr = wilders_smoothing(tr, 14)
+    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
+    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
+    
+    # DI+ and DI-
+    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
+    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilders_smoothing(dx, 14)
+    
+    # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 14)  # warmup for indicators
+    start_idx = max(50, 34)  # warmup for indicators
     
     for i in range(start_idx, n):
-        # Skip if outside trading session (optional for 12h)
+        # Skip if outside trading session
         if not in_session[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        if (np.isnan(ema_daily_34_aligned[i]) or np.isnan(chop[i]) or np.isnan(rsi[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
+            np.isnan(vol_ma_13_aligned[i]) or np.isnan(adx[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: daily EMA34 direction (using previous bar to avoid look-ahead)
-        ema_now = ema_daily_34_aligned[i]
-        ema_prev = ema_daily_34_aligned[i-1]
-        ema_uptrend = ema_now > ema_prev
-        ema_downtrend = ema_now < ema_prev
+        # Williams Alligator trend: Lips > Teeth > Jaw = uptrend, Lips < Teeth < Jaw = downtrend
+        lips_val = lips_aligned[i]
+        teeth_val = teeth_aligned[i]
+        jaw_val = jaw_aligned[i]
+        alligator_uptrend = lips_val > teeth_val > jaw_val
+        alligator_downtrend = lips_val < teeth_val < jaw_val
         
-        # Regime filters based on Choppiness Index
-        chop_value = chop[i]
-        is_range = chop_value > 61.8  # Range bound - mean revert
-        is_trend = chop_value < 38.2  # Trending - trend follow
+        # Volume filter: current daily volume > 1.5x 13-day EMA
+        # Find the most recent completed daily bar
+        idx_daily = len(df_daily) - 1
+        while idx_daily >= 0 and df_daily.iloc[idx_daily]['open_time'] > prices.iloc[i]['open_time']:
+            idx_daily -= 1
         
-        # Momentum filter: RSI levels
-        rsi_value = rsi[i]
-        rsi_oversold = rsi_value < 30
-        rsi_overbought = rsi_value > 70
+        if idx_daily < 0:
+            vol_filter = False
+        else:
+            vol_daily_current = df_daily.iloc[idx_daily]['volume']
+            vol_filter = vol_daily_current > 1.5 * vol_ma_13_aligned[i]
+        
+        # ADX filter: > 25 indicates strong trend
+        adx_filter = adx[i] > 25
         
         if position == 0:
-            # Look for entries based on regime
-            if is_range and rsi_oversold and ema_uptrend:
-                # In range, oversold with bullish bias - go long
+            # Look for entry with Alligator alignment, ADX strength, and volume
+            if alligator_uptrend and adx_filter and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            elif is_range and rsi_overbought and ema_downtrend:
-                # In range, overbought with bearish bias - go short
-                signals[i] = -0.25
-                position = -1
-            elif is_trend and rsi_value > 50 and ema_uptrend:
-                # In trend, bullish momentum - go long
-                signals[i] = 0.25
-                position = 1
-            elif is_trend and rsi_value < 50 and ema_downtrend:
-                # In trend, bearish momentum - go short
+            elif alligator_downtrend and adx_filter and vol_filter:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: range extreme or trend/momentum reversal
-            if (is_range and rsi_value > 70) or (not ema_uptrend) or (is_trend and rsi_value < 50):
+            # Exit long: Alligator alignment breaks or ADX weakens
+            if not alligator_uptrend or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: range extreme or trend/momentum reversal
-            if (is_range and rsi_value < 30) or (not ema_downtrend) or (is_trend and rsi_value > 50):
+            # Exit short: Alligator alignment breaks or ADX weakens
+            if not alligator_downtrend or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
