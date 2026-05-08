@@ -1,21 +1,23 @@
+# 2025-06-08
+# Hypothesis: 6h EMA crossover with 1d volume confirmation and 1d volatility filter
+# Uses EMA(13) and EMA(34) crossover for trend detection on 6h timeframe
+# Confirms with 1d volume spike (2x 20-period average) to ensure institutional participation
+# Filters out low volatility periods using 1d ATR ratio (< 0.5 indicates chop)
+# Designed for 5-15 trades per year (~20-60 total over 4 years) to minimize fee drag
+# Works in both bull and bear markets by requiring volume confirmation and volatility filter
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with 1-day volume spike and 1-day ADX trend filter
-# Donchian breakouts capture momentum in trending markets. Volume spike confirms institutional participation.
-# ADX > 25 ensures we only trade in strong trends, avoiding whipsaws in ranges.
-# This combination works in both bull and bear markets by filtering for strong trends only.
-# Targets 20-40 trades per year (~80-160 total over 4 years) to minimize fee drag.
-
-name = "4h_Donchian20_1dVolume_1dADX"
-timeframe = "4h"
+name = "6h_EMA13_34_1dVol_VolFilter"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,107 +25,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for volume and ADX
+    # Calculate EMA crossover on 6h
+    close_series = pd.Series(close)
+    ema13 = close_series.ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema34 = close_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Get 1d data for volume and volatility filters
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 4-hour Donchian channels (20-period)
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Volume spike detection on 1d (2x 20-period average)
+    vol_1d = df_1d['volume'].values
+    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike = vol_1d > (vol_ma_20 * 2.0)
+    vol_spike_6h = align_htf_to_ltf(prices, df_1d, vol_spike)
     
-    # Align Donchian levels to current 4h bar (use previous bar's levels to avoid look-ahead)
-    high_max_shifted = np.roll(high_max, 1)
-    low_min_shifted = np.roll(low_min, 1)
-    high_max_shifted[0] = np.nan
-    low_min_shifted[0] = np.nan
-    
-    # Volume spike detection on 1d (24-period MA for ~4 days)
-    vol_ma = pd.Series(df_1d['volume'].values).rolling(window=24, min_periods=24).mean().values
-    vol_spike = df_1d['volume'].values > (vol_ma * 2.0)
-    vol_spike_4h = align_htf_to_ltf(prices, df_1d, vol_spike)
-    
-    # ADX calculation on 1d
+    # Volatility filter: ATR ratio < 0.5 indicates choppy market
+    # Calculate ATR(14) on 1d
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    plus_dm = np.zeros_like(high_1d)
-    minus_dm = np.zeros_like(high_1d)
-    tr = np.zeros_like(high_1d)
-    
-    for i in range(1, len(high_1d)):
-        plus_dm[i] = max(high_1d[i] - high_1d[i-1], 0)
-        minus_dm[i] = max(low_1d[i-1] - low_1d[i], 0)
-        if plus_dm[i] == minus_dm[i]:
-            plus_dm[i] = 0
-            minus_dm[i] = 0
-        tr[i] = max(
-            high_1d[i] - low_1d[i],
-            abs(high_1d[i] - close_1d[i-1]),
-            abs(low_1d[i] - close_1d[i-1])
+    tr = np.maximum(
+        high_1d - low_1d,
+        np.maximum(
+            np.abs(high_1d - np.roll(close_1d, 1)),
+            np.abs(low_1d - np.roll(close_1d, 1))
         )
+    )
+    tr[0] = high_1d[0] - low_1d[0]  # First period
     
-    # Wilder smoothing function
-    def wilder_smooth(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        result[period-1] = np.nansum(arr[:period])
-        for i in range(period, len(arr)):
-            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
-        return result
-    
-    tr14 = wilder_smooth(tr, 14)
-    plus_dm14 = wilder_smooth(plus_dm, 14)
-    minus_dm14 = wilder_smooth(minus_dm, 14)
-    
-    plus_di14 = np.where(tr14 != 0, 100 * (plus_dm14 / tr14), 0)
-    minus_di14 = np.where(tr14 != 0, 100 * (minus_dm14 / tr14), 0)
-    
-    dx = np.where((plus_di14 + minus_di14) != 0, 
-                  100 * np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14), 0)
-    adx = wilder_smooth(dx, 14)
-    
-    adx_strong = adx > 25
-    adx_weak = adx < 20
-    adx_strong_4h = align_htf_to_ltf(prices, df_1d, adx_strong)
-    adx_weak_4h = align_htf_to_ltf(prices, df_1d, adx_weak)
+    atr14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # ATR ratio: current ATR / 20-period average ATR
+    atr_ma_20 = pd.Series(atr14).rolling(window=20, min_periods=20).mean().values
+    atr_ratio = atr14 / atr_ma_20
+    # Filter: only trade when volatility is elevated (ratio > 0.5)
+    vol_filter = atr_ratio > 0.5
+    vol_filter_6h = align_htf_to_ltf(prices, df_1d, vol_filter)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure sufficient data for Donchian and volume MA
+    start_idx = max(34, 20)  # Ensure sufficient data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(high_max_shifted[i]) or np.isnan(low_min_shifted[i]) or 
-            np.isnan(vol_spike_4h[i]) or np.isnan(adx_strong_4h[i]) or 
-            np.isnan(adx_weak_4h[i])):
+        if (np.isnan(ema13[i]) or np.isnan(ema34[i]) or 
+            np.isnan(vol_spike_6h[i]) or np.isnan(vol_filter_6h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above Donchian high, volume spike, strong trend
-            if close[i] > high_max_shifted[i] and vol_spike_4h[i] and adx_strong_4h[i]:
+            # Enter long: EMA13 crosses above EMA34, volume spike, volatility filter
+            if ema13[i] > ema34[i] and ema13[i-1] <= ema34[i-1] and vol_spike_6h[i] and vol_filter_6h[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below Donchian low, volume spike, strong trend
-            elif close[i] < low_min_shifted[i] and vol_spike_4h[i] and adx_strong_4h[i]:
+            # Enter short: EMA13 crosses below EMA34, volume spike, volatility filter
+            elif ema13[i] < ema34[i] and ema13[i-1] >= ema34[i-1] and vol_spike_6h[i] and vol_filter_6h[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to Donchian low or trend weakens
-            if close[i] < low_min_shifted[i] or adx_weak_4h[i]:
+            # Exit long: EMA13 crosses below EMA34 or volatility drops
+            if ema13[i] < ema34[i] or not vol_filter_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to Donchian high or trend weakens
-            if close[i] > high_max_shifted[i] or adx_weak_4h[i]:
+            # Exit short: EMA13 crosses above EMA34 or volatility drops
+            if ema13[i] > ema34[i] or not vol_filter_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
