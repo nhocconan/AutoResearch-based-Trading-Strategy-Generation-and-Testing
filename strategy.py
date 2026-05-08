@@ -3,20 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using weekly high/low breakout with volume confirmation and EMA200 trend filter.
-# Buys when price breaks above weekly high with volume spike and above EMA200.
-# Sells when price breaks below weekly low with volume spike and below EMA200.
-# Exits when price crosses back below/above the weekly midpoint.
-# Designed for low trade frequency (10-25/year) to minimize fee drag in bear markets.
-# Weekly levels provide strong support/resistance that work in both trending and ranging markets.
+# Hypothesis: 6h strategy using 1d Elder Ray (Bull/Bear Power) with 13-period EMA and market regime filter.
+# Elder Ray measures bull/bear power relative to EMA13. In bull regime (EMA13 rising), go long on Bull Power > 0.
+# In bear regime (EMA13 falling), go short on Bear Power < 0. Uses volume confirmation for signal quality.
+# Designed for low trade frequency (15-30/year) to avoid fee drag. Works in both trending and ranging markets.
 
-name = "1d_1wHighLow_Breakout_VolumeTrend"
-timeframe = "1d"
+name = "6h_1dElderRay_EMA13_Regime"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,68 +22,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Get 1d data for Elder Ray calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly high, low, and midpoint
-    weekly_high = high_1w
-    weekly_low = low_1w
-    weekly_mid = (high_1w + low_1w) / 2.0
+    # Calculate 13-period EMA for Elder Ray
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate EMA200 on daily close for trend filter
-    close_series = pd.Series(close)
-    ema_200 = close_series.ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power_1d = high_1d - ema13_1d
+    bear_power_1d = low_1d - ema13_1d
     
-    # Align weekly indicators to daily timeframe
-    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high)
-    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low)
-    weekly_mid_aligned = align_htf_to_ltf(prices, df_1w, weekly_mid)
+    # Calculate EMA13 slope for regime detection (rising/falling)
+    ema13_slope_1d = np.diff(ema13_1d, prepend=ema13_1d[0])
     
-    # Volume confirmation: daily volume spike (2x 20-period EMA)
+    # Align 1d indicators to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    ema13_slope_aligned = align_htf_to_ltf(prices, df_1d, ema13_slope_1d)
+    
+    # Volume confirmation: 6h volume spike (1.5x 20-period EMA)
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike = volume > (vol_ema * 2.0)
+    vol_spike = volume > (vol_ema * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # Ensure enough data for EMA200
+    start_idx = 20  # Ensure enough data for EMA13
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(weekly_high_aligned[i]) or 
-            np.isnan(weekly_low_aligned[i]) or 
-            np.isnan(weekly_mid_aligned[i]) or 
-            np.isnan(ema_200[i])):
+        if (np.isnan(bull_power_aligned[i]) or 
+            np.isnan(bear_power_aligned[i]) or 
+            np.isnan(ema13_slope_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above weekly high + volume spike + above EMA200
-            if close[i] > weekly_high_aligned[i] and vol_spike[i] and close[i] > ema_200[i]:
+            # Enter long: bull regime (EMA13 rising) + Bull Power > 0 + volume spike
+            if ema13_slope_aligned[i] > 0 and bull_power_aligned[i] > 0 and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below weekly low + volume spike + below EMA200
-            elif close[i] < weekly_low_aligned[i] and vol_spike[i] and close[i] < ema_200[i]:
+            # Enter short: bear regime (EMA13 falling) + Bear Power < 0 + volume spike
+            elif ema13_slope_aligned[i] < 0 and bear_power_aligned[i] < 0 and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below weekly midpoint
-            if close[i] < weekly_mid_aligned[i]:
+            # Exit long: bull power turns negative or regime changes to bear
+            if bull_power_aligned[i] <= 0 or ema13_slope_aligned[i] < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above weekly midpoint
-            if close[i] > weekly_mid_aligned[i]:
+            # Exit short: bear power turns positive or regime changes to bull
+            if bear_power_aligned[i] >= 0 or ema13_slope_aligned[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
