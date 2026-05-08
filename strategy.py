@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian(20) breakout with daily trend filter and volume confirmation
-# We go long when price breaks above 20-period high with daily EMA(34) uptrend and volume spike.
-# We go short when price breaks below 20-period low with daily EMA(34) downtrend and volume spike.
-# Uses 12h timeframe to target 12-37 trades/year, avoiding excessive frequency.
-# Donchian provides clear trend-following structure.
-# Daily trend filter ensures we trade with the higher timeframe momentum.
-# Volume spike confirms institutional participation in the breakout.
+# Hypothesis: 4-hour Bollinger Band squeeze breakout with weekly trend filter and volume confirmation
+# We go long when price breaks above upper BB with weekly EMA(50) uptrend and volume spike.
+# We go short when price breaks below lower BB with weekly EMA(50) downtrend and volume spike.
+# Uses 4h timeframe targeting 20-50 trades/year. Bollinger squeeze identifies low volatility
+# periods preceding breakouts. Weekly trend filter ensures alignment with higher timeframe momentum.
+# Volume spike confirms institutional participation, reducing false breakouts.
 
-name = "12h_Donchian20_DailyTrend_Volume"
-timeframe = "12h"
+name = "4h_Bollinger_Squeeze_Breakout_WeeklyTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,19 +24,28 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data once for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get weekly data once for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate daily EMA(34) for trend filter
-    daily_close = df_1d['close'].values
-    ema34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate weekly EMA(50) for trend filter
+    weekly_close = df_1w['close'].values
+    ema50_1w = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Calculate Donchian channel on 12h data (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Bollinger Bands (20, 2.0) on 4h
+    close_s = pd.Series(close)
+    bb_middle = close_s.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_s.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2.0 * bb_std
+    bb_lower = bb_middle - 2.0 * bb_std
+    
+    # Bollinger Band width for squeeze detection (normalized by middle band)
+    bb_width = (bb_upper - bb_lower) / bb_middle
+    # Squeeze condition: BB width below 20-period average (low volatility)
+    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
+    squeeze_condition = bb_width < bb_width_ma
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -50,39 +58,41 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(bb_upper[i]) or 
+            np.isnan(bb_lower[i]) or np.isnan(squeeze_condition[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema34_1d_val = ema34_1d_aligned[i]
-        upper_band = donchian_high[i]
-        lower_band = donchian_low[i]
+        ema50_1w_val = ema50_1w_aligned[i]
+        upper_band = bb_upper[i]
+        lower_band = bb_lower[i]
+        is_squeeze = squeeze_condition[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: price breaks above upper band + daily uptrend + volume spike
+            # Enter long: price breaks above upper BB + weekly uptrend + volume spike + squeeze
             if (not np.isnan(upper_band) and close[i] > upper_band and 
-                close[i] > ema34_1d_val and vol_spike):
+                close[i] > ema50_1w_val and vol_spike and is_squeeze):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below lower band + daily downtrend + volume spike
+            # Enter short: price breaks below lower BB + weekly downtrend + volume spike + squeeze
             elif (not np.isnan(lower_band) and close[i] < lower_band and 
-                  close[i] < ema34_1d_val and vol_spike):
+                  close[i] < ema50_1w_val and vol_spike and is_squeeze):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below lower band OR daily trend turns down
-            if (not np.isnan(lower_band) and close[i] < lower_band) or close[i] < ema34_1d_val:
+            # Exit long: price breaks below middle BB OR weekly trend turns down
+            if (not np.isnan(bb_middle[i]) and close[i] < bb_middle[i]) or close[i] < ema50_1w_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above upper band OR daily trend turns up
-            if (not np.isnan(upper_band) and close[i] > upper_band) or close[i] > ema34_1d_val:
+            # Exit short: price breaks above middle BB OR weekly trend turns up
+            if (not np.isnan(bb_middle[i]) and close[i] > bb_middle[i]) or close[i] > ema50_1w_val:
                 signals[i] = 0.0
                 position = 0
             else:
