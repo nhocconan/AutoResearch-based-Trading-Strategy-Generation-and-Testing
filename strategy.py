@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_DailyBullBearPower_EnergyShift"
-timeframe = "6h"
+name = "4h_Donchian20_Volume_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,61 +17,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Elder Ray calculation
+    # Daily trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Daily EMA13 for Elder Ray calculation
-    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Donchian channels (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Bull Power = High - EMA13, Bear Power = EMA13 - Low
-    bull_power_1d = high_1d - ema_13_1d
-    bear_power_1d = ema_13_1d - low_1d
-    
-    # Energy Shift: Bull Power - Bear Power (positive = bullish, negative = bearish)
-    energy_shift_1d = bull_power_1d - bear_power_1d
-    
-    # Align to 6h timeframe
-    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
-    bull_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
-    energy_shift_1d_aligned = align_htf_to_ltf(prices, df_1d, energy_shift_1d)
-    
-    # 6-day EMA of Energy Shift for trend smoothing
-    energy_shift_ema6 = pd.Series(energy_shift_1d_aligned).ewm(span=6, adjust=False, min_periods=6).mean().values
-    
-    # Volume confirmation: current volume > 1.3x 24-period average (4 days of 6h bars)
-    vol_ma24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_confirm = volume > (1.3 * vol_ma24)
+    # Volume filter: current volume > 1.3x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.3 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(energy_shift_ema6[i]) or np.isnan(volume_confirm[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(high_20[i]) or 
+            np.isnan(low_20[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Energy Shift turning positive with volume confirmation
-            long_cond = (energy_shift_ema6[i] > 0 and 
-                        energy_shift_ema6[i] > energy_shift_ema6[i-1] and
-                        volume_confirm[i])
+            # Long: price breaks above upper Donchian, daily uptrend, volume filter
+            long_cond = (close[i] > high_20[i] and 
+                        ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1] and
+                        volume_filter[i])
             
-            # Short: Energy Shift turning negative with volume confirmation
-            short_cond = (energy_shift_ema6[i] < 0 and 
-                         energy_shift_ema6[i] < energy_shift_ema6[i-1] and
-                         volume_confirm[i])
+            # Short: price breaks below lower Donchian, daily downtrend, volume filter
+            short_cond = (close[i] < low_20[i] and 
+                         ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1] and
+                         volume_filter[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -80,15 +66,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Energy Shift turns negative
-            if energy_shift_ema6[i] < 0:
+            # Long exit: price crosses below lower Donchian
+            if close[i] < low_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Energy Shift turns positive
-            if energy_shift_ema6[i] > 0:
+            # Short exit: price crosses above upper Donchian
+            if close[i] > high_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
