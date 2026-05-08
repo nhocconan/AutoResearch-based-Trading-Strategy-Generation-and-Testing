@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Choppiness Index + 1d EMA34 + Volume Spike
-# Long when CHOP(12h) > 61.8 (range) AND price > 1d EMA34 (up trend) AND volume > 1.5x 20-period average
-# Short when CHOP(12h) > 61.8 (range) AND price < 1d EMA34 (down trend) AND volume > 1.5x 20-period average
-# Exit when CHOP(12h) < 38.2 (trending) OR price crosses EMA34 in opposite direction
-# Choppiness Index identifies ranging markets ideal for mean reversion to EMA.
-# EMA34 filters higher timeframe trend direction. Volume confirms institutional participation.
-# Target: 50-150 total trades over 4 years (12-37/year).
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume spike confirmation.
+# Long when price breaks above Donchian upper band (20-period high) AND 1d EMA50 rising AND volume > 1.8x 20-period average.
+# Short when price breaks below Donchian lower band (20-period low) AND 1d EMA50 falling AND volume > 1.8x 20-period average.
+# Exit when price crosses back inside the Donchian channel.
+# Donchian provides clear breakout levels, EMA50 filters higher timeframe trend, volume spike confirms strength.
+# Target: 80-150 total trades over 4 years (20-38/year) to stay within optimal range.
 
-name = "12h_Chop_1dEMA34_Volume"
-timeframe = "12h"
+name = "4h_Donchian_20_1dEMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,55 +24,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for EMA34
+    # 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d EMA34
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Donchian(20) calculation using 4h data
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    upper_band = high_series.rolling(window=20, min_periods=20).max().values
+    lower_band = low_series.rolling(window=20, min_periods=20).min().values
     
-    # 12h Choppiness Index (14-period)
-    # CHOP = 100 * log10( sum(ATR) / (max(high) - min(low)) ) / log10(n)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    range_hl = max_high - min_low
+    # 1d EMA50 direction
+    ema50_rising = np.zeros_like(ema50_1d_aligned, dtype=bool)
+    ema50_falling = np.zeros_like(ema50_1d_aligned, dtype=bool)
+    ema50_rising[1:] = ema50_1d_aligned[1:] > ema50_1d_aligned[:-1]
+    ema50_falling[1:] = ema50_1d_aligned[1:] < ema50_1d_aligned[:-1]
     
-    chop = np.full(n, 50.0)  # default neutral
-    valid = (range_hl > 0) & ~np.isnan(atr_sum)
-    chop[valid] = 100 * np.log10(atr_sum[valid] / range_hl[valid]) / np.log10(14)
-    
-    # Volume filter: current volume > 1.5x 20-period average
+    # Volume filter: current volume > 1.8x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma20)
+    volume_filter = volume > (1.8 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(35, 20, 14)  # Sufficient warmup
+    start_idx = max(50, 20)  # Sufficient warmup for EMA50 and Donchian
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(chop[i]) or 
-            np.isnan(volume_filter[i])):
+        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(ema50_rising[i]) or 
+            np.isnan(ema50_falling[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: ranging market (CHOP > 61.8), price above EMA34, volume filter
-            long_cond = (chop[i] > 61.8) and (close[i] > ema34_1d_aligned[i]) and volume_filter[i]
-            # Short conditions: ranging market (CHOP > 61.8), price below EMA34, volume filter
-            short_cond = (chop[i] > 61.8) and (close[i] < ema34_1d_aligned[i]) and volume_filter[i]
+            # Long conditions: price breaks above upper band, 1d EMA50 rising, volume filter
+            long_cond = (close[i] > upper_band[i]) and ema50_rising[i] and volume_filter[i]
+            # Short conditions: price breaks below lower band, 1d EMA50 falling, volume filter
+            short_cond = (close[i] < lower_band[i]) and ema50_falling[i] and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -82,15 +77,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: trending market (CHOP < 38.2) OR price crosses below EMA34
-            if (chop[i] < 38.2) or (close[i] < ema34_1d_aligned[i]):
+            # Long exit: price crosses back below lower band
+            if close[i] < lower_band[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: trending market (CHOP < 38.2) OR price crosses above EMA34
-            if (chop[i] < 38.2) or (close[i] > ema34_1d_aligned[i]):
+            # Short exit: price crosses back above upper band
+            if close[i] > upper_band[i]:
                 signals[i] = 0.0
                 position = 0
             else:
