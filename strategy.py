@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Stochastic_Divergence_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,48 +17,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend and stochastic
+    # Get 1d data for trend and Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
+    # Calculate Camarilla pivot levels from daily data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 14-period stochastic on daily
-    lookback = 14
-    lowest_low = pd.Series(low_1d).rolling(window=lookback, min_periods=lookback).min().values
-    highest_high = pd.Series(high_1d).rolling(window=lookback, min_periods=lookback).max().values
-    stoch_k = np.where((highest_high - lowest_low) > 0, 
-                       (close_1d - lowest_low) / (highest_high - lowest_low) * 100, 50)
-    stoch_d = pd.Series(stoch_k).rolling(window=3, min_periods=3).mean().values
+    # Pivot = (H + L + C) / 3
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Range = H - L
+    range_1d = high_1d - low_1d
+    # Resistance and Support levels
+    r1_1d = close_1d + (range_1d * 1.1 / 12)
+    s1_1d = close_1d - (range_1d * 1.1 / 12)
     
-    # Align stochastic to 6h
-    stoch_k_aligned = align_htf_to_ltf(prices, df_1d, stoch_k)
-    stoch_d_aligned = align_htf_to_ltf(prices, df_1d, stoch_d)
+    # Align Camarilla levels to 4h timeframe
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation - 24-period average volume (6h)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume confirmation - 4-period average volume (16h)
+    vol_ma = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1.0)
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
     # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    hours = prices.index.hour
     in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(stoch_k_aligned[i]) or np.isnan(stoch_d_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
+            np.isnan(s1_1d_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or
+            np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,36 +74,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: bullish divergence (stoch rising from oversold) + above EMA50 + volume
-            if (stoch_k_aligned[i] > stoch_d_aligned[i] and 
-                stoch_k_aligned[i-1] <= stoch_d_aligned[i-1] and  # crossover up
-                stoch_k_aligned[i] < 30 and  # oversold
-                close[i] > ema_50_1d_aligned[i] and
-                vol_ratio[i] > 1.3):
+            # Long: price breaks above R1 + above 1d EMA34 + volume confirmation
+            if (close[i] > r1_1d_aligned[i] and 
+                close[i] > ema_34_1d_aligned[i] and
+                vol_ratio[i] > 1.8):
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish divergence (stoch falling from overbought) + below EMA50 + volume
-            elif (stoch_k_aligned[i] < stoch_d_aligned[i] and 
-                  stoch_k_aligned[i-1] >= stoch_d_aligned[i-1] and  # crossover down
-                  stoch_k_aligned[i] > 70 and  # overbought
-                  close[i] < ema_50_1d_aligned[i] and
-                  vol_ratio[i] > 1.3):
+            # Short: price breaks below S1 + below 1d EMA34 + volume confirmation
+            elif (close[i] < s1_1d_aligned[i] and 
+                  close[i] < ema_34_1d_aligned[i] and
+                  vol_ratio[i] > 1.8):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: bearish crossover or below EMA50
-            if (stoch_k_aligned[i] < stoch_d_aligned[i] and 
-                stoch_k_aligned[i-1] >= stoch_d_aligned[i-1]) or \
-               close[i] < ema_50_1d_aligned[i]:
+            # Exit long: price falls back below pivot OR below 1d EMA34
+            if close[i] < pivot_1d_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: bullish crossover or above EMA50
-            if (stoch_k_aligned[i] > stoch_d_aligned[i] and 
-                stoch_k_aligned[i-1] <= stoch_d_aligned[i-1]) or \
-               close[i] > ema_50_1d_aligned[i]:
+            # Exit short: price rises back above pivot OR above 1d EMA34
+            if close[i] > pivot_1d_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
