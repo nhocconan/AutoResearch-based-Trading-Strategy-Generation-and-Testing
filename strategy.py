@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy combining 1d Camarilla pivot levels with 12h trend filter and volume confirmation.
-# Long when price breaks above Camarilla R3 level in uptrend with volume surge.
-# Short when price breaks below Camarilla S3 level in downtrend with volume surge.
-# Uses 12h EMA(50) for trend direction and 1d Camarilla levels for structure.
-# Designed for low trade frequency (20-30/year) to minimize fee freight and capture sustained moves.
+# Hypothesis: 1d weekly Donchian breakout with 1w EMA trend filter and volume confirmation.
+# Long when price breaks above weekly high in weekly uptrend with volume surge.
+# Short when price breaks below weekly low in weekly downtrend with volume surge.
+# Uses weekly EMA(34) for trend direction and daily volume > 2x 20-day EMA for confirmation.
+# Designed for low trade frequency (7-25/year) to minimize fee fraud and capture sustained moves.
 
-name = "4h_Camarilla_R3S3_12hTrend_Volume"
-timeframe = "4h"
+name = "1d_WeeklyDonchian_Breakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,81 +23,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    # Get weekly data for trend and Donchian channels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla levels: R3, S3
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # Camarilla: R3 = close + (high - low) * 1.1/2, S3 = close - (high - low) * 1.1/2
-    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 2
-    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 2
+    # Weekly EMA(34) for trend filter
+    close_1w_series = pd.Series(close_1w)
+    ema_34_1w = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_up = ema_34_1w[1:] > ema_34_1w[:-1]  # Rising EMA = uptrend
+    trend_up = np.concatenate([[False], trend_up])  # Align with weekly index
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
+    # Weekly Donchian channels (20-period)
+    high_roll = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    close_12h = df_12h['close'].values
+    # Align weekly indicators to daily timeframe
+    trend_up_aligned = align_htf_to_ltf(prices, df_1w, trend_up.astype(float))
+    high_roll_aligned = align_htf_to_ltf(prices, df_1w, high_roll)
+    low_roll_aligned = align_htf_to_ltf(prices, df_1w, low_roll)
     
-    # 12h EMA(50) for trend filter
-    close_12h_series = pd.Series(close_12h)
-    ema_50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_up = ema_50_12h[1:] > ema_50_12h[:-1]  # Rising EMA = uptrend
-    trend_up = np.concatenate([[False], trend_up])  # Align with 12h index
-    
-    # Align 1d Camarilla levels to 4h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Align 12h trend to 4h timeframe
-    trend_up_aligned = align_htf_to_ltf(prices, df_12h, trend_up.astype(float))
-    
-    # Volume confirmation: 4h volume > 2.0x 20-period EMA
+    # Volume confirmation: daily volume > 2.0x 20-day EMA
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     vol_confirm = volume > (vol_ema * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for EMA(50)
+    start_idx = 34  # Ensure enough data for EMA(34)
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(trend_up_aligned[i]) or np.isnan(vol_ema[i])):
+        if (np.isnan(trend_up_aligned[i]) or np.isnan(high_roll_aligned[i]) or
+            np.isnan(low_roll_aligned[i]) or np.isnan(vol_ema[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long setup: break above Camarilla R3 in uptrend with volume
-            if (trend_up_aligned[i] > 0.5 and  # 12h uptrend
-                close[i] > camarilla_r3_aligned[i] and
+            # Long setup: break above weekly high in weekly uptrend with volume
+            if (trend_up_aligned[i] > 0.5 and  # Weekly uptrend
+                close[i] > high_roll_aligned[i] and
                 vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short setup: break below Camarilla S3 in downtrend with volume
-            elif (trend_up_aligned[i] <= 0.5 and  # 12h downtrend
-                  close[i] < camarilla_s3_aligned[i] and
+            # Short setup: break below weekly low in weekly downtrend with volume
+            elif (trend_up_aligned[i] <= 0.5 and  # Weekly downtrend
+                  close[i] < low_roll_aligned[i] and
                   vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: break below Camarilla S3 or trend turns down
-            if close[i] < camarilla_s3_aligned[i] or trend_up_aligned[i] <= 0.5:
+            # Long exit: break below weekly low or trend turns down
+            if close[i] < low_roll_aligned[i] or trend_up_aligned[i] <= 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: break above Camarilla R3 or trend turns up
-            if close[i] > camarilla_r3_aligned[i] or trend_up_aligned[i] > 0.5:
+            # Short exit: break above weekly high or trend turns up
+            if close[i] > high_roll_aligned[i] or trend_up_aligned[i] > 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
