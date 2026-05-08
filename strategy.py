@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Squeeze_Breakout_Trend_Volume"
-timeframe = "4h"
+name = "12h_MACD_Histogram_Trend_With_1d_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,63 +17,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for BB and Keltner calculations
+    # Get daily data for MACD and volume
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 35:
         return np.zeros(n)
     
-    # Squeeze Momentum: Bollinger Bands within Keltner Channel
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # Bollinger Bands (20, 2)
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    bb_upper = sma_20 + 2 * std_20
-    bb_lower = sma_20 - 2 * std_20
+    # MACD on daily: fast EMA(12), slow EMA(26), signal EMA(9)
+    ema12 = pd.Series(close_1d).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema26 = pd.Series(close_1d).ewm(span=26, adjust=False, min_periods=26).mean().values
+    macd_line = ema12 - ema26
+    signal_line = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).mean().values
+    macd_hist = macd_line - signal_line
     
-    # Keltner Channel (20, 1.5)
-    atr_1d = pd.Series(high_1d - low_1d).rolling(window=20, min_periods=20).mean().values
-    kc_upper = sma_20 + 1.5 * atr_1d
-    kc_lower = sma_20 - 1.5 * atr_1d
+    # Volume SMA(20) on daily
+    vol_sma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Squeeze condition: BB inside KC
-    squeeze_on = (bb_upper <= kc_upper) & (bb_lower >= kc_lower)
-    squeeze_off = ~squeeze_on
-    
-    # Momentum: close - SMA(20)
-    momentum = close_1d - sma_20
-    
-    # Align to 4h timeframe
-    squeeze_on_aligned = align_htf_to_ltf(prices, df_1d, squeeze_on)
-    squeeze_off_aligned = align_htf_to_ltf(prices, df_1d, squeeze_off)
-    momentum_aligned = align_htf_to_ltf(prices, df_1d, momentum)
-    
-    # 4h trend filter: EMA(50)
-    ema_50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
-    
-    # Volume filter: volume > 1.5 * average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > 1.5 * vol_ma
+    # Align MACD histogram and volume SMA to 12h
+    macd_hist_aligned = align_htf_to_ltf(prices, df_1d, macd_hist)
+    vol_sma_aligned = align_htf_to_ltf(prices, df_1d, vol_sma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup
+    start_idx = 35  # warmup for MACD
     
     for i in range(start_idx, n):
-        if np.isnan(ema_50[i]) or np.isnan(vol_ma[i]):
+        # Skip if any critical data is NaN
+        if (np.isnan(macd_hist_aligned[i]) or np.isnan(vol_sma_aligned[i]) or 
+            np.isnan(volume_1d[i // 288])):  # volume index for current 12h bar
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Current 12h volume (from original 12h data)
+        vol_12h = volume[i]
+        # Daily volume SMA from aligned array (already shifted for completed bar)
+        vol_sma_val = vol_sma_aligned[i]
+        
         if position == 0:
-            # Long: squeeze off, momentum > 0, price above EMA50, volume confirmation
-            long_cond = squeeze_off_aligned[i] and (momentum_aligned[i] > 0) and (close[i] > ema_50[i]) and vol_filter[i]
-            # Short: squeeze off, momentum < 0, price below EMA50, volume confirmation
-            short_cond = squeeze_off_aligned[i] and (momentum_aligned[i] < 0) and (close[i] < ema_50[i]) and vol_filter[i]
+            # Long: MACD histogram positive and rising + volume above average
+            macd_rising = (i > start_idx and macd_hist_aligned[i] > macd_hist_aligned[i-1])
+            long_cond = (macd_hist_aligned[i] > 0) and macd_rising and (vol_12h > vol_sma_val)
+            
+            # Short: MACD histogram negative and falling + volume above average
+            macd_falling = (i > start_idx and macd_hist_aligned[i] < macd_hist_aligned[i-1])
+            short_cond = (macd_hist_aligned[i] < 0) and macd_falling and (vol_12h > vol_sma_val)
             
             if long_cond:
                 signals[i] = 0.25
@@ -82,15 +74,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: squeeze on or momentum <= 0 or price below EMA50
-            if squeeze_on_aligned[i] or (momentum_aligned[i] <= 0) or (close[i] <= ema_50[i]):
+            # Exit long: MACD histogram turns negative
+            if macd_hist_aligned[i] < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: squeeze on or momentum >= 0 or price above EMA50
-            if squeeze_on_aligned[i] or (momentum_aligned[i] >= 0) or (close[i] >= ema_50[i]):
+            # Exit short: MACD histogram turns positive
+            if macd_hist_aligned[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -98,12 +90,10 @@ def generate_signals(prices):
     
     return signals
 
-# Squeeze Breakout Strategy
-# Uses Bollinger Bands within Keltner Channel to identify low volatility squeezes
-# Breakout occurs when price exits squeeze with momentum and volume confirmation
-# Trend filter ensures trades align with higher timeframe direction
-# Works in both bull and bear markets by capturing volatility expansion phases
-# Target: 50-150 trades over 4 years (12-37/year) to minimize fee drag
-# Squeeze indicates consolidation; breakout with volume signals new trend start
-# EMA50 filter avoids counter-trend trades during strong trends
-# Volume confirmation reduces false breakouts in low liquidity periods
+# Hypothesis: MACD histogram on daily timeframe captures momentum shifts, confirmed by volume expansion.
+# Long when MACD histogram is positive AND rising (bullish momentum building) with above-average volume.
+# Short when MACD histogram is negative AND falling (bearish momentum building) with above-average volume.
+# Exits when histogram crosses zero, indicating momentum reversal.
+# Uses 12h timeframe for execution to reduce trade frequency (target: 50-150 total trades over 4 years).
+# Volume confirmation ensures moves are supported by participation, reducing false signals.
+# Works in both bull and bear markets by following momentum shifts.
