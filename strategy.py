@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "1d_1w_Camarilla_R3S3_Breakout_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,45 +17,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get weekly data for Camarilla pivot levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Camarilla pivot levels for previous day
-    # Using typical price of previous day: (H + L + C) / 3
-    prev_close = np.roll(close_1d, 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close[0] = close_1d[0]  # avoid NaN on first element
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
+    # Calculate Camarilla pivot levels from previous week
+    # R3 = C + (H-L)*1.1/2
+    # S3 = C - (H-L)*1.1/2
+    camarilla_r3 = close_1w + (high_1w - low_1w) * 1.1 / 2
+    camarilla_s3 = close_1w - (high_1w - low_1w) * 1.1 / 2
     
-    typical_price = (prev_high + prev_low + prev_close) / 3
+    # Align Camarilla levels to daily timeframe (wait for weekly close)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
     
-    # Camarilla levels: R3, R2, R1, S1, S2, S3
-    # Range = high - low
-    range_1d = prev_high - prev_low
-    R3 = typical_price + range_1d * 1.1 / 2
-    R2 = typical_price + range_1d * 1.1 / 4
-    R1 = typical_price + range_1d * 1.1 / 6
-    S1 = typical_price - range_1d * 1.1 / 6
-    S2 = typical_price - range_1d * 1.1 / 4
-    S3 = typical_price - range_1d * 1.1 / 2
-    
-    # Align Camarilla levels to 12h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    
-    # 1d trend filter: EMA(34)
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Daily trend filter: EMA(50)
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Volume confirmation: 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -64,42 +46,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for indicators
+    start_idx = 100  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(R3_aligned[i]) or np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(S3_aligned[i]) or np.isnan(ema_34_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_50[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Close above R3 + uptrend + volume confirmation
-            if (close[i] > R3_aligned[i] and
-                close[i] > ema_34_aligned[i] and
+            # Long: Close > R3 + above EMA50 + volume confirmation
+            if (close[i] > r3_aligned[i] and
+                close[i] > ema_50[i] and
                 vol_ratio[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: Close below S3 + downtrend + volume confirmation
-            elif (close[i] < S3_aligned[i] and
-                  close[i] < ema_34_aligned[i] and
+            # Short: Close < S3 + below EMA50 + volume confirmation
+            elif (close[i] < s3_aligned[i] and
+                  close[i] < ema_50[i] and
                   vol_ratio[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Close below R1 or trend reversal
-            if (close[i] < R1_aligned[i] or
-                close[i] < ema_34_aligned[i]):
+            # Long exit: Close below S3 or below EMA50
+            if (close[i] < s3_aligned[i] or
+                close[i] < ema_50[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Close above S1 or trend reversal
-            if (close[i] > S1_aligned[i] or
-                close[i] > ema_34_aligned[i]):
+            # Short exit: Close above R3 or above EMA50
+            if (close[i] > r3_aligned[i] or
+                close[i] > ema_50[i]):
                 signals[i] = 0.0
                 position = 0
             else:
