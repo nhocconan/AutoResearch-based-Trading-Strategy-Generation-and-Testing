@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Volume_Weighted_Skew_MeanReversion_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Breakout_12hTrend_VolumeS_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,68 +17,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data once
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 12h data once
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # === 1d Close for price position ===
+    # === 12h EMA20 for trend filter ===
+    close_12h = df_12h['close'].values
+    ema20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema20_12h)
+    
+    # === 1d Previous day's pivot points (HLC/3) ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # === 1d 20-period high/low for range ===
-    high_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).min().values
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d[0] = high_1d[0]
+    prev_low_1d[0] = low_1d[0]
+    prev_close_1d[0] = close_1d[0]
     
-    # === Price position in 20-day range (0 to 1) ===
-    range_20 = high_20 - low_20
-    price_pos = np.where(range_20 > 0, (close_1d - low_20) / range_20, 0.5)
+    pivot = (prev_high_1d + prev_low_1d + prev_close_1d) / 3.0
+    range_1d = prev_high_1d - prev_low_1d
     
-    # === 1d Volume-weighted skew of price position ===
-    vol_1d = df_1d['volume'].values
-    # Weighted mean of price position
-    sum_vol = np.nancumsum(vol_1d)
-    sum_vol_pos = np.nancumsum(vol_1d * price_pos)
-    weighted_mean = np.where(sum_vol > 0, sum_vol_pos / sum_vol, 0.5)
-    # Weighted variance
-    sum_vol_var = np.nancumsum(vol_1d * (price_pos - weighted_mean) ** 2)
-    weighted_var = np.where(sum_vol > 0, sum_vol_var / sum_vol, 0.0)
-    # Weighted skew (third moment)
-    sum_vol_skew = np.nancumsum(vol_1d * (price_pos - weighted_mean) ** 3)
-    weighted_skew = np.where((sum_vol > 0) & (weighted_var > 0), 
-                            sum_vol_skew / (sum_vol * weighted_var ** 1.5), 0)
+    # Camarilla R3 and S3 levels
+    r3 = pivot + (range_1d * 1.1 / 4)
+    s3 = pivot - (range_1d * 1.1 / 4)
     
-    # Align to 6h
-    price_pos_6h = align_htf_to_ltf(prices, df_1d, price_pos)
-    weighted_skew_6h = align_htf_to_ltf(prices, df_1d, weighted_skew)
+    # Align to 4h timeframe
+    r3_4h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_4h = align_htf_to_ltf(prices, df_1d, s3)
     
-    # === 6h Volume filter: current volume > 1.5x 20-period average ===
+    # === 4h Volume filter: current volume > 20-period average ===
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # warmup
+    start_idx = 20  # warmup for volume MA
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(price_pos_6h[i]) or np.isnan(weighted_skew_6h[i]) or 
-            np.isnan(vol_ma20[i])):
+        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or 
+            np.isnan(ema20_12h_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Mean reversion signals based on volume-weighted skew
-            # Negative skew = more volume at lower prices -> potential bounce long
-            # Positive skew = more volume at higher prices -> potential drop short
-            long_cond = (weighted_skew_6h[i] < -0.3 and 
-                        price_pos_6h[i] < 0.3 and  # Oversold
-                        volume[i] > vol_ma20[i])    # Volume confirmation
+            # Breakout entry with volume confirmation and trend filter
+            long_cond = (close[i] > r3_4h[i] and 
+                        close[i] > ema20_12h_aligned[i] and
+                        volume[i] > vol_ma20[i])
             
-            short_cond = (weighted_skew_6h[i] > 0.3 and 
-                         price_pos_6h[i] > 0.7 and  # Overbought
-                         volume[i] > vol_ma20[i])   # Volume confirmation
+            short_cond = (close[i] < s3_4h[i] and 
+                         close[i] < ema20_12h_aligned[i] and
+                         volume[i] > vol_ma20[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -87,19 +88,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price returns to middle or skew normalizes
-            exit_cond = (price_pos_6h[i] > 0.5 or 
-                        weighted_skew_6h[i] > -0.1)
-            if exit_cond:
+            # Long exit: close below S3 or trend reversal
+            if close[i] < s3_4h[i] or close[i] < ema20_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price returns to middle or skew normalizes
-            exit_cond = (price_pos_6h[i] < 0.5 or 
-                        weighted_skew_6h[i] < 0.1)
-            if exit_cond:
+            # Short exit: close above R3 or trend reversal
+            if close[i] > r3_4h[i] or close[i] > ema20_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -107,11 +104,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Mean reversion strategy using volume-weighted skewness of price position
-# within 20-day range on 1d timeframe. Negative skew indicates heavier volume at lower
-# price levels (accumulation), signaling potential long. Positive skew indicates
-# distribution at higher levels, signaling potential short. Uses 6-volume confirmation
-# and exits when price returns to mid-range or skew normalizes. Designed to work
-# in ranging markets common in 2025 BTC/ETH environment. Targets 60-120 trades over
-# 4 years (15-30/year) to minimize fee drift. Uses discrete sizing (0.25). Works
-# on BTC/ETH via institutional volume patterns.
+# Hypothesis: Camarilla R3/S3 breakout strategy on 4h timeframe with 12h EMA trend filter and volume confirmation.
+# Enters long when price breaks above R3 with volume and above 12h EMA (uptrend).
+# Enters short when price breaks below S3 with volume and below 12h EMA (downtrend).
+# Exits when price returns to opposite S3/R3 level or trend reverses (price crosses 12h EMA).
+# Uses discrete position sizing (0.25) to minimize fee churn. Targets 20-50 trades/year to avoid fee drag.
+# Works in both bull (breakouts with trend) and bear (breakdowns with trend) markets via institutional levels.
