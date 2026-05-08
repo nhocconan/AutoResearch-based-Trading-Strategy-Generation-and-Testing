@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h price action near 12h/1d volume-weighted average price (VWAP) with trend filter
-# Uses VWAP as dynamic support/resistance in ranging markets and breakout confirmation in trends.
-# Combines with 12h EMA50 trend filter and volume confirmation for high-probability entries.
-# Designed for low-frequency trades (<120 total) to minimize fee drag in ranging/choppy markets.
+# Hypothesis: 12h Donchian breakout with 1d EMA50 trend and volume confirmation
+# Uses Donchian channel breakouts for trend capture, filtered by daily EMA50 trend
+# and volume spikes to avoid false breakouts. Designed for low-frequency trades
+# (<150 total) to minimize fee drag and work in both bull and bear markets.
 
-name = "4h_VWAP_Bounce_12hEMA50_Volume"
-timeframe = "4h"
+name = "12h_Donchian20_1dEMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,66 +22,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for VWAP calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 1d data for Donchian channels and EMA50
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    # Calculate 12h VWAP (volume-weighted average price)
-    typical_price_12h = (df_12h['high'].values + df_12h['low'].values + df_12h['close'].values) / 3.0
-    vwap_12h = (typical_price_12h * df_12h['volume'].values).cumsum() / df_12h['volume'].values.cumsum()
-    vwap_12h = np.where(df_12h['volume'].values.cumsum() > 0, vwap_12h, np.nan)
+    # Calculate daily Donchian channels (20-period high/low)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Align 12h VWAP to 4h timeframe
-    vwap_12h_aligned = align_htf_to_ltf(prices, df_12h, vwap_12h)
+    # Calculate 20-period rolling max/min for Donchian channels
+    high_max = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Get 12h data for EMA50 trend filter
-    ema50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Align Donchian channels to 12h timeframe
+    high_max_aligned = align_htf_to_ltf(prices, df_1d, high_max)
+    low_min_aligned = align_htf_to_ltf(prices, df_1d, low_min)
     
-    # Volume confirmation: current volume > 1.5x 20-period EMA of volume
-    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ema * 1.5)
+    # Get 1d data for EMA50 trend filter
+    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Volume spike (2.0x 20-period EMA)
+    vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure EMA50 has enough data
+    start_idx = 60  # Ensure EMA50 and Donchian have enough data
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(vwap_12h_aligned[i]) or np.isnan(ema50_12h_aligned[i]) or 
-            np.isnan(vol_confirm[i])):
+        if (np.isnan(high_max_aligned[i]) or np.isnan(low_min_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price touches VWAP support in uptrend with volume confirmation
-            if (close[i] >= vwap_12h_aligned[i] * 0.998 and  # Near VWAP support (0.2% tolerance)
-                close[i] > ema50_12h_aligned[i] and          # Above 12h EMA50 (uptrend)
-                vol_confirm[i]):                           # Volume confirmation
+            # Enter long: price breaks above Donchian high with 1d uptrend and volume spike
+            if (close[i] > high_max_aligned[i] and 
+                close[i] > ema50_1d_aligned[i] and vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price touches VWAP resistance in downtrend with volume confirmation
-            elif (close[i] <= vwap_12h_aligned[i] * 1.002 and  # Near VWAP resistance (0.2% tolerance)
-                  close[i] < ema50_12h_aligned[i] and          # Below 12h EMA50 (downtrend)
-                  vol_confirm[i]):                           # Volume confirmation
+            # Enter short: price breaks below Donchian low with 1d downtrend and volume spike
+            elif (close[i] < low_min_aligned[i] and 
+                  close[i] < ema50_1d_aligned[i] and vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below VWAP or trend fails
-            if (close[i] < vwap_12h_aligned[i] * 0.995 or   # Below VWAP support
-                close[i] < ema50_12h_aligned[i]):           # Trend failed
+            # Exit long: price breaks below Donchian low or trend fails
+            if (close[i] < low_min_aligned[i] or 
+                close[i] < ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above VWAP or trend fails
-            if (close[i] > vwap_12h_aligned[i] * 1.005 or   # Above VWAP resistance
-                close[i] > ema50_12h_aligned[i]):           # Trend failed
+            # Exit short: price breaks above Donchian high or trend fails
+            if (close[i] > high_max_aligned[i] or 
+                close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
