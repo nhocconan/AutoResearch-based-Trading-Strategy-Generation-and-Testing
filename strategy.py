@@ -3,22 +3,31 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian breakout with weekly pivot direction and volume confirmation
-# Uses weekly Camarilla pivots (from Monday open) to determine trend direction:
-# - Price above weekly R3: bullish bias (look for long breakouts)
-# - Price below weekly S3: bearish bias (look for short breakouts)
-# Entry: 6h Donchian(20) breakout in direction of weekly bias + volume spike (>2x 20-period avg)
-# Exit: opposite Donchian breakout or loss of weekly bias
-# Designed to capture strong trends with low frequency in both bull and bear markets.
+# Hypothesis: 12h Williams Alligator with 1d trend filter and volume confirmation
+# Williams Alligator uses three smoothed moving averages (Jaw, Teeth, Lips) to identify trends.
+# Jaw (13-period SMMA shifted 8 bars), Teeth (8-period SMMA shifted 5 bars), Lips (5-period SMMA shifted 3 bars).
+# We go long when Lips > Teeth > Jaw (bullish alignment) and short when Lips < Teeth < Jaw (bearish alignment),
+# confirmed by 1d EMA(34) trend direction and volume spike.
+# Designed for low trade frequency in both bull and bear markets.
 # Target: 50-150 total trades over 4 years = 12-37/year
 
-name = "6h_Donchian_WeeklyPivot_Volume"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
+
+def smma(data, period):
+    """Smoothed Moving Average (SMMA)"""
+    sma = pd.Series(data).rolling(window=period, min_periods=period).mean().values
+    smma_vals = np.full_like(data, np.nan, dtype=float)
+    if len(data) >= period:
+        smma_vals[period-1] = sma[period-1]
+        for i in range(period, len(data)):
+            smma_vals[i] = (smma_vals[i-1] * (period-1) + data[i]) / period
+    return smma_vals
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,93 +35,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data once (for Camarilla pivots)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
+    # Get daily data once
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate weekly Camarilla pivots from previous week's OHLC
-    # Based on weekly open, high, low, close
-    weekly_open = df_1w['open'].values
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    # Calculate daily EMA(34) for trend direction
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Camarilla levels: R3/S3 and R4/S4
-    # R3 = close + (high - low) * 1.1/2
-    # S3 = close - (high - low) * 1.1/2
-    # R4 = close + (high - low) * 1.1
-    # S4 = close - (high - low) * 1.1
-    rng = weekly_high - weekly_low
-    r3 = weekly_close + rng * 1.1 / 2.0
-    s3 = weekly_close - rng * 1.1 / 2.0
-    r4 = weekly_close + rng * 1.1
-    s4 = weekly_close - rng * 1.1
+    # Williams Alligator components on 12h data
+    jaw = smma(close, 13)  # 13-period SMMA
+    teeth = smma(close, 8)  # 8-period SMMA
+    lips = smma(close, 5)   # 5-period SMMA
     
-    # Align weekly levels to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
+    # Shift the averages as per Alligator definition
+    jaw_shifted = np.full_like(jaw, np.nan)
+    teeth_shifted = np.full_like(teeth, np.nan)
+    lips_shifted = np.full_like(lips, np.nan)
     
-    # Calculate 6h Donchian channels (20-period)
-    # Upper band: highest high of last 20 periods
-    # Lower band: lowest low of last 20 periods
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    if len(jaw) >= 8:
+        jaw_shifted[8:] = jaw[:-8]
+    if len(teeth) >= 5:
+        teeth_shifted[5:] = teeth[:-5]
+    if len(lips) >= 3:
+        lips_shifted[3:] = lips[:-3]
     
     # Volume spike: current volume > 2.0 * 20-period average
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # warmup for calculations
+    start_idx = 50  # warmup for calculations
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(jaw_shifted[i]) or 
+            np.isnan(teeth_shifted[i]) or np.isnan(lips_shifted[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine weekly bias based on price relative to S3/R3
-        # Bullish bias: price > weekly R3
-        # Bearish bias: price < weekly S3
-        # Neutral: between S3 and R3 (no new entries)
-        bullish_bias = close[i] > r3_aligned[i]
-        bearish_bias = close[i] < s3_aligned[i]
+        ema34_1d_val = ema34_1d_aligned[i]
+        jaw_val = jaw_shifted[i]
+        teeth_val = teeth_shifted[i]
+        lips_val = lips_shifted[i]
+        vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: Donchian breakout up + bullish bias + volume spike
-            if (close[i] > donchian_high[i] and 
-                bullish_bias and 
-                volume_spike[i]):
+            # Enter long: Lips > Teeth > Jaw (bullish alignment) + uptrend + volume spike
+            if (lips_val > teeth_val > jaw_val and 
+                close[i] > ema34_1d_val and 
+                vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Donchian breakout down + bearish bias + volume spike
-            elif (close[i] < donchian_low[i] and 
-                  bearish_bias and 
-                  volume_spike[i]):
+            # Enter short: Lips < Teeth < Jaw (bearish alignment) + downtrend + volume spike
+            elif (lips_val < teeth_val < jaw_val and 
+                  close[i] < ema34_1d_val and 
+                  vol_spike):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Donchian breakout down OR loss of bullish bias
-            if (close[i] < donchian_low[i] or not bullish_bias):
+            # Exit long: Bullish alignment breaks OR price breaks below trend
+            if not (lips_val > teeth_val > jaw_val) or close[i] < ema34_1d_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Donchian breakout up OR loss of bearish bias
-            if (close[i] > donchian_high[i] or not bearish_bias):
+            # Exit short: Bearish alignment breaks OR price breaks above trend
+            if not (lips_val < teeth_val < jaw_val) or close[i] > ema34_1d_val:
                 signals[i] = 0.0
                 position = 0
             else:
