@@ -3,101 +3,87 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with 1d volume confirmation and ADX trend filter.
-# Long when price breaks above Donchian(20) high AND 1d volume > 1.3x 20-period average AND ADX(14) > 25 (trending market).
-# Short when price breaks below Donchian(20) low AND 1d volume > 1.3x 20-period average AND ADX(14) > 25.
-# Exit when price crosses back inside the Donchian channel.
-# Uses 12h timeframe as specified, with 1d volume and ADX for higher timeframe context.
+# Hypothesis: 4h Camarilla pivot reversal with 1d volume spike and daily trend filter.
+# Long when price touches or crosses below S3 level AND 1d volume > 1.5x 20-day average AND daily EMA50 > EMA200 (bullish trend).
+# Short when price touches or crosses above R3 level AND 1d volume > 1.5x 20-day average AND daily EMA50 < EMA200 (bearish trend).
+# Exit when price returns to the daily VWAP (approximated as daily close).
+# Uses 4h timeframe for entries, with 1d volume and trend for higher timeframe confirmation.
 # Target: 50-150 total trades over 4 years (12-37/year) with controlled frequency to avoid fee drag.
 
-name = "12h_Donchian_20_1dVolume_ADX"
-timeframe = "12h"
+name = "4h_Camarilla_S3R3_1dVolume_EMA50_200"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     
-    # Daily data for volume and ADX
+    # Daily data for volume, EMA, and VWAP approximation
     df_d = get_htf_data(prices, '1d')
-    if len(df_d) < 2:
+    if len(df_d) < 50:
         return np.zeros(n)
     
-    # Donchian(20) on 12h data
-    donchian_period = 20
-    upper_dc = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    lower_dc = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    # Calculate Camarilla levels from previous daily candle
+    close_prev = df_d['close'].values
+    high_prev = df_d['high'].values
+    low_prev = df_d['low'].values
     
-    # Daily volume filter: current volume > 1.3x 20-period average
+    # Camarilla multipliers
+    S1 = close_prev - (1.1/12) * (high_prev - low_prev)
+    S2 = close_prev - (1.1/6) * (high_prev - low_prev)
+    S3 = close_prev - (1.1/4) * (high_prev - low_prev)
+    R1 = close_prev + (1.1/12) * (high_prev - low_prev)
+    R2 = close_prev + (1.1/6) * (high_prev - low_prev)
+    R3 = close_prev + (1.1/4) * (high_prev - low_prev)
+    
+    # Align Camarilla levels to 4h timeframe
+    S3_aligned = align_htf_to_ltf(prices, df_d, S3)
+    R3_aligned = align_htf_to_ltf(prices, df_d, R3)
+    
+    # Daily volume filter: current volume > 1.5x 20-day average
     volume_d = df_d['volume'].values
     vol_ma20_d = pd.Series(volume_d).rolling(window=20, min_periods=20).mean().values
-    volume_filter_d = volume_d > (1.3 * vol_ma20_d)
+    volume_filter_d = volume_d > (1.5 * vol_ma20_d)
     volume_filter = align_htf_to_ltf(prices, df_d, volume_filter_d)
     
-    # Daily ADX(14) for trend strength
-    high_d = df_d['high'].values
-    low_d = df_d['low'].values
+    # Daily trend filter: EMA50 > EMA200 for bullish, EMA50 < EMA200 for bearish
     close_d = df_d['close'].values
+    ema50_d = pd.Series(close_d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema200_d = pd.Series(close_d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    trend_bullish = ema50_d > ema200_d
+    trend_bearish = ema50_d < ema200_d
+    trend_bullish_aligned = align_htf_to_ltf(prices, df_d, trend_bullish)
+    trend_bearish_aligned = align_htf_to_ltf(prices, df_d, trend_bearish)
     
-    # True Range
-    tr1 = high_d - low_d
-    tr2 = np.abs(high_d - np.roll(close_d, 1))
-    tr3 = np.abs(low_d - np.roll(close_d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = high_d[0] - low_d[0]  # First TR
-    
-    # Directional Movement
-    plus_dm = np.where((high_d - np.roll(high_d, 1)) > (np.roll(low_d, 1) - low_d), 
-                       np.maximum(high_d - np.roll(high_d, 1), 0), 0)
-    minus_dm = np.where((np.roll(low_d, 1) - low_d) > (high_d - np.roll(high_d, 1)), 
-                        np.maximum(np.roll(low_d, 1) - low_d, 0), 0)
-    plus_dm[0] = 0
-    minus_dm[0] = 0
-    
-    # Smoothed values
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / atr
-    minus_di = 100 * minus_dm_smooth / atr
-    
-    # ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    adx[np.isnan(adx)] = 0
-    
-    # Align ADX to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_d, adx)
-    
-    # Trend filter: ADX > 25
-    trend_filter = adx_aligned > 25
+    # Exit condition: price returns to daily VWAP (approximated as daily close)
+    vwap_d = close_d  # Simple approximation using daily close
+    vwap_aligned = align_htf_to_ltf(prices, df_d, vwap_d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(donchian_period, 20)  # Sufficient warmup
+    start_idx = 50  # Sufficient warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(upper_dc[i]) or np.isnan(lower_dc[i]) or 
-            np.isnan(volume_filter[i]) or np.isnan(trend_filter[i])):
+        if (np.isnan(S3_aligned[i]) or np.isnan(R3_aligned[i]) or 
+            np.isnan(volume_filter[i]) or np.isnan(trend_bullish_aligned[i]) or 
+            np.isnan(trend_bearish_aligned[i]) or np.isnan(vwap_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price breaks above Donchian upper, volume filter, trending market
-            long_cond = (close[i] > upper_dc[i]) and volume_filter[i] and trend_filter[i]
-            # Short conditions: price breaks below Donchian lower, volume filter, trending market
-            short_cond = (close[i] < lower_dc[i]) and volume_filter[i] and trend_filter[i]
+            # Long conditions: price at or below S3, volume spike, bullish daily trend
+            long_cond = (close[i] <= S3_aligned[i]) and volume_filter[i] and trend_bullish_aligned[i]
+            # Short conditions: price at or above R3, volume spike, bearish daily trend
+            short_cond = (close[i] >= R3_aligned[i]) and volume_filter[i] and trend_bearish_aligned[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -106,15 +92,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses back below Donchian lower
-            if close[i] < lower_dc[i]:
+            # Long exit: price returns to daily VWAP
+            if close[i] >= vwap_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses back above Donchian upper
-            if close[i] > upper_dc[i]:
+            # Short exit: price returns to daily VWAP
+            if close[i] <= vwap_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
