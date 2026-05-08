@@ -3,13 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_v3"
-timeframe = "12h"
+# Hypothesis: Use 4h timeframe with daily Donchian breakout (20-day high/low) 
+# combined with 4h volume spike and daily trend filter (EMA34) to capture 
+# strong directional moves. In bull markets, breakouts above 20-day high with 
+# volume continuation; in bear markets, breakdowns below 20-day low with 
+# volume spike. Volume confirmation reduces false breakouts, EMA34 ensures 
+# alignment with daily trend. Discrete sizing (0.25) minimizes fee churn.
+
+name = "4h_DailyDonchian20_Breakout_EMA34_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 80:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,43 +34,21 @@ def generate_signals(prices):
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate daily ATR(14) for volatility filter
+    # Calculate daily Donchian channels (20-period) using previous day's data to avoid look-ahead
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
     
-    # Calculate daily Camarilla levels from previous day
-    high_1d_shift = df_1d['high'].shift(1).values
-    low_1d_shift = df_1d['low'].shift(1).values
-    close_1d_shift = df_1d['close'].shift(1).values
+    # 20-day high and low from previous day (shifted by 1)
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Calculate pivot and Camarilla levels using previous day's data
-    pivot = (high_1d_shift + low_1d_shift + close_1d_shift) / 3
-    range_ = high_1d_shift - low_1d_shift
-    r3 = close_1d_shift + (range_ * 1.1 / 4)
-    s3 = close_1d_shift - (range_ * 1.1 / 4)
+    # Align Donchian levels to 4h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # Align Camarilla levels to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # Volume spike: current volume > 2.5 * 30-period average (stricter threshold)
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_spike = volume > (2.5 * vol_ma)
-    
-    # Volatility filter: current ATR > 0.8 * 20-period average ATR
-    atr_current = pd.Series(np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))).rolling(window=14, min_periods=14).mean().values
-    atr_ma = pd.Series(atr_current).rolling(window=20, min_periods=20).mean().values
-    volatility_filter = atr_current > (0.8 * atr_ma)
+    # Volume spike: current volume > 2.0 * 20-period average (on 4h)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -72,46 +57,41 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr14_1d_aligned[i]) or
-            np.isnan(atr_ma[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         ema34_1d_val = ema34_1d_aligned[i]
-        r3_val = r3_aligned[i]
-        s3_val = s3_aligned[i]
+        donchian_high_val = donchian_high_aligned[i]
+        donchian_low_val = donchian_low_aligned[i]
         vol_spike = volume_spike[i]
-        vol_filter = volatility_filter[i]
-        atr14_val = atr14_1d_aligned[i]
         
         if position == 0:
-            # Enter long: price breaks above S3 + uptrend + volume spike + volatility filter
-            if (close[i] > s3_val and 
+            # Enter long: price breaks above 20-day high + uptrend + volume spike
+            if (close[i] > donchian_high_val and 
                 close[i] > ema34_1d_val and 
-                vol_spike and 
-                vol_filter):
+                vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below R3 + downtrend + volume spike + volatility filter
-            elif (close[i] < r3_val and 
+            # Enter short: price breaks below 20-day low + downtrend + volume spike
+            elif (close[i] < donchian_low_val and 
                   close[i] < ema34_1d_val and 
-                  vol_spike and 
-                  vol_filter):
+                  vol_spike):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below S3 OR trend turns down OR volatility drops
-            if (close[i] < s3_val or close[i] < ema34_1d_val or not vol_filter):
+            # Exit long: price breaks below 20-day low OR trend turns down
+            if (close[i] < donchian_low_val or close[i] < ema34_1d_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above R3 OR trend turns up OR volatility drops
-            if (close[i] > r3_val or close[i] > ema34_1d_val or not vol_filter):
+            # Exit short: price breaks above 20-day high OR trend turns up
+            if (close[i] > donchian_high_val or close[i] > ema34_1d_val):
                 signals[i] = 0.0
                 position = 0
             else:
