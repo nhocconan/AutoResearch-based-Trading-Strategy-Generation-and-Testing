@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Ichimoku_Cloud_Filter_1dTrend_Volume"
-timeframe = "6h"
+name = "1d_WeeklyPivot_S2_S4_Breakout_WeeklyTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,55 +17,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Ichimoku components
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:
+    # Calculate weekly trend: EMA50 on weekly close
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
-    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (period9_high + period9_low) / 2
+    # Calculate weekly pivot points (S2, S4, R2, R4)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Kijun-sen (Base Line): (26-period high + low) / 2
-    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (period26_high + period26_low) / 2
+    H_prev = np.roll(high_1w, 1)
+    L_prev = np.roll(low_1w, 1)
+    C_prev = np.roll(close_1w, 1)
+    H_prev[0] = np.nan
+    L_prev[0] = np.nan
+    C_prev[0] = np.nan
     
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
-    senkou_span_a = (tenkan_sen + kijun_sen) / 2
+    pivot = (H_prev + L_prev + C_prev) / 3
+    range_hl = H_prev - L_prev
     
-    # Senkou Span B (Leading Span B): (52-period high + low) / 2
-    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_span_b = (period52_high + period52_low) / 2
+    # S2 = pivot - range
+    S2 = pivot - range_hl
+    # S4 = pivot - 2 * range
+    S4 = pivot - 2 * range_hl
+    # R2 = pivot + range
+    R2 = pivot + range_hl
+    # R4 = pivot + 2 * range
+    R4 = pivot + 2 * range_hl
     
-    # Align Ichimoku components to 6h timeframe
-    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
+    # Align to daily timeframe
+    S2_aligned = align_htf_to_ltf(prices, df_1w, S2)
+    S4_aligned = align_htf_to_ltf(prices, df_1w, S4)
+    R2_aligned = align_htf_to_ltf(prices, df_1w, R2)
+    R4_aligned = align_htf_to_ltf(prices, df_1w, R4)
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
     
-    # Cloud top and bottom
-    cloud_top = np.maximum(senkou_span_a_aligned, senkou_span_b_aligned)
-    cloud_bottom = np.minimum(senkou_span_a_aligned, senkou_span_b_aligned)
-    
-    # Volume spike: current volume > 2.0x 20-period average
+    # Volume spike: current volume > 2.0x 20-day average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 52  # Sufficient warmup
+    start_idx = 50  # Sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
-            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or 
+        if (np.isnan(S2_aligned[i]) or np.isnan(S4_aligned[i]) or 
+            np.isnan(R2_aligned[i]) or np.isnan(R4_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -73,15 +78,14 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: TK cross bullish + price above cloud + volume spike
-            tk_cross_bullish = tenkan_sen_aligned[i] > kijun_sen_aligned[i]
-            price_above_cloud = close[i] > cloud_top[i]
-            long_cond = tk_cross_bullish and price_above_cloud and volume_spike[i]
-            
-            # Short: TK cross bearish + price below cloud + volume spike
-            tk_cross_bearish = tenkan_sen_aligned[i] < kijun_sen_aligned[i]
-            price_below_cloud = close[i] < cloud_bottom[i]
-            short_cond = tk_cross_bearish and price_below_cloud and volume_spike[i]
+            # Long: break above R2 + weekly uptrend + volume spike
+            long_cond = (close[i] > R2_aligned[i]) and \
+                        (close[i] > ema_50_1w_aligned[i]) and \
+                        volume_spike[i]
+            # Short: break below S2 + weekly downtrend + volume spike
+            short_cond = (close[i] < S2_aligned[i]) and \
+                         (close[i] < ema_50_1w_aligned[i]) and \
+                         volume_spike[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -90,19 +94,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: TK cross bearish or price below cloud
-            tk_cross_bearish = tenkan_sen_aligned[i] < kijun_sen_aligned[i]
-            price_below_cloud = close[i] < cloud_top[i]
-            if tk_cross_bearish or price_below_cloud:
+            # Long exit: close below weekly pivot (mean reversion)
+            if close[i] < pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: TK cross bullish or price above cloud
-            tk_cross_bullish = tenkan_sen_aligned[i] > kijun_sen_aligned[i]
-            price_above_cloud = close[i] > cloud_bottom[i]
-            if tk_cross_bullish or price_above_cloud:
+            # Short exit: close above weekly pivot (mean reversion)
+            if close[i] > pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
