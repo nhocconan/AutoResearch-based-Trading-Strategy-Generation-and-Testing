@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Fibonacci_Retracement_Breakout_12hTrend"
-timeframe = "4h"
+name = "1h_Camarilla_Pivot_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,39 +17,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Daily data for Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    # Calculate daily Camarilla pivot levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 12h EMA50 for trend
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # 4h ATR(14) for swing calculation
-    high_pd = pd.Series(high)
-    low_pd = pd.Series(low)
-    close_pd = pd.Series(close)
-    tr1 = high_pd - low_pd
-    tr2 = abs(high_pd - close_pd.shift(1))
-    tr3 = abs(low_pd - close_pd.shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
+    # Resistance levels
+    r1 = close_1d + (range_1d * 1.1 / 12)
+    r2 = close_1d + (range_1d * 1.1 / 6)
+    r3 = close_1d + (range_1d * 1.1 / 4)
+    r4 = close_1d + (range_1d * 1.1 / 2)
     
-    # Identify swing highs and lows using 4-period lookback
-    swing_high = np.zeros(n, dtype=bool)
-    swing_low = np.zeros(n, dtype=bool)
-    for i in range(4, n-4):
-        if high[i] == np.max(high[i-4:i+5]):
-            swing_high[i] = True
-        if low[i] == np.min(low[i-4:i+5]):
-            swing_low[i] = True
+    # Support levels
+    s1 = close_1d - (range_1d * 1.1 / 12)
+    s2 = close_1d - (range_1d * 1.1 / 6)
+    s3 = close_1d - (range_1d * 1.1 / 4)
+    s4 = close_1d - (range_1d * 1.1 / 2)
     
-    # Find most recent swing points for Fibonacci calculation
-    last_swing_high_idx = np.where(swing_high)[0]
-    last_swing_low_idx = np.where(swing_low)[0]
+    # Align daily levels to 1h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
+        return np.zeros(n)
+    
+    # Calculate 4h EMA50 for trend filter
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    
+    # Volume spike: current volume > 2.0x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma20)
+    
+    # Session filter: 8-20 UTC
+    hours = prices.index.hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -58,77 +78,54 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(atr[i]) or 
-            len(last_swing_high_idx) == 0 or len(last_swing_low_idx) == 0):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or
+            np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(s2_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(ema_50_4h_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Get most recent swing points before current bar
-        valid_highs = last_swing_high_idx[last_swing_high_idx < i]
-        valid_lows = last_swing_low_idx[last_swing_low_idx < i]
-        
-        if len(valid_highs) == 0 or len(valid_lows) == 0:
+        # Session check
+        if not session_filter[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
-        
-        recent_high_idx = valid_highs[-1]
-        recent_low_idx = valid_lows[-1]
-        
-        swing_high_price = high[recent_high_idx]
-        swing_low_price = low[recent_low_idx]
-        
-        # Skip if swing points are too close (invalid range)
-        if swing_high_price <= swing_low_price:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Calculate Fibonacci levels
-        swing_range = swing_high_price - swing_low_price
-        fib_382 = swing_low_price + 0.382 * swing_range
-        fib_618 = swing_low_price + 0.618 * swing_range
-        
-        # Trend filter: 12h EMA50 slope
-        uptrend = ema_50_12h_aligned[i] > ema_50_12h_aligned[i-1]
-        downtrend = ema_50_12h_aligned[i] < ema_50_12h_aligned[i-1]
         
         if position == 0:
-            # Long: pullback to 61.8% in uptrend, break above 38.2%
-            long_cond = (uptrend and 
-                        low[i] <= fib_618 * 1.005 and  # Allow small tolerance
-                        high[i] > fib_382 and
-                        close[i] > fib_382)
+            # Long: price breaks above R3 with 4h uptrend and volume spike
+            long_cond = (close[i] > r3_aligned[i] and 
+                        ema_50_4h_aligned[i] > ema_50_4h_aligned[i-1] and
+                        volume_spike[i])
             
-            # Short: pullback to 38.2% in downtrend, break below 61.8%
-            short_cond = (downtrend and 
-                         high[i] >= fib_382 * 0.995 and  # Allow small tolerance
-                         low[i] < fib_618 and
-                         close[i] < fib_618)
+            # Short: price breaks below S3 with 4h downtrend and volume spike
+            short_cond = (close[i] < s3_aligned[i] and 
+                         ema_50_4h_aligned[i] < ema_50_4h_aligned[i-1] and
+                         volume_spike[i])
             
             if long_cond:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             elif short_cond:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below 61.8% or trend changes
-            if close[i] < fib_618 or not uptrend:
+            # Long exit: price closes below R1 or 4h trend turns down
+            if (close[i] < r1_aligned[i] or 
+                ema_50_4h_aligned[i] < ema_50_4h_aligned[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: price breaks above 38.2% or trend changes
-            if close[i] > fib_382 or not downtrend:
+            # Short exit: price closes above S1 or 4h trend turns up
+            if (close[i] > s1_aligned[i] or 
+                ema_50_4h_aligned[i] > ema_50_4h_aligned[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
