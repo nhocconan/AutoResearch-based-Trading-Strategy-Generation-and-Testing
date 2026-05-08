@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_DonchianBreakout_1dVolume_ADX_v3"
+name = "12h_Camarilla_Pivot_1dVolume_Trend"
 timeframe = "12h"
 leverage = 1.0
 
@@ -16,10 +16,28 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get 1d data for volume and ADX
+    # Get 1d data for Camarilla pivots, volume, and trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
+    
+    # Calculate 1d Camarilla pivot levels (based on previous day's range)
+    # Camarilla: H4 = Close + 1.5*(High-Low)*1.1/2, L4 = Close - 1.5*(High-Low)*1.1/2
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    camarilla_h4 = np.full(len(df_1d), np.nan)
+    camarilla_l4 = np.full(len(df_1d), np.nan)
+    
+    for i in range(1, len(df_1d)):  # need previous day's data
+        high_prev = high_1d[i-1]
+        low_prev = low_1d[i-1]
+        close_prev = close_1d[i-1]
+        range_prev = high_prev - low_prev
+        
+        camarilla_h4[i] = close_prev + 1.5 * range_prev * 1.1 / 2
+        camarilla_l4[i] = close_prev - 1.5 * range_prev * 1.1 / 2
     
     # Calculate 1d volume average (20-period)
     vol_1d = df_1d['volume'].values
@@ -28,99 +46,25 @@ def generate_signals(prices):
         if i >= 19:
             vol_avg_20[i] = np.mean(vol_1d[i-19:i+1])
     
-    # Calculate 1d ADX (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range
-    tr = np.zeros(len(df_1d))
-    for i in range(len(df_1d)):
-        if i == 0:
-            tr[i] = high_1d[i] - low_1d[i]
-        else:
-            tr[i] = max(
-                high_1d[i] - low_1d[i],
-                abs(high_1d[i] - close_1d[i-1]),
-                abs(low_1d[i] - close_1d[i-1])
-            )
-    
-    # Directional Movement
-    dm_plus = np.zeros(len(df_1d))
-    dm_minus = np.zeros(len(df_1d))
-    for i in range(1, len(df_1d)):
-        up_move = high_1d[i] - high_1d[i-1]
-        down_move = low_1d[i-1] - low_1d[i]
-        if up_move > down_move and up_move > 0:
-            dm_plus[i] = up_move
-        if down_move > up_move and down_move > 0:
-            dm_minus[i] = down_move
-    
-    # Smoothed values
-    atr = np.zeros(len(df_1d))
-    dm_plus_smooth = np.zeros(len(df_1d))
-    dm_minus_smooth = np.zeros(len(df_1d))
-    
-    for i in range(len(df_1d)):
-        if i < 14:
-            if i == 0:
-                atr[i] = tr[i]
-                dm_plus_smooth[i] = dm_plus[i]
-                dm_minus_smooth[i] = dm_minus[i]
-            else:
-                atr[i] = (atr[i-1] * 13 + tr[i]) / 14
-                dm_plus_smooth[i] = (dm_plus_smooth[i-1] * 13 + dm_plus[i]) / 14
-                dm_minus_smooth[i] = (dm_minus_smooth[i-1] * 13 + dm_minus[i]) / 14
-        else:
-            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
-            dm_plus_smooth[i] = (dm_plus_smooth[i-1] * 13 + dm_plus[i]) / 14
-            dm_minus_smooth[i] = (dm_minus_smooth[i-1] * 13 + dm_minus[i]) / 14
-    
-    # DI+ and DI-
-    di_plus = np.zeros(len(df_1d))
-    di_minus = np.zeros(len(df_1d))
-    dx = np.zeros(len(df_1d))
-    for i in range(len(df_1d)):
-        if atr[i] != 0:
-            di_plus[i] = 100 * dm_plus_smooth[i] / atr[i]
-            di_minus[i] = 100 * dm_minus_smooth[i] / atr[i]
-            if di_plus[i] + di_minus[i] != 0:
-                dx[i] = 100 * abs(di_plus[i] - di_minus[i]) / (di_plus[i] + di_minus[i])
-    
-    # ADX (smoothed DX)
-    adx = np.zeros(len(df_1d))
-    for i in range(len(df_1d)):
-        if i < 27:  # need 14+14 periods for smoothing
-            adx[i] = np.nan
-        elif i == 27:
-            adx[i] = np.mean(dx[14:28])
-        else:
-            adx[i] = (adx[i-1] * 13 + dx[i]) / 14
+    # Calculate 1d EMA50 for trend filter
+    close_series = pd.Series(close_1d)
+    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Align 1d data to 12h timeframe
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Calculate 12h Donchian channels (20-period)
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    donchian_mid = np.full(n, np.nan)
-    
-    for i in range(n):
-        if i >= 19:
-            donchian_high[i] = np.max(high[i-19:i+1])
-            donchian_low[i] = np.min(low[i-19:i+1])
-            donchian_mid[i] = (donchian_high[i] + donchian_low[i]) / 2
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 28)  # warmup for indicators
+    start_idx = max(20, 50)  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(vol_avg_20_aligned[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or 
+            np.isnan(vol_avg_20_aligned[i]) or np.isnan(ema_50_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -138,10 +82,13 @@ def generate_signals(prices):
                 position = 0
             continue
         
+        camarilla_h4_current = camarilla_h4[idx_1d]
+        camarilla_l4_current = camarilla_l4[idx_1d]
         vol_avg_20_current = vol_avg_20[idx_1d]
-        adx_current = adx[idx_1d]
+        ema_50_current = ema_50[idx_1d]
         
-        if np.isnan(vol_avg_20_current) or np.isnan(adx_current):
+        if (np.isnan(camarilla_h4_current) or np.isnan(camarilla_l4_current) or 
+            np.isnan(vol_avg_20_current) or np.isnan(ema_50_current)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -151,46 +98,32 @@ def generate_signals(prices):
         vol_current = df_1d['volume'].iloc[idx_1d]
         vol_confirmed = vol_current > 1.5 * vol_avg_20_current
         
-        # Trend detection
-        is_trending = adx_current > 25
-        is_ranging = adx_current < 20
+        # Trend filter: price above/below EMA50
+        price_above_ema = close_1d[idx_1d] > ema_50_current
+        price_below_ema = close_1d[idx_1d] < ema_50_current
         
         # Trading logic
         if position == 0:
             # Look for entry
             if vol_confirmed:
-                if is_trending:
-                    # In trending market: Donchian breakout
-                    if close[i] > donchian_high[i]:
-                        signals[i] = 0.25
-                        position = 1
-                    elif close[i] < donchian_low[i]:
-                        signals[i] = -0.25
-                        position = -1
-                elif is_ranging:
-                    # In ranging market: mean reversion at Donchian mid-point
-                    if close[i] < donchian_low[i]:
-                        signals[i] = 0.25
-                        position = 1
-                    elif close[i] > donchian_high[i]:
-                        signals[i] = -0.25
-                        position = -1
-                else:
-                    # Transition zone: wait for clearer signal
-                    pass
+                # Long when price touches L4 and in uptrend
+                if close[i] <= camarilla_l4_aligned[i] and price_above_ema:
+                    signals[i] = 0.25
+                    position = 1
+                # Short when price touches H4 and in downtrend
+                elif close[i] >= camarilla_h4_aligned[i] and price_below_ema:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
             # Manage long position
             exit_signal = False
-            if is_trending:
-                # Exit when price breaks below Donchian low
-                if close[i] < donchian_low[i]:
-                    exit_signal = True
-            elif is_ranging:
-                # Exit when price reaches Donchian mid-point
-                if close[i] >= donchian_mid[i]:
-                    exit_signal = True
-            elif not vol_confirmed:
-                exit_signal = True  # volume confirmation lost
+            # Exit when price reaches H4 or trend changes
+            if close[i] >= camarilla_h4_aligned[i]:
+                exit_signal = True
+            elif not price_above_ema:  # trend turned against position
+                exit_signal = True
+            elif not vol_confirmed:  # volume confirmation lost
+                exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
@@ -200,16 +133,13 @@ def generate_signals(prices):
         elif position == -1:
             # Manage short position
             exit_signal = False
-            if is_trending:
-                # Exit when price breaks above Donchian high
-                if close[i] > donchian_high[i]:
-                    exit_signal = True
-            elif is_ranging:
-                # Exit when price reaches Donchian mid-point
-                if close[i] <= donchian_mid[i]:
-                    exit_signal = True
-            elif not vol_confirmed:
-                exit_signal = True  # volume confirmation lost
+            # Exit when price reaches L4 or trend changes
+            if close[i] <= camarilla_l4_aligned[i]:
+                exit_signal = True
+            elif not price_below_ema:  # trend turned against position
+                exit_signal = True
+            elif not vol_confirmed:  # volume confirmation lost
+                exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
