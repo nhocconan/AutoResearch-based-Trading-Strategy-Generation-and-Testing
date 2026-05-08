@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Index with 1d EMA34 trend filter and 6h volume confirmation.
-# Long when Bull Power > 0 (close > EMA13), Bear Power < 0 (low < EMA13), 1d EMA34 up, and 6h volume > 1.5x 20-period average.
-# Short when Bull Power < 0, Bear Power > 0, 1d EMA34 down, and volume spike.
-# Exit when Bull Power and Bear Power converge (|Bull Power - Bear Power| < 0.1 * ATR) or trend reverses.
-# Elder Ray measures bull/bear power relative to EMA13, effective in both trending and ranging markets.
-# Target: 50-150 total trades over 4 years (12-37/year) for low fee drift.
+# Hypothesis: 6h Elder Ray Power (Bull/Bear) with 1d EMA34 trend filter and volume confirmation.
+# Long when Bull Power > 0, Bear Power < 0, price > 1d EMA34, and volume > 1.5x 20-period average.
+# Short when Bull Power < 0, Bear Power > 0, price < 1d EMA34, and volume > 1.5x 20-period average.
+# Exit when Bull Power and Bear Power converge (both near zero) or trend weakens.
+# Elder Ray measures bull/bear power relative to EMA13, providing early trend signals.
+# Combined with 1d EMA34 for higher timeframe trend alignment and volume filter for confirmation.
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
 
 name = "6h_ElderRay_1dEMA34_Volume"
 timeframe = "6h"
@@ -24,21 +25,10 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 6h EMA13 for Elder Ray
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
     ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Bull Power = Close - EMA13
-    bull_power = close - ema13
-    # Bear Power = EMA13 - Low
-    bear_power = ema13 - low
-    
-    # 6h ATR for exit condition
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
     
     # 6h volume filter: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -50,12 +40,10 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Calculate EMA34 on 1d close
-    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_slope = ema34_1d - np.roll(ema34_1d, 1)
-    ema34_1d_slope[0] = 0
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA34 slope to 6h timeframe
-    ema34_1d_slope_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d_slope)
+    # Align 1d EMA34 to 6h timeframe
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -65,17 +53,17 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
         if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(volume_filter[i]) or np.isnan(ema34_1d_slope_aligned[i])):
+            np.isnan(volume_filter[i]) or np.isnan(ema34_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: Bull Power > 0, Bear Power > 0, 1d EMA34 up, volume spike
-            long_cond = (bull_power[i] > 0) and (bear_power[i] > 0) and (ema34_1d_slope_aligned[i] > 0) and volume_filter[i]
-            # Short conditions: Bull Power < 0, Bear Power < 0, 1d EMA34 down, volume spike
-            short_cond = (bull_power[i] < 0) and (bear_power[i] < 0) and (ema34_1d_slope_aligned[i] < 0) and volume_filter[i]
+            # Long conditions: Bull Power > 0, Bear Power < 0, price > 1d EMA34, volume spike
+            long_cond = (bull_power[i] > 0) and (bear_power[i] < 0) and (close[i] > ema34_aligned[i]) and volume_filter[i]
+            # Short conditions: Bull Power < 0, Bear Power > 0, price < 1d EMA34, volume spike
+            short_cond = (bull_power[i] < 0) and (bear_power[i] > 0) and (close[i] < ema34_aligned[i]) and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -84,19 +72,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: power convergence or trend reversal
-            power_diff = np.abs(bull_power[i] - bear_power[i])
-            exit_cond = (power_diff < 0.1 * atr[i]) or (ema34_1d_slope_aligned[i] < 0)
-            if exit_cond:
+            # Long exit: Bull Power <= 0 or Bear Power >= 0 (convergence) or price < 1d EMA34
+            if (bull_power[i] <= 0) or (bear_power[i] >= 0) or (close[i] < ema34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: power convergence or trend reversal
-            power_diff = np.abs(bull_power[i] - bear_power[i])
-            exit_cond = (power_diff < 0.1 * atr[i]) or (ema34_1d_slope_aligned[i] > 0)
-            if exit_cond:
+            # Short exit: Bull Power >= 0 or Bear Power <= 0 (convergence) or price > 1d EMA34
+            if (bull_power[i] >= 0) or (bear_power[i] <= 0) or (close[i] > ema34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
