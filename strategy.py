@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Keltner_Turtle_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,34 +17,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter and Camarilla pivot points
+    # Get daily data for ATR and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily trend: EMA(34)
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # True Range and ATR(20) on daily
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    atr_20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate daily Camarilla pivot levels
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    range_ = high_1d - low_1d
-    r3 = pivot + (range_ * 1.1 / 2)
-    s3 = pivot - (range_ * 1.1 / 2)
-    r4 = pivot + (range_ * 1.1)
-    s4 = pivot - (range_ * 1.1)
+    # Keltner Channel on daily: EMA(20) ± 2 * ATR(20)
+    ema_20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    upper_keltner = ema_20 + (2 * atr_20)
+    lower_keltner = ema_20 - (2 * atr_20)
     
-    # Align daily Camarilla levels to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Align Keltner channels to 4h timeframe
+    upper_keltner_aligned = align_htf_to_ltf(prices, df_1d, upper_keltner)
+    lower_keltner_aligned = align_htf_to_ltf(prices, df_1d, lower_keltner)
+    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20)
     
-    # Volume confirmation: 20-period average
+    # Trend filter: EMA(50) on daily close
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    
+    # Volume confirmation: 20-period average on 4h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     
@@ -55,38 +59,38 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(s4_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(upper_keltner_aligned[i]) or np.isnan(lower_keltner_aligned[i]) or 
+            np.isnan(ema_20_aligned[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above S4 with daily uptrend and volume
-            if (close[i] > s4_aligned[i] and 
-                close[i] > ema_34_1d_aligned[i] and
-                vol_ratio[i] > 1.5):
+            # Long: close above upper Keltner with uptrend and volume
+            if (close[i] > upper_keltner_aligned[i] and 
+                close[i] > ema_50_aligned[i] and
+                vol_ratio[i] > 1.3):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below R3 with daily downtrend and volume
-            elif (close[i] < r3_aligned[i] and 
-                  close[i] < ema_34_1d_aligned[i] and
-                  vol_ratio[i] > 1.5):
+            # Short: close below lower Keltner with downtrend and volume
+            elif (close[i] < lower_keltner_aligned[i] and 
+                  close[i] < ema_50_aligned[i] and
+                  vol_ratio[i] > 1.3):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below S3 or reverses below daily EMA
-            if (close[i] < s3_aligned[i] or 
-                close[i] < ema_34_1d_aligned[i]):
+            # Long exit: close below EMA(20) or volatility contraction
+            if (close[i] < ema_20_aligned[i] or 
+                vol_ratio[i] < 0.8):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above R3 or reverses above daily EMA
-            if (close[i] > r3_aligned[i] or 
-                close[i] > ema_34_1d_aligned[i]):
+            # Short exit: close above EMA(20) or volatility contraction
+            if (close[i] > ema_20_aligned[i] or 
+                vol_ratio[i] < 0.8):
                 signals[i] = 0.0
                 position = 0
             else:
