@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Donchian20_Volume_Confirm"
-timeframe = "12h"
+name = "4h_KAMA_Trend_With_Volume_Confirmation"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,24 +17,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter and volume confirmation
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 100:
         return np.zeros(n)
     
-    # Daily EMA50 for trend filter
+    # KAMA on daily close
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    direction = np.abs(np.subtract(close_1d, np.roll(close_1d, 10)))
+    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0)
+    er = np.where(volatility != 0, direction / volatility, 0)
+    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    kama_1d = kama
     
-    # Daily average volume for confirmation
-    vol_1d = df_1d['volume'].values
-    avg_vol_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    avg_vol_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_1d)
+    # Align KAMA to 4h
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
     
-    # Calculate 12h Donchian channels (20-period)
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Volume confirmation - 20-period average volume on 4h
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1.0)
+    vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
     signals = np.zeros(n)
     position = 0
@@ -42,36 +49,31 @@ def generate_signals(prices):
     start_idx = 200
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(avg_vol_1d_aligned[i]) or 
-            np.isnan(high_max[i]) or np.isnan(low_min[i])):
+        if (np.isnan(kama_1d_aligned[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian high + above daily EMA50 + volume above average
-            if (close[i] > high_max[i] and 
-                close[i] > ema_50_1d_aligned[i] and
-                volume[i] > avg_vol_1d_aligned[i]):
+            # Long: price above KAMA + volume confirmation
+            if close[i] > kama_1d_aligned[i] and vol_ratio[i] > 1.5:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low + below daily EMA50 + volume above average
-            elif (close[i] < low_min[i] and 
-                  close[i] < ema_50_1d_aligned[i] and
-                  volume[i] > avg_vol_1d_aligned[i]):
+            # Short: price below KAMA + volume confirmation
+            elif close[i] < kama_1d_aligned[i] and vol_ratio[i] > 1.5:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below Donchian low OR below daily EMA50
-            if close[i] < low_min[i] or close[i] < ema_50_1d_aligned[i]:
+            # Exit long: price below KAMA
+            if close[i] < kama_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above Donchian high OR above daily EMA50
-            if close[i] > high_max[i] or close[i] > ema_50_1d_aligned[i]:
+            # Exit short: price above KAMA
+            if close[i] > kama_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
