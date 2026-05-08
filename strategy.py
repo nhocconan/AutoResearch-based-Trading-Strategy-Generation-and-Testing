@@ -1,25 +1,15 @@
 #!/usr/bin/env python3
-"""
-4h RSI Extreme + Volume Spike + Trend Filter (1d EMA50)
-- Long: RSI(14) < 30 + volume spike + 1d EMA50 rising
-- Short: RSI(14) > 70 + volume spike + 1d EMA50 falling
-- Exit: RSI crosses back above 50 (long) or below 50 (short)
-- Uses 1d EMA50 for trend filter to avoid counter-trend trades
-- Volume spike: current volume > 2.0x 20-period average
-- Target: 20-50 trades/year to minimize fee drag on 4h timeframe
-"""
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_RSI_Extreme_Volume_Trend"
-timeframe = "4h"
+name = "6h_ChaikinOscillator_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,47 +17,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for EMA50 trend filter
+    # 1d data for trend and volume
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 5:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    # 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    volume_1d = df_1d['volume'].values
     
-    # RSI(14) calculation
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Wilder's smoothing (equivalent to alpha=1/14)
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])  # first average of first 14 gains
-    avg_loss[13] = np.mean(loss[1:14])  # first average of first 14 losses
+    # Chaikin Oscillator (3,10) on 6d data
+    # ADL = ((Close - Low) - (High - Close)) / (High - Low) * Volume
+    # Handle division by zero
+    hl_range = high - low
+    hl_range = np.where(hl_range == 0, 1, hl_range)  # avoid div by zero
+    adl = ((close - low) - (high - close)) / hl_range * volume
+    # Cumulative ADL
+    adl_cum = np.nancumsum(adl)
+    # Chaikin Oscillator = EMA(3) - EMA(10) of ADL
+    ema3_adl = pd.Series(adl_cum).ewm(span=3, adjust=False, min_periods=3).mean().values
+    ema10_adl = pd.Series(adl_cum).ewm(span=10, adjust=False, min_periods=10).mean().values
+    chaikin = ema3_adl - ema10_adl
     
-    for i in range(14, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    rsi[:13] = np.nan  # not enough data for first 14 periods
-    
-    # Volume spike: current volume > 2.0x 20-period average
+    # Volume spike: current volume > 1.8x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma20)
+    volume_spike = volume > (1.8 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need enough data for RSI and EMA
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(rsi[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(chaikin[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -75,14 +61,14 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: RSI < 30 (oversold) + volume spike + 1d EMA50 rising
-            long_cond = (rsi[i] < 30 and 
-                        ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1] and
+            # Long: Chaikin > 0 (buying pressure) + 1d uptrend + volume spike
+            long_cond = (chaikin[i] > 0 and 
+                        ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and
                         volume_spike[i])
             
-            # Short: RSI > 70 (overbought) + volume spike + 1d EMA50 falling
-            short_cond = (rsi[i] > 70 and 
-                         ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1] and
+            # Short: Chaikin < 0 (selling pressure) + 1d downtrend + volume spike
+            short_cond = (chaikin[i] < 0 and 
+                         ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and
                          volume_spike[i])
             
             if long_cond:
@@ -92,15 +78,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: RSI crosses back above 50 (momentum fading)
-            if rsi[i] > 50:
+            # Long exit: Chaikin turns negative (selling pressure)
+            if chaikin[i] < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI crosses back below 50 (momentum fading)
-            if rsi[i] < 50:
+            # Short exit: Chaikin turns positive (buying pressure)
+            if chaikin[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
