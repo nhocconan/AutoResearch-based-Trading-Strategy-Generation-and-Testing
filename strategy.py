@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian Breakout with Weekly Trend Filter and Volume Confirmation
-# Uses weekly Donchian trend for bias, 12h Donchian breakout for entry, and volume surge (>1.5x average) for confirmation.
-# Designed to capture strong trends in both bull and bear markets while avoiding false breakouts in low-volume conditions.
-# Target: 15-25 trades/year per symbol (60-100 total over 4 years).
+# Hypothesis: 4h RSI + 1d ADX Trend Filter + Volume Spike
+# Uses daily ADX (>25) for trend strength filter, RSI(14) for mean reversion entries,
+# and volume spike (>1.5x 20-period average) for entry confirmation.
+# Designed to capture pullbacks in strong trends across bull/bear markets.
+# Target: 20-40 trades/year.
 
-name = "12h_DonchianBreakout_WeeklyTrend_Volume"
-timeframe = "12h"
+name = "4h_RSI_1dADX25_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,50 +23,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 20:
-        return np.zeros(n)
-    
-    # Calculate weekly Donchian channels (20-period)
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    
-    # Weekly upper band (20-period high)
-    donchian_high_weekly = np.full(len(high_weekly), np.nan)
-    for i in range(20, len(high_weekly)):
-        donchian_high_weekly[i] = np.max(high_weekly[i-20:i])
-    
-    # Weekly lower band (20-period low)
-    donchian_low_weekly = np.full(len(low_weekly), np.nan)
-    for i in range(20, len(low_weekly)):
-        donchian_low_weekly[i] = np.min(low_weekly[i-20:i])
-    
-    # Get daily data for volume average
+    # Get daily data for ADX trend filter
     df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 20:
+    if len(df_daily) < 30:
         return np.zeros(n)
     
-    # Calculate daily volume average (20-period)
-    vol_daily = df_daily['volume'].values
-    vol_avg_20_daily = np.full(len(vol_daily), np.nan)
-    for i in range(20, len(vol_daily)):
-        vol_avg_20_daily[i] = np.mean(vol_daily[i-20:i])
+    # Calculate daily ADX (14-period)
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
+    close_daily = df_daily['close'].values
     
-    # Align weekly Donchian bands to 12h timeframe
-    donchian_high_weekly_aligned = align_htf_to_ltf(prices, df_weekly, donchian_high_weekly)
-    donchian_low_weekly_aligned = align_htf_to_ltf(prices, df_weekly, donchian_low_weekly)
+    # True Range
+    tr1 = high_daily[1:] - low_daily[1:]
+    tr2 = np.abs(high_daily[1:] - close_daily[:-1])
+    tr3 = np.abs(low_daily[1:] - close_daily[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
     
-    # Align daily volume average to 12h timeframe
-    vol_avg_20_daily_aligned = align_htf_to_ltf(prices, df_daily, vol_avg_20_daily)
+    # Directional Movement
+    up_move = high_daily[1:] - high_daily[:-1]
+    down_move = low_daily[:-1] - low_daily[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[0.0], plus_dm])
+    minus_dm = np.concatenate([[0.0], minus_dm])
     
-    # Calculate 12h Donchian breakout levels (20-period)
-    donchian_high_12h = np.full(n, np.nan)
-    donchian_low_12h = np.full(n, np.nan)
+    # Smoothed values
+    def smooth_wilder(arr, period):
+        smoothed = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return smoothed
+        smoothed[period-1] = np.nansum(arr[:period])
+        for i in range(period, len(arr)):
+            smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + arr[i]
+        return smoothed
     
-    for i in range(20, n):
-        donchian_high_12h[i] = np.max(high[i-20:i])
-        donchian_low_12h[i] = np.min(low[i-20:i])
+    atr_14 = smooth_wilder(tr, 14)
+    plus_di_14 = 100 * smooth_wilder(plus_dm, 14) / atr_14
+    minus_di_14 = 100 * smooth_wilder(minus_dm, 14) / atr_14
+    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
+    adx_14 = smooth_wilder(dx, 14)
+    
+    # Calculate RSI (14-period) on 4h
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    gain = np.concatenate([[0.0], gain])
+    loss = np.concatenate([[0.0], loss])
+    
+    avg_gain = np.full_like(gain, np.nan)
+    avg_loss = np.full_like(loss, np.nan)
+    if len(gain) >= 14:
+        avg_gain[13] = np.mean(gain[:14])
+        avg_loss[13] = np.mean(loss[:14])
+        for i in range(14, len(gain)):
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Calculate volume average (20-period) on 4h
+    vol_avg_20 = np.full_like(volume, np.nan)
+    if len(volume) >= 20:
+        for i in range(20, len(volume)):
+            vol_avg_20[i] = np.mean(volume[i-20:i])
+    
+    # Align daily ADX to 4h timeframe
+    adx_14_aligned = align_htf_to_ltf(prices, df_daily, adx_14)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -74,7 +99,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)  # warmup for indicators
+    start_idx = max(34, 20)  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if outside trading session
@@ -85,37 +110,33 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_weekly_aligned[i]) or np.isnan(donchian_low_weekly_aligned[i]) or
-            np.isnan(vol_avg_20_daily_aligned[i]) or np.isnan(donchian_high_12h[i]) or np.isnan(donchian_low_12h[i])):
+        if (np.isnan(rsi[i]) or np.isnan(adx_14_aligned[i]) or 
+            np.isnan(vol_avg_20[i]) or np.isnan(close[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current 12h volume > 1.5x 20-period average of daily volume
-        vol_confirmation = volume[i] > 1.5 * vol_avg_20_daily_aligned[i]
+        # Volume spike: current volume > 1.5x 20-period average
+        vol_spike = volume[i] > 1.5 * vol_avg_20[i]
         
         if position == 0:
-            # Look for entry: breakout above weekly resistance in uptrend or below weekly support in downtrend
-            # Uptrend: price above weekly Donchian middle (bullish bias)
-            weekly_mid = (donchian_high_weekly_aligned[i] + donchian_low_weekly_aligned[i]) / 2
-            uptrend = close[i] > weekly_mid
+            # Look for entry: RSI extreme in strong trend with volume spike
+            # Strong trend: ADX > 25
+            strong_trend = adx_14_aligned[i] > 25
             
-            # Downtrend: price below weekly Donchian middle (bearish bias)
-            downtrend = close[i] < weekly_mid
-            
-            # Long: price breaks above 12h Donchian resistance in uptrend with volume confirmation
+            # Long when RSI < 30 (oversold) in strong trend
             long_condition = (
-                close[i] > donchian_high_12h[i] and   # break above 12h resistance
-                uptrend and                           # weekly uptrend bias
-                vol_confirmation                      # volume confirmation
+                rsi[i] < 30 and           # oversold
+                strong_trend and          # strong trend
+                vol_spike                 # volume spike for entry
             )
             
-            # Short: price breaks below 12h Donchian support in downtrend with volume confirmation
+            # Short when RSI > 70 (overbought) in strong trend
             short_condition = (
-                close[i] < donchian_low_12h[i] and    # break below 12h support
-                downtrend and                         # weekly downtrend bias
-                vol_confirmation                      # volume confirmation
+                rsi[i] > 70 and           # overbought
+                strong_trend and          # strong trend
+                vol_spike                 # volume spike for entry
             )
             
             if long_condition:
@@ -125,15 +146,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns below 12h Donchian support or weekly trend turns down
-            if close[i] < donchian_low_12h[i] or close[i] < weekly_mid:
+            # Exit long: RSI returns to neutral or trend weakens
+            if rsi[i] > 50 or adx_14_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns above 12h Donchian resistance or weekly trend turns up
-            if close[i] > donchian_high_12h[i] or close[i] > weekly_mid:
+            # Exit short: RSI returns to neutral or trend weakens
+            if rsi[i] < 50 or adx_14_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
