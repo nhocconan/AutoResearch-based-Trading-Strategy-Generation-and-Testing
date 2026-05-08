@@ -3,82 +3,102 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with volume confirmation and 1d EMA trend filter
-# Long when price breaks above Donchian(20) high, volume > 1.5x average, and 1d EMA50 rising
-# Short when price breaks below Donchian(20) low, volume > 1.5x average, and 1d EMA50 falling
-# Exit when price reverses to touch Donchian midpoint or trend changes
-# Uses discrete position sizing (0.25) to minimize fee churn
-# Targets 20-50 trades per year to avoid fee drag while capturing major trends
+# Hypothesis: Daily Bollinger Band Width regime filter + RSI mean reversion + Weekly trend confirmation
+# Long when BBW < 20th percentile (squeeze), RSI < 30 (oversold), weekly uptrend
+# Short when BBW < 20th percentile (squeeze), RSI > 70 (overbought), weekly downtrend
+# Bollinger Band Width identifies low volatility periods conducive to mean reversion
+# RSI captures oversold/overbought conditions within the squeeze
+# Weekly trend ensures trades align with higher timeframe momentum
+# Targets 30-100 total trades over 4 years (7-25/year) to minimize fee drag
 
-name = "4h_Donchian20_Volume_1dEMA50_Trend"
-timeframe = "4h"
+name = "1d_BBW_RSI_WeeklyTrend"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data once for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data once for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA(50) for trend filter
-    daily_close = df_1d['close'].values
-    ema50_1d = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate weekly EMA(34) for trend filter
+    weekly_close = df_1w['close'].values
+    ema34_1w = pd.Series(weekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Donchian channels (20-period)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_high + donch_low) / 2
+    # Bollinger Bands (20, 2)
+    bb_period = 20
+    bb_std = 2
+    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper = sma + bb_std * std
+    lower = sma - bb_std * std
+    bbw = (upper - lower) / sma  # Bollinger Band Width
     
-    # Volume average (20-period)
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # BBW percentile rank (20-period lookback)
+    bbw_rank = np.zeros_like(bbw)
+    for i in range(bb_period, n):
+        start = max(0, i - 20)
+        window = bbw[start:i+1]
+        if len(window) > 0:
+            bbw_rank[i] = (np.sum(window <= bbw[i]) / len(window)) * 100
+        else:
+            bbw_rank[i] = 50
+    
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup
+    start_idx = 50  # warmup for calculations
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(vol_avg[i]) or np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(bbw_rank[i]) or np.isnan(rsi[i]) or 
+            np.isnan(ema34_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        bbw_rank_val = bbw_rank[i]
+        rsi_val = rsi[i]
+        ema34_1w_val = ema34_1w_aligned[i]
+        
         if position == 0:
-            # Enter long: break above Donchian high + volume spike + 1d EMA rising
-            if (close[i] > donch_high[i] and 
-                volume[i] > 1.5 * vol_avg[i] and 
-                ema50_1d_aligned[i] > ema50_1d_aligned[i-1]):
+            # Enter long: BBW squeeze (<20th percentile), RSI oversold (<30), weekly uptrend
+            if bbw_rank_val < 20 and rsi_val < 30 and ema34_1w_val > 0:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below Donchian low + volume spike + 1d EMA falling
-            elif (close[i] < donch_low[i] and 
-                  volume[i] > 1.5 * vol_avg[i] and 
-                  ema50_1d_aligned[i] < ema50_1d_aligned[i-1]):
+            # Enter short: BBW squeeze (<20th percentile), RSI overbought (>70), weekly downtrend
+            elif bbw_rank_val < 20 and rsi_val > 70 and ema34_1w_val < 0:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price touches Donchian mid or 1d EMA turns down
-            if close[i] <= donch_mid[i] or ema50_1d_aligned[i] < ema50_1d_aligned[i-1]:
+            # Exit long: BBW expansion (>50th percentile) or RSI overbought (>70) or weekly trend down
+            if bbw_rank_val > 50 or rsi_val > 70 or ema34_1w_val < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price touches Donchian mid or 1d EMA turns up
-            if close[i] >= donch_mid[i] or ema50_1d_aligned[i] > ema50_1d_aligned[i-1]:
+            # Exit short: BBW expansion (>50th percentile) or RSI oversold (<30) or weekly trend up
+            if bbw_rank_val > 50 or rsi_val < 30 or ema34_1w_val > 0:
                 signals[i] = 0.0
                 position = 0
             else:
