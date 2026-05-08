@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R + 1d Trend Filter + Volume Spike
-# Uses weekly trend direction for bias, Williams %R for mean reversion entries,
-# and volume spike (>2x average) for confirmation. Designed to work in both bull and bear
-# markets by following the weekly trend while buying dips in uptrends and selling rallies in downtrends.
-# Target: 15-35 trades/year.
+# Hypothesis: 4h Donchian Breakout with 1d Trend Filter and Volume Confirmation
+# Uses daily EMA50 for trend bias, Donchian(20) breakout for entry, and volume spike (>1.5x average) for confirmation.
+# Designed to capture trends in both bull and bear markets while avoiding false breakouts in low-volume conditions.
+# Target: 25-40 trades/year (~100-160 total over 4 years).
 
-name = "6h_WilliamsR_1dTrend_VolumeSpike"
-timeframe = "6h"
+name = "4h_Donchian20_1dEMA50_VolumeConfirm"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,50 +22,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter and volume average
+    # Get daily data for EMA trend filter
     df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 34:
+    if len(df_daily) < 50:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend filter
+    # Calculate daily EMA50 for trend filter
     close_daily = df_daily['close'].values
-    ema34_daily = np.full(len(close_daily), np.nan)
-    if len(close_daily) >= 34:
-        ema34_daily[33] = np.mean(close_daily[:34])
-        for i in range(34, len(close_daily)):
-            ema34_daily[i] = (close_daily[i] * 2 + ema34_daily[i-1] * 32) / 34
+    ema50_daily = np.full(len(close_daily), np.nan)
+    if len(close_daily) >= 50:
+        ema50_daily[49] = np.mean(close_daily[:50])
+        for i in range(50, len(close_daily)):
+            ema50_daily[i] = (close_daily[i] * 2 + ema50_daily[i-1] * 48) / 50
     
-    # Calculate daily volume average (20-period)
+    # Calculate daily volume average for volume confirmation
     vol_daily = df_daily['volume'].values
     vol_avg_20_daily = np.full(len(vol_daily), np.nan)
     if len(vol_daily) >= 20:
         for i in range(20, len(vol_daily)):
             vol_avg_20_daily[i] = np.mean(vol_daily[i-20:i])
     
-    # Get weekly data for Williams %R
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 14:
-        return np.zeros(n)
-    
-    # Calculate weekly Williams %R (14-period)
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    close_weekly = df_weekly['close'].values
-    
-    willr_weekly = np.full(len(close_weekly), np.nan)
-    if len(close_weekly) >= 14:
-        for i in range(13, len(close_weekly)):
-            highest_high = np.max(high_weekly[i-13:i+1])
-            lowest_low = np.min(low_weekly[i-13:i+1])
-            if highest_high > lowest_low:
-                willr_weekly[i] = -100 * (highest_high - close_weekly[i]) / (highest_high - lowest_low)
-            else:
-                willr_weekly[i] = -50  # neutral when no range
-    
-    # Align daily and weekly indicators to 6h timeframe
-    ema34_daily_aligned = align_htf_to_ltf(prices, df_daily, ema34_daily)
+    # Align daily indicators to 4h timeframe
+    ema50_daily_aligned = align_htf_to_ltf(prices, df_daily, ema50_daily)
     vol_avg_20_daily_aligned = align_htf_to_ltf(prices, df_daily, vol_avg_20_daily)
-    willr_weekly_aligned = align_htf_to_ltf(prices, df_weekly, willr_weekly)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -75,7 +53,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20, 14)  # warmup for indicators
+    start_idx = max(50, 20)  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if outside trading session
@@ -86,30 +64,39 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(ema34_daily_aligned[i]) or np.isnan(vol_avg_20_daily_aligned[i]) or
-            np.isnan(willr_weekly_aligned[i])):
+        if (np.isnan(ema50_daily_aligned[i]) or np.isnan(vol_avg_20_daily_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume spike: current 6h volume > 2x 20-period average of daily volume
-        vol_spike = volume[i] > 2.0 * vol_avg_20_daily_aligned[i]
+        # Calculate Donchian channels (20-period) for breakout
+        if i >= 20:
+            highest_high = np.max(high[i-20:i])
+            lowest_low = np.min(low[i-20:i])
+        else:
+            highest_high = np.nan
+            lowest_low = np.nan
+        
+        # Volume confirmation: current 4h volume > 1.5x 20-period average of daily volume
+        vol_confirm = False
+        if not np.isnan(vol_avg_20_daily_aligned[i]):
+            vol_confirm = volume[i] > 1.5 * vol_avg_20_daily_aligned[i]
         
         if position == 0:
-            # Look for entry: Williams %R oversold/overbought with weekly trend and volume spike
-            # Long when weekly trend up, Williams %R oversold (< -80), and volume spike
+            # Look for entry: breakout in direction of daily trend with volume confirmation
+            # Long when price breaks above Donchian high in bullish trend
             long_condition = (
-                close[i] > ema34_daily_aligned[i] and   # price above daily EMA34 (bullish bias)
-                willr_weekly_aligned[i] < -80 and       # Williams %R oversold
-                vol_spike                               # volume spike for entry
+                close[i] > highest_high and           # price breaks above Donchian high
+                close[i] > ema50_daily_aligned[i] and # price above daily EMA50 (bullish bias)
+                vol_confirm                           # volume confirmation
             )
             
-            # Short when weekly trend down, Williams %R overbought (> -20), and volume spike
+            # Short when price breaks below Donchian low in bearish trend
             short_condition = (
-                close[i] < ema34_daily_aligned[i] and   # price below daily EMA34 (bearish bias)
-                willr_weekly_aligned[i] > -20 and       # Williams %R overbought
-                vol_spike                               # volume spike for entry
+                close[i] < lowest_low and             # price breaks below Donchian low
+                close[i] < ema50_daily_aligned[i] and # price below daily EMA50 (bearish bias)
+                vol_confirm                           # volume confirmation
             )
             
             if long_condition:
@@ -119,15 +106,17 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R returns above -50 or trend changes
-            if willr_weekly_aligned[i] > -50 or close[i] < ema34_daily_aligned[i]:
+            # Exit long: price returns below Donchian midpoint or trend reverses
+            midpoint = (highest_high + lowest_low) / 2
+            if close[i] < midpoint or close[i] < ema50_daily_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R returns below -50 or trend changes
-            if willr_weekly_aligned[i] < -50 or close[i] > ema34_daily_aligned[i]:
+            # Exit short: price returns above Donchian midpoint or trend reverses
+            midpoint = (highest_high + lowest_low) / 2
+            if close[i] > midpoint or close[i] > ema50_daily_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
