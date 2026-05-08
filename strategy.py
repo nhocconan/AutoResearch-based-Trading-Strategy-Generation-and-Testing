@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Camarilla_R3S3_Breakout_1wTrend_VolumeSpike"
-timeframe = "6h"
+name = "12h_PriceChannel_VolumeBreakout_1wTrend"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,80 +17,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
+    # Get weekly data once for trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return np.zeros(n)
     
+    # Weekly EMA200 for long-term trend
     close_1w = df_1w['close'].values
-    sma_50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
-    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
+    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
     
-    # Get daily data for Camarilla pivots
+    # Daily data for volume average
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla levels for each day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Daily average volume (20-period)
+    vol_1d = df_1d['volume'].values
+    avg_vol_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    avg_vol_20_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_20)
     
-    # Camarilla formulas
-    R4 = close_1d + (high_1d - low_1d) * 1.500
-    R3 = close_1d + (high_1d - low_1d) * 1.250
-    S3 = close_1d - (high_1d - low_1d) * 1.250
-    S4 = close_1d - (high_1d - low_1d) * 1.500
-    
-    # Align to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, R4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, S4)
-    
-    # Volume spike detection on 6h
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values  # 4 days of 6h bars
-    vol_ratio = volume / np.maximum(vol_ma, 1e-10)
+    # 12h Donchian channels (20-period)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 200  # warmup for weekly EMA200
     
     for i in range(start_idx, n):
-        if np.isnan(sma_50_1w_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or \
-           np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(vol_ratio[i]):
+        # Skip if any critical data is NaN
+        if (np.isnan(ema200_1w_aligned[i]) or np.isnan(avg_vol_20_aligned[i]) or 
+            np.isnan(high_max[i]) or np.isnan(low_min[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine weekly trend
-        weekly_uptrend = close[i] > sma_50_1w_aligned[i]
-        weekly_downtrend = close[i] < sma_50_1w_aligned[i]
-        
         if position == 0:
-            # Long: price breaks above R3 with volume spike in weekly uptrend
-            long_breakout = close[i] > r3_aligned[i] and vol_ratio[i] > 2.0
-            # Short: price breaks below S3 with volume spike in weekly downtrend
-            short_breakout = close[i] < s3_aligned[i] and vol_ratio[i] > 2.0
+            # Long: price breaks above upper Donchian + volume spike + price above weekly EMA200
+            long_cond = (close[i] > high_max[i]) and (volume[i] > 1.5 * avg_vol_20_aligned[i]) and (close[i] > ema200_1w_aligned[i])
             
-            if long_breakout and weekly_uptrend:
+            # Short: price breaks below lower Donchian + volume spike + price below weekly EMA200
+            short_cond = (close[i] < low_min[i]) and (volume[i] > 1.5 * avg_vol_20_aligned[i]) and (close[i] < ema200_1w_aligned[i])
+            
+            if long_cond:
                 signals[i] = 0.25
                 position = 1
-            elif short_breakout and weekly_downtrend:
+            elif short_cond:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price closes below S3 or weekly trend turns down
-            if close[i] < s3_aligned[i] or not weekly_uptrend:
+            # Long exit: price closes below lower Donchian
+            if close[i] < low_min[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price closes above R3 or weekly trend turns up
-            if close[i] > r3_aligned[i] or not weekly_downtrend:
+            # Short exit: price closes above upper Donchian
+            if close[i] > high_max[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -98,9 +85,8 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R3/S3 levels act as strong support/resistance. 
-# Breakouts with volume spikes indicate institutional interest. 
-# Weekly trend filter ensures we trade with the higher timeframe momentum.
-# Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
-# Volume spike requirement (>2x average) filters false breakouts.
-# Target: 50-150 total trades over 4 years to minimize fee decay.
+# Hypothesis: 12h Donchian breakout with volume confirmation and weekly trend filter.
+# Long when price breaks above 20-period high with volume >1.5x daily average and price above weekly EMA200.
+# Short when price breaks below 20-period low with volume spike and price below weekly EMA200.
+# Exit on opposite Donchian break. Weekly EMA200 filter ensures trading with long-term trend.
+# Volume spike confirms institutional interest. Target: 50-150 total trades over 4 years.
