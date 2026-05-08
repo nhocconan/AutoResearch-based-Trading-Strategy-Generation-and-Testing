@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Bollinger Band squeeze with daily trend filter and volume confirmation
-# Long when BB width at 20-period low, price breaks above upper band, daily trend up, volume spike
-# Short when BB width at 20-period low, price breaks below lower band, daily trend down, volume spike
-# Bollinger squeeze indicates low volatility primed for breakout; volume confirms institutional interest
-# Daily trend filter ensures alignment with higher timeframe momentum
-# Targets 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost
+# Hypothesis: 4-hour Williams %R with daily trend filter and volume confirmation
+# Long when Williams %R crosses above -20 (oversold bounce), daily trend up, volume spike
+# Short when Williams %R crosses below -80 (overbought rejection), daily trend down, volume spike
+# Williams %R identifies momentum exhaustion; daily trend filters for higher timeframe direction
+# Volume spike confirms institutional participation; avoids false signals
+# Targets 75-200 total trades over 4 years (19-50/year) for 4h timeframe
 
-name = "6h_BollingerSqueeze_DailyTrend_Volume"
-timeframe = "6h"
+name = "4h_WilliamsR_DailyTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,9 +19,9 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
     # Get daily data once for trend filter
@@ -34,18 +34,13 @@ def generate_signals(prices):
     ema50_1d = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Bollinger Bands (20, 2)
-    bb_period = 20
-    bb_std = 2
-    sma_bb = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std_bb = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_bb = sma_bb + (bb_std * std_bb)
-    lower_bb = sma_bb - (bb_std * std_bb)
-    bb_width = upper_bb - lower_bb
-    
-    # BB width percentile for squeeze detection (lowest 20% = squeeze)
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=50).rank(pct=True).values
+    # Williams %R(14): (Highest High - Close) / (Highest High - Lowest Low) * -100
+    # Using 14-period lookback
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -58,8 +53,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(sma_bb[i]) or 
-            np.isnan(std_bb[i]) or np.isnan(bb_width_percentile[i]) or 
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(williams_r[i]) or 
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -67,28 +61,28 @@ def generate_signals(prices):
             continue
         
         ema50_1d_val = ema50_1d_aligned[i]
-        bb_width_pct = bb_width_percentile[i]
+        wr = williams_r[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: BB squeeze (width in lowest 20%), price breaks above upper band, daily uptrend, volume spike
-            if bb_width_pct <= 0.2 and close[i] > upper_bb[i] and ema50_1d_val > 0 and vol_spike:
+            # Enter long: Williams %R crosses above -20 (oversold bounce), daily uptrend, volume spike
+            if wr > -20 and williams_r[i-1] <= -20 and ema50_1d_val > 0 and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: BB squeeze (width in lowest 20%), price breaks below lower band, daily downtrend, volume spike
-            elif bb_width_pct <= 0.2 and close[i] < lower_bb[i] and ema50_1d_val < 0 and vol_spike:
+            # Enter short: Williams %R crosses below -80 (overbought rejection), daily downtrend, volume spike
+            elif wr < -80 and williams_r[i-1] >= -80 and ema50_1d_val < 0 and vol_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to middle band or daily trend turns down
-            if close[i] < sma_bb[i] or ema50_1d_val < 0:
+            # Exit long: Williams %R falls below -80 or daily trend turns down
+            if wr < -80 or ema50_1d_val < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to middle band or daily trend turns up
-            if close[i] > sma_bb[i] or ema50_1d_val > 0:
+            # Exit short: Williams %R rises above -20 or daily trend turns up
+            if wr > -20 or ema50_1d_val > 0:
                 signals[i] = 0.0
                 position = 0
             else:
