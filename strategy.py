@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy combining 1-week pivot points with 1-day volatility regime filtering.
-# Weekly pivot points (calculated from prior week) provide strong institutional support/resistance.
-# Long when price crosses above weekly pivot with volatility expansion (vol regime), short when crosses below.
-# Uses 1-day ATR ratio to filter for volatility expansion regimes - avoids whipsaws in low volatility.
-# Designed for low trade frequency (15-25/year) with clear entry/exit rules to minimize fee drag.
-# Works in both bull (trend following breaks) and bear (mean reversion at pivot levels) markets.
+# Hypothesis: 12h strategy using daily volatility breakout with volume confirmation and trend filter.
+# Combines daily ATR breakout (buy when price breaks above close + ATR, sell when breaks below close - ATR)
+# with volume spike confirmation and 12h EMA(50) trend filter. Uses daily timeframe for volatility
+# measurement to avoid noise, 12h for execution to reduce frequency. Designed for low trade frequency
+# (15-25/year) to minimize fee drag while capturing volatility expansion moves in both bull and bear markets.
 
-name = "6h_WeeklyPivot_VolRegime_Breakout"
-timeframe = "6h"
+name = "12h_DailyATR_Breakout_Volume_TrendFilter"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,105 +23,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly pivot points from prior week's OHLC
-    pivot = np.zeros_like(close_1w)
-    r1 = np.zeros_like(close_1w)
-    s1 = np.zeros_like(close_1w)
-    r2 = np.zeros_like(close_1w)
-    s2 = np.zeros_like(close_1w)
-    r3 = np.zeros_like(close_1w)
-    s3 = np.zeros_like(close_1w)
-    
-    for i in range(1, len(close_1w)):
-        # Prior week's high, low, close
-        ph = high_1w[i-1]
-        pl = low_1w[i-1]
-        pc = close_1w[i-1]
-        
-        # Standard pivot point calculation
-        pivot[i] = (ph + pl + pc) / 3.0
-        r1[i] = 2 * pivot[i] - pl
-        s1[i] = 2 * pivot[i] - ph
-        r2[i] = pivot[i] + (ph - pl)
-        s2[i] = pivot[i] - (ph - pl)
-        r3[i] = ph + 2 * (pivot[i] - pl)
-        s3[i] = pl - 2 * (ph - pivot[i])
-    
-    # First week has no prior data
-    pivot[0] = r1[0] = s1[0] = r2[0] = s2[0] = r3[0] = s3[0] = np.nan
-    
-    # Align weekly pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
-    
-    # Get daily data for volatility regime filter
+    # Get daily data for ATR calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 15:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1-day ATR(14) and its 30-period average for regime filter
-    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
-    tr2 = np.maximum(np.abs(low_1d[1:] - close_1d[:-1]), tr1)
-    tr = np.concatenate([[np.nan], tr2])
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_ma_30 = pd.Series(atr_14).rolling(window=30, min_periods=30).mean().values
-    vol_regime = atr_14 > atr_ma_30  # Volatility expansion regime
+    # Calculate ATR(14) on daily timeframe
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14 = np.zeros(len(close_1d))
+    atr_14[14] = np.mean(tr[:14])
+    for i in range(15, len(close_1d)):
+        atr_14[i] = (atr_14[i-1] * 13 + tr[i-1]) / 14
     
-    # Align volatility regime to 6h timeframe
-    vol_regime_aligned = align_htf_to_ltf(prices, df_1d, vol_regime)
+    # Calculate upper and lower bands: close ± ATR
+    upper_band = close_1d + atr_14
+    lower_band = close_1d - atr_14
+    
+    # Align bands to 12h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
+    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
+    
+    # 12h EMA(50) for trend filter
+    close_series = pd.Series(close)
+    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Volume confirmation: 12h volume > 2.0x 20-period EMA
+    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ema * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for alignments
+    start_idx = 50  # Ensure enough data for EMA(50)
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(vol_regime_aligned[i])):
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or
+            np.isnan(ema_50[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: price crosses above weekly pivot with volatility expansion
-            if close[i] > pivot_aligned[i] and close[i-1] <= pivot_aligned[i-1] and vol_regime_aligned[i]:
+            # Long entry: price breaks above upper band with volume confirmation and uptrend
+            if close[i] > upper_aligned[i] and vol_confirm[i] and close[i] > ema_50[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price crosses below weekly pivot with volatility expansion
-            elif close[i] < pivot_aligned[i] and close[i-1] >= pivot_aligned[i-1] and vol_regime_aligned[i]:
+            # Short entry: price breaks below lower band with volume confirmation and downtrend
+            elif close[i] < lower_aligned[i] and vol_confirm[i] and close[i] < ema_50[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below weekly pivot OR volatility contraction
-            if close[i] < pivot_aligned[i] or not vol_regime_aligned[i]:
+            # Long exit: price closes below EMA50 or reverses below lower band
+            if close[i] < ema_50[i] or close[i] < lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above weekly pivot OR volatility contraction
-            if close[i] > pivot_aligned[i] or not vol_regime_aligned[i]:
+            # Short exit: price closes above EMA50 or reverses above upper band
+            if close[i] > ema_50[i] or close[i] > upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
