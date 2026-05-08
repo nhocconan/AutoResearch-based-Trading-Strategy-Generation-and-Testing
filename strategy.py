@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Strict_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,7 +26,10 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 1d Camarilla pivot levels (R3, S3)
+    # Calculate 1d Camarilla pivot levels (R1, S1)
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -41,17 +44,17 @@ def generate_signals(prices):
     pivot = (H_prev + L_prev + C_prev) / 3
     range_hl = H_prev - L_prev
     
-    R3 = pivot + (range_hl * 1.1 / 2)
-    S3 = pivot - (range_hl * 1.1 / 2)
+    R1 = pivot + (range_hl * 1.1 / 6)
+    S1 = pivot - (range_hl * 1.1 / 6)
     
-    # Align Camarilla levels to 6h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    # Align Camarilla levels to 12h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
-    # Volume spike: current volume > 2x 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma20)
+    # Volume spike: current volume > 2.0x 30-period average (balanced)
+    vol_ma30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_spike = volume > (2.0 * vol_ma30)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -60,7 +63,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
             np.isnan(pivot_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
@@ -69,34 +72,34 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: break above R3 + uptrend (price > 1d EMA34) + volume spike
-            long_cond = (close[i] > R3_aligned[i]) and \
+            # Long: break above R1 + uptrend (price > 1d EMA34) + volume spike
+            long_cond = (close[i] > R1_aligned[i]) and \
                         (close[i] > ema_34_1d_aligned[i]) and \
                         volume_spike[i]
-            # Short: break below S3 + downtrend (price < 1d EMA34) + volume spike
-            short_cond = (close[i] < S3_aligned[i]) and \
+            # Short: break below S1 + downtrend (price < 1d EMA34) + volume spike
+            short_cond = (close[i] < S1_aligned[i]) and \
                          (close[i] < ema_34_1d_aligned[i]) and \
                          volume_spike[i]
             
             if long_cond:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             elif short_cond:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Long exit: close below pivot (mean reversion to mean)
-            if close[i] < pivot_aligned[i]:
+            # Long exit: close below 1d EMA34 (trend reversal)
+            if close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Short exit: close above pivot (mean reversion to mean)
-            if close[i] > pivot_aligned[i]:
+            # Short exit: close above 1d EMA34 (trend reversal)
+            if close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
