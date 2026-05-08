@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_Camarilla_R3S3_Breakout_Trend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1wTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 25:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,16 +17,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data once for Camarilla pivot levels and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 1w data once for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # 1d EMA34 trend filter
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_1d = (close_1d > ema34_1d).astype(float)
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    # Get 1d data once for Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # 1w EMA34 trend filter (more stable than 50)
+    close_1w = df_1w['close'].values
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_1w = (close_1w > ema34_1w).astype(float)
+    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
     
     # Previous day's OHLC for Camarilla calculation
     prev_high = np.roll(df_1d['high'].values, 1)
@@ -39,12 +44,12 @@ def generate_signals(prices):
     # Camarilla pivot levels calculation
     pivot = (prev_high + prev_low + prev_close) / 3.0
     range_val = prev_high - prev_low
-    r3 = pivot + (range_val * 1.1 / 2)
-    s3 = pivot - (range_val * 1.1 / 2)
+    r1 = pivot + (range_val * 1.1 / 6)
+    s1 = pivot - (range_val * 1.1 / 6)
     
-    # Align Camarilla levels to 6h timeframe
-    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
+    # Align Camarilla levels to 12h timeframe
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
     
     # Volume spike detection: current volume > 2.0 * 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -53,22 +58,22 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # warmup for EMA34 and volume MA
+    start_idx = 20  # warmup for volume MA
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or np.isnan(trend_1w_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: price breaks above R3 with volume spike and 1d uptrend
-            long_cond = (close[i] > r3_6h[i] and vol_spike[i] and trend_1d_aligned[i] > 0.5)
+            # Long entry: price breaks above R1 with volume spike and 1w uptrend
+            long_cond = (close[i] > r1_12h[i] and vol_spike[i] and trend_1w_aligned[i] > 0.5)
             
-            # Short entry: price breaks below S3 with volume spike and 1d downtrend
-            short_cond = (close[i] < s3_6h[i] and vol_spike[i] and trend_1d_aligned[i] < 0.5)
+            # Short entry: price breaks below S1 with volume spike and 1w downtrend
+            short_cond = (close[i] < s1_12h[i] and vol_spike[i] and trend_1w_aligned[i] < 0.5)
             
             if long_cond:
                 signals[i] = 0.25
@@ -77,15 +82,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below S3 (reversal signal)
-            if close[i] < s3_6h[i]:
+            # Long exit: price breaks below S1 (reversal signal)
+            if close[i] < s1_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price reverses back above R3 (reversal signal)
-            if close[i] > r3_6h[i]:
+            # Short exit: price reverses back above R1 (reversal signal)
+            if close[i] > r1_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -93,11 +98,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla R3/S3 breakout strategy with volume spike confirmation and 1d EMA34 trend filter on 6h timeframe.
-# Enters long when price breaks above R3 with volume spike and 1d uptrend (close > EMA34).
-# Enters short when price breaks below S3 with volume spike and 1d downtrend (close < EMA34).
-# Exits when price reverses back through S3/R3 respectively.
-# Uses discrete sizing (0.25) to minimize churn. Targets 50-150 total trades over 4 years on 6h timeframe.
-# 1d trend filter ensures we only trade with the higher timeframe trend, reducing whipsaw in sideways markets.
-# R3/S3 levels represent stronger breakout points than R1/S1, filtering out false breakouts in ranging markets.
+# Hypothesis: Camarilla R1/S1 breakout strategy with volume spike confirmation and 1w EMA34 trend filter on 12h timeframe.
+# Enters long when price breaks above R1 with volume spike and 1w uptrend (close > EMA34).
+# Enters short when price breaks below S1 with volume spike and 1w downtrend (close < EMA34).
+# Exits when price reverses back through S1/R1 respectively.
+# Uses discrete sizing (0.25) to minimize churn. Targets 15-25 trades/year on 12h timeframe.
+# 1w trend filter ensures we only trade with the higher timeframe trend, reducing whipsaw in sideways markets.
 # Works in bull markets (trend-following breakouts) and bear markets (reversal breakouts from overextended levels).
