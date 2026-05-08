@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily 20-period Donchian breakout with weekly trend filter and volume confirmation
-# We go long when price breaks above the 20-day high with weekly EMA(34) uptrend and volume spike.
-# We go short when price breaks below the 20-day low with weekly EMA(34) downtrend and volume spike.
+# Hypothesis: Daily 14-period RSI with weekly trend filter and volume confirmation
+# We go long when RSI crosses above 30 (oversold bounce) with weekly EMA(34) uptrend and volume spike.
+# We go short when RSI crosses below 70 (overbought rejection) with weekly EMA(34) downtrend and volume spike.
 # Designed for low trade frequency in both bull and bear markets with proper risk control.
 # Target: 30-100 total trades over 4 years = 7-25/year (within 150 max)
 
-name = "1d_Donchian20_1wTrend_Volume"
+name = "1d_RSI14_1wTrend_Volume"
 timeframe = "1d"
 leverage = 1.0
 
@@ -33,12 +33,18 @@ def generate_signals(prices):
     ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Calculate 20-period Donchian channels on daily data
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 14-period RSI on daily data
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
-    # Volume spike: current volume > 2.0 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume spike: current volume > 2.0 * 14-period average
+    vol_ma = pd.Series(volume).rolling(window=14, min_periods=14).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
@@ -48,41 +54,40 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(rsi_values[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         ema34_1w_val = ema34_1w_aligned[i]
-        upper_band = donchian_high[i]
-        lower_band = donchian_low[i]
+        rsi_val = rsi_values[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: price breaks above Donchian high + weekly uptrend + volume spike
-            if (close[i] > upper_band and 
+            # Enter long: RSI crosses above 30 + weekly uptrend + volume spike
+            if (rsi_val > 30 and rsi_values[i-1] <= 30 and 
                 close[i] > ema34_1w_val and 
                 vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below Donchian low + weekly downtrend + volume spike
-            elif (close[i] < lower_band and 
+            # Enter short: RSI crosses below 70 + weekly downtrend + volume spike
+            elif (rsi_val < 70 and rsi_values[i-1] >= 70 and 
                   close[i] < ema34_1w_val and 
                   vol_spike):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below Donchian low OR weekly trend turns down
-            if (close[i] < lower_band or close[i] < ema34_1w_val):
+            # Exit long: RSI crosses below 50 OR weekly trend turns down
+            if (rsi_val < 50 and rsi_values[i-1] >= 50) or close[i] < ema34_1w_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above Donchian high OR weekly trend turns up
-            if (close[i] > upper_band or close[i] > ema34_1w_val):
+            # Exit short: RSI crosses above 50 OR weekly trend turns up
+            if (rsi_val > 50 and rsi_values[i-1] <= 50) or close[i] > ema34_1w_val:
                 signals[i] = 0.0
                 position = 0
             else:
