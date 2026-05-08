@@ -1,18 +1,17 @@
-# 1d_Camarilla_R3S3_1wTrend_Volume
-# Hypothesis: Daily Camarilla R3/S3 breakout with weekly EMA50 trend filter and volume spike confirmation.
-# Long when price breaks above daily R3 AND weekly EMA50 rising AND volume > 1.5x 20-period average.
-# Short when price breaks below daily S3 AND weekly EMA50 falling AND volume > 1.5x 20-period average.
-# Exit when price crosses back inside the daily H-L range (between H4 and L4).
-# Weekly EMA50 provides stronger trend filter for better performance in both bull and bear markets.
-# Target: 30-100 total trades over 4 years (7-25/year) with reduced false signals.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_Camarilla_R3S3_1wTrend_Volume"
-timeframe = "1d"
+# Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume confirmation.
+# Long when price breaks above 4h Donchian Upper(20) AND 1d EMA50 rising AND volume > 1.5x 20-period average.
+# Short when price breaks below 4h Donchian Lower(20) AND 1d EMA50 falling AND volume > 1.5x 20-period average.
+# Exit when price crosses back inside the Donchian channel.
+# Donchian provides clear breakout levels. EMA50 filters higher timeframe trend.
+# Volume confirms institutional participation. Target: 100-200 total trades over 4 years (25-50/year).
+
+name = "4h_Donchian_20_1dEMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,42 +24,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla calculation
+    # 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # 4h Donchian(20) - calculated on 4h data
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate Camarilla levels from daily OHLC (based on previous day's close)
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Camarilla levels calculation
-    R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
-    S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
-    H4 = prev_close + (prev_high - prev_low) * 1.1 / 2
-    L4 = prev_close - (prev_high - prev_low) * 1.1 / 2
-    
-    # Align Camarilla levels to daily timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
-    
-    # Weekly EMA50 for trend filter
-    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    
-    # Weekly EMA50 direction
-    ema50_rising = np.zeros_like(ema50_1w_aligned, dtype=bool)
-    ema50_falling = np.zeros_like(ema50_1w_aligned, dtype=bool)
-    ema50_rising[1:] = ema50_1w_aligned[1:] > ema50_1w_aligned[:-1]
-    ema50_falling[1:] = ema50_1w_aligned[1:] < ema50_1w_aligned[:-1]
+    # 1d EMA50 direction
+    ema50_rising = np.zeros_like(ema50_1d_aligned, dtype=bool)
+    ema50_falling = np.zeros_like(ema50_1d_aligned, dtype=bool)
+    ema50_rising[1:] = ema50_1d_aligned[1:] > ema50_1d_aligned[:-1]
+    ema50_falling[1:] = ema50_1d_aligned[1:] < ema50_1d_aligned[:-1]
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -69,13 +50,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 2)  # Sufficient warmup for EMA50 and Camarilla
+    start_idx = max(50, 2)  # Sufficient warmup for EMA50 and Donchian
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(ema50_rising[i]) or 
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(ema50_rising[i]) or 
             np.isnan(ema50_falling[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -83,30 +63,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: price breaks above R3, weekly EMA50 rising, volume filter
-            long_cond = (close[i] > R3_aligned[i]) and ema50_rising[i] and volume_filter[i]
-            # Short conditions: price breaks below S3, weekly EMA50 falling, volume filter
-            short_cond = (close[i] < S3_aligned[i]) and ema50_falling[i] and volume_filter[i]
+            # Long conditions: price breaks above Donchian Upper, 1d EMA50 rising, volume filter
+            long_cond = (close[i] > high_20[i]) and ema50_rising[i] and volume_filter[i]
+            # Short conditions: price breaks below Donchian Lower, 1d EMA50 falling, volume filter
+            short_cond = (close[i] < low_20[i]) and ema50_falling[i] and volume_filter[i]
             
             if long_cond:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             elif short_cond:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Long exit: price crosses back below H4 (Camarilla resistance)
-            if close[i] < H4_aligned[i]:
+            # Long exit: price crosses back below Donchian Lower
+            if close[i] < low_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Short exit: price crosses back above L4 (Camarilla support)
-            if close[i] > L4_aligned[i]:
+            # Short exit: price crosses back above Donchian Upper
+            if close[i] > high_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
