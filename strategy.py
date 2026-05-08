@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R4/S4 breakout with 1d EMA34 trend and volume confirmation
-# Uses daily Camarilla levels (tighter than R3/S3) for high-probability breakouts.
-# Requires alignment with daily EMA34 trend and volume spike to filter false signals.
-# Designed for low-frequency trades (<400 total) to minimize fee drag and work in both bull/bear markets.
+# Hypothesis: 1d KAMA trend with 1w RSI filter and volume confirmation
+# Uses weekly RSI(14) to filter KAMA trend direction for high-probability entries.
+# Requires volume spike to confirm momentum. Designed for low-frequency trades (<150 total)
+# to minimize fee drag and work in both bull/bear markets by following the trend.
 
-name = "4h_Camarilla_R4S4_1dEMA34_Volume"
-timeframe = "4h"
+name = "1d_KAMA_RSI14_1w_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,35 +22,50 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 1w data for RSI filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate daily Camarilla levels (R4, S4 - outer bands)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly RSI(14)
+    close_1w = df_1w['close'].values
+    delta = np.diff(close_1w, prepend=close_1w[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Previous day's values for today's Camarilla levels
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # Wilder's smoothing
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[14] = np.mean(gain[1:15])
+    avg_loss[14] = np.mean(loss[1:15])
     
-    # Camarilla calculations for R4/S4 (outer bands)
-    R4 = prev_close + (prev_high - prev_low) * 1.1 / 2
-    S4 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    for i in range(15, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # Align Camarilla levels to 4h timeframe
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi_14 = 100 - (100 / (1 + rs))
+    rsi_14[:14] = np.nan  # Not enough data
     
-    # Get 1d data for EMA34 trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Align weekly RSI to daily timeframe
+    rsi_14_aligned = align_htf_to_ltf(prices, df_1w, rsi_14)
+    
+    # Calculate daily KAMA trend
+    # Efficiency Ratio (ER)
+    change = np.abs(np.diff(close, k=10, prepend=close[:10]))
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)
+    er = np.where(volatility != 0, change / volatility, 0)
+    
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)  # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # KAMA calculation
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
     # Volume spike (2x 20-period EMA)
     vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -59,40 +74,40 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure EMA34 has enough data
+    start_idx = 30  # Ensure KAMA and RSI have enough data
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(R4_aligned[i]) or np.isnan(S4_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_spike[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi_14_aligned[i]) or 
+            np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above R4 with 1d uptrend and volume spike
-            if (close[i] > R4_aligned[i] and 
-                close[i] > ema34_1d_aligned[i] and vol_spike[i]):
+            # Enter long: price above KAMA, RSI > 50 (bullish), and volume spike
+            if (close[i] > kama[i] and 
+                rsi_14_aligned[i] > 50 and vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S4 with 1d downtrend and volume spike
-            elif (close[i] < S4_aligned[i] and 
-                  close[i] < ema34_1d_aligned[i] and vol_spike[i]):
+            # Enter short: price below KAMA, RSI < 50 (bearish), and volume spike
+            elif (close[i] < kama[i] and 
+                  rsi_14_aligned[i] < 50 and vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below S4 or trend fails
-            if (close[i] < S4_aligned[i] or 
-                close[i] < ema34_1d_aligned[i]):
+            # Exit long: price below KAMA or RSI turns bearish
+            if (close[i] < kama[i] or 
+                rsi_14_aligned[i] < 50):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above R4 or trend fails
-            if (close[i] > R4_aligned[i] or 
-                close[i] > ema34_1d_aligned[i]):
+            # Exit short: price above KAMA or RSI turns bullish
+            if (close[i] > kama[i] or 
+                rsi_14_aligned[i] > 50):
                 signals[i] = 0.0
                 position = 0
             else:
