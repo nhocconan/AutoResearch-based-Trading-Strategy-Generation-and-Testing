@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA + RSI + chop filter
-# Long when KAMA trending up, RSI > 50, and Choppiness Index > 61.8 (ranging market)
-# Short when KAMA trending down, RSI < 50, and Choppiness Index > 61.8 (ranging market)
-# Exit when KAMA changes direction or RSI crosses 50
-# KAMA adapts to market noise, RSI filters momentum, Chop filter ensures mean-reversion regime
-# Works in both bull/bear by focusing on ranging markets where mean reversion prevails
-# Target: 30-100 total trades over 4 years (7-25/year)
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d trend filter and volume confirmation.
+# Bull Power = High - EMA13(close), Bear Power = EMA13(close) - Low.
+# Long when Bull Power > 0 AND Bear Power < 0 AND 1d EMA34 rising AND volume > 1.5x 20-period average.
+# Short when Bear Power > 0 AND Bull Power < 0 AND 1d EMA34 falling AND volume > 1.5x 20-period average.
+# Exit when Bull Power and Bear Power have the same sign (both positive or both negative).
+# Elder Ray measures bull/bear strength relative to trend. EMA34 filters higher timeframe trend.
+# Volume spike confirms institutional participation. Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "1d_KAMA_RSI_Chop"
-timeframe = "1d"
+name = "6h_ElderRay_1dEMA34_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,82 +23,54 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # 1w data for Choppiness Index calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # 1d data for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate KAMA on daily close
-    # Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close, n=10))
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)
-    er = np.zeros_like(change)
-    er[9:] = change[9:] / np.maximum(volatility[9:], 1e-10)
+    # EMA13 for Elder Ray calculation
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    kama = np.full_like(close, np.nan)
-    kama[9] = close[9]  # seed
-    for i in range(10, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Bull Power = High - EMA13, Bear Power = EMA13 - Low
+    bull_power = high - ema13
+    bear_power = ema13 - low
     
-    # Align KAMA to daily timeframe (already aligned)
-    kama_aligned = kama
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # RSI(14)
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi[:14] = np.nan
+    # 1d EMA34 direction
+    ema34_rising = np.zeros_like(ema34_1d_aligned, dtype=bool)
+    ema34_falling = np.zeros_like(ema34_1d_aligned, dtype=bool)
+    ema34_rising[1:] = ema34_1d_aligned[1:] > ema34_1d_aligned[:-1]
+    ema34_falling[1:] = ema34_1d_aligned[1:] < ema34_1d_aligned[:-1]
     
-    # Choppiness Index (14) on weekly data
-    atr_1w = np.zeros(len(df_1w))
-    tr1 = df_1w['high'].values - df_1w['low'].values
-    tr2 = np.abs(df_1w['high'].values - np.roll(df_1w['close'].values, 1))
-    tr3 = np.abs(df_1w['low'].values - np.roll(df_1w['close'].values, 1))
-    tr1[0] = 0
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1w = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    max_hh = pd.Series(df_1w['high'].values).rolling(window=14, min_periods=14).max().values
-    min_ll = pd.Series(df_1w['low'].values).rolling(window=14, min_periods=14).min().values
-    
-    chop = np.zeros_like(atr_1w)
-    denom = max_hh - min_ll
-    chop[13:] = 100 * np.log10(np.sum(atr_1w[13:]) / np.maximum(denom[13:], 1e-10)) / np.log10(14)
-    chop[:13] = np.nan
-    
-    # Align Chop to daily timeframe with 2-bar delay for confirmation
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop, additional_delay_bars=2)
+    # Volume filter: current volume > 1.5x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(14, 10)  # Sufficient warmup
+    start_idx = max(30, 1)  # Sufficient warmup for EMA13 and EMA34
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(ema34_rising[i]) or 
+            np.isnan(ema34_falling[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: KAMA up, RSI > 50, Chop > 61.8 (ranging)
-            kama_up = i > 0 and kama_aligned[i] > kama_aligned[i-1]
-            long_cond = kama_up and (rsi[i] > 50) and (chop_aligned[i] > 61.8)
-            # Short conditions: KAMA down, RSI < 50, Chop > 61.8 (ranging)
-            kama_down = i > 0 and kama_aligned[i] < kama_aligned[i-1]
-            short_cond = kama_down and (rsi[i] < 50) and (chop_aligned[i] > 61.8)
+            # Long conditions: Bull Power > 0 AND Bear Power < 0 AND 1d EMA34 rising AND volume filter
+            long_cond = (bull_power[i] > 0) and (bear_power[i] < 0) and ema34_rising[i] and volume_filter[i]
+            # Short conditions: Bear Power > 0 AND Bull Power < 0 AND 1d EMA34 falling AND volume filter
+            short_cond = (bear_power[i] > 0) and (bull_power[i] < 0) and ema34_falling[i] and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -107,17 +79,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: KAMA turns down or RSI < 50
-            kama_down = i > 0 and kama_aligned[i] < kama_aligned[i-1]
-            if kama_down or (rsi[i] < 50):
+            # Long exit: Bull Power and Bear Power have same sign (both positive or both negative)
+            if (bull_power[i] > 0 and bear_power[i] > 0) or (bull_power[i] < 0 and bear_power[i] < 0):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: KAMA turns up or RSI > 50
-            kama_up = i > 0 and kama_aligned[i] > kama_aligned[i-1]
-            if kama_up or (rsi[i] > 50):
+            # Short exit: Bull Power and Bear Power have same sign (both positive or both negative)
+            if (bull_power[i] > 0 and bear_power[i] > 0) or (bull_power[i] < 0 and bear_power[i] < 0):
                 signals[i] = 0.0
                 position = 0
             else:
