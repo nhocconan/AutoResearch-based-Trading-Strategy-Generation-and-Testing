@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Donchian_Breakout_Volume_Trend"
-timeframe = "4h"
+name = "6h_ElderRay_WeeklyTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,19 +17,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily trend filter: EMA34 on daily close
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Donchian channels (20-period) on 4h data
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    close_1w = df_1w['close'].values
+    
+    # Calculate weekly EMA34 for trend filter
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Daily data for Elder Ray calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate daily EMA13 for Elder Ray
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Calculate Bull Power and Bear Power
+    bull_power_1d = high_1d - ema13_1d
+    bear_power_1d = low_1d - ema13_1d
+    
+    # Align Elder Ray components to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
     
     # Volume spike: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -42,22 +59,24 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(bull_power_aligned[i]) or 
+            np.isnan(bear_power_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian high, daily uptrend, volume spike
-            long_cond = (close[i] > donchian_high[i] and 
-                        ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and
+            # Long: Bull Power > 0, Bear Power < 0, weekly uptrend, volume spike
+            long_cond = (bull_power_aligned[i] > 0 and 
+                        bear_power_aligned[i] < 0 and 
+                        ema_34_1w_aligned[i] > ema_34_1w_aligned[i-1] and
                         volume_spike[i])
             
-            # Short: price breaks below Donchian low, daily downtrend, volume spike
-            short_cond = (close[i] < donchian_low[i] and 
-                         ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and
+            # Short: Bull Power < 0, Bear Power > 0, weekly downtrend, volume spike
+            short_cond = (bull_power_aligned[i] < 0 and 
+                         bear_power_aligned[i] > 0 and 
+                         ema_34_1w_aligned[i] < ema_34_1w_aligned[i-1] and
                          volume_spike[i])
             
             if long_cond:
@@ -67,15 +86,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below Donchian low
-            if close[i] < donchian_low[i]:
+            # Long exit: Bull Power turns negative
+            if bull_power_aligned[i] < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above Donchian high
-            if close[i] > donchian_high[i]:
+            # Short exit: Bear Power turns positive
+            if bear_power_aligned[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
