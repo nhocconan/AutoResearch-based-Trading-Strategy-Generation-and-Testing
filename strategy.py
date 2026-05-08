@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Liquidity_Reversal"
-timeframe = "6h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,7 +17,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for swing structure
+    # 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
+        return np.zeros(n)
+    
+    close_4h = df_4h['close'].values
+    
+    # Calculate 4h EMA50 for trend filter
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    
+    # Daily data for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -26,39 +37,33 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate swing points (local highs/lows)
-    n1d = len(high_1d)
-    swing_high = np.full(n1d, np.nan)
-    swing_low = np.full(n1d, np.nan)
+    # Calculate daily Camarilla levels (R1, S1)
+    n1d = len(close_1d)
+    camarilla_R1 = np.full(n1d, np.nan)
+    camarilla_S1 = np.full(n1d, np.nan)
     
-    for i in range(2, n1d-2):
-        # Swing high: higher than 2 bars on each side
-        if (high_1d[i] > high_1d[i-1] and high_1d[i] > high_1d[i-2] and
-            high_1d[i] > high_1d[i+1] and high_1d[i] > high_1d[i+2]):
-            swing_high[i] = high_1d[i]
-        # Swing low: lower than 2 bars on each side
-        if (low_1d[i] < low_1d[i-1] and low_1d[i] < low_1d[i-2] and
-            low_1d[i] < low_1d[i+1] and low_1d[i] < low_1d[i+2]):
-            swing_low[i] = low_1d[i]
-    
-    # Forward fill swing levels
     for i in range(1, n1d):
-        if np.isnan(swing_high[i]):
-            swing_high[i] = swing_high[i-1]
-        if np.isnan(swing_low[i]):
-            swing_low[i] = swing_low[i-1]
+        PH = high_1d[i-1]
+        PL = low_1d[i-1]
+        PC = close_1d[i-1]
+        
+        R1 = PC + 1.1 * (PH - PL) / 2
+        S1 = PC - 1.1 * (PH - PL) / 2
+        
+        camarilla_R1[i] = R1
+        camarilla_S1[i] = S1
     
-    # Align swing levels to 6h
-    swing_high_aligned = align_htf_to_ltf(prices, df_1d, swing_high)
-    swing_low_aligned = align_htf_to_ltf(prices, df_1d, swing_low)
+    # Align Camarilla levels to 1h timeframe
+    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
+    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
     
-    # Volume imbalance: compare current volume to 20-period average
+    # Volume spike: current volume > 2.0x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ratio = np.where(vol_ma20 > 0, volume / vol_ma20, 1.0)
+    volume_spike = volume > (2.0 * vol_ma20)
     
-    # Price position relative to swing range
-    range_width = swing_high_aligned - swing_low_aligned
-    price_in_range = np.where(range_width > 0, (close - swing_low_aligned) / range_width, 0.5)
+    # Session filter: 08:00-20:00 UTC
+    hours = prices.index.hour
+    session_mask = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -66,39 +71,46 @@ def generate_signals(prices):
     start_idx = 100
     
     for i in range(start_idx, n):
-        # Skip if critical data invalid
-        if (np.isnan(swing_high_aligned[i]) or np.isnan(swing_low_aligned[i]) or
-            np.isnan(volume_ratio[i])):
+        # Skip if any critical data is NaN
+        if (np.isnan(camarilla_R1_aligned[i]) or np.isnan(camarilla_S1_aligned[i]) or 
+            np.isnan(ema_50_4h_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price near swing low with high volume (accumulation)
-            long_cond = (price_in_range[i] < 0.2 and volume_ratio[i] > 1.8)
-            # Short: price near swing high with high volume (distribution)
-            short_cond = (price_in_range[i] > 0.8 and volume_ratio[i] > 1.8)
+            # Long: price breaks above R1 with 4h uptrend + volume spike + session
+            long_cond = (close[i] > camarilla_R1_aligned[i] and 
+                        ema_50_4h_aligned[i] > ema_50_4h_aligned[i-1] and
+                        volume_spike[i] and
+                        session_mask[i])
+            
+            # Short: price breaks below S1 with 4h downtrend + volume spike + session
+            short_cond = (close[i] < camarilla_S1_aligned[i] and 
+                         ema_50_4h_aligned[i] < ema_50_4h_aligned[i-1] and
+                         volume_spike[i] and
+                         session_mask[i])
             
             if long_cond:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             elif short_cond:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Long exit: price reaches middle of range or volume dries up
-            if price_in_range[i] > 0.5 or volume_ratio[i] < 0.7:
+            # Long exit: price breaks below S1 (reversion to mean)
+            if close[i] < camarilla_S1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: price reaches middle of range or volume dries up
-            if price_in_range[i] < 0.5 or volume_ratio[i] < 0.7:
+            # Short exit: price breaks above R1 (reversion to mean)
+            if close[i] > camarilla_R1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
