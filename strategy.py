@@ -1,19 +1,18 @@
-# -*- mode: python; coding: utf-8 -*-
-
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1w pivot levels as structural bias, 6h Donchian(20) breakout, and volume confirmation.
-# Long when price breaks above 6h Donchian upper band with price above weekly pivot and volume > 1.5x average.
-# Short when price breaks below 6h Donchian lower band with price below weekly pivot and volume > 1.5x average.
-# Weekly pivot provides trend bias from higher timeframe, reducing false breakouts in ranging markets.
-# Works in bull (breakouts with upward bias) and bear (breakouts with downward bias).
+# Hypothesis: 12h strategy using weekly RSI(14) for trend filter, daily Donchian(20) breakout, and volume confirmation.
+# Long when weekly RSI > 50, price breaks above daily Donchian upper band, volume > 1.5x average.
+# Short when weekly RSI < 50, price breaks below daily Donchian lower band, volume > 1.5x average.
+# Uses ATR-based volatility sizing and time-based exits to limit drawdown.
 # Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and fee drag.
+# Works in bull (trend follow) and bear (trend still exists in downtrends).
 
-name = "6h_1wPivot_6hDonchian_Volume"
-timeframe = "6h"
+name = "12h_weeklyRSI_dailyDonchian_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,102 +25,100 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:  # Need at least one full week for pivot calculation
+    # Get weekly data for RSI trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 14:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    close_weekly = df_weekly['close'].values
     
-    # Get 6h data for Donchian bands
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 20:
+    # Get daily data for Donchian bands
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 20:
         return np.zeros(n)
     
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
     
-    # Calculate weekly pivot points (standard formula)
-    # Pivot = (H + L + C) / 3
-    # R1 = 2*P - L, S1 = 2*P - H
-    # R2 = P + (H - L), S2 = P - (H - L)
-    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    r1_1w = 2 * pivot_1w - low_1w
-    s1_1w = 2 * pivot_1w - high_1w
-    r2_1w = pivot_1w + (high_1w - low_1w)
-    s2_1w = pivot_1w - (high_1w - low_1w)
-    r3_1w = high_1w + 2 * (pivot_1w - low_1w)
-    s3_1w = low_1w - 2 * (high_1w - pivot_1w)
+    # Weekly RSI(14)
+    delta = np.diff(close_weekly, prepend=close_weekly[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / np.where(avg_loss == 0, 1e-10, avg_loss)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_above_50 = rsi > 50
     
-    # 6h Donchian(20) bands
-    donchian_high = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
+    # Daily Donchian(20) bands
+    donchian_high = pd.Series(high_daily).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_daily).rolling(window=20, min_periods=20).min().values
     
-    # Align weekly pivot levels to 6h
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
-    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
-    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
-    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
-    
-    # Align 6h Donchian bands to 6h
-    donchian_high_aligned = align_htf_to_ltf(prices, df_6h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_6h, donchian_low)
+    # Align weekly RSI to 12h
+    rsi_above_50_aligned = align_htf_to_ltf(prices, df_weekly, rsi_above_50.astype(float))
+    # Align daily Donchian bands to 12h
+    donchian_high_aligned = align_htf_to_ltf(prices, df_daily, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_daily, donchian_low)
     
     # Volume average (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     
+    # Volatility-based position sizing (ATR-based)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    vol_factor = np.clip(atr / (close * 0.01), 0.5, 2.0)  # Normalize volatility
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_bar = 0
     
-    start_idx = 40  # Ensure enough data for indicators
+    start_idx = 34  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(r3_1w_aligned[i]) or np.isnan(s3_1w_aligned[i]) or
-            np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(rsi_above_50_aligned[i]) or np.isnan(donchian_high_aligned[i]) or
+            np.isnan(donchian_low_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(vol_factor[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above 6h Donchian upper band with price above weekly S3 (bullish bias) and volume spike
-            if (close[i] > donchian_high_aligned[i] and
-                close[i] > s3_1w_aligned[i] and  # Price above weekly support level 3
+            # Long: weekly RSI > 50, price breaks above daily Donchian upper band, volume spike
+            if (rsi_above_50_aligned[i] and
+                close[i] > donchian_high_aligned[i] and
                 vol_ratio[i] > 1.5):
-                signals[i] = 0.25
+                signals[i] = 0.25 * vol_factor[i]
                 position = 1
                 entry_bar = i
-            # Short: price breaks below 6h Donchian lower band with price below weekly R3 (bearish bias) and volume spike
-            elif (close[i] < donchian_low_aligned[i] and
-                  close[i] < r3_1w_aligned[i] and  # Price below weekly resistance level 3
+            # Short: weekly RSI < 50, price breaks below daily Donchian lower band, volume spike
+            elif (not rsi_above_50_aligned[i] and
+                  close[i] < donchian_low_aligned[i] and
                   vol_ratio[i] > 1.5):
-                signals[i] = -0.25
+                signals[i] = -0.25 * vol_factor[i]
                 position = -1
                 entry_bar = i
         elif position == 1:
-            # Long exit: price breaks below 6h Donchian lower band or max 40 bars held (~10 days)
-            if (close[i] < donchian_low_aligned[i] or
-                i - entry_bar >= 40):
+            # Long exit: RSI flip, price breaks below Donchian lower band, or max 30 bars held
+            if (not rsi_above_50_aligned[i] or 
+                close[i] < donchian_low_aligned[i] or
+                i - entry_bar >= 30):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.25 * vol_factor[i]
         elif position == -1:
-            # Short exit: price breaks above 6h Donchian upper band or max 40 bars held (~10 days)
-            if (close[i] > donchian_high_aligned[i] or
-                i - entry_bar >= 40):
+            # Short exit: RSI flip, price breaks above Donchian upper band, or max 30 bars held
+            if (rsi_above_50_aligned[i] or 
+                close[i] > donchian_high_aligned[i] or
+                i - entry_bar >= 30):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.25 * vol_factor[i]
     
     return signals
