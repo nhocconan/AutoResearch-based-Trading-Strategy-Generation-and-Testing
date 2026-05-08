@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using 1w EMA(34) as trend filter, 1d Donchian(20) breakout, and volume confirmation.
-# Long when 1w EMA > price (bullish trend), price breaks above 1d Donchian upper band, volume > 2x average.
-# Short when 1w EMA < price (bearish trend), price breaks below 1d Donchian lower band, volume > 2x average.
-# Exit on trend reversal, Donchian break in opposite direction, or max 10 days held.
-# Uses position size 0.25 to balance return and drawdown. Target: 30-100 total trades over 4 years (7-25/year).
-# Designed to capture trends in both bull and bear markets by using 1w trend filter, with volume to confirm breakout strength.
+# Hypothesis: 6h strategy using 12-hour trend filter (EMA34) and 6-hour Donchian breakout with volume confirmation.
+# Long when 12h EMA > price (bullish trend), price breaks above 6h Donchian upper band, volume > 2x average.
+# Short when 12h EMA < price (bearish trend), price breaks below 6h Donchian lower band, volume > 2x average.
+# Exit on trend reversal or Donchian break in opposite direction.
+# Uses position size 0.25 to balance return and drawdown. Target: 50-150 total trades over 4 years (12-37/year).
+# Designed to capture trends in both bull and bear markets by using 12h trend filter, with volume to confirm breakout strength.
 
-name = "1d_1wEMA34_1dDonchian_Volume_v1"
-timeframe = "1d"
+name = "6h_12hEMA34_6hDonchian_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,30 +24,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Get 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 34:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_12h = df_12h['close'].values
     
-    # Get 1d data for Donchian bands
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 6h data for Donchian bands
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
     
-    # 1-week EMA(34)
-    ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # 12-hour EMA(34)
+    ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # 1-day Donchian(20) bands
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # 6-hour Donchian(20) bands
+    donchian_high = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_6h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_6h, donchian_low)
     
     # Volume average (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -61,7 +61,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_1w_aligned[i]) or np.isnan(donchian_high_aligned[i]) or
+        if (np.isnan(ema_12h_aligned[i]) or np.isnan(donchian_high_aligned[i]) or
             np.isnan(donchian_low_aligned[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -69,34 +69,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: 1w EMA bullish (price > EMA), price breaks above 1d Donchian upper band, volume spike
-            if (close[i] > ema_1w_aligned[i] and
+            # Long: 12h EMA bullish (price > EMA), price breaks above 6h Donchian upper band, volume spike
+            if (close[i] > ema_12h_aligned[i] and
                 close[i] > donchian_high_aligned[i] and
                 vol_ratio[i] > 2.0):
                 signals[i] = 0.25
                 position = 1
                 entry_bar = i
-            # Short: 1w EMA bearish (price < EMA), price breaks below 1d Donchian lower band, volume spike
-            elif (close[i] < ema_1w_aligned[i] and
+            # Short: 12h EMA bearish (price < EMA), price breaks below 6h Donchian lower band, volume spike
+            elif (close[i] < ema_12h_aligned[i] and
                   close[i] < donchian_low_aligned[i] and
                   vol_ratio[i] > 2.0):
                 signals[i] = -0.25
                 position = -1
                 entry_bar = i
         elif position == 1:
-            # Long exit: trend reversal, price breaks below Donchian lower band, or max 10 days held
-            if (close[i] < ema_1w_aligned[i] or 
-                close[i] < donchian_low_aligned[i] or
-                i - entry_bar >= 10):
+            # Long exit: trend reversal or price breaks below Donchian lower band
+            if (close[i] < ema_12h_aligned[i] or 
+                close[i] < donchian_low_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend reversal, price breaks above Donchian upper band, or max 10 days held
-            if (close[i] > ema_1w_aligned[i] or 
-                close[i] > donchian_high_aligned[i] or
-                i - entry_bar >= 10):
+            # Short exit: trend reversal or price breaks above Donchian upper band
+            if (close[i] > ema_12h_aligned[i] or 
+                close[i] > donchian_high_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
