@@ -1,18 +1,17 @@
-#52
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h volume-weighted VWAP mean reversion with 1d ADX trend filter.
-# Long when price crosses below VWAP AND 1d ADX > 20 (trending) AND volume > 1.5x average.
-# Short when price crosses above VWAP AND 1d ADX > 20 AND volume > 1.5x average.
-# Exit when price crosses back above VWAP (for long) or below VWAP (for short).
-# VWAP mean reversion works in both bull/bear markets with trend filter avoiding false signals.
-# Target: 100-180 total trades over 4 years (25-45/year) for low fee drag.
+# Hypothesis: 12h Williams %R mean-reversion with 1d ADX trend filter and 12h volume confirmation.
+# Long when Williams %R < -80 (oversold) AND 1d ADX > 25 (trending) AND 12h volume > 1.5x 20-period average.
+# Short when Williams %R > -20 (overbought) AND 1d ADX > 25 AND 12h volume > 1.5x 20-period average.
+# Exit when Williams %R crosses back above -50 (for long) or below -50 (for short).
+# Uses mean-reversion in trending markets to capture pullbacks with trend filter to avoid chop.
+# Target: 50-150 total trades over 4 years (12-38/year) for low fee drift.
 
-name = "4h_VWAP_1dADX_Volume"
-timeframe = "4h"
+name = "12h_WilliamsR_1dADX_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,13 +24,13 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 4h VWAP (typical price * volume cumulative)
-    typical_price = (high + low + close) / 3
-    vwap_num = np.cumsum(typical_price * volume)
-    vwap_den = np.cumsum(volume)
-    vwap = np.where(vwap_den != 0, vwap_num / vwap_den, typical_price)
+    # 12h Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    williams_r[highest_high == lowest_low] = -50  # Avoid division by zero
     
-    # 4h volume filter: current volume > 1.5x 20-period average
+    # 12h volume filter: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma20)
     
@@ -71,20 +70,20 @@ def generate_signals(prices):
     
     # DX and ADX
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    dx = np.where((di_plus + di_minus) != 0, dx, 0)
+    dx[di_plus + di_minus == 0] = 0  # Avoid division by zero
     adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Align 1d ADX to 4h timeframe
+    # Align 1d ADX to 12h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Sufficient warmup
+    start_idx = 30  # Sufficient warmup for Williams %R and ADX
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(vwap[i]) or np.isnan(volume_filter[i]) or 
+        if (np.isnan(williams_r[i]) or np.isnan(volume_filter[i]) or 
             np.isnan(adx_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -92,10 +91,10 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: cross below VWAP, ADX > 20, volume spike
-            long_cond = (close[i] < vwap[i]) and (close[i-1] >= vwap[i-1]) and (adx_aligned[i] > 20) and volume_filter[i]
-            # Short conditions: cross above VWAP, ADX > 20, volume spike
-            short_cond = (close[i] > vwap[i]) and (close[i-1] <= vwap[i-1]) and (adx_aligned[i] > 20) and volume_filter[i]
+            # Long conditions: Williams %R oversold (< -80), ADX > 25, volume spike
+            long_cond = (williams_r[i] < -80) and (adx_aligned[i] > 25) and volume_filter[i]
+            # Short conditions: Williams %R overbought (> -20), ADX > 25, volume spike
+            short_cond = (williams_r[i] > -20) and (adx_aligned[i] > 25) and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -104,15 +103,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: cross back above VWAP
-            if close[i] > vwap[i] and close[i-1] <= vwap[i-1]:
+            # Long exit: Williams %R crosses above -50
+            if williams_r[i] > -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: cross back below VWAP
-            if close[i] < vwap[i] and close[i-1] >= vwap[i-1]:
+            # Short exit: Williams %R crosses below -50
+            if williams_r[i] < -50:
                 signals[i] = 0.0
                 position = 0
             else:
