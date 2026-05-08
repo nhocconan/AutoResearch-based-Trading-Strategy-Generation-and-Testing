@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_WeeklyKeltnerBreakout_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "12h_Keltner_Breakout_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,67 +17,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data once
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 30:
+    # Get 1d and 1w data once
+    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
+    
+    if len(df_1d) < 30 or len(df_1w) < 30:
         return np.zeros(n)
     
-    # Weekly EMA20 for trend filter
-    close_weekly = df_weekly['close'].values
-    ema20_weekly = pd.Series(close_weekly).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema20_weekly)
+    # === 1d ATR for Keltner channel (10-period) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    tr = np.maximum(high_1d - low_1d, 
+                    np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), 
+                               np.abs(low_1d - np.roll(close_1d, 1))))
+    tr[0] = high_1d[0] - low_1d[0]
+    atr10_1d = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    atr10_1d_aligned = align_htf_to_ltf(prices, df_1d, atr10_1d)
     
-    # Weekly ATR for Keltner channels
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    close_weekly_prev = np.roll(close_weekly, 1)
-    close_weekly_prev[0] = close_weekly[0]
-    tr = np.maximum(high_weekly - low_weekly,
-                    np.maximum(np.abs(high_weekly - close_weekly_prev),
-                               np.abs(low_weekly - close_weekly_prev)))
-    tr[0] = high_weekly[0] - low_weekly[0]
-    atr20_weekly = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
-    atr20_weekly_aligned = align_htf_to_ltf(prices, df_weekly, atr20_weekly)
+    # === 1d EMA20 for middle line ===
+    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
     
-    # Weekly Keltner channels
-    upper_keltner = ema20_weekly_aligned + (2.0 * atr20_weekly_aligned)
-    lower_keltner = ema20_weekly_aligned - (2.0 * atr20_weekly_aligned)
+    # === Keltner bands (1.5 * ATR) ===
+    upper_keltner = ema20_1d_aligned + 1.5 * atr10_1d_aligned
+    lower_keltner = ema20_1d_aligned - 1.5 * atr10_1d_aligned
     
-    # Daily volume filter: current volume > 20-period average
+    # === 1w EMA50 for trend filter ===
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
+    # === Volume filter: current volume > 20-period average ===
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # warmup for EMA20 and volume MA
+    start_idx = 50  # warmup for volatility and volume
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if np.isnan(ema20_weekly_aligned[i]) or np.isnan(upper_keltner[i]) or np.isnan(lower_keltner[i]) or np.isnan(vol_ma20[i]):
+        if (np.isnan(upper_keltner[i]) or np.isnan(lower_keltner[i]) or 
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: price breaks above upper Keltner channel with volume confirmation in uptrend
-            if close[i] > upper_keltner[i] and close[i] > ema20_weekly_aligned[i] and volume[i] > vol_ma20[i]:
+            # Long: break above upper Keltner + uptrend + volume
+            long_cond = (close[i] > upper_keltner[i] and 
+                        close[i] > ema50_1w_aligned[i] and
+                        volume[i] > vol_ma20[i])
+            
+            # Short: break below lower Keltner + downtrend + volume
+            short_cond = (close[i] < lower_keltner[i] and 
+                         close[i] < ema50_1w_aligned[i] and
+                         volume[i] > vol_ma20[i])
+            
+            if long_cond:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below lower Keltner channel with volume confirmation in downtrend
-            elif close[i] < lower_keltner[i] and close[i] < ema20_weekly_aligned[i] and volume[i] > vol_ma20[i]:
+            elif short_cond:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price falls below weekly EMA20 (trend reversal)
-            if close[i] < ema20_weekly_aligned[i]:
+            # Long exit: close below EMA20 (middle line) or opposite signal
+            exit_cond = close[i] < ema20_1d_aligned[i]
+            if exit_cond:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises above weekly EMA20 (trend reversal)
-            if close[i] > ema20_weekly_aligned[i]:
+            # Short exit: close above EMA20 (middle line) or opposite signal
+            exit_cond = close[i] > ema20_1d_aligned[i]
+            if exit_cond:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -85,9 +101,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Weekly Keltner breakout strategy with trend filter and volume confirmation.
-# Uses weekly EMA20 and ATR to construct Keltner channels, entering long when price breaks above upper channel
-# with volume confirmation in an uptrend (price > weekly EMA20), and short when price breaks below lower channel
-# with volume confirmation in a downtrend (price < weekly EMA20). Exits when price crosses back below/above weekly EMA20.
-# Designed to capture trends in both bull and bear markets while avoiding false breakouts with volume confirmation.
-# Targets 20-50 trades over 4 years (5-12/year) to minimize fee drag. Uses discrete sizing (0.25) to reduce churn.
+# Hypothesis: 12h Keltner breakout with 1w trend filter and volume confirmation.
+# Enters long when price breaks above upper Keltner band (EMA20 + 1.5*ATR) in uptrend
+# (price > 1w EMA50) with volume confirmation. Enters short on breakdown below lower
+# Keltner band in downtrend with volume. Exits when price crosses back below/above
+# the middle line (EMA20). Uses 1d for Keltner calculation, 1w for trend filter.
+# Designed to capture trend moves in both bull and bear markets while avoiding
+# false breakouts in ranging conditions. Targets 50-150 trades over 4 years.
