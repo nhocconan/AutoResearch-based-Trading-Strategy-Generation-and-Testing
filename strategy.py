@@ -3,15 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h momentum with 4h trend filter and volume confirmation
-# Uses 1h RSI(14) for entry timing, 4h EMA(50) for trend direction, and volume spike for confirmation.
-# Long when RSI < 30 (oversold) in uptrend, short when RSI > 70 (overbought) in downtrend.
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1w trend filter and volume confirmation
+# Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
+# Go long when Bull Power > 0 and Bear Power < 0 with weekly uptrend and volume spike
+# Go short when Bear Power < 0 and Bull Power < 0 with weekly downtrend and volume spike
 # Designed for low trade frequency in both bull and bear markets.
-# Target: 60-150 total trades over 4 years = 15-37/year for 1h timeframe.
+# Target: 50-150 total trades over 4 years = 12-37/year
 
-name = "1h_RSI14_4hEMA50_Volume"
-timeframe = "1h"
+name = "6h_ElderRay_1wTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
+
+def ema(data, period):
+    """Exponential Moving Average with proper handling"""
+    return pd.Series(data).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def generate_signals(prices):
     n = len(prices)
@@ -23,24 +28,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data once
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get weekly data once
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 13:
         return np.zeros(n)
     
-    # Calculate 4h EMA(50) for trend direction
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Calculate weekly EMA(13) for trend direction
+    close_1w = df_1w['close'].values
+    ema13_1w = ema(close_1w, 13)
+    ema13_1w_aligned = align_htf_to_ltf(prices, df_1w, ema13_1w)
     
-    # Calculate 1h RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Elder Ray components on 6h data
+    ema13 = ema(close, 13)
+    bull_power = high - ema13
+    bear_power = low - ema13
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -53,42 +54,46 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema13_1w_aligned[i]) or np.isnan(ema13[i]) or 
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema50_4h_val = ema50_4h_aligned[i]
-        rsi_val = rsi[i]
+        ema13_1w_val = ema13_1w_aligned[i]
+        ema13_val = ema13[i]
+        bull_val = bull_power[i]
+        bear_val = bear_power[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: RSI < 30 (oversold) + uptrend + volume spike
-            if (rsi_val < 30 and 
-                close[i] > ema50_4h_val and 
+            # Enter long: Bull Power > 0, Bear Power < 0, weekly uptrend, volume spike
+            if (bull_val > 0 and bear_val < 0 and 
+                close[i] > ema13_1w_val and 
                 vol_spike):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # Enter short: RSI > 70 (overbought) + downtrend + volume spike
-            elif (rsi_val > 70 and 
-                  close[i] < ema50_4h_val and 
+            # Enter short: Bear Power < 0, Bull Power < 0, weekly downtrend, volume spike
+            elif (bear_val < 0 and bull_val < 0 and 
+                  close[i] < ema13_1w_val and 
                   vol_spike):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: RSI > 50 (normal) OR price breaks below trend
-            if rsi_val > 50 or close[i] < ema50_4h_val:
+            # Exit long: Bull Power <= 0 OR Bear Power >= 0 OR weekly trend breaks
+            if not (bull_val > 0 and bear_val < 0) or close[i] < ema13_1w_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: RSI < 50 (normal) OR price breaks above trend
-            if rsi_val < 50 or close[i] > ema50_4h_val:
+            # Exit short: Bear Power >= 0 OR Bull Power >= 0 OR weekly trend breaks
+            if not (bull_val < 0 and bear_val < 0) or close[i] > ema13_1w_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
