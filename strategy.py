@@ -1,22 +1,21 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian breakout with weekly ADX trend filter and volume confirmation.
-# Long when price breaks above Donchian(20) upper band AND weekly ADX > 25 (strong trend) AND volume > 1.5x 20-day average.
-# Short when price breaks below Donchian(20) lower band AND weekly ADX > 25 AND volume > 1.5x 20-day average.
-# Exit when price crosses back below Donchian(20) midpoint for long or above midpoint for short.
-# Uses daily timeframe for lower transaction costs and weekly trend filter to avoid counter-trend trades.
-# Target: 20-50 total trades over 4 years (5-12/year) for minimal fee drag.
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA100 trend filter and volume confirmation.
+# Long when price breaks above 20-period high AND price > 1d EMA100 AND volume > 1.5x 20-period average.
+# Short when price breaks below 20-period low AND price < 1d EMA100 AND volume > 1.5x 20-period average.
+# Exit when price crosses back below/above 10-period Donchian midpoint to capture mean reversion.
+# Target: 50-150 total trades over 4 years (12-37/year) for low fee drift and strong performance in both bull and bear.
 
-name = "1d_Donchian20_WeeklyADX_Volume"
-timeframe = "1d"
+name = "12h_Donchian20_1dEMA100_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,98 +23,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for ADX trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # 1d data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 100:
         return np.zeros(n)
     
-    # Daily Donchian channels (20-period)
+    # 20-period Donchian channels
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_upper = highest_high
-    donchian_lower = lowest_low
-    donchian_mid = (donchian_upper + donchian_lower) / 2
+    donchian_mid = (highest_high + lowest_low) / 2.0
     
-    # Weekly ADX calculation (14-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # 10-period Donchian midpoint for exit
+    highest_high_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values
+    lowest_low_10 = pd.Series(low).rolling(window=10, min_periods=10).min().values
+    donchian_mid_10 = (highest_high_10 + lowest_low_10) / 2.0
     
-    # True Range
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    
-    # Directional Movement
-    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w), 
-                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)), 
-                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed values
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # DI values
-    di_plus = 100 * dm_plus_smooth / atr
-    di_minus = 100 * dm_minus_smooth / atr
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    dx = np.where((di_plus + di_minus) == 0, 0, dx)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Align weekly ADX to daily
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    
-    # Volume filter: current volume > 1.5x 20-day average
+    # Volume filter: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma20)
+    
+    # 1d EMA100 for trend filter
+    close_1d = df_1d['close'].values
+    ema100_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
+    ema100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema100_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Sufficient warmup for Donchian and ADX
+    start_idx = 100  # Sufficient warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(donchian_mid[i]) or np.isnan(donchian_mid_10[i]) or
+            np.isnan(volume_filter[i]) or np.isnan(ema100_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: break above Donchian upper, strong trend, volume spike
-            long_cond = (close[i] > donchian_upper[i]) and (adx_aligned[i] > 25) and volume_filter[i]
-            # Short conditions: break below Donchian lower, strong trend, volume spike
-            short_cond = (close[i] < donchian_lower[i]) and (adx_aligned[i] > 25) and volume_filter[i]
+            # Long conditions: price breaks above 20-period high, volume spike, above 1d EMA100
+            long_cond = (close[i] > highest_high[i]) and volume_filter[i] and (close[i] > ema100_1d_aligned[i])
+            # Short conditions: price breaks below 20-period low, volume spike, below 1d EMA100
+            short_cond = (close[i] < lowest_low[i]) and volume_filter[i] and (close[i] < ema100_1d_aligned[i])
             
             if long_cond:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
             elif short_cond:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below Donchian midpoint
-            if close[i] < donchian_mid[i]:
+            # Long exit: price crosses below 10-period Donchian midpoint
+            if close[i] < donchian_mid_10[i] and close[i-1] >= donchian_mid_10[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above Donchian midpoint
-            if close[i] > donchian_mid[i]:
+            # Short exit: price crosses above 10-period Donchian midpoint
+            if close[i] > donchian_mid_10[i] and close[i-1] <= donchian_mid_10[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
