@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_WeeklyDonchian20_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "6h_VWAP_Deviation_1dTrend_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,61 +17,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Calculate VWAP for 6h window
+    typical_price = (high + low + close) / 3.0
+    vwap_numerator = typical_price * volume
+    vwap_denominator = volume
+    vwap = pd.Series(vwap_numerator).rolling(window=4, min_periods=4).sum().values / \
+           pd.Series(vwap_denominator).rolling(window=4, min_periods=4).sum().values
+    
+    # Calculate deviation from VWAP as percentage
+    vwap_dev = (close - vwap) / vwap * 100.0
+    
+    # 1d data for trend filter and volume context
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Weekly Donchian channels (20-period) for trend filter
-    donch_high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donch_low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    donch_high_20_aligned = align_htf_to_ltf(prices, df_1w, donch_high_20)
-    donch_low_20_aligned = align_htf_to_ltf(prices, df_1w, donch_low_20)
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Weekly ATR for volatility filter (14-period)
-    tr_w = np.maximum(high_1w - low_1w, 
-                      np.maximum(np.abs(high_1w - np.roll(close_1w, 1)), 
-                                 np.abs(low_1w - np.roll(close_1w, 1))))
-    tr_w[0] = high_1w[0] - low_1w[0]
-    atr14_1w = pd.Series(tr_w).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr14_1w_aligned = align_htf_to_ltf(prices, df_1w, atr14_1w)
-    
-    # Daily Donchian breakout (20-period) for entry signal
-    donch_high_20d = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low_20d = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume filter: daily volume > 20-day average
-    vol_ma20d = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 1d volume average for context
+    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # warmup for weekly indicators
+    start_idx = 50  # warmup for EMA50
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donch_high_20_aligned[i]) or np.isnan(donch_low_20_aligned[i]) or 
-            np.isnan(atr14_1w_aligned[i]) or np.isnan(vol_ma20d[i]) or
-            np.isnan(donch_high_20d[i]) or np.isnan(donch_low_20d[i])):
+        if (np.isnan(vwap_dev[i]) or np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(vol_avg_20_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Daily price breaks above weekly Donchian high, price above weekly Donchian low, volume above average
-            long_cond = (close[i] > donch_high_20_aligned[i] and 
-                        close[i] > donch_low_20_aligned[i] and
-                        volume[i] > vol_ma20d[i])
+            # Long: Price significantly below VWAP (mean reversion) AND above 1d EMA50 (uptrend)
+            long_cond = (vwap_dev[i] < -1.5 and 
+                        close[i] > ema50_1d_aligned[i])
             
-            # Short: Daily price breaks below weekly Donchian low, price below weekly Donchian high, volume above average
-            short_cond = (close[i] < donch_low_20_aligned[i] and 
-                         close[i] < donch_high_20_aligned[i] and
-                         volume[i] > vol_ma20d[i])
+            # Short: Price significantly above VWAP (mean reversion) AND below 1d EMA50 (downtrend)
+            short_cond = (vwap_dev[i] > 1.5 and 
+                         close[i] < ema50_1d_aligned[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -80,15 +73,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Price closes below weekly Donchian low OR weekly ATR contraction (low volatility)
-            if close[i] < donch_low_20_aligned[i] or atr14_1w_aligned[i] < atr14_1w_aligned[i-1] * 0.8:
+            # Long exit: Price returns to VWAP OR breaks below 1d EMA50
+            if vwap_dev[i] > -0.5 or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price closes above weekly Donchian high OR weekly ATR contraction
-            if close[i] > donch_high_20_aligned[i] or atr14_1w_aligned[i] < atr14_1w_aligned[i-1] * 0.8:
+            # Short exit: Price returns to VWAP OR breaks above 1d EMA50
+            if vwap_dev[i] < 0.5 or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -96,8 +89,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Weekly Donchian breakout with volatility filter and volume confirmation.
-# Uses weekly trend context (Donchian channels) for directional bias on daily timeframe.
-# Volatility filter avoids whipsaws in ranging markets. Volume ensures participation.
-# Targets 15-25 trades/year to minimize fee drag. Works in bull (breakout continuation) 
-# and bear (mean reversion at band edges) via volatility-based exits. Discrete sizing (0.25) reduces churn.
+# Hypothesis: Mean reversion from 6h VWAP with 1d EMA50 trend filter.
+# In uptrends (price > 1d EMA50), buy when price deviates significantly below VWAP.
+# In downtrends (price < 1d EMA50), sell when price deviates significantly above VWAP.
+# VWAP deviation >1.5% provides entry signal, reversion to within 0.5% provides exit.
+# Works in both bull and bear markets by aligning with higher timeframe trend.
+# 6h timeframe targets 12-37 trades/year to minimize fee drag. Discrete sizing (0.25) reduces churn.
