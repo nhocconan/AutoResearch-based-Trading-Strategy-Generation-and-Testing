@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Donchian_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_RSI_1dATRBreakout"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 300:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,71 +17,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend and volume filters
+    # Get 1d data for ATR filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate EMA50 on 1d close for trend filter
+    # Calculate 14-day ATR on daily data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate volume spike filter on 1d
-    volume_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_ratio_1d = volume_1d / vol_ma_1d
-    volume_ratio_1d = np.nan_to_num(volume_ratio_1d, nan=1.0)
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[0.0], tr])  # align length
     
-    # Calculate Donchian channels on 12h data
-    window = 20
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    for i in range(window-1, n):
-        donchian_high[i] = np.max(high[i-window+1:i+1])
-        donchian_low[i] = np.min(low[i-window+1:i+1])
+    # Normalize ATR by price to get relative volatility
+    atr_pct = atr / close_1d
+    atr_pct_ma = pd.Series(atr_pct).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = atr_pct / atr_pct_ma  # current volatility vs average
+    vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
-    # Align 1d indicators to 12h timeframe
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    volume_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ratio_1d)
+    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio)
+    
+    # Calculate RSI on 4h data
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Use Wilder's smoothing (alpha = 1/period)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = np.nan_to_num(rsi, nan=50.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(200, 50)  # Ensure enough data for indicators
+    start_idx = 100  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_ratio_1d_aligned[i]) or 
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
+        if (np.isnan(rsi[i]) or np.isnan(vol_ratio_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above Donchian high + above EMA50 + volume spike
-            if (close[i] > donchian_high[i] and 
-                close[i] > ema50_1d_aligned[i] and 
-                volume_ratio_1d_aligned[i] > 1.5):
+            # Long: RSI oversold (<30) + volatility above average
+            if rsi[i] < 30 and vol_ratio_aligned[i] > 1.0:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian low + below EMA50 + volume spike
-            elif (close[i] < donchian_low[i] and 
-                  close[i] < ema50_1d_aligned[i] and 
-                  volume_ratio_1d_aligned[i] > 1.5):
+            # Short: RSI overbought (>70) + volatility above average
+            elif rsi[i] > 70 and vol_ratio_aligned[i] > 1.0:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Price crosses below Donchian low
-            if close[i] < donchian_low[i]:
+            # Long exit: RSI returns to neutral (>45)
+            if rsi[i] > 45:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price crosses above Donchian high
-            if close[i] > donchian_high[i]:
+            # Short exit: RSI returns to neutral (<55)
+            if rsi[i] < 55:
                 signals[i] = 0.0
                 position = 0
             else:
