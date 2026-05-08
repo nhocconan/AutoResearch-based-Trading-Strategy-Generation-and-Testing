@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h Camarilla pivot levels with 1d trend filter and volume confirmation.
-# Camarilla levels (S1, S2, R1, R2) provide precise support/resistance in both trending and ranging markets.
-# Long when price breaks above R1 in 1d uptrend with volume confirmation.
-# Short when price breaks below S1 in 1d downtrend with volume confirmation.
-# Uses 1d EMA(34) trend filter to ensure alignment with daily momentum.
-# Designed for moderate trade frequency (15-35/year) to balance opportunity with cost efficiency.
+# Hypothesis: 6h strategy using 1-week Donchian channels with 1-day volume confirmation.
+# Long when price breaks above weekly Donchian high with daily volume > 2x 20-day average.
+# Short when price breaks below weekly Donchian low with daily volume > 2x 20-day average.
+# Uses 1-week ADX(14) > 25 to ensure only strong trends are traded, avoiding chop.
+# Designed for low trade frequency (15-30/year) to capture strong trend continuations.
+# Works in bull markets (breaks highs) and bear markets (breaks lows) due to symmetric logic.
 
-name = "1h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "1h"
+name = "6h_WeeklyDonchian_Breakout_Volume_ADX"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,98 +24,134 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Camarilla pivot calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # Get weekly data for Donchian channels and ADX
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:  # Need enough for Donchian(20) and ADX(14)
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Camarilla pivot levels from previous 4h bar
-    camarilla_r1 = np.zeros_like(close_4h)  # R1 level
-    camarilla_s1 = np.zeros_like(close_4h)  # S1 level
+    # Weekly Donchian channels (20-period)
+    donch_high = np.full_like(close_1w, np.nan)
+    donch_low = np.full_like(close_1w, np.nan)
     
-    for i in range(1, len(close_4h)):
-        # Previous 4h bar's high, low, close
-        ph = high_4h[i-1]
-        pl = low_4h[i-1]
-        pc = close_4h[i-1]
+    for i in range(20, len(close_1w)):
+        donch_high[i] = np.max(high_1w[i-20:i])
+        donch_low[i] = np.min(low_1w[i-20:i])
+    
+    # Weekly ADX(14) for trend strength
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = high[1:] - low[1:]
+        tr2 = np.abs(high[1:] - close[:-1])
+        tr3 = np.abs(low[1:] - close[:-1])
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr = np.concatenate([[np.nan], tr])
         
-        # Camarilla calculations
-        camarilla_r1[i] = pc + (ph - pl) * 1.1 / 12  # R1
-        camarilla_s1[i] = pc - (ph - pl) * 1.1 / 12  # S1
+        # Directional Movement
+        dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
+                           np.maximum(high[1:] - high[:-1], 0), 0)
+        dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
+                            np.maximum(low[:-1] - low[1:], 0), 0)
+        dm_plus = np.concatenate([[0], dm_plus])
+        dm_minus = np.concatenate([[0], dm_minus])
+        
+        # Smoothed values
+        atr = np.full_like(high, np.nan)
+        dm_plus_smooth = np.full_like(high, np.nan)
+        dm_minus_smooth = np.full_like(high, np.nan)
+        
+        # Initial averages
+        if len(high) >= period:
+            atr[period-1] = np.nanmean(tr[1:period])
+            dm_plus_smooth[period-1] = np.nanmean(dm_plus[1:period])
+            dm_minus_smooth[period-1] = np.nanmean(dm_minus[1:period])
+            
+            # Wilder smoothing
+            for i in range(period, len(high)):
+                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+                dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (period-1) + dm_plus[i]) / period
+                dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (period-1) + dm_minus[i]) / period
+        
+        # DX and ADX
+        dx = np.full_like(high, np.nan)
+        adx = np.full_like(high, np.nan)
+        
+        for i in range(period, len(high)):
+            if atr[i] != 0:
+                dx[i] = (np.abs(dm_plus_smooth[i] - dm_minus_smooth[i]) / atr[i]) * 100
+        
+        if len(high) >= 2 * period - 1:
+            adx[2*period-2] = np.nanmean(dx[period:2*period-1])
+            for i in range(2*period-1, len(high)):
+                adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
     
-    # First bar has no previous data
-    camarilla_r1[0] = camarilla_s1[0] = np.nan
+    adx_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
+    strong_trend = (adx_1w >= 25).astype(float)  # 1.0 when ADX >= 25
     
-    # Align Camarilla levels to 1h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s1)
+    # Align weekly indicators to 6h timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_1w, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1w, donch_low)
+    strong_trend_aligned = align_htf_to_ltf(prices, df_1w, strong_trend)
     
-    # Get 1d trend filter
+    # Get daily data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    # Daily EMA(34) for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    daily_trend_up = ema_34_1d[1:] > ema_34_1d[:-1]  # Rising daily EMA
-    daily_trend_up = np.concatenate([[False], daily_trend_up])  # Align with daily index
-    daily_trend_aligned = align_htf_to_ltf(prices, df_1d, daily_trend_up.astype(float))
+    volume_1d = df_1d['volume'].values
     
-    # Volume confirmation: current volume > 1.5x 24-period EMA
-    vol_ema = pd.Series(volume).ewm(span=24, adjust=False, min_periods=24).mean().values
-    vol_confirm = volume > (vol_ema * 1.5)
+    # Daily volume EMA(20)
+    vol_ema_1d = pd.Series(volume_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_ratio_1d = volume_1d / vol_ema_1d  # Current volume vs 20-day average
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Align daily volume ratio to 6h timeframe
+    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Ensure enough data for EMA(34)
+    start_idx = 100  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(daily_trend_aligned[i]) or np.isnan(vol_ema[i])):
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or
+            np.isnan(strong_trend_aligned[i]) or np.isnan(vol_ratio_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long setup: break above R1 in daily uptrend with volume and session
-            if (daily_trend_aligned[i] > 0.5 and  # Daily uptrend
-                close[i] > camarilla_r1_aligned[i] and  # Break above R1
-                vol_confirm[i] and
-                session_filter[i]):
-                signals[i] = 0.20
+            # Long setup: break above weekly Donchian high in strong trend with volume spike
+            if (strong_trend_aligned[i] > 0.5 and  # Strong trend (ADX >= 25)
+                close[i] > donch_high_aligned[i] and  # Break above Donchian high
+                vol_ratio_aligned[i] > 2.0):          # Daily volume > 2x 20-day average
+                signals[i] = 0.25
                 position = 1
-            # Short setup: break below S1 in daily downtrend with volume and session
-            elif (daily_trend_aligned[i] <= 0.5 and  # Daily downtrend
-                  close[i] < camarilla_s1_aligned[i] and  # Break below S1
-                  vol_confirm[i] and
-                  session_filter[i]):
-                signals[i] = -0.20
+            # Short setup: break below weekly Donchian low in strong trend with volume spike
+            elif (strong_trend_aligned[i] > 0.5 and  # Strong trend (ADX >= 25)
+                  close[i] < donch_low_aligned[i] and   # Break below Donchian low
+                  vol_ratio_aligned[i] > 2.0):          # Daily volume > 2x 20-day average
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: break below S1 or trend turns down
-            if close[i] < camarilla_s1_aligned[i] or daily_trend_aligned[i] <= 0.5:
+            # Long exit: break below weekly Donchian low or trend weakens
+            if close[i] < donch_low_aligned[i] or strong_trend_aligned[i] <= 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: break above R1 or trend turns up
-            if close[i] > camarilla_r1_aligned[i] or daily_trend_aligned[i] > 0.5:
+            # Short exit: break above weekly Donchian high or trend weakens
+            if close[i] > donch_high_aligned[i] or strong_trend_aligned[i] <= 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
