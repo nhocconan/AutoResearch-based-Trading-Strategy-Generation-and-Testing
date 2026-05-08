@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Donchian_Breakout_Volume_Trend_12h"
-timeframe = "4h"
+name = "1d_RSI_Pullback_Trend_Filter_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,69 +17,93 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data once for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 12h EMA(50) for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Weekly EMA(50) for trend filter
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Donchian channels (20-period) on 4h
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    for i in range(19, n):
-        donchian_high[i] = np.max(high[i-19:i+1])
-        donchian_low[i] = np.min(low[i-19:i+1])
+    # Daily RSI(14) for pullback entries
+    delta = np.diff(close, prepend=np.nan)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Volume spike detection (20-period average)
-    vol_avg = np.full(n, np.nan)
-    for i in range(19, n):
-        vol_avg[i] = np.mean(volume[i-19:i+1])
-    volume_spike = volume > (vol_avg * 1.5)
+    # Wilder's smoothing for RSI
+    def wilders_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        result[period-1] = np.nanmean(data[:period])
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    avg_gain = wilders_smooth(gain, 14)
+    avg_loss = wilders_smooth(loss, 14)
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # warmup
+    start_idx = 50  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_50_12h_aligned[i])):
+        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(rsi[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Trend filter: weekly EMA50 slope
+        if i >= start_idx + 1:
+            ema_prev = ema50_1w_aligned[i-1]
+            ema_curr = ema50_1w_aligned[i]
+            if not (np.isnan(ema_prev) or np.isnan(ema_curr)):
+                trend_up = ema_curr > ema_prev
+                trend_down = ema_curr < ema_prev
+            else:
+                trend_up = trend_down = False
+        else:
+            trend_up = trend_down = False
+        
+        rsi_val = rsi[i]
+        
         if position == 0:
-            # Long breakout: price > Donchian high + volume spike + above 12h EMA50
-            if (close[i] > donchian_high[i] and 
-                volume_spike[i] and 
-                close[i] > ema_50_12h_aligned[i]):
+            # Long: uptrend + RSI pullback (< 40)
+            if trend_up and rsi_val < 40:
                 signals[i] = 0.25
                 position = 1
-            # Short breakout: price < Donchian low + volume spike + below 12h EMA50
-            elif (close[i] < donchian_low[i] and 
-                  volume_spike[i] and 
-                  close[i] < ema_50_12h_aligned[i]):
+            # Short: downtrend + RSI bounce (> 60)
+            elif trend_down and rsi_val > 60:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price < Donchian low
-            if close[i] < donchian_low[i]:
+            # Exit long: trend reversal or RSI overbought
+            if not trend_up or rsi_val > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price > Donchian high
-            if close[i] > donchian_high[i]:
+            # Exit short: trend reversal or RSI oversold
+            if not trend_down or rsi_val < 30:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
+
+# Hypothesis: Daily RSI pullbacks in the direction of weekly trend capture
+# intermediate swings in both bull and bear markets. Weekly EMA50 filter
+# ensures we only trade with the higher timeframe trend, reducing whipsaw.
+# RSI < 40 for longs and > 60 for shorts provides oversold/overbought
+# entries during pullbacks. Exits on trend reversal or RSI extremes.
+# Weekly timeframe reduces noise, daily provides timely entries.
+# Target: 20-60 trades over 4 years (5-15/year) to minimize fee drag.
