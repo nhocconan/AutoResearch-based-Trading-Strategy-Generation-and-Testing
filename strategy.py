@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using daily Camarilla pivot levels with volume confirmation and ADX trend filter.
-# Camarilla levels (R3, S3) act as strong support/resistance in trending markets.
-# Long when price breaks above R3 in an uptrend with volume confirmation.
-# Short when price breaks below S3 in a downtrend with volume confirmation.
-# Uses daily ADX(14) > 25 to filter for trending conditions only.
-# Designed for low trade frequency (20-50/year) to minimize fee drag and capture high-probability breakouts.
+# Hypothesis: 4h strategy using 1-day volume-weighted average price (VWAP) with 1-week trend filter.
+# VWAP acts as dynamic support/resistance. Long when price pulls back to VWAP in uptrend with volume confirmation.
+# Short when price bounces from VWAP in downtrend with volume confirmation.
+# Uses 1-week trend filter to ensure alignment with higher timeframe momentum.
+# Designed for low trade frequency (20-50/year) to minimize fee drag and capture high-probability mean reversion.
 
-name = "4h_Camarilla_R3S3_Breakout_ADX_Trend_Volume"
+name = "4h_VWAP_Pullback_TrendFilter_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,7 +23,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation
+    # Get daily data for VWAP calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -32,111 +31,78 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Camarilla pivot levels from previous day
-    camarilla_r3 = np.zeros_like(close_1d)  # R3 level
-    camarilla_s3 = np.zeros_like(close_1d)  # S3 level
+    # Calculate daily VWAP
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
+    vwap_numerator = np.cumsum(typical_price_1d * volume_1d)
+    vwap_denominator = np.cumsum(volume_1d)
+    vwap_1d = vwap_numerator / vwap_denominator
     
-    for i in range(1, len(close_1d)):
-        # Previous day's high, low, close
-        ph = high_1d[i-1]
-        pl = low_1d[i-1]
-        pc = close_1d[i-1]
-        
-        # Range
-        rng = ph - pl
-        
-        # Camarilla levels
-        camarilla_r3[i] = pc + (rng * 1.1/2)  # R3 = C + (H-L)*1.1/2
-        camarilla_s3[i] = pc - (rng * 1.1/2)  # S3 = C - (H-L)*1.1/2
+    # Align VWAP to 4h timeframe
+    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
     
-    # First day has no prior data
-    camarilla_r3[0] = camarilla_s3[0] = np.nan
-    
-    # Align Camarilla levels to 4h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Get daily ADX(14) for trend filter
-    if len(df_1d) < 14:
+    # Get weekly trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[0], tr])  # First TR is 0
+    close_1w = df_1w['close'].values
+    # Weekly EMA(21) for trend filter
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    weekly_trend_up = ema_21_1w[1:] > ema_21_1w[:-1]  # Rising weekly EMA
+    weekly_trend_up = np.concatenate([[False], weekly_trend_up])  # Align with daily index
+    weekly_trend_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_up.astype(float))
     
-    # Calculate Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    # 4h EMA(50) for intermediate trend and dynamic support/resistance
+    close_series = pd.Series(close)
+    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Smooth TR and DM using Wilder's smoothing (equivalent to EMA with alpha=1/14)
-    def wilders_smooth(data, period):
-        result = np.zeros_like(data)
-        result[period-1] = np.mean(data[:period])
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    atr = wilders_smooth(tr, 14)
-    di_plus = wilders_smooth(dm_plus, 14)
-    di_minus = wilders_smooth(dm_minus, 14)
-    
-    # Calculate DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 
-                  np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
-    adx = wilders_smooth(dx, 14)
-    
-    # Align ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume confirmation: current volume > 1.5x 20-period EMA
-    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ema * 1.5)
+    # Volume confirmation: current volume > 1.8x 30-period EMA
+    vol_ema = pd.Series(volume).ewm(span=30, adjust=False, min_periods=30).mean().values
+    vol_confirm = volume > (vol_ema * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for ADX calculation
+    start_idx = 50  # Ensure enough data for EMA(50)
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(vwap_aligned[i]) or np.isnan(ema_50[i]) or 
+            np.isnan(weekly_trend_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long setup: break above R3 in uptrend (ADX > 25) with volume
-            if (adx_aligned[i] > 25 and  # Trending condition
-                close[i] > camarilla_r3_aligned[i] and  # Break above R3
+            # Long setup: pullback to VWAP in uptrend with volume
+            if (weekly_trend_aligned[i] > 0.5 and  # Weekly uptrend
+                close[i] > ema_50[i] and             # Above intermediate EMA
+                close[i] <= vwap_aligned[i] * 1.005 and  # Near VWAP (allow 0.5% slack)
+                close[i] >= vwap_aligned[i] * 0.995 and
                 vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short setup: break below S3 in downtrend (ADX > 25) with volume
-            elif (adx_aligned[i] > 25 and  # Trending condition
-                  close[i] < camarilla_s3_aligned[i] and  # Break below S3
+            # Short setup: bounce from VWAP in downtrend with volume
+            elif (weekly_trend_aligned[i] <= 0.5 and  # Weekly downtrend
+                  close[i] < ema_50[i] and            # Below intermediate EMA
+                  close[i] >= vwap_aligned[i] * 0.995 and  # Near VWAP
+                  close[i] <= vwap_aligned[i] * 1.005 and
                   vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: break below S3 or trend weakens (ADX < 20)
-            if close[i] < camarilla_s3_aligned[i] or adx_aligned[i] < 20:
+            # Long exit: break below VWAP or trend turns down
+            if close[i] < vwap_aligned[i] * 0.995 or weekly_trend_aligned[i] <= 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: break above R3 or trend weakens (ADX < 20)
-            if close[i] > camarilla_r3_aligned[i] or adx_aligned[i] < 20:
+            # Short exit: break above VWAP or trend turns up
+            if close[i] > vwap_aligned[i] * 1.005 or weekly_trend_aligned[i] > 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
