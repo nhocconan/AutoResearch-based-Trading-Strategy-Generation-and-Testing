@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_Choppiness_Trend_Follow"
-timeframe = "1d"
+name = "6h_MultiFactor_Signal_Confirmation"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,65 +17,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data once
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get daily data once for higher timeframe context
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly EMA(21) for trend direction
-    close_1w = df_1w['close'].values
-    ema21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
+    # Calculate 1d EMA(50) for trend filter
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate daily ATR(14) for volatility
-    tr = np.maximum(high[1:] - low[1:], 
-                    np.maximum(np.abs(high[1:] - close[:-1]), 
-                               np.abs(low[1:] - close[:-1])))
-    tr = np.concatenate([[np.nan], tr])
-    atr14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate 12h RSI(14) for momentum filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
+        return np.zeros(n)
     
-    # Calculate daily Choppiness Index (14-period)
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
+    close_12h = df_12h['close'].values
+    delta = np.diff(close_12h)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi12h = 100 - (100 / (1 + rs))
+    rsi12h_aligned = align_htf_to_ltf(prices, df_12h, rsi12h)
+    
+    # Calculate 6-hour Bollinger Bands (20, 2)
+    ma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = ma20 + 2 * std20
+    lower_bb = ma20 - 2 * std20
+    
+    # Volume filter: current volume > 1.5 * 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # warmup
+    start_idx = 50  # warmup
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema21_1w_aligned[i]) or np.isnan(chop[i]) or 
-            np.isnan(atr14[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(rsi12h_aligned[i]) or 
+            np.isnan(ma20[i]) or np.isnan(std20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema_val = ema21_1w_aligned[i]
-        chop_val = chop[i]
+        ema_val = ema50_1d_aligned[i]
+        rsi_val = rsi12h_aligned[i]
+        vol_filt = volume_filter[i]
         
         if position == 0:
-            # Enter long: trending market (CHOP < 38.2) and price above weekly EMA
-            if chop_val < 38.2 and close[i] > ema_val:
+            # Enter long: price near lower BB, RSI oversold, above 1d EMA, volume confirmation
+            if (close[i] <= lower_bb[i] and rsi_val < 30 and 
+                close[i] > ema_val and vol_filt):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: trending market (CHOP < 38.2) and price below weekly EMA
-            elif chop_val < 38.2 and close[i] < ema_val:
+            # Enter short: price near upper BB, RSI overbought, below 1d EMA, volume confirmation
+            elif (close[i] >= upper_bb[i] and rsi_val > 70 and 
+                  close[i] < ema_val and vol_filt):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: market becomes ranging (CHOP > 61.8) or price crosses below weekly EMA
-            if chop_val > 61.8 or close[i] < ema_val:
+            # Exit long: price crosses above middle band OR RSI overbought
+            if (close[i] >= ma20[i] or rsi_val > 70):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: market becomes ranging (CHOP > 61.8) or price crosses above weekly EMA
-            if chop_val > 61.8 or close[i] > ema_val:
+            # Exit short: price crosses below middle band OR RSI oversold
+            if (close[i] <= ma20[i] or rsi_val < 30):
                 signals[i] = 0.0
                 position = 0
             else:
