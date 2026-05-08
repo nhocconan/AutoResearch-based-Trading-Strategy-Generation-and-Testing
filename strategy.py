@@ -3,89 +3,83 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d RSI(14) with 1w EMA34 trend filter and volume confirmation
-# Long when RSI < 30 (oversold), 1w EMA34 rising, volume > 1.3x average
-# Short when RSI > 70 (overbought), 1w EMA34 falling, volume > 1.3x average
-# Uses RSI for mean reversion signals, weekly EMA for trend filter, volume for confirmation
-# Targets 7-25 trades per year (28-100 over 4 years) for low fee drag and high win rate
-# Works in both bull and bear markets due to trend filter avoiding counter-trend trades
+# Hypothesis: 12h Williams %R with 1d EMA34 trend filter and volume spike confirmation
+# Long when Williams %R crosses above -80 (oversold), price > 1d EMA34, volume > 2x average
+# Short when Williams %R crosses below -20 (overbought), price < 1d EMA34, volume > 2x average
+# Uses Williams %R for mean reversion signals, EMA34 for trend filter, volume spike for confirmation
+# Targets 12-37 trades per year (50-150 over 4 years) to avoid fee drag
+# Works in both bull and bear markets due to trend filter and volume confirmation
 
-name = "1d_RSI14_1wEMA34_Volume"
-timeframe = "1d"
+name = "12h_WilliamsR_1dEMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 34:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Get 1d data for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate RSI(14) - mean reversion signal
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate 14-period Williams %R
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
     
-    # Wilder's smoothing (equivalent to EMA with alpha=1/14)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate EMA34 on 1d close for trend filter
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate EMA34 on 1w close for trend filter
-    close_1w = df_1w['close'].values
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
-    
-    # Volume confirmation: current volume > 1.3x 20-period average
+    # Volume spike: current volume > 2x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_conf = volume > (vol_ma * 1.3)
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Need at least 34 days of data for RSI and EMA
+    start_idx = 34  # Need at least 34 days of data for EMA34
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(rsi[i]) or np.isnan(ema34_1w_aligned[i]) or 
+        if (np.isnan(williams_r[i]) or np.isnan(ema34_1d_aligned[i]) or 
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        rsi_val = rsi[i]
-        ema34_1w_val = ema34_1w_aligned[i]
-        vol_conf_val = vol_conf[i]
+        wr = williams_r[i]
+        ema34 = ema34_1d_aligned[i]
+        vol_spike_val = vol_spike[i]
         
         if position == 0:
-            # Enter long: RSI oversold (<30), 1w uptrend, volume confirmation
-            if rsi_val < 30 and ema34_1w_val > 0 and vol_conf_val:
+            # Enter long: Williams %R crosses above -80 (from below), price > EMA34, volume spike
+            if i > start_idx and williams_r[i-1] <= -80 and wr > -80 and close[i] > ema34 and vol_spike_val:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: RSI overbought (>70), 1w downtrend, volume confirmation
-            elif rsi_val > 70 and ema34_1w_val < 0 and vol_conf_val:
+            # Enter short: Williams %R crosses below -20 (from above), price < EMA34, volume spike
+            elif i > start_idx and williams_r[i-1] >= -20 and wr < -20 and close[i] < ema34 and vol_spike_val:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: RSI overbought (>70) or 1w trend down
-            if rsi_val > 70 or ema34_1w_val < 0:
+            # Exit long: Williams %R crosses below -50 or price < EMA34
+            if wr < -50 or close[i] < ema34:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: RSI oversold (<30) or 1w trend up
-            if rsi_val < 30 or ema34_1w_val > 0:
+            # Exit short: Williams %R crosses above -50 or price > EMA34
+            if wr > -50 or close[i] > ema34:
                 signals[i] = 0.0
                 position = 0
             else:
