@@ -3,8 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_Camarilla_R1_S1_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timezone = "UTC"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,20 +18,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate weekly data once before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly EMA34 for trend
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Calculate daily data once before loop
+    # Calculate 1d Camarilla pivot levels once before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -39,7 +27,7 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily Camarilla levels (R1, S1) from previous day
+    # Calculate Camarilla levels (R1, S1)
     H_prev = np.roll(high_1d, 1)
     L_prev = np.roll(low_1d, 1)
     C_prev = np.roll(close_1d, 1)
@@ -53,10 +41,14 @@ def generate_signals(prices):
     R1 = pivot + (range_hl * 1.1 / 12)
     S1 = pivot - (range_hl * 1.1 / 12)
     
-    # Align Camarilla levels to daily timeframe
+    # Align Camarilla levels to 12h timeframe (wait for daily bar close)
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    
+    # 1d trend: EMA34
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume spike: current volume > 2.0x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -70,7 +62,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
         if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(pivot_aligned[i]) or np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -78,13 +70,13 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: break above R1 + weekly uptrend + volume spike
+            # Long: break above R1 + uptrend + volume spike
             long_cond = (close[i] > R1_aligned[i]) and \
-                        (close[i] > ema_34_1w_aligned[i]) and \
+                        (close[i] > ema_34_1d_aligned[i]) and \
                         volume_spike[i]
-            # Short: break below S1 + weekly downtrend + volume spike
+            # Short: break below S1 + downtrend + volume spike
             short_cond = (close[i] < S1_aligned[i]) and \
-                         (close[i] < ema_34_1w_aligned[i]) and \
+                         (close[i] < ema_34_1d_aligned[i]) and \
                          volume_spike[i]
             
             if long_cond:
