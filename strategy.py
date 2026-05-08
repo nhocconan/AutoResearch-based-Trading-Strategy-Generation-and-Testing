@@ -3,19 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian breakout with 1w EMA200 trend filter and volume confirmation.
-# Long when price breaks above 20-day high AND price > 1w EMA200 AND volume > 1.5x 20-day average.
-# Short when price breaks below 20-day low AND price < 1w EMA200 AND volume > 1.5x 20-day average.
-# Exit when price crosses back below 10-day SMA (long) or above 10-day SMA (short).
-# This strategy targets fewer trades (~15-25/year) by requiring multiple confluence factors.
+# Hypothesis: 6h Bollinger Band squeeze breakout with 1d trend filter and volume confirmation.
+# Long when: BB width < 10th percentile (squeeze), price breaks above upper BB, volume > 1.5x 20-period avg, and price > 1d EMA50.
+# Short when: BB width < 10th percentile (squeeze), price breaks below lower BB, volume > 1.5x 20-period avg, and price < 1d EMA50.
+# Exit when price returns to middle BB (mean reversion).
+# Uses Bollinger Band squeeze to identify low volatility breakouts, with 1d trend filter to avoid counter-trend trades.
+# Target: 60-120 total trades over 4 years (15-30/year) for low fee drift.
 
-name = "1d_Donchian20_1wEMA200_Volume"
-timeframe = "1d"
+name = "6h_BollingerSqueeze_1dEMA50_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,46 +24,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d Donchian channels
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 1d data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # 1d volume filter: current volume > 1.5x 20-day average
+    # Bollinger Bands (20, 2) on 6h data
+    close_series = pd.Series(close)
+    bb_middle = close_series.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_series.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2 * bb_std
+    bb_lower = bb_middle - 2 * bb_std
+    bb_width = bb_upper - bb_lower
+    
+    # BB width percentile (10th) for squeeze detection - using 50-period lookback
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=50).quantile(0.10).values
+    squeeze_condition = bb_width < bb_width_percentile
+    
+    # 6h volume filter: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma20)
     
-    # 1d 10-day SMA for exit
-    sma10 = pd.Series(close).rolling(window=10, min_periods=10).mean().values
-    
-    # 1w data for EMA200 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    # 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # Sufficient warmup for EMA200
+    start_idx = 50  # Sufficient warmup for BB and EMA50
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(volume_filter[i]) or np.isnan(sma10[i]) or 
-            np.isnan(ema200_1w_aligned[i])):
+        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(bb_middle[i]) or
+            np.isnan(squeeze_condition[i]) or np.isnan(volume_filter[i]) or 
+            np.isnan(ema50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: break above Donchian high, above 1w EMA200, volume spike
-            long_cond = (close[i] > donchian_high[i]) and (close[i] > ema200_1w_aligned[i]) and volume_filter[i]
-            # Short conditions: break below Donchian low, below 1w EMA200, volume spike
-            short_cond = (close[i] < donchian_low[i]) and (close[i] < ema200_1w_aligned[i]) and volume_filter[i]
+            # Long conditions: squeeze breakout above upper BB, volume spike, above 1d EMA50
+            long_cond = (squeeze_condition[i] and 
+                        close[i] > bb_upper[i] and 
+                        volume_filter[i] and 
+                        close[i] > ema50_1d_aligned[i])
+            
+            # Short conditions: squeeze breakout below lower BB, volume spike, below 1d EMA50
+            short_cond = (squeeze_condition[i] and 
+                         close[i] < bb_lower[i] and 
+                         volume_filter[i] and 
+                         close[i] < ema50_1d_aligned[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -71,15 +86,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below 10-day SMA
-            if close[i] < sma10[i] and close[i-1] >= sma10[i-1]:
+            # Long exit: price returns to middle BB (mean reversion)
+            if close[i] <= bb_middle[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above 10-day SMA
-            if close[i] > sma10[i] and close[i-1] <= sma10[i-1]:
+            # Short exit: price returns to middle BB (mean reversion)
+            if close[i] >= bb_middle[i]:
                 signals[i] = 0.0
                 position = 0
             else:
