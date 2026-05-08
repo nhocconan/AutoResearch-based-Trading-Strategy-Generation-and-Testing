@@ -3,20 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d ADX(14) + Volume Spike + 1w EMA20 Trend Filter
-# Long when ADX > 25 (trending) + volume > 2x 20-period avg + price above 1w EMA20
-# Short when ADX > 25 + volume > 2x 20-period avg + price below 1w EMA20
-# Exit when ADX < 20 (range) or price crosses 1w EMA20 in opposite direction
-# Targets 15-25 trades per year for low fee drag (< 100 total over 4 years)
-# ADX filters choppy markets, volume confirms momentum, 1w EMA provides multi-timeframe trend bias
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) + 12h ADX trend filter + volume confirmation
+# Long when Bull Power > 0, ADX > 25 (trending), and volume > 1.5x 20-period average
+# Short when Bear Power < 0, ADX > 25 (trending), and volume > 1.5x 20-period average
+# Exit when Elder Power reverses sign or ADX < 20 (range) or volume drops
+# Targets 12-37 trades per year (50-150 total over 4 years) for optimal fee drag
+# Elder Ray measures bull/bear strength relative to EMA, ADX filters for trending markets,
+# volume confirms momentum strength. Works in both bull (strong bull power) and bear (strong bear power) markets.
 
-name = "1d_ADX14_VolumeSpike_1wEMA20_Trend"
-timeframe = "1d"
+name = "6h_ElderRay_12hADX_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,99 +25,105 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # ADX calculation (14-period)
-    def true_range(h, l, c_prev):
-        tr1 = h - l
-        tr2 = np.abs(h - c_prev)
-        tr3 = np.abs(l - c_prev)
-        return np.maximum(tr1, np.maximum(tr2, tr3))
+    # Elder Ray components (13-period EMA as base)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = true_range(high[i], low[i], close[i-1])
+    # Get 12h data for ADX filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
+        return np.zeros(n)
     
-    # Directional movement
-    up_move = high[1:] - high[:-1]
-    down_move = low[:-1] - low[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
+    # Calculate ADX (14-period) on 12h data
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Smoothed values
-    def smooth_wilder(arr, period):
+    # True Range
+    tr1 = np.abs(high_12h[1:] - low_12h[:-1])
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr = np.concatenate([[np.nan], tr])
+    
+    # Directional Movement
+    dm_plus = np.where((high_12h[1:] - high_12h[:-1]) > (low_12h[:-1] - low_12h[1:]), 
+                       np.maximum(high_12h[1:] - high_12h[:-1], 0), 0)
+    dm_minus = np.where((low_12h[:-1] - low_12h[1:]) > (high_12h[1:] - high_12h[:-1]), 
+                        np.maximum(low_12h[:-1] - low_12h[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Smooth TR, DM+, DM- (14-period)
+    def smooth_series(arr, period):
         result = np.full_like(arr, np.nan, dtype=float)
         if len(arr) < period:
             return result
+        # First value: simple average
         result[period-1] = np.nansum(arr[:period])
+        # Subsequent values: Wilder smoothing
         for i in range(period, len(arr)):
             result[i] = result[i-1] - (result[i-1] / period) + arr[i]
         return result
     
-    period = 14
-    tr_smooth = smooth_wilder(tr, period)
-    plus_dm_smooth = smooth_wilder(plus_dm, period)
-    minus_dm_smooth = smooth_wilder(minus_dm, period)
+    tr14 = smooth_series(tr, 14)
+    dm_plus_14 = smooth_series(dm_plus, 14)
+    dm_minus_14 = smooth_series(dm_minus, 14)
     
-    # DI and DX
-    plus_di = 100 * plus_dm_smooth / tr_smooth
-    minus_di = 100 * minus_dm_smooth / tr_smooth
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = smooth_wilder(dx, period)
+    # DI+ and DI-
+    di_plus = np.where(tr14 != 0, 100 * dm_plus_14 / tr14, 0)
+    di_minus = np.where(tr14 != 0, 100 * dm_minus_14 / tr14, 0)
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = smooth_series(dx, 14)
     
-    # Calculate EMA20 on 1w close for trend filter
-    close_1w = df_1w['close'].values
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # Align 12h indicators to 6s timeframe
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx)
     
-    # Volume confirmation: current volume > 2x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 2.0)
+    vol_conf = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for ADX and EMA
+    start_idx = 50  # Need enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(adx[i]) or np.isnan(ema20_1w_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(adx_12h_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        close_val = close[i]
-        adx_val = adx[i]
-        ema20_val = ema20_1w_aligned[i]
-        vol_spike_val = vol_spike[i]
+        bull_val = bull_power[i]
+        bear_val = bear_power[i]
+        adx_val = adx_12h_aligned[i]
+        vol_conf_val = vol_conf[i]
         
         if position == 0:
-            # Enter long: ADX > 25 (trending) + volume spike + price above 1w EMA20
-            if adx_val > 25 and vol_spike_val and close_val > ema20_val:
+            # Enter long: Bull Power > 0, ADX > 25 (trending), volume confirmation
+            if bull_val > 0 and adx_val > 25 and vol_conf_val:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: ADX > 25 (trending) + volume spike + price below 1w EMA20
-            elif adx_val > 25 and vol_spike_val and close_val < ema20_val:
+            # Enter short: Bear Power < 0, ADX > 25 (trending), volume confirmation
+            elif bear_val < 0 and adx_val > 25 and vol_conf_val:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: ADX < 20 (range) or price crosses below 1w EMA20
-            if adx_val < 20 or close_val < ema20_val:
+            # Exit long: Bull Power <= 0 or ADX < 20 (range) or volume drops
+            if bull_val <= 0 or adx_val < 20 or not vol_conf_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: ADX < 20 (range) or price crosses above 1w EMA20
-            if adx_val < 20 or close_val > ema20_val:
+            # Exit short: Bear Power >= 0 or ADX < 20 (range) or volume drops
+            if bear_val >= 0 or adx_val < 20 or not vol_conf_val:
                 signals[i] = 0.0
                 position = 0
             else:
