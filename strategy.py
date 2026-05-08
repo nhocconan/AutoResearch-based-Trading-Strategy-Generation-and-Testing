@@ -3,103 +3,101 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Hull Moving Average (HMA) crossover with RSI filter and weekly trend confirmation
-# Long when HMA(21) crosses above HMA(55) and RSI < 55 in weekly uptrend
-# Short when HMA(21) crosses below HMA(55) and RSI > 45 in weekly downtrend
-# HMA reduces lag while maintaining smoothness, RSI filters overextension, weekly trend ensures alignment
-# Targets 30-100 trades over 4 years to minimize fee drag while capturing major trends
+# Hypothesis: 6h Williams Alligator + 12h Trend + Volume Spike
+# Long when price > Alligator teeth, 12h EMA50 rising, volume > 1.5x avg
+# Short when price < Alligator teeth, 12h EMA50 falling, volume > 1.5x avg
+# Alligator identifies trend, EMA50 confirms higher timeframe direction, volume filters weak moves
+# Targets 50-150 total trades over 4 years (12-37/year) to balance accuracy and frequency
 
-name = "1d_HMA_Crossover_RSI_WeeklyTrend"
-timeframe = "1d"
+name = "6h_WilliamsAlligator_12hTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get weekly data once for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 55:
+    # Get 12h data once for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate weekly EMA(34) for trend filter (more responsive than SMA)
-    weekly_close = df_1w['close'].values
-    ema34_1w = pd.Series(weekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Calculate 12h EMA(50) for trend filter
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # HMA(21) - Hull Moving Average
-    def wma(data, window):
-        weights = np.arange(1, window + 1)
-        return np.convolve(data, weights, 'valid') / weights.sum()
+    # Williams Alligator (13,8,5) with SMMA (Smoothed Moving Average)
+    def smma(arr, period):
+        result = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return result
+        # First value is SMA
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: SMMA = (prev * (period-1) + current) / period
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    def hma(data, window):
-        half = window // 2
-        sqrt = int(np.sqrt(window))
-        wma_half = wma(data, half)
-        wma_full = wma(data, window)
-        raw_hma = 2 * wma_half - wma_full
-        return wma(raw_hma, sqrt)
+    jaw = smma(high, 13)  # Blue line (13-period)
+    teeth = smma(low, 8)   # Red line (8-period)
+    lips = smma(close, 5)  # Green line (5-period)
     
-    # Pad arrays to match original length
-    hma_21_raw = hma(close, 21)
-    hma_55_raw = hma(close, 55)
-    hma_21 = np.full_like(close, np.nan)
-    hma_55 = np.full_like(close, np.nan)
-    hma_21[20:] = hma_21_raw  # HMA(21) needs 21 periods
-    hma_55[54:] = hma_55_raw  # HMA(55) needs 55 periods
-    
-    # RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Volume spike filter: current volume > 1.5x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (vol_ma20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 55  # warmup for HMA(55)
+    start_idx = 50  # warmup for Alligator and EMA
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(hma_21[i]) or np.isnan(hma_55[i]) or np.isnan(rsi[i]) or 
-            np.isnan(ema34_1w_aligned[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        hma_21_val = hma_21[i]
-        hma_55_val = hma_55[i]
-        rsi_val = rsi[i]
-        ema34_1w_val = ema34_1w_aligned[i]
+        # Alligator condition: price alignment
+        price_above_teeth = close[i] > teeth[i]
+        price_below_teeth = close[i] < teeth[i]
         
         if position == 0:
-            # Enter long: HMA(21) > HMA(55) and RSI < 55 in weekly uptrend
-            if hma_21_val > hma_55_val and rsi_val < 55 and ema34_1w_val > 0:
+            # Enter long: price > teeth, 12h EMA50 rising, volume spike
+            if (price_above_teeth and 
+                ema50_12h_aligned[i] > ema50_12h_aligned[i-1] and 
+                vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: HMA(21) < HMA(55) and RSI > 45 in weekly downtrend
-            elif hma_21_val < hma_55_val and rsi_val > 45 and ema34_1w_val < 0:
+            # Enter short: price < teeth, 12h EMA50 falling, volume spike
+            elif (price_below_teeth and 
+                  ema50_12h_aligned[i] < ema50_12h_aligned[i-1] and 
+                  vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: HMA(21) < HMA(55) or RSI > 70 (overbought) or weekly trend down
-            if hma_21_val < hma_55_val or rsi_val > 70 or ema34_1w_val < 0:
+            # Exit long: price < teeth or 12h EMA50 falling or no volume spike
+            if (price_below_teeth or 
+                ema50_12h_aligned[i] < ema50_12h_aligned[i-1] or 
+                not vol_spike[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: HMA(21) > HMA(55) or RSI < 30 (oversold) or weekly trend up
-            if hma_21_val > hma_55_val or rsi_val < 30 or ema34_1w_val > 0:
+            # Exit short: price > teeth or 12h EMA50 rising or no volume spike
+            if (price_above_teeth or 
+                ema50_12h_aligned[i] > ema50_12h_aligned[i-1] or 
+                not vol_spike[i]):
                 signals[i] = 0.0
                 position = 0
             else:
