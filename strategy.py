@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_KAMA_Trend_with_Volume_Confirmation"
-timeframe = "4h"
+name = "1d_Weekly_Camarilla_Pivot_Trend_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,82 +17,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data once
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data once
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate 1d KAMA for trend direction
-    close_1d = df_1d['close'].values
-    # Efficiency Ratio (ER)
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.abs(np.diff(close_1d))
-    er = np.divide(change, volatility, out=np.zeros_like(change), where=volatility!=0)
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)
-    slow_sc = 2 / (30 + 1)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    kama_1d = kama
-    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
+    # Calculate weekly Camarilla pivot levels
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Volume spike detection: current volume > 2 * 20-period average
+    # Weekly pivot calculation
+    pivot_1w = (high_1w + low_1w + close_1w) / 3
+    range_1w = high_1w - low_1w
+    
+    # Camarilla levels: R3, R1, S1, S3
+    r3_1w = pivot_1w + (range_1w * 1.1)
+    r1_1w = pivot_1w + (range_1w * 1.1 / 6)
+    s1_1w = pivot_1w - (range_1w * 1.1 / 6)
+    s3_1w = pivot_1w - (range_1w * 1.1)
+    
+    # Align weekly levels to daily timeframe
+    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    
+    # Calculate daily EMA(34) for trend filter
+    daily_ema34 = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Calculate daily volume spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # warmup
+    start_idx = 40  # warmup for weekly alignment
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if np.isnan(kama_1d_aligned[i]):
+        if (np.isnan(r3_1w_aligned[i]) or np.isnan(s3_1w_aligned[i]) or 
+            np.isnan(daily_ema34[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        kama_val = kama_1d_aligned[i]
-        vol_spike = volume_spike[i]
-        
         if position == 0:
-            # Enter long: price above KAMA with volume spike
-            if close[i] > kama_val and vol_spike:
+            # Enter long: price touches S1 with volume spike and above weekly EMA
+            if (low[i] <= s1_1w_aligned[i] and volume_spike[i] and 
+                close[i] > daily_ema34[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price below KAMA with volume spike
-            elif close[i] < kama_val and vol_spike:
+            # Enter short: price touches R1 with volume spike and below weekly EMA
+            elif (high[i] >= r1_1w_aligned[i] and volume_spike[i] and 
+                  close[i] < daily_ema34[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price below KAMA
-            if close[i] < kama_val:
+            # Exit long: price touches S3 or closes below daily EMA
+            if (low[i] <= s3_1w_aligned[i] or close[i] < daily_ema34[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price above KAMA
-            if close[i] > kama_val:
+            # Exit short: price touches R3 or closes above daily EMA
+            if (high[i] >= r3_1w_aligned[i] or close[i] > daily_ema34[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
-
-# Hypothesis: Uses daily KAMA (adaptive moving average) to capture trend direction with 4h execution.
-# - Enters long when price is above daily KAMA with volume confirmation
-# - Enters short when price is below daily KAMA with volume confirmation
-# - Exits when price crosses back below/above daily KAMA
-# - Volume spike filter ensures trades occur with conviction
-# - KAMA adapts to market conditions: fast in trends, slow in ranges
-# - Target: 50-100 total trades over 4 years (12-25/year) to minimize fee drag
-# - Position size: 0.25 for balanced risk/return
-# - Works in both bull and bear markets by following daily trend direction
-# - Volume confirmation reduces false signals in low-volume environments
-# - Focus on BTC and ETH as primary targets (not SOL-only)
