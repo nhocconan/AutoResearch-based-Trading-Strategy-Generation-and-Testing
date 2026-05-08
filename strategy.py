@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Choppiness Index regime filter combined with 1d RSI mean reversion.
-# Long when CHOP(14) > 61.8 (range) AND RSI(14) < 30 on 1d.
-# Short when CHOP(14) > 61.8 (range) AND RSI(14) > 70 on 1d.
-# Exit when RSI crosses back to neutral (40-60).
-# Chop filter avoids trending markets where mean reversion fails.
-# RSI extremes provide mean-reversion signals in ranging markets.
-# Target: 60-120 total trades over 4 years (15-30/year).
+# Hypothesis: 12h Donchian breakout with 1d EMA50 trend filter and volume confirmation.
+# Long when price breaks above 12h Donchian upper (20) AND price > 1d EMA50 AND volume > 1.5x 20-period average.
+# Short when price breaks below 12h Donchian lower (20) AND price < 1d EMA50 AND volume > 1.5x 20-period average.
+# Exit when price crosses back below Donchian upper (for long) or above Donchian lower (for short).
+# Donchian provides trend-following structure, EMA50 filters trend direction, volume confirms participation.
+# Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe.
 
-name = "4h_Chop_RSI_MeanReversion"
-timeframe = "4h"
+name = "12h_Donchian_1dEMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,48 +22,48 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # 4h Choppiness Index: high/low range vs true range over 14 periods
-    atr = pd.Series(np.sqrt((high - low)**2)).rolling(window=14, min_periods=14).mean().values
-    sum_high_low = pd.Series(high - low).rolling(window=14, min_periods=14).sum().values
-    chop = 100 * np.log10(sum_high_low / (atr * 14)) / np.log10(14)
+    # 12h volume filter: current volume > 1.5x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma20)
     
-    # 1d data for RSI
+    # 12h Donchian channels (20-period)
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_upper = high_roll
+    donchian_lower = low_roll
+    
+    # 1d data for EMA50
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # RSI on 1d close
-    close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # EMA50 on 1d close
+    ema_50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d RSI to 4h timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # Align 1d EMA50 to 12h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 14  # Sufficient warmup
+    start_idx = 50  # Sufficient warmup for EMA50
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if np.isnan(chop[i]) or np.isnan(rsi_aligned[i]):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: choppy market (range) + RSI oversold
-            long_cond = (chop[i] > 61.8) and (rsi_aligned[i] < 30)
-            # Short: choppy market (range) + RSI overbought
-            short_cond = (chop[i] > 61.8) and (rsi_aligned[i] > 70)
+            # Long conditions: break above Donchian upper, price > EMA50, volume filter
+            long_cond = (close[i] > donchian_upper[i]) and (close[i] > ema_50_aligned[i]) and volume_filter[i]
+            # Short conditions: break below Donchian lower, price < EMA50, volume filter
+            short_cond = (close[i] < donchian_lower[i]) and (close[i] < ema_50_aligned[i]) and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -73,15 +72,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: RSI returns to neutral (40-60)
-            if rsi_aligned[i] >= 40:
+            # Long exit: cross below Donchian upper
+            if close[i] < donchian_upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI returns to neutral (40-60)
-            if rsi_aligned[i] <= 60:
+            # Short exit: cross above Donchian lower
+            if close[i] > donchian_lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
