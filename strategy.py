@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6s Weekly Pivot Reversal with 1d Trend Filter and Volume Confirmation
+# Hypothesis: 6h Weekly Pivot Reversal with 1d Trend Filter and Volume Confirmation
 # Uses weekly pivot points (calculated from prior week) to identify potential reversal zones.
 # In bullish weekly trend (price > 1d EMA34), look for long entries near weekly S1/S2 with volume confirmation.
 # In bearish weekly trend (price < 1d EMA34), look for short entries near weekly R1/R2 with volume confirmation.
