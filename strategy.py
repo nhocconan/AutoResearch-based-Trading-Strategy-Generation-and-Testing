@@ -3,41 +3,34 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_Pivot_1dVolume_Trend"
-timeframe = "12h"
+name = "4h_TRIX_Trend_Volume_1d"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots, volume, and trend
+    # Get 1d data for TRIX and volume
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla pivot levels (based on previous day's range)
-    # Camarilla: H4 = Close + 1.5*(High-Low)*1.1/2, L4 = Close - 1.5*(High-Low)*1.1/2
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d TRIX (15-period)
     close_1d = df_1d['close'].values
+    ema1 = pd.Series(close_1d).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
     
-    camarilla_h4 = np.full(len(df_1d), np.nan)
-    camarilla_l4 = np.full(len(df_1d), np.nan)
-    
-    for i in range(1, len(df_1d)):  # need previous day's data
-        high_prev = high_1d[i-1]
-        low_prev = low_1d[i-1]
-        close_prev = close_1d[i-1]
-        range_prev = high_prev - low_prev
-        
-        camarilla_h4[i] = close_prev + 1.5 * range_prev * 1.1 / 2
-        camarilla_l4[i] = close_prev - 1.5 * range_prev * 1.1 / 2
+    # TRIX = (ema3 - previous ema3) / previous ema3 * 100
+    trix_raw = np.full(len(ema3), np.nan)
+    for i in range(1, len(ema3)):
+        if ema3[i-1] != 0:
+            trix_raw[i] = (ema3[i] - ema3[i-1]) / ema3[i-1] * 100
     
     # Calculate 1d volume average (20-period)
     vol_1d = df_1d['volume'].values
@@ -46,25 +39,18 @@ def generate_signals(prices):
         if i >= 19:
             vol_avg_20[i] = np.mean(vol_1d[i-19:i+1])
     
-    # Calculate 1d EMA50 for trend filter
-    close_series = pd.Series(close_1d)
-    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align 1d data to 12h timeframe
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    # Align 1d data to 4h timeframe
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix_raw)
     vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 50)  # warmup for indicators
+    start_idx = 50  # warmup for TRIX
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or 
-            np.isnan(vol_avg_20_aligned[i]) or np.isnan(ema_50_aligned[i])):
+        if np.isnan(trix_aligned[i]) or np.isnan(vol_avg_20_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -82,13 +68,10 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        camarilla_h4_current = camarilla_h4[idx_1d]
-        camarilla_l4_current = camarilla_l4[idx_1d]
+        trix_current = trix_raw[idx_1d]
         vol_avg_20_current = vol_avg_20[idx_1d]
-        ema_50_current = ema_50[idx_1d]
         
-        if (np.isnan(camarilla_h4_current) or np.isnan(camarilla_l4_current) or 
-            np.isnan(vol_avg_20_current) or np.isnan(ema_50_current)):
+        if np.isnan(trix_current) or np.isnan(vol_avg_20_current):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -98,31 +81,29 @@ def generate_signals(prices):
         vol_current = df_1d['volume'].iloc[idx_1d]
         vol_confirmed = vol_current > 1.5 * vol_avg_20_current
         
-        # Trend filter: price above/below EMA50
-        price_above_ema = close_1d[idx_1d] > ema_50_current
-        price_below_ema = close_1d[idx_1d] < ema_50_current
+        # TRIX signal: positive for long, negative for short
+        trix_positive = trix_current > 0
+        trix_negative = trix_current < 0
         
         # Trading logic
         if position == 0:
             # Look for entry
             if vol_confirmed:
-                # Long when price touches L4 and in uptrend
-                if close[i] <= camarilla_l4_aligned[i] and price_above_ema:
+                # Long when TRIX positive
+                if trix_positive:
                     signals[i] = 0.25
                     position = 1
-                # Short when price touches H4 and in downtrend
-                elif close[i] >= camarilla_h4_aligned[i] and price_below_ema:
+                # Short when TRIX negative
+                elif trix_negative:
                     signals[i] = -0.25
                     position = -1
         elif position == 1:
             # Manage long position
             exit_signal = False
-            # Exit when price reaches H4 or trend changes
-            if close[i] >= camarilla_h4_aligned[i]:
+            # Exit when TRIX turns negative or volume confirmation lost
+            if not trix_positive:
                 exit_signal = True
-            elif not price_above_ema:  # trend turned against position
-                exit_signal = True
-            elif not vol_confirmed:  # volume confirmation lost
+            elif not vol_confirmed:
                 exit_signal = True
             
             if exit_signal:
@@ -133,12 +114,10 @@ def generate_signals(prices):
         elif position == -1:
             # Manage short position
             exit_signal = False
-            # Exit when price reaches L4 or trend changes
-            if close[i] <= camarilla_l4_aligned[i]:
+            # Exit when TRIX turns positive or volume confirmation lost
+            if not trix_negative:
                 exit_signal = True
-            elif not price_below_ema:  # trend turned against position
-                exit_signal = True
-            elif not vol_confirmed:  # volume confirmation lost
+            elif not vol_confirmed:
                 exit_signal = True
             
             if exit_signal:
