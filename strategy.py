@@ -1,18 +1,17 @@
-#38
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Williams %R with weekly trend filter and volume confirmation
-# Long when Williams %R crosses above -20 (oversold bounce), weekly trend up, volume spike
-# Short when Williams %R crosses below -80 (overbought rejection), weekly trend down, volume spike
-# Williams %R identifies momentum exhaustion; weekly trend filters for higher timeframe direction
+# Hypothesis: 6-hour Elder Ray Index (Bull/Bear Power) with 1d trend filter and volume confirmation
+# Long when Bull Power > 0 and Bear Power < 0 (bullish momentum), daily trend up, volume spike
+# Short when Bear Power > 0 and Bull Power < 0 (bearish momentum), daily trend down, volume spike
+# Elder Ray measures bull/bear power relative to EMA; daily trend filters for higher timeframe direction
 # Volume spike confirms institutional participation; avoids false signals
-# Targets 30-100 total trades over 4 years (7-25/year) for 1d timeframe
+# Targets 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost
 
-name = "1d_WilliamsR_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "6h_ElderRay_DailyTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,23 +24,20 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data once for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get daily data once for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly EMA(50) for trend filter
-    weekly_close = df_1w['close'].values
-    ema50_1w = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate daily EMA(13) for Elder Ray and trend filter
+    daily_close = df_1d['close'].values
+    ema13_1d = pd.Series(daily_close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
     
-    # Williams %R(14): (Highest High - Close) / (Highest High - Lowest Low) * -100
-    # Using 14-period lookback
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    ema13_6h = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13_6h
+    bear_power = low - ema13_6h
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -54,36 +50,37 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema13_1d_aligned[i]) or np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema50_1w_val = ema50_1w_aligned[i]
-        wr = williams_r[i]
+        ema13_1d_val = ema13_1d_aligned[i]
+        bp = bull_power[i]
+        br = bear_power[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: Williams %R crosses above -20 (oversold bounce), weekly uptrend, volume spike
-            if wr > -20 and williams_r[i-1] <= -20 and ema50_1w_val > 0 and vol_spike:
+            # Enter long: Bull Power > 0 and Bear Power < 0 (bullish), daily uptrend, volume spike
+            if bp > 0 and br < 0 and ema13_1d_val > 0 and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Williams %R crosses below -80 (overbought rejection), weekly downtrend, volume spike
-            elif wr < -80 and williams_r[i-1] >= -80 and ema50_1w_val < 0 and vol_spike:
+            # Enter short: Bear Power > 0 and Bull Power < 0 (bearish), daily downtrend, volume spike
+            elif br > 0 and bp < 0 and ema13_1d_val < 0 and vol_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R falls below -80 or weekly trend turns down
-            if wr < -80 or ema50_1w_val < 0:
+            # Exit long: Bear Power >= 0 or daily trend turns down
+            if br >= 0 or ema13_1d_val < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R rises above -20 or weekly trend turns up
-            if wr > -20 or ema50_1w_val > 0:
+            # Exit short: Bull Power <= 0 or daily trend turns up
+            if bp <= 0 or ema13_1d_val > 0:
                 signals[i] = 0.0
                 position = 0
             else:
