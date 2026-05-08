@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend and volume confirmation
-# Uses daily Camarilla pivot levels for entry/exit on 4h timeframe.
-# Requires 12h EMA50 alignment and volume spike to avoid false breakouts.
-# Designed for low-frequency, high-conviction trades to minimize fee drag.
-# Works in both bull and bear markets via breakout logic in direction of higher timeframe trend.
+# Hypothesis: 1h mean reversion with 4h/1d trend filter and volume confirmation
+# Uses 4h EMA50 for trend direction and 1d Bollinger Bands for mean reversion zones
+# Entry: price touches 1d Bollinger lower band (for long) or upper band (for short)
+# Only trade in direction of 4h EMA50 trend with volume confirmation
+# Designed for low-frequency, high-conviction trades to minimize fee drag
+# Works in both bull and bear markets via trend alignment and mean reversion
 
-name = "4h_Camarilla_R3S3_12hEMA50_Volume"
-timeframe = "4h"
+name = "1h_BollingerMeanRev_4hEMA50_1dVol"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,44 +24,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot levels
+    # Get 4h data for EMA50 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
+        return np.zeros(n)
+    
+    close_4h = df_4h['close'].values
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    
+    # Get 1d data for Bollinger Bands
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate daily Camarilla levels (R3, S3)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    # Calculate 20-period SMA and standard deviation for Bollinger Bands
+    sma20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_bb_1d = sma20_1d + (2 * std20_1d)
+    lower_bb_1d = sma20_1d - (2 * std20_1d)
     
-    # Previous day's values for today's Camarilla levels
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # Align Bollinger Bands to 1h timeframe
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb_1d)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb_1d)
     
-    # Camarilla calculations
-    R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
-    S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
-    
-    # Align Camarilla levels to 4h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    
-    # Volume spike (2x 20-period EMA)
-    vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 2.0)
+    # Volume spike (1.5x 20-period EMA)
+    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_spike = volume > (vol_ema * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -69,39 +60,40 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_spike[i])):
+        if (np.isnan(ema50_4h_aligned[i]) or 
+            np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or
+            np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above R3 with 12h uptrend and volume spike
-            if (close[i] > R3_aligned[i] and 
-                close[i] > ema50_12h_aligned[i] and vol_spike[i]):
-                signals[i] = 0.25
+            # Enter long: price touches lower Bollinger Band with 4h uptrend and volume spike
+            if (close[i] <= lower_bb_aligned[i] and 
+                close[i] > ema50_4h_aligned[i] and vol_spike[i]):
+                signals[i] = 0.20
                 position = 1
-            # Enter short: price breaks below S3 with 12h downtrend and volume spike
-            elif (close[i] < S3_aligned[i] and 
-                  close[i] < ema50_12h_aligned[i] and vol_spike[i]):
-                signals[i] = -0.25
+            # Enter short: price touches upper Bollinger Band with 4h downtrend and volume spike
+            elif (close[i] >= upper_bb_aligned[i] and 
+                  close[i] < ema50_4h_aligned[i] and vol_spike[i]):
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below S3 or trend fails
-            if (close[i] < S3_aligned[i] or 
-                close[i] < ema50_12h_aligned[i]):
+            # Exit long: price crosses above 4h EMA50 or touches upper Bollinger Band
+            if (close[i] >= ema50_4h_aligned[i] or 
+                close[i] >= upper_bb_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: price breaks above R3 or trend fails
-            if (close[i] > R3_aligned[i] or 
-                close[i] > ema50_12h_aligned[i]):
+            # Exit short: price crosses below 4h EMA50 or touches lower Bollinger Band
+            if (close[i] <= ema50_4h_aligned[i] or 
+                close[i] <= lower_bb_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
