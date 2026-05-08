@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_Weekly_Camarilla_R3S3_Breakout_Trend_Volume"
-timeframe = "1d"
+name = "6h_Weekly_Pivot_R1S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,48 +17,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data once for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Weekly EMA21 trend filter
-    close_1w = df_1w['close'].values
-    ema21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    trend_1w = (close_1w > ema21_1w).astype(float)
-    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
-    
-    # Get daily data once for Camarilla pivot levels (using previous day's OHLC)
+    # Get 1d data for pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla calculation (R3/S3 levels)
-    prev_high = np.roll(df_1d['high'].values, 1)
-    prev_low = np.roll(df_1d['low'].values, 1)
-    prev_close = np.roll(df_1d['close'].values, 1)
-    prev_high[0] = df_1d['high'].values[0]
-    prev_low[0] = df_1d['low'].values[0]
-    prev_close[0] = df_1d['close'].values[0]
+    # Get weekly data for pivot levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
     
-    # Camarilla pivot levels calculation (R3 and S3)
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_val = prev_high - prev_low
-    r3 = pivot + (range_val * 1.1 / 2)  # R3 level
-    s3 = pivot - (range_val * 1.1 / 2)  # S3 level
+    # Weekly OHLC for pivot calculation
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Align Camarilla levels to daily timeframe (no alignment needed as both are daily)
-    # But we still use the helper for consistency and to handle any potential index issues
-    r3_1d = align_htf_to_ltf(prices, df_1d, r3)
-    s3_1d = align_htf_to_ltf(prices, df_1d, s3)
+    # Weekly pivot points (P1, R1, S1)
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    weekly_range = weekly_high - weekly_low
+    weekly_r1 = weekly_pivot + weekly_range
+    weekly_s1 = weekly_pivot - weekly_range
     
-    # Volume spike detection: current volume > 2.0 * 20-period average
+    # Align weekly pivot levels to 6h
+    weekly_r1_6h = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    weekly_s1_6h = align_htf_to_ltf(prices, df_1w, weekly_s1)
+    
+    # 1d EMA50 trend filter
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_1d = (close_1d > ema50_1d).astype(float)
+    trend_1d_6h = align_htf_to_ltf(prices, df_1d, trend_1d)
+    
+    # Volume spike: current volume > 2.0 * 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (vol_ma20 * 2.0)
     
     # Price distance filter: require breakout to be at least 0.3% above/below level
-    price_above_r3 = close > r3_1d * 1.003
-    price_below_s3 = close < s3_1d * 0.997
+    price_above_r1 = close > weekly_r1_6h * 1.003
+    price_below_s1 = close < weekly_s1_6h * 0.997
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -67,18 +63,19 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r3_1d[i]) or np.isnan(s3_1d[i]) or np.isnan(trend_1w_aligned[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(weekly_r1_6h[i]) or np.isnan(weekly_s1_6h[i]) or 
+            np.isnan(trend_1d_6h[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: price breaks above R3 with volume spike and weekly uptrend
-            long_cond = (price_above_r3[i] and vol_spike[i] and trend_1w_aligned[i] > 0.5)
+            # Long entry: price breaks above weekly R1 with volume spike and 1d uptrend
+            long_cond = (price_above_r1[i] and vol_spike[i] and trend_1d_6h[i] > 0.5)
             
-            # Short entry: price breaks below S3 with volume spike and weekly downtrend
-            short_cond = (price_below_s3[i] and vol_spike[i] and trend_1w_aligned[i] < 0.5)
+            # Short entry: price breaks below weekly S1 with volume spike and 1d downtrend
+            short_cond = (price_below_s1[i] and vol_spike[i] and trend_1d_6h[i] < 0.5)
             
             if long_cond:
                 signals[i] = 0.25
@@ -87,15 +84,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price reverses back below R3 (mean reversion)
-            if close[i] < r3_1d[i]:
+            # Long exit: price reverses back below weekly R1 (mean reversion)
+            if close[i] < weekly_r1_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price reverses back above S3 (mean reversion)
-            if close[i] > s3_1d[i]:
+            # Short exit: price reverses back above weekly S1 (mean reversion)
+            if close[i] > weekly_s1_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -103,10 +100,7 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Daily Camarilla R3/S3 breakout with weekly EMA21 trend filter and volume confirmation.
-# Uses daily timeframe to reduce trade frequency (target: 15-25 trades/year) to minimize fee drag.
-# Weekly trend filter ensures alignment with higher timeframe momentum.
-# Volume spike (2x 20-day average) confirms institutional participation.
-# Price distance filter (0.3%) avoids false breakouts from minor noise.
-# Position size 0.25 balances return potential with drawdown control.
-# Designed to work in both bull and bear markets by following weekly trend direction.
+# Hypothesis: Weekly pivot R1/S1 breakout on 6h timeframe with 1d EMA50 trend filter and volume confirmation.
+# Weekly pivots provide stronger institutional levels than daily pivots, reducing false breakouts.
+# Works in both bull (breakouts) and bear (reversals at S1/R1) markets due to mean-reversion exit logic.
+# Target: 20-40 trades/year to stay within optimal frequency range for 6h timeframe.
