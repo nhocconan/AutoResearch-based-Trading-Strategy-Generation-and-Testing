@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Williams Alligator with 1-week trend filter and volume confirmation
-# We go long when price is above Alligator teeth (green line) with weekly EMA(34) uptrend and volume spike.
-# We go short when price is below Alligator teeth with weekly EMA(34) downtrend and volume spike.
-# Uses 12h timeframe to target 12-37 trades/year, avoiding excessive frequency.
-# Williams Alligator (Jaw=13, Teeth=8, Lips=5) identifies trend direction and strength.
-# Weekly trend filter ensures we trade with the higher timeframe momentum.
-# Volume spike confirms institutional participation in the move.
+# Hypothesis: 4-hour TRIX momentum with volume spike and daily trend filter.
+# Long when TRIX crosses above zero with daily EMA(34) uptrend and volume spike.
+# Short when TRIX crosses below zero with daily EMA(34) downtrend and volume spike.
+# Uses TRIX (12-period EMA of EMA of EMA) for smooth momentum, reducing whipsaw.
+# Daily trend filter ensures alignment with higher timeframe momentum.
+# Volume spike confirms institutional participation.
+# Designed for 4h timeframe to target 20-50 trades/year, avoiding excessive frequency.
 
-name = "12h_WilliamsAlligator_WeeklyTrend_Volume"
-timeframe = "12h"
+name = "4h_TRIX_DailyTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,49 +25,25 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data once for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Get daily data once for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate weekly EMA(34) for trend filter
-    weekly_close = df_1w['close'].values
-    ema34_1w = pd.Series(weekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Calculate daily EMA(34) for trend filter
+    daily_close = df_1d['close'].values
+    ema34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate Williams Alligator (13,8,5) on 12h data
-    # Jaw: 13-period SMMA shifted 8 bars forward
-    # Teeth: 8-period SMMA shifted 5 bars forward  
-    # Lips: 5-period SMMA shifted 3 bars forward
-    def smoothed_moving_average(data, period):
-        sma = np.full_like(data, np.nan, dtype=float)
-        if len(data) < period:
-            return sma
-        sma[period-1] = np.mean(data[:period])
-        for i in range(period, len(data)):
-            sma[i] = (sma[i-1] * (period-1) + data[i]) / period
-        return sma
+    # Calculate TRIX on 4h: triple EMA of close, then ROC
+    # TRIX = EMA(EMA(EMA(close, 12), 12), 12) then 1-period ROC
+    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
+    trix = 100 * (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1)
+    trix[0] = 0  # first value undefined
     
-    jaw_raw = smoothed_moving_average(close, 13)
-    teeth_raw = smoothed_moving_average(close, 8)
-    lips_raw = smoothed_moving_average(close, 5)
-    
-    # Apply shifts (Jaw: +8, Teeth: +5, Lips: +3)
-    jaw = np.full_like(jaw_raw, np.nan)
-    teeth = np.full_like(teeth_raw, np.nan)
-    lips = np.full_like(lips_raw, np.nan)
-    
-    if len(jaw) > 8:
-        jaw[8:] = jaw_raw[:-8]
-    if len(teeth) > 5:
-        teeth[5:] = teeth_raw[:-5]
-    if len(lips) > 3:
-        lips[3:] = lips_raw[:-3]
-    
-    # Alligator teeth is the middle line (8-period SMMA)
-    teeth_aligned = align_htf_to_ltf(prices, pd.DataFrame({'index': range(len(teeth))}), teeth)
-    
-    # Volume spike: current volume > 2.0 * 20-period average on 12h
+    # Volume spike: current volume > 2.0 * 20-period average on 4h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
@@ -78,38 +54,38 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(trix[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema34_1w_val = ema34_1w_aligned[i]
-        teeth_level = teeth_aligned[i]
+        ema34_1d_val = ema34_1d_aligned[i]
+        trix_val = trix[i]
+        trix_prev = trix[i-1]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: price above teeth + weekly uptrend + volume spike
-            if (not np.isnan(teeth_level) and close[i] > teeth_level and 
-                close[i] > ema34_1w_val and vol_spike):
+            # Enter long: TRIX crosses above zero + daily uptrend + volume spike
+            if (trix_prev <= 0 and trix_val > 0 and 
+                close[i] > ema34_1d_val and vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price below teeth + weekly downtrend + volume spike
-            elif (not np.isnan(teeth_level) and close[i] < teeth_level and 
-                  close[i] < ema34_1w_val and vol_spike):
+            # Enter short: TRIX crosses below zero + daily downtrend + volume spike
+            elif (trix_prev >= 0 and trix_val < 0 and 
+                  close[i] < ema34_1d_val and vol_spike):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price below teeth OR weekly trend turns down
-            if (not np.isnan(teeth_level) and close[i] < teeth_level) or close[i] < ema34_1w_val:
+            # Exit long: TRIX crosses below zero OR daily trend turns down
+            if (trix_prev >= 0 and trix_val < 0) or close[i] < ema34_1d_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price above teeth OR weekly trend turns up
-            if (not np.isnan(teeth_level) and close[i] > teeth_level) or close[i] > ema34_1w_val:
+            # Exit short: TRIX crosses above zero OR daily trend turns up
+            if (trix_prev <= 0 and trix_val > 0) or close[i] > ema34_1d_val:
                 signals[i] = 0.0
                 position = 0
             else:
