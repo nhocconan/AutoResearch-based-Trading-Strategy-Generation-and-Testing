@@ -3,16 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Camarilla pivot breakout with weekly trend filter and volume confirmation
-# We go long when price breaks above R3 with weekly EMA(34) uptrend and volume spike.
-# We go short when price breaks below S3 with weekly EMA(34) downtrend and volume spike.
-# Uses 4h timeframe targeting 20-50 trades/year, avoiding excessive frequency.
-# Weekly trend filter ensures we trade with the higher timeframe momentum.
-# Volume spike confirms institutional participation in the breakout.
-# Weekly timeframe provides more stable trend filter than daily, reducing false signals.
+# Hypothesis: 12-hour Choppiness Index regime filter with Donchian breakout and volume confirmation
+# Uses Choppiness Index to identify trending vs ranging markets, enters only on Donchian breakouts
+# in the direction of the trend, with volume confirmation. Avoids whipsaws in sideways markets.
+# Timeframe: 12h targets 12-37 trades/year (50-150 total over 4 years) to minimize fee drag.
+# Works in both bull and bear markets by filtering for trending regimes only.
 
-name = "4h_Camarilla_R3S3_WeeklyTrend_Volume"
-timeframe = "4h"
+name = "12h_Chop_DonchianBreakout_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,33 +23,54 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data once for Camarilla pivots and trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Get daily data once for Choppiness Index calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate weekly EMA(34) for trend filter
-    weekly_close = df_1w['close'].values
-    ema34_1w = pd.Series(weekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Calculate daily Choppiness Index (14-period)
+    # CHOP = 100 * log10(SUM(TR(14)) / (ATR(14) * 14)) / log10(14)
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels from weekly data
-    # R3 = close + 1.1*(high - low)/2
-    # S3 = close - 1.1*(high - low)/2
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close_vals = df_1w['close'].values
+    # True Range calculation
+    tr1 = daily_high[1:] - daily_low[1:]
+    tr2 = np.abs(daily_high[1:] - daily_close[:-1])
+    tr3 = np.abs(daily_low[1:] - daily_close[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # Align with original index
     
-    camarilla_r3 = weekly_close_vals + 1.1 * (weekly_high - weekly_low) / 2
-    camarilla_s3 = weekly_close_vals - 1.1 * (weekly_high - weekly_low) / 2
+    # ATR (14) - using Wilder's smoothing (equivalent to RMA)
+    atr = np.full_like(daily_high, np.nan, dtype=float)
+    if len(daily_high) >= 14:
+        atr[13] = np.nanmean(tr[1:15])  # First ATR value
+        for i in range(14, len(daily_high)):
+            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
     
-    # Align Camarilla levels to 4h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
+    # Sum of TR over 14 periods
+    tr_sum = np.full_like(daily_high, np.nan, dtype=float)
+    for i in range(13, len(daily_high)):
+        tr_sum[i] = np.nansum(tr[i-13:i+1])
     
-    # Volume spike: current volume > 2.0 * 20-period average on 4h
+    # Choppiness Index
+    chop = np.full_like(daily_high, np.nan, dtype=float)
+    for i in range(13, len(daily_high)):
+        if not np.isnan(tr_sum[i]) and not np.isnan(atr[i]) and atr[i] > 0:
+            chop[i] = 100 * np.log10(tr_sum[i] / (atr[i] * 14)) / np.log10(14)
+        else:
+            chop[i] = np.nan
+    
+    # Align Choppiness Index to 12h timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # Donchian Channel (20-period) on 12h
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume confirmation: current volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_confirmed = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -60,39 +79,39 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(chop_aligned[i]) or np.isnan(high_20[i]) or 
+            np.isnan(low_20[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema34_1w_val = ema34_1w_aligned[i]
-        r3_level = camarilla_r3_aligned[i]
-        s3_level = camarilla_s3_aligned[i]
-        vol_spike = volume_spike[i]
+        chop_val = chop_aligned[i]
+        upper_donchian = high_20[i]
+        lower_donchian = low_20[i]
+        vol_conf = volume_confirmed[i]
         
         if position == 0:
-            # Enter long: price breaks above R3 + weekly uptrend + volume spike
-            if (not np.isnan(r3_level) and close[i] > r3_level and 
-                close[i] > ema34_1w_val and vol_spike):
+            # Enter long: Donchian breakout up + trending market (CHOP < 38.2) + volume confirmation
+            if (not np.isnan(upper_donchian) and close[i] > upper_donchian and 
+                chop_val < 38.2 and vol_conf):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S3 + weekly downtrend + volume spike
-            elif (not np.isnan(s3_level) and close[i] < s3_level and 
-                  close[i] < ema34_1w_val and vol_spike):
+            # Enter short: Donchian breakout down + trending market (CHOP < 38.2) + volume confirmation
+            elif (not np.isnan(lower_donchian) and close[i] < lower_donchian and 
+                  chop_val < 38.2 and vol_conf):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below S3 OR weekly trend turns down
-            if (not np.isnan(s3_level) and close[i] < s3_level) or close[i] < ema34_1w_val:
+            # Exit long: price re-enters Donchian channel OR market becomes ranging (CHOP > 61.8)
+            if (not np.isnan(lower_donchian) and close[i] < lower_donchian) or chop_val > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above R3 OR weekly trend turns up
-            if (not np.isnan(r3_level) and close[i] > r3_level) or close[i] > ema34_1w_val:
+            # Exit short: price re-enters Donchian channel OR market becomes ranging (CHOP > 61.8)
+            if (not np.isnan(upper_donchian) and close[i] > upper_donchian) or chop_val > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
