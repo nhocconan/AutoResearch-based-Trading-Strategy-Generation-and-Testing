@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with 1d volume confirmation and ADX trend filter.
-# Uses 12h price relative to Alligator jaws/teeth/lips for trend direction.
+# Hypothesis: 12h Donchian channel breakout with 1d volume confirmation and ADX trend filter.
+# Uses 12h price breaking above/below 20-period Donchian channels for entry.
 # Confirmed by 1d volume > 1.5x 20-period average and 1d ADX > 25 for trend strength.
-# In trending markets, follows Alligator alignment (long when green, short when red).
-# In ranging markets (ADX < 20), uses mean reversion at Bollinger Bands (20,2).
+# In trending markets (ADX > 25), follows breakout direction.
+# In ranging markets (ADX < 20), uses mean reversion at Donchian mid-point.
 # Designed to work in both bull and bear markets by adapting to trend strength.
 # Target: 15-35 trades/year (60-140 total over 4 years).
 
-name = "12h_WilliamsAlligator_1dVolume_ADX"
+name = "12h_DonchianBreakout_1dVolume_ADX"
 timeframe = "12h"
 leverage = 1.0
 
@@ -109,44 +109,16 @@ def generate_signals(prices):
     vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Calculate 12h Williams Alligator (13,8,5)
-    # Jaw (13-period SMMA, shifted 8 bars)
-    jaw = np.full(n, np.nan)
-    # Teeth (8-period SMMA, shifted 5 bars)
-    teeth = np.full(n, np.nan)
-    # Lips (5-period SMMA, shifted 3 bars)
-    lips = np.full(n, np.nan)
+    # Calculate 12h Donchian channels (20-period)
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    donchian_mid = np.full(n, np.nan)
     
-    # Calculate SMMA (Smoothed Moving Average)
-    def smma(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(arr[:period])
-        # Subsequent values: (prev * (period-1) + current) / period
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
-    
-    jaw_raw = smma(close, 13)
-    teeth_raw = smma(close, 8)
-    lips_raw = smma(close, 5)
-    
-    # Apply shifts
-    for i in range(8, n):
-        jaw[i] = jaw_raw[i-8]
-    for i in range(5, n):
-        teeth[i] = teeth_raw[i-5]
-    for i in range(3, n):
-        lips[i] = lips_raw[i-3]
-    
-    # Calculate Bollinger Bands (20,2) for ranging market
-    close_pd = pd.Series(close)
-    bb_middle = close_pd.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_pd.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
+    for i in range(n):
+        if i >= 19:
+            donchian_high[i] = np.max(high[i-19:i+1])
+            donchian_low[i] = np.min(low[i-19:i+1])
+            donchian_mid[i] = (donchian_high[i] + donchian_low[i]) / 2
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -155,7 +127,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(vol_avg_20_aligned[i]) or np.isnan(adx_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -196,21 +168,19 @@ def generate_signals(prices):
             # Look for entry
             if vol_confirmed:
                 if is_trending:
-                    # In trending market: Alligator alignment
-                    # Green: lips > teeth > jaw (bullish alignment)
-                    # Red: lips < teeth < jaw (bearish alignment)
-                    if lips[i] > teeth[i] and teeth[i] > jaw[i]:
+                    # In trending market: Donchian breakout
+                    if close[i] > donchian_high[i]:
                         signals[i] = 0.25
                         position = 1
-                    elif lips[i] < teeth[i] and teeth[i] < jaw[i]:
+                    elif close[i] < donchian_low[i]:
                         signals[i] = -0.25
                         position = -1
                 elif is_ranging:
-                    # In ranging market: mean reversion at Bollinger Bands
-                    if close[i] <= bb_lower[i]:
+                    # In ranging market: mean reversion at Donchian mid-point
+                    if close[i] < donchian_low[i]:
                         signals[i] = 0.25
                         position = 1
-                    elif close[i] >= bb_upper[i]:
+                    elif close[i] > donchian_high[i]:
                         signals[i] = -0.25
                         position = -1
                 else:
@@ -220,12 +190,12 @@ def generate_signals(prices):
             # Manage long position
             exit_signal = False
             if is_trending:
-                # Exit when Alligator alignment breaks (red formation)
-                if lips[i] < teeth[i] and teeth[i] < jaw[i]:
+                # Exit when price breaks below Donchian low
+                if close[i] < donchian_low[i]:
                     exit_signal = True
             elif is_ranging:
-                # Exit when price reaches middle Bollinger Band
-                if close[i] >= bb_middle[i]:
+                # Exit when price reaches Donchian mid-point
+                if close[i] >= donchian_mid[i]:
                     exit_signal = True
             elif not vol_confirmed:
                 exit_signal = True  # volume confirmation lost
@@ -239,12 +209,12 @@ def generate_signals(prices):
             # Manage short position
             exit_signal = False
             if is_trending:
-                # Exit when Alligator alignment breaks (green formation)
-                if lips[i] > teeth[i] and teeth[i] > jaw[i]:
+                # Exit when price breaks above Donchian high
+                if close[i] > donchian_high[i]:
                     exit_signal = True
             elif is_ranging:
-                # Exit when price reaches middle Bollinger Band
-                if close[i] <= bb_middle[i]:
+                # Exit when price reaches Donchian mid-point
+                if close[i] <= donchian_mid[i]:
                     exit_signal = True
             elif not vol_confirmed:
                 exit_signal = True  # volume confirmation lost
