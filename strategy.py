@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with 1d trend filter and volume confirmation
-# Donchian channel breakouts capture trend momentum with clear entry/exit levels.
-# Long when price breaks above 20-period high AND 1d EMA(34) uptrend + volume spike
-# Short when price breaks below 20-period low AND 1d EMA(34) downtrend + volume spike
-# Exit when price crosses the midline or opposite breakout occurs
-# Designed for low trade frequency (12-37/year) with strong trend capture in both bull and bear markets
+# Hypothesis: 4h TRIX with 12h trend filter and volume confirmation
+# TRIX (triple-smoothed EMA) filters noise and identifies momentum.
+# We go long when TRIX crosses above zero and rising, short when crosses below zero and falling,
+# aligned with 12h EMA(50) trend and confirmed by volume spike.
+# Designed for low trade frequency in both bull and bear markets.
+# Target: 50-150 total trades over 4 years = 12-37/year
 
-name = "12h_Donchian_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_TRIX_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,24 +20,25 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data once
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 12h data once
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate daily EMA(34) for trend direction
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate 12h EMA(50) for trend direction
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Calculate Donchian channel (20-period) on 12h data
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (high_max + low_min) / 2
+    # Calculate TRIX on 4h data (triple EMA of 1-period ROC)
+    # TRIX = EMA(EMA(EMA(ROC, n), n), n) where ROC = (close/close.prev - 1) * 100
+    roc = np.diff(close, prepend=close[0]) / close * 100
+    ema1 = pd.Series(roc).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
+    trix = ema3
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -50,46 +51,52 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(high_max[i]) or 
-            np.isnan(low_min[i]) or np.isnan(donchian_mid[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(trix[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema34_1d_val = ema34_1d_aligned[i]
-        upper = high_max[i]
-        lower = low_min[i]
-        midline = donchian_mid[i]
+        ema50_12h_val = ema50_12h_aligned[i]
+        trix_val = trix[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: price breaks above upper band + uptrend + volume spike
-            if (close[i] > upper and 
-                close[i] > ema34_1d_val and 
-                vol_spike):
-                signals[i] = 0.25
-                position = 1
-            # Enter short: price breaks below lower band + downtrend + volume spike
-            elif (close[i] < lower and 
-                  close[i] < ema34_1d_val and 
-                  vol_spike):
-                signals[i] = -0.25
-                position = -1
+            # Enter long: TRIX crosses above zero and rising + uptrend + volume spike
+            if i > 0:
+                trix_prev = trix[i-1]
+                trix_rising = trix_val > trix_prev
+                if (trix_val > 0 and trix_prev <= 0 and trix_rising and 
+                    close[i] > ema50_12h_val and 
+                    vol_spike):
+                    signals[i] = 0.25
+                    position = 1
+            # Enter short: TRIX crosses below zero and falling + downtrend + volume spike
+            if i > 0:
+                trix_prev = trix[i-1]
+                trix_falling = trix_val < trix_prev
+                if (trix_val < 0 and trix_prev >= 0 and trix_falling and 
+                    close[i] < ema50_12h_val and 
+                    vol_spike):
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Exit long: price crosses below midline OR breaks below lower band
-            if (close[i] < midline or close[i] < lower):
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
+            # Exit long: TRIX crosses below zero OR price breaks below trend
+            if i > 0:
+                trix_prev = trix[i-1]
+                if (trix_val < 0 and trix_prev >= 0) or close[i] < ema50_12h_val:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above midline OR breaks above upper band
-            if (close[i] > midline or close[i] > upper):
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+            # Exit short: TRIX crosses above zero OR price breaks above trend
+            if i > 0:
+                trix_prev = trix[i-1]
+                if (trix_val > 0 and trix_prev <= 0) or close[i] > ema50_12h_val:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
