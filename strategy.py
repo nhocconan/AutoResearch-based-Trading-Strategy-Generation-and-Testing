@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla Pivot Breakout with 1d Trend and Volume Spike
-# - Uses Camarilla levels from daily timeframe (S1/S2 for long, R1/R2 for short)
-# - Breakout above S1 with 1d uptrend or below R1 with 1d downtrend
-# - Volume spike confirms breakout strength
-# - Works in bull/bear by using 1d trend filter to avoid counter-trend trades
-# - Target: 15-30 trades/year to minimize fee drag on 12h timeframe
+# Hypothesis: 4h KAMA Trend + RSI + Volume Spike
+# - Uses KAMA direction (bullish/bearish) from 4h as primary trend filter
+# - RSI(14) for momentum confirmation (long when RSI>55, short when RSI<45)
+# - Volume spike (>2x 20-period average) confirms breakout strength
+# - Works in bull/bear by using KAMA which adapts to market noise
+# - Target: 20-30 trades/year to minimize fee drag on 4h timeframe
 
-name = "12h_CamarillaBreakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_KAMA_RSI_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,42 +24,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
-        return np.zeros(n)
+    # KAMA calculation
+    close_series = pd.Series(close)
+    change = abs(close_series.diff(1))
+    volatility = change.rolling(window=10, min_periods=10).sum()
+    er = change.rolling(window=10, min_periods=10).sum() / volatility.replace(0, np.finfo(float).eps)
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    kama_dir = kama > np.roll(kama, 1)
+    kama_dir[0] = False
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla levels using previous day's data
-    # S1 = C - (H-L)*1.08, S2 = C - (H-L)*1.16, R1 = C + (H-L)*1.08, R2 = C + (H-L)*1.16
-    n1d = len(close_1d)
-    camarilla_S1 = np.full(n1d, np.nan)
-    camarilla_S2 = np.full(n1d, np.nan)
-    camarilla_R1 = np.full(n1d, np.nan)
-    camarilla_R2 = np.full(n1d, np.nan)
-    
-    for i in range(1, n1d):
-        H = high_1d[i-1]
-        L = low_1d[i-1]
-        C = close_1d[i-1]
-        range_val = H - L
-        camarilla_S1[i] = C - range_val * 1.08
-        camarilla_S2[i] = C - range_val * 1.16
-        camarilla_R1[i] = C + range_val * 1.08
-        camarilla_R2[i] = C + range_val * 1.16
-    
-    # Align Camarilla levels to 12h timeframe
-    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
-    camarilla_S2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S2)
-    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
-    camarilla_R2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R2)
-    
-    # 1d data for trend filter (EMA34)
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.finfo(float).eps)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
     
     # Volume spike: current volume > 2.0x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -68,28 +54,22 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(camarilla_S1_aligned[i]) or np.isnan(camarilla_S2_aligned[i]) or 
-            np.isnan(camarilla_R1_aligned[i]) or np.isnan(camarilla_R2_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_spike[i])):
+        if np.isnan(kama_dir[i]) or np.isnan(rsi[i]) or np.isnan(volume_spike[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above S1 (support) with 1d uptrend + volume spike
-            long_cond = (close[i] > camarilla_S1_aligned[i] and 
-                        ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and
-                        volume_spike[i])
+            # Long: KAMA bullish + RSI>55 + volume spike
+            long_cond = kama_dir[i] and (rsi[i] > 55) and volume_spike[i]
             
-            # Short: price breaks below R1 (resistance) with 1d downtrend + volume spike
-            short_cond = (close[i] < camarilla_R1_aligned[i] and 
-                         ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and
-                         volume_spike[i])
+            # Short: KAMA bearish + RSI<45 + volume spike
+            short_cond = (~kama_dir[i]) and (rsi[i] < 45) and volume_spike[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -98,15 +78,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below S2 (strong support break)
-            if close[i] < camarilla_S2_aligned[i]:
+            # Long exit: KAMA turns bearish OR RSI<45
+            if (~kama_dir[i]) or (rsi[i] < 45):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above R2 (strong resistance break)
-            if close[i] > camarilla_R2_aligned[i]:
+            # Short exit: KAMA turns bullish OR RSI>55
+            if kama_dir[i] or (rsi[i] > 55):
                 signals[i] = 0.0
                 position = 0
             else:
