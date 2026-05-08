@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w trend filter and volume confirmation.
-# Long when price breaks above 20-day high AND 1w EMA50 rising AND volume > 1.8x 20-day average.
-# Short when price breaks below 20-day low AND 1w EMA50 falling AND volume > 1.8x 20-day average.
-# Exit when price crosses back inside the 20-day range.
-# Donchian provides trend-following structure, 1w EMA50 filters higher timeframe trend,
-# Volume confirms institutional participation. Target: 30-100 total trades over 4 years (7-25/year).
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA50 trend filter and volume spike confirmation.
+# Bull Power = High - EMA13, Bear Power = EMA13 - Low.
+# Long when Bull Power > 0, 1d EMA50 rising, and volume > 2x 20-period average.
+# Short when Bear Power > 0, 1d EMA50 falling, and volume > 2x 20-period average.
+# Exit when power crosses zero (Bull Power <= 0 for long exit, Bear Power <= 0 for short exit).
+# Elder Ray measures bull/bear strength relative to EMA13. EMA50 filters higher timeframe trend.
+# Volume spike confirms institutional participation. Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "1d_Donchian_20_1wEMA50_Volume"
-timeframe = "1d"
+name = "6h_ElderRay_1dEMA50_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,47 +25,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # 20-day Donchian channels (daily)
+    # 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Donchian high and low (20-period)
-    donch_high = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
+    # EMA13 for Elder Ray calculation
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Align Donchian levels to daily timeframe
-    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
+    # Elder Ray components
+    bull_power = high - ema13  # High - EMA13
+    bear_power = ema13 - low   # EMA13 - Low
     
-    # 1w EMA50 for trend filter
-    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # 1w EMA50 direction
-    ema50_rising = np.zeros_like(ema50_1w_aligned, dtype=bool)
-    ema50_falling = np.zeros_like(ema50_1w_aligned, dtype=bool)
-    ema50_rising[1:] = ema50_1w_aligned[1:] > ema50_1w_aligned[:-1]
-    ema50_falling[1:] = ema50_1w_aligned[1:] < ema50_1w_aligned[:-1]
+    # 1d EMA50 direction
+    ema50_rising = np.zeros_like(ema50_1d_aligned, dtype=bool)
+    ema50_falling = np.zeros_like(ema50_1d_aligned, dtype=bool)
+    ema50_rising[1:] = ema50_1d_aligned[1:] > ema50_1d_aligned[:-1]
+    ema50_falling[1:] = ema50_1d_aligned[1:] < ema50_1d_aligned[:-1]
     
-    # Volume filter: current volume > 1.8x 20-day average
+    # Volume filter: current volume > 2x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.8 * vol_ma20)
+    volume_filter = volume > (2.0 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Sufficient warmup for EMA50 and Donchian
+    start_idx = max(20, 13)  # Sufficient warmup for EMA13 and volume MA
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(ema50_rising[i]) or 
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(ema50_rising[i]) or 
             np.isnan(ema50_falling[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -72,10 +67,10 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: price breaks above Donchian high, 1w EMA50 rising, volume filter
-            long_cond = (close[i] > donch_high_aligned[i]) and ema50_rising[i] and volume_filter[i]
-            # Short conditions: price breaks below Donchian low, 1w EMA50 falling, volume filter
-            short_cond = (close[i] < donch_low_aligned[i]) and ema50_falling[i] and volume_filter[i]
+            # Long conditions: Bull Power > 0, 1d EMA50 rising, volume filter
+            long_cond = (bull_power[i] > 0) and ema50_rising[i] and volume_filter[i]
+            # Short conditions: Bear Power > 0, 1d EMA50 falling, volume filter
+            short_cond = (bear_power[i] > 0) and ema50_falling[i] and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -84,15 +79,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses back below Donchian low
-            if close[i] < donch_low_aligned[i]:
+            # Long exit: Bull Power <= 0 (bullish momentum faded)
+            if bull_power[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses back above Donchian high
-            if close[i] > donch_high_aligned[i]:
+            # Short exit: Bear Power <= 0 (bearish momentum faded)
+            if bear_power[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
