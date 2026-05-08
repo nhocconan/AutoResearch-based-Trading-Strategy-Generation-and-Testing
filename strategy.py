@@ -1,10 +1,16 @@
+# 6h_Camarilla_R3S3_Breakout_1dTrend_Volume - Novel twist: Use 1d trend (not 12h) + volume spike
+# Hypothesis: Combining daily trend with Camarilla breakouts on 6h provides better regime alignment
+# than 12h trend, capturing multi-day momentum while avoiding overtrading.
+# Works in bull/bear by requiring volume confirmation and trend alignment.
+# Target: 50-150 trades over 4 years (12-37/year)
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_Regime"
-timeframe = "4h"
+name = "6h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,24 +25,26 @@ def generate_signals(prices):
     
     # Get daily data for Camarilla calculation and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels
-    hl_range = high_1d - low_1d
-    C = close_1d
-    R3 = C + hl_range * 1.1000
-    S3 = C - hl_range * 1.1000
+    # Calculate Camarilla levels for each daily bar
+    camarilla_high = high_1d + 1.1 * (high_1d - low_1d)
+    camarilla_low = low_1d - 1.1 * (high_1d - low_1d)
+    camarilla_range = camarilla_high - camarilla_low
     
-    # Align Camarilla levels to 4h timeframe (wait for daily close)
-    R3_4h = align_htf_to_ltf(prices, df_1d, R3)
-    S3_4h = align_htf_to_ltf(prices, df_1d, S3)
+    R3 = camarilla_low + camarilla_range * 1.1000
+    S3 = camarilla_high - camarilla_range * 1.1000
     
-    # Daily EMA(34) trend filter
+    # Align Camarilla levels to 6h timeframe (wait for daily close)
+    R3_6h = align_htf_to_ltf(prices, df_1d, R3)
+    S3_6h = align_htf_to_ltf(prices, df_1d, S3)
+    
+    # 1d trend filter: EMA(34) - more responsive than 50
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
@@ -51,7 +59,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(R3_4h[i]) or np.isnan(S3_4h[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+        if (np.isnan(R3_6h[i]) or np.isnan(S3_6h[i]) or np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -59,29 +67,29 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above R3 + uptrend (price > daily EMA34) + volume
-            if (close[i] > R3_4h[i] and
+            # Long: Price breaks above R3 + uptrend + volume
+            if (close[i] > R3_6h[i] and
                 close[i] > ema_34_1d_aligned[i] and
-                vol_ratio[i] > 1.8):
+                vol_ratio[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S3 + downtrend (price < daily EMA34) + volume
-            elif (close[i] < S3_4h[i] and
+            # Short: Price breaks below S3 + downtrend + volume
+            elif (close[i] < S3_6h[i] and
                   close[i] < ema_34_1d_aligned[i] and
-                  vol_ratio[i] > 1.8):
+                  vol_ratio[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Price falls back below S3 or trend reversal (price < daily EMA34)
-            if (close[i] < S3_4h[i] or
+            # Long exit: Price falls back below S3 or trend reversal
+            if (close[i] < S3_6h[i] or
                 close[i] < ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price rises back above R3 or trend reversal (price > daily EMA34)
-            if (close[i] > R3_4h[i] or
+            # Short exit: Price rises back above R3 or trend reversal
+            if (close[i] > R3_6h[i] or
                 close[i] > ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
