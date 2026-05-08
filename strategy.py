@@ -1,20 +1,15 @@
-# 4h_TRIX_Momentum_Trend_Filter
-# Hypothesis: TRIX (12-period) captures momentum shifts with smoothing, while a 4h EMA50 trend filter ensures
-# trades align with the dominant direction. Volume confirmation reduces false signals. Designed for 4h to
-# limit trades (~20-40/year) and avoid fee drag. Works in bull/bear by following trend.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_TRIX_Momentum_Trend_Filter"
-timeframe = "4h"
+name = "6h_PriceChannel_Turnaround_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,48 +17,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h EMA50 for trend filter
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 1d data for pivot calculation and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # TRIX: triple EMA of ROC, period=12
-    # ROC = (close / close.shift(1) - 1) * 100
-    roc = np.zeros(n)
-    roc[1:] = (close[1:] / close[:-1] - 1) * 100
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # First EMA of ROC
-    ema1 = pd.Series(roc).ewm(span=12, adjust=False, min_periods=12).mean().values
-    # Second EMA
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    # Third EMA = TRIX
-    trix = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # Calculate daily pivot points
+    n1d = len(close_1d)
+    pivot = np.full(n1d, np.nan)
+    r1 = np.full(n1d, np.nan)
+    s1 = np.full(n1d, np.nan)
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    for i in range(1, n1d):
+        PP = (high_1d[i-1] + low_1d[i-1] + close_1d[i-1]) / 3.0
+        R1 = 2 * PP - low_1d[i-1]
+        S1 = 2 * PP - high_1d[i-1]
+        
+        pivot[i] = PP
+        r1[i] = R1
+        s1[i] = S1
+    
+    # Align pivot levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume spike: current volume > 2.0x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma20)
+    volume_spike = volume > (2.0 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 35  # max of 12*3 (TRIX) and 20 (vol)
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if np.isnan(trix[i]) or np.isnan(ema_50[i]) or np.isnan(volume_confirm[i]):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: TRIX crosses above zero with uptrend + volume
-            long_cond = (trix[i] > 0 and trix[i-1] <= 0 and 
-                        ema_50[i] > ema_50[i-1] and
-                        volume_confirm[i])
+            # Long: price crosses above pivot with uptrend + volume spike
+            long_cond = (close[i] > pivot_aligned[i] and 
+                        ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and
+                        volume_spike[i])
             
-            # Short: TRIX crosses below zero with downtrend + volume
-            short_cond = (trix[i] < 0 and trix[i-1] >= 0 and 
-                         ema_50[i] < ema_50[i-1] and
-                         volume_confirm[i])
+            # Short: price crosses below pivot with downtrend + volume spike
+            short_cond = (close[i] < pivot_aligned[i] and 
+                         ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and
+                         volume_spike[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -72,15 +86,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: TRIX crosses below zero OR trend breaks
-            if trix[i] < 0 or ema_50[i] < ema_50[i-1]:
+            # Long exit: price crosses below S1 (support break)
+            if close[i] < s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: TRIX crosses above zero OR trend breaks
-            if trix[i] > 0 or ema_50[i] > ema_50[i-1]:
+            # Short exit: price crosses above R1 (resistance break)
+            if close[i] > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
