@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Donchian20_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,28 +17,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend and volume
+    # Get daily data for Camarilla levels and 12h data for EMA trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    df_12h = get_htf_data(prices, '12h')
+    
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Daily EMA for trend (34-period)
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate Camarilla levels from previous day
+    # Using previous day's high, low, close
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Daily volume average (20-period)
-    volume_1d = df_1d['volume'].values
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    # Camarilla R1 and S1
+    R1 = prev_close + 1.1 * (prev_high - prev_low) / 12
+    S1 = prev_close - 1.1 * (prev_high - prev_low) / 12
     
-    # 12h Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align Camarilla levels to 4h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # Volume confirmation (12h)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma_20 > 0, vol_ma_20, 1.0)
+    # Calculate 12h EMA50 for trend filter
+    if len(df_12h) < 50:
+        return np.zeros(n)
+    
+    ema_50 = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
+    
+    # Volume confirmation - 20-period average volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1.0)
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
     # Session filter: 08-20 UTC
@@ -48,9 +57,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0
     
-    for i in range(20, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]) or
-            np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(vol_ratio[i])):
+    start_idx = 100
+    
+    for i in range(start_idx, n):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,28 +74,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian high + price > daily EMA34 + volume spike
-            if (close[i] > high_20[i] and 
-                close[i] > ema_34_1d_aligned[i] and
+            # Long: Close > R1 AND price > EMA50 AND volume confirmation
+            if (close[i] > R1_aligned[i] and 
+                close[i] > ema_50_aligned[i] and
                 vol_ratio[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low + price < daily EMA34 + volume spike
-            elif (close[i] < low_20[i] and 
-                  close[i] < ema_34_1d_aligned[i] and
+            # Short: Close < S1 AND price < EMA50 AND volume confirmation
+            elif (close[i] < S1_aligned[i] and 
+                  close[i] < ema_50_aligned[i] and
                   vol_ratio[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price below daily EMA34
-            if close[i] < ema_34_1d_aligned[i]:
+            # Exit long: Close < S1 OR price < EMA50
+            if (close[i] < S1_aligned[i] or close[i] < ema_50_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price above daily EMA34
-            if close[i] > ema_34_1d_aligned[i]:
+            # Exit short: Close > R1 OR price > EMA50
+            if (close[i] > R1_aligned[i] or close[i] > ema_50_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
