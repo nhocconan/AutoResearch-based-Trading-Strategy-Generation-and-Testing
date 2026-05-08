@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ElderRay_BullBearPower_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_TRIX_1wTrend_Volume_Spike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,45 +17,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume spike: current volume > 1.8x 24-period average
-    vol_ma24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > (1.8 * vol_ma24)
+    # Volume spike: current volume > 2.0x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma20)
     
-    # 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 26:
+    # 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 12:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
     
-    # 1d EMA26 for trend filter (faster than EMA34 for more signals)
-    ema_26_1d = pd.Series(close_1d).ewm(span=26, adjust=False, min_periods=26).mean().values
-    ema_26_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_26_1d)
+    # TRIX on 1w close (12-period EMA triple)
+    close_1w_series = pd.Series(close_1w)
+    ema1 = close_1w_series.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
+    trix = ((ema3 - ema3.shift(1)) / ema3.shift(1)) * 100
+    trix_values = trix.fillna(0).values
     
-    # Calculate Elder Ray components (13-period EMA for power)
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13  # Bull Power: High - EMA13
-    bear_power = low - ema13   # Bear Power: Low - EMA13
+    # Align TRIX to 12h timeframe
+    trix_aligned = align_htf_to_ltf(prices, df_1w, trix_values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 26  # Sufficient warmup for EMA26 and EMA13
+    start_idx = 36  # 12*3 for TRIX calculation
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_26_1d_aligned[i]) or np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(trix_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: Bull Power > 0, price above 1d EMA26, volume spike
-            long_cond = (bull_power[i] > 0) and (close[i] > ema_26_1d_aligned[i]) and volume_spike[i]
-            # Short conditions: Bear Power < 0, price below 1d EMA26, volume spike
-            short_cond = (bear_power[i] < 0) and (close[i] < ema_26_1d_aligned[i]) and volume_spike[i]
+            # Long conditions: TRIX > 0 (bullish momentum), volume spike
+            long_cond = (trix_aligned[i] > 0) and volume_spike[i]
+            # Short conditions: TRIX < 0 (bearish momentum), volume spike
+            short_cond = (trix_aligned[i] < 0) and volume_spike[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -64,15 +65,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Bull Power turns negative OR price crosses below 1d EMA26
-            if (bull_power[i] <= 0) or (close[i] < ema_26_1d_aligned[i]):
+            # Long exit: TRIX crosses below 0 (momentum shift)
+            if trix_aligned[i] < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Bear Power turns positive OR price crosses above 1d EMA26
-            if (bear_power[i] >= 0) or (close[i] > ema_26_1d_aligned[i]):
+            # Short exit: TRIX crosses above 0 (momentum shift)
+            if trix_aligned[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
