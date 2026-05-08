@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout + weekly EMA200 trend + volume confirmation
-# Uses weekly EMA200 for trend bias, daily Donchian breakouts for entry,
-# and volume spike (>1.5x 20-day average) for confirmation. Designed to capture
-# strong trends in both bull and bear markets while avoiding false breakouts
-# in low-volume conditions. Target: 10-25 trades/year.
+# Hypothesis: 6h Williams Fractal Breakout with 1d Trend and Volume Confirmation
+# Uses daily Williams fractals to identify support/resistance levels.
+# Enters on breakout above bearish fractal (resistance) or below bullish fractal (support)
+# when aligned with daily trend (EMA50) and confirmed by volume spike (>1.5x 20-period average).
+# Designed to capture momentum bursts in both bull and bear markets while avoiding false breakouts.
+# Target: 15-35 trades/year.
 
-name = "1d_Donchian20_WeeklyEMA200_VolumeConfirm"
-timeframe = "1d"
+name = "6h_WilliamsFractal_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,85 +24,95 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for EMA200 trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 200:
+    # Get daily data for Williams fractals and trend filter
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 10:
         return np.zeros(n)
     
-    # Calculate weekly EMA200 for trend filter
-    close_weekly = df_weekly['close'].values
-    ema200_weekly = np.full(len(close_weekly), np.nan)
-    if len(close_weekly) >= 200:
-        ema200_weekly[199] = np.mean(close_weekly[:200])
-        for i in range(200, len(close_weekly)):
-            ema200_weekly[i] = (close_weekly[i] * 2 + ema200_weekly[i-1] * 198) / 200
+    # Calculate Williams fractals (5-bar window: 2 left, 2 right)
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
     
-    # Calculate daily Donchian channels (20-period)
-    highest_high_20 = np.full(n, np.nan)
-    lowest_low_20 = np.full(n, np.nan)
-    if n >= 20:
-        for i in range(20, n):
-            highest_high_20[i] = np.max(high[i-20:i])
-            lowest_low_20[i] = np.min(low[i-20:i])
+    bearish_fractal = np.full(len(high_daily), np.nan)  # resistance
+    bullish_fractal = np.full(len(low_daily), np.nan)   # support
+    
+    # Need at least 5 bars: indices 2 to n-3 (0-based)
+    for i in range(2, len(high_daily) - 2):
+        # Bearish fractal: highest high with two lower highs on each side
+        if (high_daily[i] > high_daily[i-1] and high_daily[i] > high_daily[i-2] and
+            high_daily[i] > high_daily[i+1] and high_daily[i] > high_daily[i+2]):
+            bearish_fractal[i] = high_daily[i]
+        
+        # Bullish fractal: lowest low with two higher lows on each side
+        if (low_daily[i] < low_daily[i-1] and low_daily[i] < low_daily[i-2] and
+            low_daily[i] < low_daily[i+1] and low_daily[i] < low_daily[i+2]):
+            bullish_fractal[i] = low_daily[i]
+    
+    # Calculate daily EMA50 for trend filter
+    close_daily = df_daily['close'].values
+    ema50_daily = np.full(len(close_daily), np.nan)
+    if len(close_daily) >= 50:
+        # Use pandas EMA for efficiency and correctness
+        ema_series = pd.Series(close_daily).ewm(span=50, adjust=False, min_periods=50).mean()
+        ema50_daily = ema_series.values
     
     # Calculate daily volume average for volume confirmation
-    vol_avg_20 = np.full(n, np.nan)
-    if n >= 20:
-        for i in range(20, n):
-            vol_avg_20[i] = np.mean(volume[i-20:i])
+    vol_daily = df_daily['volume'].values
+    vol_avg_20_daily = np.full(len(vol_daily), np.nan)
+    if len(vol_daily) >= 20:
+        vol_series = pd.Series(vol_daily).rolling(window=20, min_periods=20).mean()
+        vol_avg_20_daily = vol_series.values
     
-    # Align weekly EMA200 to daily timeframe
-    ema200_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema200_weekly)
+    # Williams fractals need 2 extra bars for confirmation (wait for 2 candles after the fractal)
+    bearish_fractal_confirmed = np.full_like(bearish_fractal, np.nan)
+    bullish_fractal_confirmed = np.full_like(bullish_fractal, np.nan)
     
-    # Pre-compute session filter (08-20 UTC) - though less critical for daily
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    for i in range(2, len(bearish_fractal)):
+        if not np.isnan(bearish_fractal[i-2]):  # fractal formed 2 bars ago
+            bearish_fractal_confirmed[i] = bearish_fractal[i-2]
+        if not np.isnan(bullish_fractal[i-2]):  # fractal formed 2 bars ago
+            bullish_fractal_confirmed[i] = bullish_fractal[i-2]
+    
+    # Align daily indicators to 6h timeframe
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_daily, bearish_fractal_confirmed)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_daily, bullish_fractal_confirmed)
+    ema50_daily_aligned = align_htf_to_ltf(prices, df_daily, ema50_daily)
+    vol_avg_20_daily_aligned = align_htf_to_ltf(prices, df_daily, vol_avg_20_daily)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(200, 20)  # warmup for indicators
+    start_idx = 50  # warmup for EMA50
     
     for i in range(start_idx, n):
-        # Skip if outside trading session
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
         # Skip if any required data is NaN
-        if (np.isnan(ema200_weekly_aligned[i]) or 
-            np.isnan(highest_high_20[i]) or 
-            np.isnan(lowest_low_20[i]) or
-            np.isnan(vol_avg_20[i])):
+        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or
+            np.isnan(ema50_daily_aligned[i]) or np.isnan(vol_avg_20_daily_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current daily volume > 1.5x 20-day average
-        vol_confirm = volume[i] > 1.5 * vol_avg_20[i]
+        # Volume breakout: current 6h volume > 1.5x 20-period average of daily volume
+        vol_breakout = volume[i] > 1.5 * vol_avg_20_daily_aligned[i]
         
         if position == 0:
-            # Look for entry: follow weekly EMA200 trend with Donchian breakout
-            # Bullish when price above weekly EMA200
-            bullish_trend = close[i] > ema200_weekly_aligned[i]
-            # Bearish when price below weekly EMA200
-            bearish_trend = close[i] < ema200_weekly_aligned[i]
+            # Look for entry: breakout of fractal level in direction of daily trend
+            # Bearish fractal = resistance, break above = bullish signal
+            # Bullish fractal = support, break below = bearish signal
             
-            # Long when price breaks above Donchian high in bullish trend with volume
+            # Long when price breaks above bearish fractal (resistance) in uptrend
             long_condition = (
-                bullish_trend and                    # bullish weekly trend
-                close[i] > highest_high_20[i] and    # break above 20-day high
-                vol_confirm                          # volume confirmation
+                close[i] > bearish_fractal_aligned[i] and   # break above resistance
+                close[i] > ema50_daily_aligned[i] and       # price above EMA50 (uptrend)
+                vol_breakout                                # volume confirmation
             )
             
-            # Short when price breaks below Donchian low in bearish trend with volume
+            # Short when price breaks below bullish fractal (support) in downtrend
             short_condition = (
-                bearish_trend and                    # bearish weekly trend
-                close[i] < lowest_low_20[i] and      # break below 20-day low
-                vol_confirm                          # volume confirmation
+                close[i] < bullish_fractal_aligned[i] and   # break below support
+                close[i] < ema50_daily_aligned[i] and       # price below EMA50 (downtrend)
+                vol_breakout                                # volume confirmation
             )
             
             if long_condition:
@@ -111,15 +122,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns below Donchian low or trend reverses
-            if close[i] < lowest_low_20[i] or close[i] < ema200_weekly_aligned[i]:
+            # Exit long: price returns below EMA50 or breaks below bullish fractal (support)
+            if close[i] < ema50_daily_aligned[i] or close[i] < bullish_fractal_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns above Donchian high or trend reverses
-            if close[i] > highest_high_20[i] or close[i] > ema200_weekly_aligned[i]:
+            # Exit short: price returns above EMA50 or breaks above bearish fractal (resistance)
+            if close[i] > ema50_daily_aligned[i] or close[i] > bearish_fractal_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
