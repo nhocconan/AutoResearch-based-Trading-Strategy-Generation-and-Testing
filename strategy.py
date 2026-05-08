@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1d EMA34 trend filter + volume confirmation
-# Uses daily EMA34 for trend bias, Donchian channels for breakout signals,
-# and volume surge for entry confirmation. Designed to capture trends in both bull and bear markets
-# while avoiding false breakouts in choppy conditions. Target: 12-37 trades/year on 12h timeframe.
+# Hypothesis: 4h Donchian(20) breakout + 1d EMA50 trend filter + Volume spike
+# Uses daily EMA50 for trend direction, Donchian channel breakouts for entry,
+# and volume > 2x average for confirmation. Designed to capture trends in both
+# bull and bear markets while avoiding false breakouts. Target: 20-40 trades/year.
 
-name = "12h_Donchian20_1dEMA34_VolumeConfirmation"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA50_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,26 +24,34 @@ def generate_signals(prices):
     
     # Get daily data for EMA trend filter
     df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 34:
+    if len(df_daily) < 50:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend filter
+    # Calculate daily EMA50 for trend filter
     close_daily = df_daily['close'].values
-    ema34_daily = np.full(len(close_daily), np.nan)
-    if len(close_daily) >= 34:
-        ema34_daily[33] = np.mean(close_daily[:34])
-        for i in range(34, len(close_daily)):
-            ema34_daily[i] = (close_daily[i] * 2 + ema34_daily[i-1] * 32) / 34
+    ema50_daily = np.full(len(close_daily), np.nan)
+    if len(close_daily) >= 50:
+        ema50_daily[49] = np.mean(close_daily[:50])
+        for i in range(50, len(close_daily)):
+            ema50_daily[i] = (close_daily[i] * 2 + ema50_daily[i-1] * 48) / 50
     
-    # Calculate daily volume average for volume confirmation
+    # Calculate daily average volume for volume confirmation
     vol_daily = df_daily['volume'].values
     vol_avg_20_daily = np.full(len(vol_daily), np.nan)
     if len(vol_daily) >= 20:
         for i in range(20, len(vol_daily)):
             vol_avg_20_daily[i] = np.mean(vol_daily[i-20:i])
     
-    # Align daily indicators to 12h timeframe
-    ema34_daily_aligned = align_htf_to_ltf(prices, df_daily, ema34_daily)
+    # Calculate Donchian channel (20-period) on 4h data
+    highest_high_20 = np.full(n, np.nan)
+    lowest_low_20 = np.full(n, np.nan)
+    if n >= 20:
+        for i in range(20, n):
+            highest_high_20[i] = np.max(high[i-20:i])
+            lowest_low_20[i] = np.min(low[i-20:i])
+    
+    # Align daily indicators to 4h timeframe
+    ema50_daily_aligned = align_htf_to_ltf(prices, df_daily, ema50_daily)
     vol_avg_20_daily_aligned = align_htf_to_ltf(prices, df_daily, vol_avg_20_daily)
     
     # Pre-compute session filter (08-20 UTC)
@@ -53,7 +61,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # warmup for indicators
+    start_idx = max(50, 20, 20)  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if outside trading session
@@ -64,33 +72,30 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(ema34_daily_aligned[i]) or np.isnan(vol_avg_20_daily_aligned[i])):
+        if (np.isnan(ema50_daily_aligned[i]) or np.isnan(vol_avg_20_daily_aligned[i]) or
+            np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Calculate Donchian channels for 12h timeframe (20-period)
-        donchian_high = np.max(high[i-19:i+1])
-        donchian_low = np.min(low[i-19:i+1])
-        
-        # Volume confirmation: current 12h volume > 1.5x 20-period average of daily volume
-        vol_confirm = False
-        if not np.isnan(vol_avg_20_daily_aligned[i]):
-            vol_confirm = volume[i] > 1.5 * vol_avg_20_daily_aligned[i]
+        # Volume spike: current 4h volume > 2x 20-period average of daily volume
+        vol_spike = volume[i] > 2.0 * vol_avg_20_daily_aligned[i]
         
         if position == 0:
-            # Look for entry: breakout in direction of daily EMA trend with volume confirmation
+            # Look for entry: Donchian breakout in direction of daily EMA trend with volume spike
+            # Long when price breaks above upper Donchian band in bullish trend
             long_condition = (
-                close[i] > donchian_high and    # price breaks above Donchian high
-                close[i] > ema34_daily_aligned[i] and   # price above EMA34 (bullish bias)
-                vol_confirm                     # volume confirmation
+                close[i] > highest_high_20[i] and   # price breaks above upper Donchian band
+                close[i] > ema50_daily_aligned[i] and   # price above EMA50 (bullish bias)
+                vol_spike                             # volume spike for confirmation
             )
             
+            # Short when price breaks below lower Donchian band in bearish trend
             short_condition = (
-                close[i] < donchian_low and     # price breaks below Donchian low
-                close[i] < ema34_daily_aligned[i] and   # price below EMA34 (bearish bias)
-                vol_confirm                     # volume confirmation
+                close[i] < lowest_low_20[i] and    # price breaks below lower Donchian band
+                close[i] < ema50_daily_aligned[i] and   # price below EMA50 (bearish bias)
+                vol_spike                             # volume spike for confirmation
             )
             
             if long_condition:
@@ -100,17 +105,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns below Donchian mid-point or trend reverses
-            donchian_mid = (donchian_high + donchian_low) / 2
-            if close[i] < donchian_mid or close[i] < ema34_daily_aligned[i]:
+            # Exit long: price returns below lower Donchian band or trend reverses
+            if close[i] < lowest_low_20[i] or close[i] < ema50_daily_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns above Donchian mid-point or trend reverses
-            donchian_mid = (donchian_high + donchian_low) / 2
-            if close[i] > donchian_mid or close[i] > ema34_daily_aligned[i]:
+            # Exit short: price returns above upper Donchian band or trend reverses
+            if close[i] > highest_high_20[i] or close[i] > ema50_daily_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
