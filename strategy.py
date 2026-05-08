@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Bollinger Band squeeze and 1w EMA trend filter with volume confirmation.
-# Bollinger Band squeeze (BB width < 20th percentile) indicates low volatility and potential breakout.
-# Long when price breaks above upper BB with volume surge and above 1w EMA.
-# Short when price breaks below lower BB with volume surge and below 1w EMA.
-# Designed for low trade frequency (20-40/year) to avoid fee drag. Works in both trending and ranging markets by capturing volatility breakouts.
+# Hypothesis: 12h strategy using Donchian breakout (20) with 1d ADX trend filter and volume confirmation.
+# Long when price breaks above 20-period Donchian high + ADX > 25 + volume spike.
+# Short when price breaks below 20-period Donchian low + ADX > 25 + volume spike.
+# Exit when price crosses the Donchian midline (average of 20-period high/low).
+# Designed for low trade frequency (<30/year) to avoid fee drag. Trend filter reduces whipsaws in chop.
 
-name = "4h_BB_Squeeze_1wEMA_Volume"
-timeframe = "4h"
+name = "12h_Donchian20_ADX25_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,43 +23,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Bollinger Bands
+    # Get 1d data for ADX calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    # Calculate ADX on 1d data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Bollinger Bands (20, 2)
-    ma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb = ma_20 + (2 * std_20)
-    lower_bb = ma_20 - (2 * std_20)
-    bb_width = upper_bb - lower_bb
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # first value NaN
     
-    # Calculate Bollinger Band width percentile (20-period lookback)
-    bb_width_percentile = np.full_like(bb_width, np.nan)
-    for i in range(20, len(bb_width)):
-        window = bb_width[i-20:i]
-        bb_width_percentile[i] = (bb_width[i] <= window).sum() / len(window) * 100
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Squeeze condition: BB width below 20th percentile
-    squeeze = bb_width_percentile < 20
+    # Smoothed values (Wilder's smoothing)
+    def WilderSmooth(x, period):
+        result = np.full_like(x, np.nan)
+        if len(x) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nanmean(x[1:period])  # skip first NaN in tr
+        for i in range(period, len(x)):
+            result[i] = result[i-1] - (result[i-1] / period) + x[i]
+        return result
     
-    # Calculate 1w EMA (using 5-day EMA as proxy)
-    ema_1w = pd.Series(close_1d).ewm(span=5, adjust=False, min_periods=5).mean().values
+    atr = WilderSmooth(tr, 14)
+    dm_plus_smooth = WilderSmooth(dm_plus, 14)
+    dm_minus_smooth = WilderSmooth(dm_minus, 14)
     
-    # Align 1d indicators to 4h timeframe
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
-    squeeze_aligned = align_htf_to_ltf(prices, df_1d, squeeze)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1d, ema_1w)
+    # DI+ and DI-
+    di_plus = np.where(atr > 0, 100 * dm_plus_smooth / atr, 0)
+    di_minus = np.where(atr > 0, 100 * dm_minus_smooth / atr, 0)
     
-    # Volume confirmation: 4h volume spike (2x 20-period EMA)
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = WilderSmooth(dx, 14)
+    
+    # Align ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Donchian channels (20-period) on 12h data
+    def rolling_max(arr, window):
+        res = np.full_like(arr, np.nan)
+        for i in range(window-1, len(arr)):
+            res[i] = np.max(arr[i-window+1:i+1])
+        return res
+    
+    def rolling_min(arr, window):
+        res = np.full_like(arr, np.nan)
+        for i in range(window-1, len(arr)):
+            res[i] = np.min(arr[i-window+1:i+1])
+        return res
+    
+    donch_high = rolling_max(high, 20)
+    donch_low = rolling_min(low, 20)
+    donch_mid = (donch_high + donch_low) / 2.0
+    
+    # Volume confirmation: 12h volume spike (1.5x 20-period EMA)
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike = volume > (vol_ema * 2.0)
+    vol_spike = volume > (vol_ema * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -68,34 +102,34 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(upper_bb_aligned[i]) or 
-            np.isnan(lower_bb_aligned[i]) or 
-            np.isnan(squeeze_aligned[i]) or 
-            np.isnan(ema_1w_aligned[i])):
+        if (np.isnan(adx_aligned[i]) or 
+            np.isnan(donch_high[i]) or 
+            np.isnan(donch_low[i]) or 
+            np.isnan(donch_mid[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above upper BB + BB squeeze + volume surge + above 1w EMA
-            if close[i] > upper_bb_aligned[i] and squeeze_aligned[i] and vol_spike[i] and close[i] > ema_1w_aligned[i]:
+            # Enter long: price breaks above Donchian high + ADX > 25 + volume spike
+            if close[i] > donch_high[i] and adx_aligned[i] > 25 and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below lower BB + BB squeeze + volume surge + below 1w EMA
-            elif close[i] < lower_bb_aligned[i] and squeeze_aligned[i] and vol_spike[i] and close[i] < ema_1w_aligned[i]:
+            # Enter short: price breaks below Donchian low + ADX > 25 + volume spike
+            elif close[i] < donch_low[i] and adx_aligned[i] > 25 and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below lower BB
-            if close[i] < lower_bb_aligned[i]:
+            # Exit long: price crosses below Donchian midline
+            if close[i] < donch_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above upper BB
-            if close[i] > upper_bb_aligned[i]:
+            # Exit short: price crosses above Donchian midline
+            if close[i] > donch_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
