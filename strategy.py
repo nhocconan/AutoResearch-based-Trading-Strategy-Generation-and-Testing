@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian channel breakout with daily volume confirmation and ADX trend filter.
-# Long when price breaks above Donchian upper band (20) AND volume > 1.3x 20-period average AND ADX > 25.
-# Short when price breaks below Donchian lower band (20) AND volume > 1.3x 20-period average AND ADX > 25.
-# Exit when price crosses back into the Donchian channel (between upper and lower bands).
-# Uses 4h timeframe with 1d volume and ADX for higher timeframe context.
-# Target: 75-200 total trades over 4 years (19-50/year) with controlled frequency to avoid fee drag.
+# Hypothesis: 12h price action trading using 1d Fibonacci retracement levels and volume confirmation.
+# Long when price retraces to 61.8% Fibonacci level from recent swing low and closes above it with volume confirmation.
+# Short when price retraces to 38.2% Fibonacci level from recent swing high and closes below it with volume confirmation.
+# Uses 12h timeframe with 1d Fibonacci levels for higher timeframe context.
+# Designed to work in both bull and bear markets by trading mean reversion within the trend.
+# Target: 50-150 total trades over 4 years with controlled frequency to avoid fee drag.
 
-name = "4h_Donchian_20_Volume_ADX"
-timeframe = "4h"
+name = "12h_Fibonacci_Retracement_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,64 +24,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for volume and ADX
+    # Daily data for Fibonacci calculation
     df_d = get_htf_data(prices, '1d')
     if len(df_d) < 2:
         return np.zeros(n)
     
-    # Donchian channel (20-period) on 4h data
-    donchian_period = 20
-    upper_band = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    lower_band = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    # Calculate 20-period highest high and lowest low for swing points
+    highest_high_20 = pd.Series(df_d['high']).rolling(window=20, min_periods=20).max().values
+    lowest_low_20 = pd.Series(df_d['low']).rolling(window=20, min_periods=20).min().values
     
-    # Daily volume filter: current volume > 1.3x 20-period average
+    # Fibonacci levels: 38.2% and 61.8% retracement
+    range_20 = highest_high_20 - lowest_low_20
+    fib_382 = lowest_low_20 + (range_20 * 0.382)  # Resistance in uptrend, support in downtrend
+    fib_618 = lowest_low_20 + (range_20 * 0.618)  # Support in uptrend, resistance in downtrend
+    
+    # Align Fibonacci levels to 12h timeframe
+    fib_382_aligned = align_htf_to_ltf(prices, df_d, fib_382)
+    fib_618_aligned = align_htf_to_ltf(prices, df_d, fib_618)
+    
+    # Volume filter: current volume > 1.3x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.3 * vol_ma20)
-    
-    # Daily ADX (14-period) for trend strength
-    adx_period = 14
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    # Directional Movement
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), np.maximum(high - np.roll(high, 1), 0), 0)
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), np.maximum(np.roll(low, 1) - low, 0), 0)
-    # Smooth TR, DM+
-    tr_smooth = pd.Series(tr).rolling(window=adx_period, min_periods=adx_period).sum().values
-    dm_plus_smooth = pd.Series(dm_plus).rolling(window=adx_period, min_periods=adx_period).sum().values
-    dm_minus_smooth = pd.Series(dm_minus).rolling(window=adx_period, min_periods=adx_period).sum().values
-    # DI+ and DI-
-    di_plus = np.where(tr_smooth != 0, 100 * dm_plus_smooth / tr_smooth, 0)
-    di_minus = np.where(tr_smooth != 0, 100 * dm_minus_smooth / tr_smooth, 0)
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = pd.Series(dx).rolling(window=adx_period, min_periods=adx_period).mean().values
-    
-    # Align daily indicators to 4h timeframe
-    volume_filter_aligned = align_htf_to_ltf(prices, df_d, volume_filter)
-    adx_aligned = align_htf_to_ltf(prices, df_d, adx)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(donchian_period, 20, adx_period)  # Sufficient warmup
+    start_idx = max(20, 20)  # Sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
-            np.isnan(volume_filter_aligned[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(fib_382_aligned[i]) or np.isnan(fib_618_aligned[i]) or 
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price breaks above upper band, volume filter, ADX > 25
-            long_cond = (close[i] > upper_band[i]) and volume_filter_aligned[i] and (adx_aligned[i] > 25)
-            # Short conditions: price breaks below lower band, volume filter, ADX > 25
-            short_cond = (close[i] < lower_band[i]) and volume_filter_aligned[i] and (adx_aligned[i] > 25)
+            # Long conditions: price at 61.8% support level with volume confirmation
+            # Allow small tolerance for price action around the level
+            long_cond = (close[i] >= fib_618_aligned[i] * 0.999) and (close[i] <= fib_618_aligned[i] * 1.001) and volume_filter[i]
+            # Short conditions: price at 38.2% resistance level with volume confirmation
+            short_cond = (close[i] <= fib_382_aligned[i] * 1.001) and (close[i] >= fib_382_aligned[i] * 0.999) and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -90,15 +74,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses back below lower band
-            if close[i] < lower_band[i]:
+            # Long exit: price moves above 38.2% level or below 61.8% level
+            if close[i] > fib_382_aligned[i] * 1.001 or close[i] < fib_618_aligned[i] * 0.999:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses back above upper band
-            if close[i] > upper_band[i]:
+            # Short exit: price moves below 61.8% level or above 38.2% level
+            if close[i] < fib_618_aligned[i] * 0.999 or close[i] > fib_382_aligned[i] * 1.001:
                 signals[i] = 0.0
                 position = 0
             else:
