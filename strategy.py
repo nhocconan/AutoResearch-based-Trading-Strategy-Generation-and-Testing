@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
-# Long when price breaks above upper channel AND price > EMA50(1d) AND volume > 1.5x 30-period average.
-# Short when price breaks below lower channel AND price < EMA50(1d) AND volume > 1.5x 30-period average.
-# Exit when price crosses back to midline of the channel.
-# Uses Donchian breakout structure with EMA50 trend filter and volume confirmation.
-# Target: 60-120 total trades over 4 years (15-30/year) to avoid fee drag.
+# Hypothesis: 6h Bollinger Band squeeze breakout with 1d trend filter and volume confirmation.
+# Long when price breaks above upper band AND price > EMA34(1d) AND volume > 1.8x 20-period average.
+# Short when price breaks below lower band AND price < EMA34(1d) AND volume > 1.8x 20-period average.
+# Exit when price crosses back below upper band (long) or above lower band (short).
+# Bollinger squeeze (low volatility) precedes explosive moves. EMA34(1d) filters trend direction.
+# Volume confirms institutional participation. Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "12h_Donchian20_1dEMA50_Volume"
-timeframe = "12h"
+name = "6h_BollingerSqueeze_1dEMA34_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,56 +24,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h volume filter: current volume > 1.5x 30-period average
-    vol_ma30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_filter = volume > (1.5 * vol_ma30)
+    # Volume filter: current volume > 1.8x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.8 * vol_ma20)
     
-    # 1d data for Donchian channel and EMA50
+    # Bollinger Bands (20, 2) on 6h close
+    bb_period = 20
+    bb_std = 2
+    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean()
+    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std()
+    upper_band = sma + (std * bb_std)
+    lower_band = sma - (std * bb_std)
+    upper_band = upper_band.values
+    lower_band = lower_band.values
+    
+    # 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate Donchian channel (20-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Upper and lower bands
-    upper_band = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_band = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Middle line (exit condition)
-    middle_line = (upper_band + lower_band) / 2
-    
-    # EMA50 on 1d close
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align 1d indicators to 12h timeframe
-    upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
-    lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
-    middle_line_aligned = align_htf_to_ltf(prices, df_1d, middle_line)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # EMA34 on 1d close
+    ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Sufficient warmup for EMA50 and Donchian
+    start_idx = 34  # Sufficient warmup for EMA34 and Bollinger Bands
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]) or 
-            np.isnan(middle_line_aligned[i]) or np.isnan(ema_50_aligned[i]) or 
-            np.isnan(volume_filter[i])):
+        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: break above upper band, price > EMA50, volume filter
-            long_cond = (close[i] > upper_band_aligned[i]) and (close[i] > ema_50_aligned[i]) and volume_filter[i]
-            # Short conditions: break below lower band, price < EMA50, volume filter
-            short_cond = (close[i] < lower_band_aligned[i]) and (close[i] < ema_50_aligned[i]) and volume_filter[i]
+            # Long conditions: break above upper band, price > EMA34, volume filter
+            long_cond = (close[i] > upper_band[i]) and (close[i] > ema_34_aligned[i]) and volume_filter[i]
+            # Short conditions: break below lower band, price < EMA34, volume filter
+            short_cond = (close[i] < lower_band[i]) and (close[i] < ema_34_aligned[i]) and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -82,15 +74,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: cross below middle line
-            if close[i] < middle_line_aligned[i]:
+            # Long exit: cross back below upper band
+            if close[i] < upper_band[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: cross above middle line
-            if close[i] > middle_line_aligned[i]:
+            # Short exit: cross back above lower band
+            if close[i] > lower_band[i]:
                 signals[i] = 0.0
                 position = 0
             else:
