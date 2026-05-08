@@ -1,17 +1,10 @@
-# 12h_Camarilla_R4_S4_Breakout_1wTrend_Volume
-# Breakout at Camarilla R4/S4 levels with 1w trend filter and volume confirmation
-# Uses weekly trend to capture multi-week moves, reducing whipsaw in chop
-# R4/S4 levels indicate stronger breakouts, fewer false signals
-# Volume surge confirms institutional participation
-# Designed for 12h timeframe: targets 50-150 trades over 4 years
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R4_S4_Breakout_1wTrend_Volume"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,30 +17,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w trend: EMA34 on weekly close
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # 1d Camarilla R4/S4 levels
+    # 1d trend: EMA34
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    r4 = close_1d + (range_1d * 1.1 / 2)
-    s4 = close_1d - (range_1d * 1.1 / 2)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Donchian(20) channels
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume spike: current volume > 2.0x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -56,25 +37,25 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(s4_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(high_20[i]) or 
+            np.isnan(low_20[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above R4 + weekly uptrend + volume spike
-            long_cond = (close[i] > r4_aligned[i]) and \
-                        (close[i] > ema_34_1w_aligned[i]) and \
+            # Long: break above upper Donchian + uptrend (price > 1d EMA34) + volume spike
+            long_cond = (close[i] > high_20[i]) and \
+                        (close[i] > ema_34_1d_aligned[i]) and \
                         volume_spike[i]
-            # Short: break below S4 + weekly downtrend + volume spike
-            short_cond = (close[i] < s4_aligned[i]) and \
-                         (close[i] < ema_34_1w_aligned[i]) and \
+            # Short: break below lower Donchian + downtrend (price < 1d EMA34) + volume spike
+            short_cond = (close[i] < low_20[i]) and \
+                         (close[i] < ema_34_1d_aligned[i]) and \
                          volume_spike[i]
             
             if long_cond:
@@ -84,15 +65,15 @@ def generate_signals(prices):
                 signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Long exit: close below S4 (mean reversion to support)
-            if close[i] < s4_aligned[i]:
+            # Long exit: close below lower Donchian (mean reversion to support)
+            if close[i] < low_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.30
         elif position == -1:
-            # Short exit: close above R4 (mean reversion to resistance)
-            if close[i] > r4_aligned[i]:
+            # Short exit: close above upper Donchian (mean reversion to resistance)
+            if close[i] > high_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
