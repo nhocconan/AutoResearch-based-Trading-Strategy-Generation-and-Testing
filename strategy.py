@@ -1,4 +1,4 @@
-#\057usr\137bin\057env python3
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
