@@ -3,17 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R1/S1 Breakout with 12h EMA Trend and Volume Confirmation
-# Long when price breaks above S1 with 12h uptrend and volume spike
-# Short when price breaks below R1 with 12h downtrend and volume spike
-# Uses Camarilla levels from previous day for intraday support/resistance
-# Volume filter requires >2x 24-period average volume to confirm institutional interest
-# Trend filter uses 12h EMA50 to ensure alignment with higher timeframe momentum
-# Designed to capture intraday mean reversion breaks with trend alignment
-# Target: 100-180 total trades over 4 years (25-45/year) within optimal range
+# Hypothesis: 1d Donchian Breakout with Weekly Trend Filter and Volume Confirmation
+# Long when price breaks above Donchian(20) high with weekly trend up and volume spike.
+# Short when price breaks below Donchian(20) low with weekly trend down and volume spike.
+# Uses weekly EMA50 for trend filter and daily volume > 2x 20-day average for confirmation.
+# Designed for low-frequency, high-conviction trades to minimize fee drag.
+# Target: 30-100 total trades over 4 years (7-25/year) to stay within optimal range.
 
-name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_Volume"
-timeframe = "4h"
+name = "1d_Donchian_WeeklyTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,79 +24,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla levels
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 1:
+    # Get weekly data for trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    high_prev = df_daily['high'].shift(1).values
-    low_prev = df_daily['low'].shift(1).values
-    close_prev = df_daily['close'].shift(1).values
+    # Calculate weekly EMA50 for trend filter
+    close_weekly = df_weekly['close'].values
+    ema50_weekly = np.full(len(close_weekly), np.nan)
+    if len(close_weekly) >= 50:
+        ema50_weekly[49] = np.mean(close_weekly[:50])
+        for i in range(50, len(close_weekly)):
+            ema50_weekly[i] = (close_weekly[i] * 2 + ema50_weekly[i-1] * 48) / 50
     
-    # Camarilla formulas
-    R1 = close_prev + (high_prev - low_prev) * 1.1 / 12
-    S1 = close_prev - (high_prev - low_prev) * 1.1 / 12
+    # Align weekly EMA to daily timeframe
+    ema50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema50_weekly)
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
+    # Calculate daily Donchian channels (20-period)
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema50_12h = np.full(len(close_12h), np.nan)
-    if len(close_12h) >= 50:
-        ema50_12h[49] = np.mean(close_12h[:50])
-        for i in range(50, len(close_12h)):
-            ema50_12h[i] = (close_12h[i] * 2 + ema50_12h[i-1] * 48) / 50
+    if n >= 20:
+        for i in range(19, n):
+            donchian_high[i] = np.max(high[i-19:i+1])
+            donchian_low[i] = np.min(low[i-19:i+1])
     
-    # Calculate 24-period average volume for volume filter
-    vol_avg_24 = np.full(n, np.nan)
-    if n >= 24:
-        for i in range(23, n):
-            vol_avg_24[i] = np.mean(volume[i-23:i+1])
+    # Calculate daily volume average for volume filter
+    vol_avg_20 = np.full(n, np.nan)
+    if n >= 20:
+        for i in range(19, n):
+            vol_avg_20[i] = np.mean(volume[i-19:i+1])
     
-    # Align indicators to 4h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_daily, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_daily, S1)
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Pre-compute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 24)  # warmup for indicators
+    start_idx = max(50, 20)  # warmup for indicators
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_avg_24[i])):
+        # Skip if outside trading session
+        if not in_session[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume filter: current volume > 2x 24-period average
-        vol_filter = volume[i] > 2.0 * vol_avg_24[i]
+        # Skip if any required data is NaN
+        if (np.isnan(ema50_weekly_aligned[i]) or np.isnan(donchian_high[i]) or
+            np.isnan(donchian_low[i]) or np.isnan(vol_avg_20[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
         
-        # Determine trend direction from 12h EMA50
-        bullish_trend = close[i] > ema50_12h_aligned[i]
-        bearish_trend = close[i] < ema50_12h_aligned[i]
+        # Volume filter: current volume > 2x 20-period average
+        vol_filter = volume[i] > 2.0 * vol_avg_20[i]
+        
+        # Determine trend direction
+        bullish_trend = close[i] > ema50_weekly_aligned[i]
+        bearish_trend = close[i] < ema50_weekly_aligned[i]
         
         if position == 0:
-            # Look for entry: Camarilla breakout with volume and trend filter
-            # Long when price breaks above S1 in uptrend with volume
+            # Look for entry: breakout with volume and trend filter
+            # Long when price breaks above Donchian high in bullish trend
             long_condition = (
-                close[i] > S1_aligned[i] and   # price breaks above S1
-                bullish_trend and              # only long in uptrend
-                vol_filter                     # volume confirmation
+                close[i] > donchian_high[i] and  # breakout above upper band
+                bullish_trend and                # only long in uptrend
+                vol_filter                       # volume confirmation
             )
             
-            # Short when price breaks below R1 in downtrend with volume
+            # Short when price breaks below Donchian low in bearish trend
             short_condition = (
-                close[i] < R1_aligned[i] and   # price breaks below R1
-                bearish_trend and              # only short in downtrend
-                vol_filter                     # volume confirmation
+                close[i] < donchian_low[i] and   # breakout below lower band
+                bearish_trend and                # only short in downtrend
+                vol_filter                       # volume confirmation
             )
             
             if long_condition:
@@ -108,15 +110,17 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns below S1 or trend changes
-            if close[i] < S1_aligned[i] or not bullish_trend:
+            # Exit long: price returns to midpoint or trend changes
+            midpoint = (donchian_high[i] + donchian_low[i]) / 2.0
+            if close[i] < midpoint or not bullish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns above R1 or trend changes
-            if close[i] > R1_aligned[i] or not bearish_trend:
+            # Exit short: price returns to midpoint or trend changes
+            midpoint = (donchian_high[i] + donchian_low[i]) / 2.0
+            if close[i] > midpoint or not bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
