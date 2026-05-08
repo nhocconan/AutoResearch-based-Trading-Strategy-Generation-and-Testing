@@ -3,126 +3,117 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams Alligator with 1d ADX trend filter and volume confirmation.
-# Long when green line > red line > blue line (bullish alignment) AND 1d ADX > 25 AND volume > 1.5x 20-period average.
-# Short when green line < red line < blue line (bearish alignment) AND 1d ADX > 25 AND volume > 1.5x 20-period average.
-# Exit when Alligator lines crossover (green crosses red) or ADX < 20 (trend weakens).
-# Uses Williams Alligator (SMMA-based) for trend identification, ADX for trend strength, volume for confirmation.
-# Target: 60-120 total trades over 4 years (15-30/year) to avoid fee drag while capturing trends.
+# Hypothesis: 1d KAMA + RSI + Choppiness regime filter
+# Long when KAMA direction is bullish (current > prior), RSI < 40 (oversold), and Chop < 38.2 (trending)
+# Short when KAMA direction is bearish (current < prior), RSI > 60 (overbought), and Chop < 38.2 (trending)
+# Exit when KAMA direction reverses
+# Uses KAMA for adaptive trend, RSI for mean reversion entry, Chop to avoid ranging markets
+# Target: 30-100 total trades over 4 years (7-25/year) for low fee drag
 
-name = "4h_WilliamsAlligator_1dADX_Volume"
-timeframe = "4h"
+name = "1d_KAMA_RSI_Chop"
+timeframe = "1d"
 leverage = 1.0
-
-def smma(data, period):
-    """Smoothed Moving Average (SMMA) used in Williams Alligator"""
-    if len(data) < period:
-        return np.full_like(data, np.nan, dtype=float)
-    result = np.full_like(data, np.nan, dtype=float)
-    # First value is simple average
-    result[period-1] = np.mean(data[:period])
-    # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CURRENT_VALUE) / period
-    for i in range(period, len(data)):
-        result[i] = (result[i-1] * (period-1) + data[i]) / period
-    return result
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # 1d data for ADX trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # 1w data for Chop filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Williams Alligator on 4h: Jaw (13,8), Teeth (8,5), Lips (5,3)
-    # All are SMMA with different periods and shifts
-    jaw = smma(high, 13)  # Blue line
-    jaw = np.roll(jaw, 8)  # Shifted by 8 bars
+    # Calculate KAMA (Kaufman Adaptive Moving Average)
+    def kama(price, period=10, fast=2, slow=30):
+        # Efficiency Ratio
+        change = np.abs(np.diff(price, n=period))
+        volatility = np.sum(np.abs(np.diff(price)), axis=0)
+        # Avoid division by zero
+        er = np.where(volatility != 0, change / volatility, 0)
+        # Smoothing constant
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        # Initialize KAMA
+        kama_vals = np.full_like(price, np.nan, dtype=float)
+        kama_vals[period] = price[period]
+        for i in range(period+1, len(price)):
+            if not np.isnan(kama_vals[i-1]):
+                kama_vals[i] = kama_vals[i-1] + sc[i] * (price[i] - kama_vals[i-1])
+            else:
+                kama_vals[i] = price[i]
+        return kama_vals
     
-    teeth = smma(high, 8)   # Red line
-    teeth = np.roll(teeth, 5)  # Shifted by 5 bars
+    # Calculate RSI
+    def rsi(price, period=14):
+        delta = np.diff(price)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = np.zeros_like(price)
+        avg_loss = np.zeros_like(price)
+        avg_gain[period] = np.mean(gain[:period])
+        avg_loss[period] = np.mean(loss[:period])
+        for i in range(period+1, len(price)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi_vals = 100 - (100 / (1 + rs))
+        return rsi_vals
     
-    lips = smma(high, 5)    # Green line
-    lips = np.roll(lips, 3)  # Shifted by 3 bars
+    # Calculate Choppiness Index
+    def choppiness(high, low, close, period=14):
+        atr = np.zeros_like(close)
+        for i in range(1, len(close)):
+            atr[i] = max(high[i] - low[i], np.abs(high[i] - close[i-1]), np.abs(low[i] - close[i-1]))
+        # Sum of ATR over period
+        atr_sum = np.zeros_like(close)
+        for i in range(period, len(close)):
+            atr_sum[i] = np.sum(atr[i-period+1:i+1])
+        # Highest high and lowest low over period
+        max_high = np.zeros_like(close)
+        min_low = np.zeros_like(close)
+        for i in range(period-1, len(close)):
+            max_high[i] = np.max(high[i-period+1:i+1])
+            min_low[i] = np.min(low[i-period+1:i+1])
+        # Chop calculation
+        chop = np.full_like(close, np.nan, dtype=float)
+        for i in range(period, len(close)):
+            if max_high[i] != min_low[i]:
+                chop[i] = 100 * np.log10(atr_sum[i] / (max_high[i] - min_low[i])) / np.log10(period)
+            else:
+                chop[i] = 50  # neutral when no range
+        return chop
     
-    # 1d ADX for trend strength filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate indicators
+    kama_vals = kama(close, period=10, fast=2, slow=30)
+    rsi_vals = rsi(close, period=14)
+    chop_vals = choppiness(high, low, close, period=14)
     
-    # Calculate ADX components
-    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Smoothed values
-    period = 14
-    atr = np.zeros_like(high_1d)
-    atr[period] = np.mean(tr[:period])
-    for i in range(period+1, len(tr)):
-        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-    
-    # Avoid division by zero
-    atr_safe = np.where(atr == 0, 1e-10, atr)
-    
-    plus_di = 100 * np.convolve(plus_dm, np.ones(period)/period, mode='same') / atr_safe
-    minus_di = 100 * np.convolve(minus_dm, np.ones(period)/period, mode='same') / atr_safe
-    
-    dx = np.zeros_like(plus_di)
-    dx = np.where((plus_di + minus_di) != 0, 
-                  100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    
-    adx = np.zeros_like(dx)
-    adx[2*period-1] = np.mean(dx[:2*period-1]) if len(dx) >= 2*period-1 else 0
-    for i in range(2*period, len(dx)):
-        adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-    
-    # Align ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume filter: current volume > 1.5x 20-period average
-    vol_ma20 = np.convolve(volume, np.ones(20)/20, mode='same')
-    # Handle edges for convolution
-    vol_ma20[:10] = vol_ma20[10]
-    vol_ma20[-10:] = vol_ma20[-11]
-    volume_filter = volume > (1.5 * vol_ma20)
+    # Align Chop from weekly to daily
+    chop_1d = align_htf_to_ltf(prices, df_1w, chop_vals)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Sufficient warmup for indicators
+    start_idx = 30  # Sufficient warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(kama_vals[i]) or np.isnan(rsi_vals[i]) or 
+            np.isnan(chop_1d[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: bullish Alligator alignment (green > red > blue), strong trend, volume
-            bullish_align = (lips[i] > teeth[i]) and (teeth[i] > jaw[i])
-            long_cond = bullish_align and (adx_aligned[i] > 25) and volume_filter[i]
-            
-            # Short conditions: bearish Alligator alignment (green < red < blue), strong trend, volume
-            bearish_align = (lips[i] < teeth[i]) and (teeth[i] < jaw[i])
-            short_cond = bearish_align and (adx_aligned[i] > 25) and volume_filter[i]
+            # Long conditions: KAMA bullish, RSI oversold, trending market
+            long_cond = (kama_vals[i] > kama_vals[i-1]) and (rsi_vals[i] < 40) and (chop_1d[i] < 38.2)
+            # Short conditions: KAMA bearish, RSI overbought, trending market
+            short_cond = (kama_vals[i] < kama_vals[i-1]) and (rsi_vals[i] > 60) and (chop_1d[i] < 38.2)
             
             if long_cond:
                 signals[i] = 0.25
@@ -131,19 +122,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Alligator crosses bearish (green < red) OR trend weakens (ADX < 20)
-            bearish_cross = lips[i] < teeth[i]
-            weak_trend = adx_aligned[i] < 20
-            if bearish_cross or weak_trend:
+            # Long exit: KAMA turns bearish
+            if kama_vals[i] < kama_vals[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Alligator crosses bullish (green > red) OR trend weakens (ADX < 20)
-            bullish_cross = lips[i] > teeth[i]
-            weak_trend = adx_aligned[i] < 20
-            if bullish_cross or weak_trend:
+            # Short exit: KAMA turns bullish
+            if kama_vals[i] > kama_vals[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
