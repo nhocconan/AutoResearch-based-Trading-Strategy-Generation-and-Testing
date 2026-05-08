@@ -3,17 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Williams Alligator with 1-day trend filter and volume confirmation
-# Uses Alligator's Jaw (13-period SMMA), Teeth (8-period SMMA), Lips (5-period SMMA)
-# Long when Lips > Teeth > Jaw (bullish alignment) + daily EMA(50) uptrend + volume spike
-# Short when Lips < Teeth < Jaw (bearish alignment) + daily EMA(50) downtrend + volume spike
-# Alligator identifies trend absence/presence; alignment filters whipsaws in ranging markets
-# Daily trend ensures higher timeframe momentum alignment
-# Volume spike confirms institutional participation
-# Targets 50-150 total trades over 4 years (12-37/year) to avoid fee drag
+# Hypothesis: 12-hour Choppiness Index regime filter + 1-day Donchian breakout + volume confirmation
+# Uses Choppiness Index to identify ranging (CHOP > 61.8) and trending (CHOP < 38.2) regimes
+# In trending regimes: trade Donchian(20) breakouts with volume confirmation
+# In ranging regimes: mean-revert at Bollinger Band extremes with volume confirmation
+# Weekly trend filter ensures alignment with higher timeframe momentum
+# Designed for low trade frequency to avoid fee drag on 12h timeframe
 
-name = "6h_WilliamsAlligator_DailyTrend_Volume"
-timeframe = "6h"
+name = "12h_Chop_Donchian_BB_WeeklyTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,36 +24,59 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data once for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data once for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate daily EMA(50) for trend filter
+    # Calculate weekly EMA(50) for trend filter
+    weekly_close = df_1w['close'].values
+    ema50_1w = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
+    # Get daily data for Donchian and Bollinger Bands
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    # Daily Donchian channels (20-period)
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    donchian_high = pd.Series(daily_high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(daily_low).rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    
+    # Daily Bollinger Bands (20, 2)
     daily_close = df_1d['close'].values
-    ema50_1d = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    bb_middle = pd.Series(daily_close).rolling(window=20, min_periods=20).mean().values
+    bb_std = pd.Series(daily_close).rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + (2 * bb_std)
+    bb_lower = bb_middle - (2 * bb_std)
+    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper)
+    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower)
     
-    # Williams Alligator: Smoothed Moving Average (SMMA) with specific periods
-    # Jaw: 13-period SMMA, Teeth: 8-period SMMA, Lips: 5-period SMMA
-    def smma(arr, period):
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
-        result = np.full_like(arr, np.nan)
-        # First value is simple average
-        result[period-1] = np.mean(arr[:period])
-        # Subsequent values: (prev*(period-1) + current) / period
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
+    # Choppiness Index (14-period) - measures trend vs ranging
+    # High values (>61.8) indicate ranging, low values (<38.2) indicate trending
+    tr = np.maximum(high - low, 
+                    np.maximum(np.abs(high - np.roll(close, 1)), 
+                               np.abs(np.roll(close, 1) - low)))
+    # Handle first element for rolling
+    tr[0] = high[0] - low[0]
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
     
-    jaw = smma(close, 13)   # Jaw (blue line)
-    teeth = smma(close, 8)  # Teeth (red line)
-    lips = smma(close, 5)   # Lips (green line)
+    # Avoid division by zero
+    range_max_min = max_high - min_low
+    range_max_min = np.where(range_max_min == 0, 1e-10, range_max_min)
     
-    # Volume spike: current volume > 2.0 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    chop = 100 * np.log10(atr14 * 14 / range_max_min) / np.log10(14)
+    chop = np.where(np.isnan(chop), 50, chop)  # Default to middle when undefined
+    
+    # Volume spike: current volume > 1.5 * 30-period average
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -64,38 +85,59 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(lips[i]) or 
-            np.isnan(teeth[i]) or np.isnan(jaw[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or np.isnan(bb_upper_aligned[i]) or 
+            np.isnan(bb_lower_aligned[i]) or np.isnan(chop[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema50_1d_val = ema50_1d_aligned[i]
-        lip = lips[i]
-        tee = teeth[i]
-        jaw_val = jaw[i]
+        ema50_1w_val = ema50_1w_aligned[i]
+        chop_val = chop[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: Lips > Teeth > Jaw (bullish alignment) + daily uptrend + volume spike
-            if lip > tee and tee > jaw_val and close[i] > ema50_1d_val and vol_spike:
-                signals[i] = 0.25
-                position = 1
-            # Enter short: Lips < Teeth < Jaw (bearish alignment) + daily downtrend + volume spike
-            elif lip < tee and tee < jaw_val and close[i] < ema50_1d_val and vol_spike:
-                signals[i] = -0.25
-                position = -1
+            # Trending regime (CHOP < 38.2): Donchian breakout with volume
+            if chop_val < 38.2:
+                if close[i] > donchian_high_aligned[i] and vol_spike:
+                    signals[i] = 0.25
+                    position = 1
+                elif close[i] < donchian_low_aligned[i] and vol_spike:
+                    signals[i] = -0.25
+                    position = -1
+            # Ranging regime (CHOP > 61.8): Mean reversion at Bollinger Bands
+            elif chop_val > 61.8:
+                if close[i] < bb_lower_aligned[i] and vol_spike:
+                    signals[i] = 0.25
+                    position = 1
+                elif close[i] > bb_upper_aligned[i] and vol_spike:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Exit long: Alignment breaks OR daily trend turns down
-            if not (lip > tee and tee > jaw_val) or close[i] < ema50_1d_val:
+            # Exit long: regime change or opposite signal
+            exit_signal = False
+            if chop_val < 38.2:  # Still trending
+                if close[i] < donchian_low_aligned[i]:
+                    exit_signal = True
+            else:  # Ranging or neutral
+                if close[i] > bb_middle[i]:  # Return to mean
+                    exit_signal = True
+            if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Alignment breaks OR daily trend turns up
-            if not (lip < tee and tee < jaw_val) or close[i] > ema50_1d_val:
+            # Exit short: regime change or opposite signal
+            exit_signal = False
+            if chop_val < 38.2:  # Still trending
+                if close[i] > donchian_high_aligned[i]:
+                    exit_signal = True
+            else:  # Ranging or neutral
+                if close[i] < bb_middle[i]:  # Return to mean
+                    exit_signal = True
+            if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
