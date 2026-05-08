@@ -3,110 +3,149 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Choppiness Index regime filter + 12h Donchian breakout + volume confirmation
-# Chop > 61.8 = range (mean revert at Donchian bands), Chop < 38.2 = trend (breakout continuation)
-# Uses 12h Donchian(20) for structure and 40-period volume spike for confirmation
-# Target: 80-120 total trades over 4 years (20-30/year) to balance opportunity and cost
+# Hypothesis: 1h ADX/DMI with 4h trend filter and volume confirmation.
+# Use ADX > 25 + DI+ > DI- for uptrend, ADX > 25 + DI- > DI+ for downtrend.
+# Confirm with 4h EMA(34) trend direction.
+# Entry only during 08-20 UTC session.
+# Target: 60-150 total trades over 4 years (15-37/year) to minimize fee drag.
+# Works in bull/bear: ADX filters whipsaws, trend filter aligns with higher timeframe.
 
-name = "4h_Chop_Donchian_Breakout_12hVol"
-timeframe = "4h"
+name = "1h_ADX_DMI_4hTrend_Filter"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Donchian channels and chop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 34:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    close_4h = df_4h['close'].values
     
-    # 12h Donchian(20) channels
-    high_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (high_20 + low_20) / 2
+    # Calculate ADX/DMI (14-period)
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    tr = np.zeros(n)
     
-    # 12h Choppiness Index (14-period)
-    atr_12h = np.zeros(len(high_12h))
-    tr_12h = np.maximum(high_12h[1:] - low_12h[1:], 
-                        np.maximum(np.abs(high_12h[1:] - close_12h[:-1]),
-                                   np.abs(low_12h[1:] - close_12h[:-1])))
-    tr_12h = np.concatenate([[high_12h[0] - low_12h[0]], tr_12h])
-    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
-    sum_tr_14 = pd.Series(tr_12h).rolling(window=14, min_periods=14).sum().values
-    highest_high_14 = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(sum_tr_14 / (highest_high_14 - lowest_low_14)) / np.log10(14)
+    for i in range(1, n):
+        high_diff = high[i] - high[i-1]
+        low_diff = low[i-1] - low[i]
+        
+        plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
+        minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
+        
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    # 40-period volume spike confirmation (2.0x EMA)
-    vol_ema = pd.Series(volume).ewm(span=40, adjust=False, min_periods=40).mean().values
-    vol_confirm = volume > (vol_ema * 2.0)
+    # Smoothed values
+    atr = np.zeros(n)
+    plus_di = np.zeros(n)
+    minus_di = np.zeros(n)
     
-    # Align 12h indicators to 4h timeframe
-    high_20_aligned = align_htf_to_ltf(prices, df_12h, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_12h, low_20)
-    chop_aligned = align_htf_to_ltf(prices, df_12h, chop)
+    # Initial values (first 14 periods)
+    if n >= 14:
+        atr[13] = np.mean(tr[1:14])
+        plus_di[13] = 100 * np.mean(plus_dm[1:14]) / atr[13] if atr[13] != 0 else 0
+        minus_di[13] = 100 * np.mean(minus_dm[1:14]) / atr[13] if atr[13] != 0 else 0
+    
+        # Wilder smoothing
+        for i in range(14, n):
+            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+            plus_di[i] = 100 * (plus_di[i-1] * 13 + plus_dm[i]) / (14 * atr[i]) if atr[i] != 0 else 0
+            minus_di[i] = 100 * (minus_di[i-1] * 13 + minus_dm[i]) / (14 * atr[i]) if atr[i] != 0 else 0
+    
+    # ADX calculation
+    dx = np.zeros(n)
+    adx = np.zeros(n)
+    
+    for i in range(14, n):
+        di_diff = abs(plus_di[i] - minus_di[i])
+        di_sum = plus_di[i] + minus_di[i]
+        dx[i] = 100 * di_diff / di_sum if di_sum != 0 else 0
+    
+    if n >= 27:
+        adx[26] = np.mean(dx[14:27])
+        for i in range(27, n):
+            adx[i] = (adx[i-1] * 13 + dx[i]) / 14
+    
+    # 4h EMA(34) for trend filter
+    close_4h_series = pd.Series(close_4h)
+    ema_34_4h = close_4h_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_up_4h = ema_34_4h[1:] > ema_34_4h[:-1]
+    trend_up_4h = np.concatenate([[False], trend_up_4h])
+    
+    # Align 4h trend to 1h
+    trend_up_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_up_4h.astype(float))
+    
+    # Volume confirmation: 20-period volume spike (1.5x EMA)
+    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ema * 1.5)
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Ensure enough data for volume EMA
+    start_idx = 30  # Ensure enough data for ADX calculation
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or
-            np.isnan(chop_aligned[i]) or np.isnan(vol_ema[i])):
+        if (np.isnan(adx[i]) or np.isnan(plus_di[i]) or np.isnan(minus_di[i]) or
+            np.isnan(trend_up_4h_aligned[i]) or np.isnan(vol_ema[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Session filter
+        if not session_filter[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Chop > 61.8 = range: mean revert at Donchian bands
-            if chop_aligned[i] > 61.8:
-                if close[i] <= low_20_aligned[i] and vol_confirm[i]:
-                    signals[i] = 0.25
-                    position = 1
-                elif close[i] >= high_20_aligned[i] and vol_confirm[i]:
-                    signals[i] = -0.25
-                    position = -1
-            # Chop < 38.2 = trend: breakout continuation
-            elif chop_aligned[i] < 38.2:
-                if close[i] >= high_20_aligned[i] and vol_confirm[i]:
-                    signals[i] = 0.25
-                    position = 1
-                elif close[i] <= low_20_aligned[i] and vol_confirm[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # Long entry: ADX > 25, DI+ > DI-, 4h uptrend, volume confirmation
+            if (adx[i] > 25 and 
+                plus_di[i] > minus_di[i] and 
+                trend_up_4h_aligned[i] > 0.5 and 
+                vol_confirm[i]):
+                signals[i] = 0.20
+                position = 1
+            # Short entry: ADX > 25, DI- > DI+, 4h downtrend, volume confirmation
+            elif (adx[i] > 25 and 
+                  minus_di[i] > plus_di[i] and 
+                  trend_up_4h_aligned[i] <= 0.5 and 
+                  vol_confirm[i]):
+                signals[i] = -0.20
+                position = -1
         elif position == 1:
-            # Long exit: opposite signal or middle band touch
-            if chop_aligned[i] > 61.8 and close[i] >= donchian_mid[i]:
-                signals[i] = 0.0
-                position = 0
-            elif chop_aligned[i] < 38.2 and close[i] <= low_20_aligned[i]:
+            # Long exit: ADX < 20 or DI- > DI+ or 4h downtrend
+            if (adx[i] < 20 or 
+                minus_di[i] > plus_di[i] or 
+                trend_up_4h_aligned[i] <= 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: opposite signal or middle band touch
-            if chop_aligned[i] > 61.8 and close[i] <= donchian_mid[i]:
-                signals[i] = 0.0
-                position = 0
-            elif chop_aligned[i] < 38.2 and close[i] >= high_20_aligned[i]:
+            # Short exit: ADX < 20 or DI+ > DI- or 4h uptrend
+            if (adx[i] < 20 or 
+                plus_di[i] > minus_di[i] or 
+                trend_up_4h_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
