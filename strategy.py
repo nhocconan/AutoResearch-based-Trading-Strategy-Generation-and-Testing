@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 reversal with 1d trend filter and volume confirmation.
-# Fade at R3/S3 when 1d trend is opposite (mean reversion in range),
-# Breakout continuation at R4/S4 when 1d trend aligns (trend follow).
-# Uses 1d EMA(34) for trend and 60-period volume spike for confirmation.
-# Target: 60-100 total trades over 4 years (15-25/year) to minimize fee drag.
+# Hypothesis: 4h TRIX momentum with volume spike and 1d chop regime filter.
+# TRIX(9) > 0 and rising + volume spike (2x EMA60) + chop regime (range: CHOP > 61.8) = long
+# TRIX(9) < 0 and falling + volume spike + chop regime (range: CHOP > 61.8) = short
+# Chop regime filters out trending markets where TRIX whipsaws; range-bound markets favor mean reversion.
+# Target: 80-120 total trades over 4 years (20-30/year) to balance opportunity and fee drag.
 
-name = "6h_Camarilla_R3S3_Reversal_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_TRIX_VolumeSpike_ChopRange"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,7 +23,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and trend
+    # Get 1d data for chop regime filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -31,102 +31,93 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
+    # TRIX(9) on 4h close
+    # TRIX = EMA(EMA(EMA(close, 9), 9), 9) - 1-period percent change
+    ema1 = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
+    ema2 = pd.Series(ema1).ewm(span=9, adjust=False, min_periods=9).mean().values
+    ema3 = pd.Series(ema2).ewm(span=9, adjust=False, min_periods=9).mean().values
+    trix = np.zeros_like(close)
+    trix[1:] = (ema3[1:] - ema3[:-1]) / ema3[:-1] * 100
     
-    # Camarilla levels
-    range_ = prev_high - prev_low
-    R3 = prev_close + (range_ * 1.1 / 2)
-    S3 = prev_close - (range_ * 1.1 / 2)
-    R4 = prev_close + (range_ * 1.1)
-    S4 = prev_close - (range_ * 1.1)
-    
-    # 1d EMA(34) for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_up = ema_34_1d[1:] > ema_34_1d[:-1]  # Rising EMA = uptrend
-    trend_up = np.concatenate([[False], trend_up])  # Align with 1d index
+    # TRIX slope (rising/falling)
+    trix_slope = np.zeros_like(trix)
+    trix_slope[1:] = trix[1:] - trix[:-1]
     
     # Volume confirmation: 60-period volume spike (2.0x EMA)
     vol_ema = pd.Series(volume).ewm(span=60, adjust=False, min_periods=60).mean().values
     vol_confirm = volume > (vol_ema * 2.0)
     
-    # Align 1d indicators to 6h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
-    trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up.astype(float))
+    # Choppiness Index (CHOP) on 1d
+    # CHOP = 100 * log10(sum(ATR(1)) / (max(high) - min(low))) / log10(n)
+    atr_1d = np.zeros_like(close_1d)
+    tr_1d = np.zeros_like(close_1d)
+    tr_1d[0] = high_1d[0] - low_1d[0]
+    for i in range(1, len(close_1d)):
+        tr_1d[i] = max(high_1d[i] - low_1d[i], 
+                       abs(high_1d[i] - close_1d[i-1]), 
+                       abs(low_1d[i] - close_1d[i-1]))
+    # ATR(1) is just TR
+    atr_sum = np.zeros_like(close_1d)
+    for i in range(14, len(close_1d)):
+        atr_sum[i] = np.sum(tr_1d[i-13:i+1])
+    max_high = np.zeros_like(close_1d)
+    min_low = np.zeros_like(close_1d)
+    for i in range(14, len(close_1d)):
+        max_high[i] = np.max(high_1d[i-13:i+1])
+        min_low[i] = np.min(low_1d[i-13:i+1])
+    chop = np.full_like(close_1d, 50.0)  # default
+    for i in range(14, len(close_1d)):
+        if max_high[i] > min_low[i]:
+            chop[i] = 100 * np.log10(atr_sum[i] / (max_high[i] - min_low[i])) / np.log10(14)
+    
+    # Chop regime: range when CHOP > 61.8
+    chop_range = chop > 61.8
+    
+    # Align 1d indicators to 4h timeframe
+    chop_range_aligned = align_htf_to_ltf(prices, df_1d, chop_range.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Ensure enough data for volume EMA
+    start_idx = 60  # Ensure enough data for volume EMA and TRIX
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or
-            np.isnan(R4_aligned[i]) or np.isnan(S4_aligned[i]) or
-            np.isnan(trend_up_aligned[i]) or np.isnan(vol_ema[i])):
+        if (np.isnan(trix[i]) or np.isnan(trix_slope[i]) or 
+            np.isnan(vol_ema[i]) or np.isnan(chop_range_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry conditions
-            # Fade at S3 in downtrend (mean reversion)
-            if (trend_up_aligned[i] <= 0.5 and  # 1d downtrend
-                close[i] <= S3_aligned[i] and
-                vol_confirm[i]):
+            # Long entry: TRIX positive and rising + volume spike + chop range
+            if (trix[i] > 0 and 
+                trix_slope[i] > 0 and 
+                vol_confirm[i] and 
+                chop_range_aligned[i] > 0.5):
                 signals[i] = 0.25
                 position = 1
-            # Breakout above R4 in uptrend (trend follow)
-            elif (trend_up_aligned[i] > 0.5 and  # 1d uptrend
-                  close[i] >= R4_aligned[i] and
-                  vol_confirm[i]):
-                signals[i] = 0.25
-                position = 1
-            # Short entry conditions
-            # Fade at R3 in uptrend (mean reversion)
-            elif (trend_up_aligned[i] > 0.5 and  # 1d uptrend
-                  close[i] >= R3_aligned[i] and
-                  vol_confirm[i]):
-                signals[i] = -0.25
-                position = -1
-            # Breakdown below S4 in downtrend (trend follow)
-            elif (trend_up_aligned[i] <= 0.5 and  # 1d downtrend
-                  close[i] <= S4_aligned[i] and
-                  vol_confirm[i]):
+            # Short entry: TRIX negative and falling + volume spike + chop range
+            elif (trix[i] < 0 and 
+                  trix_slope[i] < 0 and 
+                  vol_confirm[i] and 
+                  chop_range_aligned[i] > 0.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: reverse signal or stop
-            if (trend_up_aligned[i] <= 0.5 and  # 1d downtrend
-                close[i] >= R3_aligned[i]):  # Hit R3 or above
-                signals[i] = 0.0
-                position = 0
-            elif (trend_up_aligned[i] > 0.5 and  # 1d uptrend
-                  close[i] <= S4_aligned[i]):  # Break below S4
+            # Long exit: TRIX turns negative or chop regime ends
+            if (trix[i] <= 0 or 
+                chop_range_aligned[i] <= 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: reverse signal or stop
-            if (trend_up_aligned[i] > 0.5 and  # 1d uptrend
-                close[i] <= S3_aligned[i]):  # Hit S3 or below
-                signals[i] = 0.0
-                position = 0
-            elif (trend_up_aligned[i] <= 0.5 and  # 1d downtrend
-                  close[i] >= R4_aligned[i]):  # Break above R4
+            # Short exit: TRIX turns positive or chop regime ends
+            if (trix[i] >= 0 or 
+                chop_range_aligned[i] <= 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
