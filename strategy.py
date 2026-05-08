@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Weekly Trend with Daily Breakout and Volume Confirmation
-# - Uses weekly EMA20 for trend direction (bullish when price > EMA20, bearish when price < EMA20)
-# - Daily price breaks above weekly EMA20 + 0.5*ATR for long, or breaks below for short
-# - Volume confirmation: current volume > 1.5x 20-day average
-# - Works in bull/bear by using weekly trend filter to avoid counter-trend trades
-# - Target: 10-20 trades/year to minimize fee drag on 1d timeframe
+# Hypothesis: 4h Camarilla Pivot Breakout with 1d Trend and Volume Spike
+# - Uses Camarilla levels from daily timeframe (S1/S2 for long, R1/R2 for short)
+# - Breakout above S1 with 1d uptrend or below R1 with 1d downtrend
+# - Volume spike confirms breakout strength
+# - 1d trend filter avoids counter-trend trades in both bull and bear markets
+# - Target: 20-40 trades/year to minimize fee drag on 4h timeframe
 
-name = "1d_WeeklyTrend_DailyBreakout_Volume"
-timeframe = "1d"
+name = "4h_CamarillaBreakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,60 +24,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # 1d data for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly EMA20 for trend
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Calculate Camarilla levels using previous day's data
+    n1d = len(close_1d)
+    camarilla_S1 = np.full(n1d, np.nan)
+    camarilla_S2 = np.full(n1d, np.nan)
+    camarilla_R1 = np.full(n1d, np.nan)
+    camarilla_R2 = np.full(n1d, np.nan)
     
-    # Weekly ATR(14) for volatility filter
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_14_1w)
+    for i in range(1, n1d):
+        H = high_1d[i-1]
+        L = low_1d[i-1]
+        C = close_1d[i-1]
+        range_val = H - L
+        camarilla_S1[i] = C - range_val * 1.08
+        camarilla_S2[i] = C - range_val * 1.16
+        camarilla_R1[i] = C + range_val * 1.08
+        camarilla_R2[i] = C + range_val * 1.16
     
-    # Daily ATR(10) for breakout threshold
-    tr1_d = high[1:] - low[1:]
-    tr2_d = np.abs(high[1:] - close[:-1])
-    tr3_d = np.abs(low[1:] - close[:-1])
-    tr_d = np.concatenate([[np.nan], np.maximum(tr1_d, np.maximum(tr2_d, tr3_d))])
-    atr_10_d = pd.Series(tr_d).rolling(window=10, min_periods=10).mean().values
+    # Align Camarilla levels to 4h timeframe
+    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
+    camarilla_S2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S2)
+    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
+    camarilla_R2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R2)
     
-    # Volume spike: current volume > 1.5x 20-day average
+    # 1d data for trend filter
+    close_1d = df_1d['close'].values
+    # 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume spike: current volume > 2.0x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma20)
+    volume_spike = volume > (2.0 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(atr_14_1w_aligned[i]) or 
-            np.isnan(atr_10_d[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(camarilla_S1_aligned[i]) or np.isnan(camarilla_S2_aligned[i]) or 
+            np.isnan(camarilla_R1_aligned[i]) or np.isnan(camarilla_R2_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above weekly EMA20 + 0.5*weekly ATR with volume spike
-            long_breakout = ema_20_1w_aligned[i] + 0.5 * atr_14_1w_aligned[i]
-            long_cond = (close[i] > long_breakout and volume_spike[i])
+            # Long: price breaks above S1 (support) with 1d uptrend + volume spike
+            long_cond = (close[i] > camarilla_S1_aligned[i] and 
+                        ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1] and
+                        volume_spike[i])
             
-            # Short: price breaks below weekly EMA20 - 0.5*weekly ATR with volume spike
-            short_breakout = ema_20_1w_aligned[i] - 0.5 * atr_14_1w_aligned[i]
-            short_cond = (close[i] < short_breakout and volume_spike[i])
+            # Short: price breaks below R1 (resistance) with 1d downtrend + volume spike
+            short_cond = (close[i] < camarilla_R1_aligned[i] and 
+                         ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1] and
+                         volume_spike[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -86,15 +99,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below weekly EMA20
-            if close[i] < ema_20_1w_aligned[i]:
+            # Long exit: price breaks below S2 (strong support break)
+            if close[i] < camarilla_S2_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above weekly EMA20
-            if close[i] > ema_20_1w_aligned[i]:
+            # Short exit: price breaks above R2 (strong resistance break)
+            if close[i] > camarilla_R2_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
