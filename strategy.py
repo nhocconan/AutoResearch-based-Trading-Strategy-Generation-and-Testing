@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_RSI20_Overbought_Oversold_Volume"
-timeframe = "1d"
+name = "4h_Camarilla_R3S3_Breakout_12hTrend_Volume_25"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,61 +17,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate RSI(14) with proper min_periods
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
     
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
+    close_12h = df_12h['close'].values
+    # Calculate EMA(50) on 12h close for trend filter
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    for i in range(14, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # Get daily data for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi[:13] = np.nan  # Not enough data for RSI
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Volume confirmation: 20-period average
+    # Calculate Camarilla levels for each daily bar
+    high_low_range = high_1d - low_1d
+    camarilla_high = high_1d + 1.1 * high_low_range
+    camarilla_low = low_1d - 1.1 * high_low_range
+    camarilla_range = camarilla_high - camarilla_low
+    
+    R3 = camarilla_low + camarilla_range * 1.1000
+    S3 = camarilla_high - camarilla_range * 1.1000
+    
+    # Align Camarilla levels to 4h timeframe (wait for daily close)
+    R3_4h = align_htf_to_ltf(prices, df_1d, R3)
+    S3_4h = align_htf_to_ltf(prices, df_1d, S3)
+    
+    # Volume confirmation: 20-period average on 4h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for indicators
+    start_idx = 200  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if np.isnan(rsi[i]) or np.isnan(vol_ratio[i]):
+        if (np.isnan(R3_4h[i]) or np.isnan(S3_4h[i]) or np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: RSI < 30 (oversold) + volume confirmation
-            if rsi[i] < 30 and vol_ratio[i] > 1.5:
+            # Long: Price breaks above R3 + above 12h EMA50 + volume
+            if (close[i] > R3_4h[i] and
+                close[i] > ema_50_12h_aligned[i] and
+                vol_ratio[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI > 70 (overbought) + volume confirmation
-            elif rsi[i] > 70 and vol_ratio[i] > 1.5:
+            # Short: Price breaks below S3 + below 12h EMA50 + volume
+            elif (close[i] < S3_4h[i] and
+                  close[i] < ema_50_12h_aligned[i] and
+                  vol_ratio[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: RSI > 50 (mean reversion)
-            if rsi[i] > 50:
+            # Long exit: Price falls back below S3 or below 12h EMA50
+            if (close[i] < S3_4h[i] or
+                close[i] < ema_50_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI < 50 (mean reversion)
-            if rsi[i] < 50:
+            # Short exit: Price rises back above R3 or above 12h EMA50
+            if (close[i] > R3_4h[i] or
+                close[i] > ema_50_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
