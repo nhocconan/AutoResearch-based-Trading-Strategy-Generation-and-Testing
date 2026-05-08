@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Keltner Channel breakout with volume confirmation and 1w RSI trend filter.
-# Long when price breaks above upper Keltner Channel (EMA + 2*ATR) with volume surge and 1w RSI > 50.
-# Short when price breaks below lower Keltner Channel (EMA - 2*ATR) with volume surge and 1w RSI < 50.
-# Uses 1d ATR and EMA for Keltner Channel, 1w RSI for trend filter.
-# Designed for low trade frequency (15-25/year) to avoid fee drag. Keltner Channels adapt to volatility,
-# working in both trending and ranging markets. Volume confirmation ensures breakout strength.
+# Hypothesis: 4h strategy using 1d ATR breakout with volume confirmation and 1w EMA trend filter.
+# Uses 1d ATR to define breakout levels from recent highs/lows.
+# Long when price breaks above recent high + 1.5*1d ATR with volume surge and above 1w EMA.
+# Short when price breaks below recent low - 1.5*1d ATR with volume surge and below 1w EMA.
+# Designed for low trade frequency (20-40/year) to avoid fee drift. ATR breakouts capture volatility expansion.
+# Works in both bull and bear markets by filtering with 1w EMA trend and requiring volume confirmation.
 
-name = "4h_1dKeltner_1wRSI_Volume"
+name = "4h_1dATRBreakout_VolumeTrend"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,131 +24,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Keltner Channel calculation
+    # Get 1d data for ATR calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA (20-period) for Keltner Channel middle line
-    ema_20 = pd.Series(df_1d['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate 14-period ATR on daily data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1d ATR (14-period) for Keltner Channel width
-    tr1 = np.abs(df_1d['high'].values[1:] - df_1d['low'].values[:-1])
-    tr2 = np.abs(df_1d['high'].values[1:] - df_1d['close'].values[:-1])
-    tr3 = np.abs(df_1d['low'].values[1:] - df_1d['close'].values[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # True Range calculation
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2[0] = tr1[0]  # First period has no previous close
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Calculate Keltner Channel bands
-    kc_upper = ema_20 + 2.0 * atr_14
-    kc_lower = ema_20 - 2.0 * atr_14
+    # ATR using Wilder's smoothing (equivalent to EMA with alpha=1/period)
+    atr_1d = np.zeros_like(tr)
+    atr_1d[0] = tr[0]
+    for i in range(1, len(tr)):
+        atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14  # Wilder's smoothing
     
-    # Get 1w data for RSI trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
-        return np.zeros(n)
-    
-    # Calculate 1w RSI (14-period)
-    close_1w = df_1w['close'].values
-    delta = np.diff(close_1w)
-    delta = np.concatenate([[np.nan], delta])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1w = 100 - (100 / (1 + rs))
+    # Calculate 1w EMA (using 5 days as proxy for 1 week)
+    ema_1w = pd.Series(close_1d).ewm(span=5, adjust=False, min_periods=5).mean().values
     
     # Align 1d indicators to 4h timeframe
-    kc_upper_aligned = align_htf_to_ltf(prices, df_1d, kc_upper)
-    kc_lower_aligned = align_htf_to_ltf(prices, df_1d, kc_lower)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1d, ema_1w)
     
-    # Align 1w RSI to 4h timeframe
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    # Calculate recent high/low for breakout levels (using 10 periods lookback)
+    # We'll use the highest high and lowest low from the last 10 periods
+    lookback = 10
+    recent_high = np.full(n, np.nan)
+    recent_low = np.full(n, np.nan)
     
-    # Volume confirmation: 4h volume spike (2x 20-period EMA)
+    for i in range(lookback, n):
+        recent_high[i] = np.max(high[i-lookback:i])
+        recent_low[i] = np.min(low[i-lookback:i])
+    
+    # Volume confirmation: 4h volume spike (1.5x 20-period EMA)
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike = volume > (vol_ema * 2.0)
+    vol_spike = volume > (vol_ema * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for indicators
+    start_idx = max(50, lookback)  # Ensure enough data
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(kc_upper_aligned[i]) or 
-            np.isnan(kc_lower_aligned[i]) or 
-            np.isnan(rsi_1w_aligned[i])):
+        if (np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(ema_1w_aligned[i]) or 
+            np.isnan(recent_high[i]) or 
+            np.isnan(recent_low[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above upper KC + volume surge + 1w RSI > 50
-            if close[i] > kc_upper_aligned[i] and vol_spike[i] and rsi_1w_aligned[i] > 50:
+            # Calculate breakout levels
+            upper_break = recent_high[i] + 1.5 * atr_1d_aligned[i]
+            lower_break = recent_low[i] - 1.5 * atr_1d_aligned[i]
+            
+            # Enter long: price breaks above upper level + volume surge + above 1w EMA
+            if close[i] > upper_break and vol_spike[i] and close[i] > ema_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below lower KC + volume surge + 1w RSI < 50
-            elif close[i] < kc_lower_aligned[i] and vol_spike[i] and rsi_1w_aligned[i] < 50:
+            # Enter short: price breaks below lower level + volume surge + below 1w EMA
+            elif close[i] < lower_break and vol_spike[i] and close[i] < ema_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below middle line (EMA)
-            if close[i] < ema_20_aligned[i] if 'ema_20_aligned' in locals() else False:
+            # Exit long: price breaks below recent low (trailing stop)
+            if close[i] < recent_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above middle line (EMA)
-            if close[i] > ema_20_aligned[i] if 'ema_20_aligned' in locals() else False:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
-    
-    # Fix: align EMA_20 for exit condition
-    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20)
-    
-    # Re-run loop with proper EMA alignment (simplified - in practice we'd compute this earlier)
-    # For brevity and correctness, we'll recompute signals with proper alignment
-    
-    # Recompute with proper EMA alignment
-    signals = np.zeros(n)
-    position = 0
-    
-    for i in range(start_idx, n):
-        # Skip if any critical data is NaN
-        if (np.isnan(kc_upper_aligned[i]) or 
-            np.isnan(kc_lower_aligned[i]) or 
-            np.isnan(rsi_1w_aligned[i]) or 
-            np.isnan(ema_20_aligned[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        if position == 0:
-            # Enter long: price breaks above upper KC + volume surge + 1w RSI > 50
-            if close[i] > kc_upper_aligned[i] and vol_spike[i] and rsi_1w_aligned[i] > 50:
-                signals[i] = 0.25
-                position = 1
-            # Enter short: price breaks below lower KC + volume surge + 1w RSI < 50
-            elif close[i] < kc_lower_aligned[i] and vol_spike[i] and rsi_1w_aligned[i] < 50:
-                signals[i] = -0.25
-                position = -1
-        elif position == 1:
-            # Exit long: price breaks below middle line (EMA)
-            if close[i] < ema_20_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:
-            # Exit short: price breaks above middle line (EMA)
-            if close[i] > ema_20_aligned[i]:
+            # Exit short: price breaks above recent high (trailing stop)
+            if close[i] > recent_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
