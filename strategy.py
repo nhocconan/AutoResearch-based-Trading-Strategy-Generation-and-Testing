@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_Donchian_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "6h_Donchian_Breakout_1dTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,46 +17,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly trend: EMA50
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # 1d trend: EMA34
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Daily Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 6h Donchian channels (20-period)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation: current volume > 1.5x 20-day average
+    # Volume spike: current volume > 2.0x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > (1.5 * vol_ma20)
+    volume_spike = volume > (2.0 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # enough for weekly EMA and daily Donchian
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(high_20[i]) or 
-            np.isnan(low_20[i]) or np.isnan(volume_confirmed[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(high_max[i]) or 
+            np.isnan(low_min[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above 20-day high + uptrend (price > weekly EMA50) + volume confirmation
-            long_cond = (close[i] > high_20[i]) and \
-                        (close[i] > ema_50_1w_aligned[i]) and \
-                        volume_confirmed[i]
-            # Short: break below 20-day low + downtrend (price < weekly EMA50) + volume confirmation
-            short_cond = (close[i] < low_20[i]) and \
-                         (close[i] < ema_50_1w_aligned[i]) and \
-                         volume_confirmed[i]
+            # Long: break above Donchian high + uptrend (price > 1d EMA34) + volume spike
+            long_cond = (close[i] > high_max[i]) and \
+                        (close[i] > ema_34_1d_aligned[i]) and \
+                        volume_spike[i]
+            # Short: break below Donchian low + downtrend (price < 1d EMA34) + volume spike
+            short_cond = (close[i] < low_min[i]) and \
+                         (close[i] < ema_34_1d_aligned[i]) and \
+                         volume_spike[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -65,15 +65,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: close below 20-day low (mean reversion to support)
-            if close[i] < low_20[i]:
+            # Long exit: close below Donchian low (mean reversion to support)
+            if close[i] < low_min[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: close above 20-day high (mean reversion to resistance)
-            if close[i] > high_20[i]:
+            # Short exit: close above Donchian high (mean reversion to resistance)
+            if close[i] > high_max[i]:
                 signals[i] = 0.0
                 position = 0
             else:
