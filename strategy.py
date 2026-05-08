@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d volume spike and 1d ADX trend filter
+# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and 1d ADX trend filter
 # Breakouts above 20-period high or below 20-period low indicate strong momentum.
 # 1d volume spike confirms institutional participation. 1d ADX > 25 ensures trading only in strong trends.
 # This combination works in both bull and bear markets by filtering for strong trends only.
-# Targets 12-37 trades per year (~50-150 total over 4 years) to minimize fee drag.
+# Targets 20-50 trades per year (~80-200 total over 4 years) to minimize fee drag.
 
-name = "12h_Donchian20_1dVolume_1dADX"
-timeframe = "12h"
+name = "4h_Donchian20_1dVolume_1dADX"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -77,10 +77,10 @@ def generate_signals(prices):
     
     adx_strong = adx > 25
     adx_weak = adx < 20
-    adx_strong_12h = align_htf_to_ltf(prices, df_1d, adx_strong)
-    adx_weak_12h = align_htf_to_ltf(prices, df_1d, adx_weak)
+    adx_strong_4h = align_htf_to_ltf(prices, df_1d, adx_strong)
+    adx_weak_4h = align_htf_to_ltf(prices, df_1d, adx_weak)
     
-    # Donchian(20) on 12h
+    # Donchian(20) on 4h
     lookback = 20
     highest_high = np.full_like(high, np.nan)
     lowest_low = np.full_like(low, np.nan)
@@ -103,7 +103,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
         if (np.isnan(highest_high_aligned[i]) or np.isnan(lowest_low_aligned[i]) or 
-            np.isnan(vol_spike[i]) or np.isnan(adx_strong_12h[i]) or np.isnan(adx_weak_12h[i])):
+            np.isnan(vol_spike[i]) or np.isnan(adx_strong_4h[i]) or np.isnan(adx_weak_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -111,23 +111,23 @@ def generate_signals(prices):
         
         if position == 0:
             # Enter long: price breaks above 20-period high, volume spike, strong trend
-            if close[i] > highest_high_aligned[i] and vol_spike[i] and adx_strong_12h[i]:
+            if close[i] > highest_high_aligned[i] and vol_spike[i] and adx_strong_4h[i]:
                 signals[i] = 0.25
                 position = 1
             # Enter short: price breaks below 20-period low, volume spike, strong trend
-            elif close[i] < lowest_low_aligned[i] and vol_spike[i] and adx_strong_12h[i]:
+            elif close[i] < lowest_low_aligned[i] and vol_spike[i] and adx_strong_4h[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Exit long: price returns to 20-period low or trend weakens
-            if close[i] < lowest_low_aligned[i] or adx_weak_12h[i]:
+            if close[i] < lowest_low_aligned[i] or adx_weak_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Exit short: price returns to 20-period high or trend weakens
-            if close[i] > highest_high_aligned[i] or adx_weak_12h[i]:
+            if close[i] > highest_high_aligned[i] or adx_weak_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
