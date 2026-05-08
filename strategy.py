@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
 # Long when price breaks above Donchian(20) high, 1d EMA34 rising, volume > 1.5x average
 # Short when price breaks below Donchian(20) low, 1d EMA34 falling, volume > 1.5x average
 # Uses Donchian channel for price structure, EMA34 for trend filter, volume for confirmation
-# Targets 50-150 total trades over 4 years (12-37/year) for low fee drag and high win rate
+# Targets 20-50 total trades per year (80-200 over 4 years) for low fee drag and high win rate
 # Works in both bull and bear markets due to trend filter and volume confirmation
 
-name = "12h_Donchian20_1dEMA34_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA34_Volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -43,7 +43,7 @@ def generate_signals(prices):
     donchian_high = pd.Series(prev_high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(prev_low).rolling(window=20, min_periods=20).min().values
     
-    # Align Donchian levels to 12h timeframe
+    # Align Donchian levels to 4h timeframe
     donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
     donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
