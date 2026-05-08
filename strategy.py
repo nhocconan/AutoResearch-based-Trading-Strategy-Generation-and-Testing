@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_KAMA_Trend_With_Volume_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,25 +22,23 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d EMA(34) for trend direction
+    # Calculate KAMA on daily close
     close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close_1d, n=10))
+    volatility = np.sum(np.abs(np.diff(close_1d, n=1)), axis=0)
+    er = np.zeros_like(close_1d)
+    er[10:] = change[10:] / np.maximum(volatility[10:], 1e-10)
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)
+    slow_sc = 2 / (30 + 1)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
     
-    # Calculate daily high/low/close for Camarilla pivot (previous day)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_prev = df_1d['close'].values
-    
-    # Calculate Camarilla levels: R1, S1 (based on previous day)
-    # R1 = close + 1.1*(high-low)/12
-    # S1 = close - 1.1*(high-low)/12
-    camarilla_r1 = close_1d_prev + 1.1 * (high_1d - low_1d) / 12
-    camarilla_s1 = close_1d_prev - 1.1 * (high_1d - low_1d) / 12
-    
-    # Align Camarilla levels to 12h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama)
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -49,45 +47,38 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for calculations
+    start_idx = 30  # warmup for calculations
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(kama_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema34_1d_val = ema34_1d_aligned[i]
-        r1 = camarilla_r1_aligned[i]
-        s1 = camarilla_s1_aligned[i]
+        kama_val = kama_1d_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: price breaks above R1 + uptrend + volume spike
-            if (close[i] > r1 and 
-                close[i] > ema34_1d_val and 
-                vol_spike):
+            # Enter long: price above KAMA + volume spike
+            if (close[i] > kama_val and vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S1 + downtrend + volume spike
-            elif (close[i] < s1 and 
-                  close[i] < ema34_1d_val and 
-                  vol_spike):
+            # Enter short: price below KAMA + volume spike
+            elif (close[i] < kama_val and vol_spike):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below S1 OR trend turns down
-            if (close[i] < s1 or close[i] < ema34_1d_val):
+            # Exit long: price below KAMA
+            if close[i] < kama_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above R1 OR trend turns up
-            if (close[i] > r1 or close[i] > ema34_1d_val):
+            # Exit short: price above KAMA
+            if close[i] > kama_val:
                 signals[i] = 0.0
                 position = 0
             else:
