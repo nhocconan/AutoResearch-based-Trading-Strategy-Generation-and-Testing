@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and ADX trend filter.
-# Uses 4h price channel breakouts confirmed by daily volume > 1.5x 20-day average.
+# Hypothesis: 6h Donchian(20) breakout with daily volume confirmation and ADX trend filter.
+# Uses 6h price channel breakouts confirmed by daily volume > 1.5x 20-day average.
 # In trending markets (ADX > 25), follows breakout direction.
 # In ranging markets (ADX < 20), uses mean reversion at channel boundaries.
 # Designed to work in both bull and bear markets by adapting to trend strength.
-# Target: 20-50 trades/year (80-200 total over 4 years).
+# Target: 12-37 trades/year (50-150 total over 4 years).
 
-name = "4h_Donchian_Breakout_Volume_ADX"
-timeframe = "4h"
+name = "6h_Donchian_Breakout_Volume_ADX"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -81,9 +81,9 @@ def generate_signals(prices):
                 dm_plus_smooth[i] = dm_plus[i]
                 dm_minus_smooth[i] = dm_minus[i]
             else:
-                atr[i] = (atr[i-1] * (13) + tr[i]) / 14
-                dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (13) + dm_plus[i]) / 14
-                dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (13) + dm_minus[i]) / 14
+                atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+                dm_plus_smooth[i] = (dm_plus_smooth[i-1] * 13 + dm_plus[i]) / 14
+                dm_minus_smooth[i] = (dm_minus_smooth[i-1] * 13 + dm_minus[i]) / 14
         else:
             atr[i] = (atr[i-1] * 13 + tr[i]) / 14
             dm_plus_smooth[i] = (dm_plus_smooth[i-1] * 13 + dm_plus[i]) / 14
@@ -110,11 +110,11 @@ def generate_signals(prices):
         else:
             adx[i] = (adx[i-1] * 13 + dx[i]) / 14
     
-    # Align daily data to 4h timeframe
+    # Align daily data to 6h timeframe
     vol_avg_20_aligned = align_htf_to_ltf(prices, df_daily, vol_avg_20)
     adx_aligned = align_htf_to_ltf(prices, df_daily, adx)
     
-    # Calculate 4h Donchian channels (20-period)
+    # Calculate 6h Donchian channels (20-period)
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     
