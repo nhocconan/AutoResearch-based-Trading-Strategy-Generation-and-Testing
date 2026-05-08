@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ADX_Momentum_Pivot_Filter_v1"
-timeframe = "6h"
+name = "12h_1d_Pivot_Trend_Follow_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,38 +22,11 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 1d ADX for trend strength ===
+    # === 1d Daily Pivot Points (previous day's HLC/3) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr = np.maximum(high_1d - low_1d,
-                    np.maximum(np.abs(high_1d - np.roll(close_1d, 1)),
-                               np.abs(low_1d - np.roll(close_1d, 1))))
-    tr[0] = high_1d[0] - low_1d[0]
-    
-    # Directional Movement
-    up_move = np.diff(high_1d, prepend=high_1d[0])
-    down_move = np.diff(low_1d, prepend=low_1d[0])
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    # Smoothed values
-    tr14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    plus_dm14 = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    minus_dm14 = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # DI values
-    plus_di14 = 100 * plus_dm14 / (tr14 + 1e-10)
-    minus_di14 = 100 * minus_dm14 / (tr14 + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14 + 1e-10)
-    adx14 = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx14)
-    
-    # === 1d Pivot Points (previous day) ===
     prev_high_1d = np.roll(high_1d, 1)
     prev_low_1d = np.roll(low_1d, 1)
     prev_close_1d = np.roll(close_1d, 1)
@@ -64,59 +37,78 @@ def generate_signals(prices):
     pivot = (prev_high_1d + prev_low_1d + prev_close_1d) / 3.0
     range_1d = prev_high_1d - prev_low_1d
     
-    # R3 and S3 levels (strong support/resistance)
-    r3 = pivot + range_1d * 1.1
-    s3 = pivot - range_1d * 1.1
+    # Pivot support/resistance levels (standard Camarilla)
+    r1 = pivot + (range_1d * 1.1 / 12)
+    s1 = pivot - (range_1d * 1.1 / 12)
+    r2 = pivot + (range_1d * 1.1 / 6)
+    s2 = pivot - (range_1d * 1.1 / 6)
     
-    # Align to 6h
-    adx_aligned = adx_1d_aligned
-    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
+    # Align pivot levels to 12h timeframe
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
+    r2_12h = align_htf_to_ltf(prices, df_1d, r2)
+    s2_12h = align_htf_to_ltf(prices, df_1d, s2)
     
-    # === 6h Momentum: ROC(12) ===
-    roc_period = 12
-    roc = np.zeros_like(close)
-    roc[roc_period:] = (close[roc_period:] - close[:-roc_period]) / (close[:-roc_period] + 1e-10)
-    
-    # === 6h Volume: current > 20-period average ===
+    # === 1d Volume filter: current volume > 20-period average ===
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # === 1d Trend filter: 50-period EMA ===
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # === 1d ATR for volatility regime ===
+    tr = np.maximum(high_1d - low_1d, 
+                    np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), 
+                               np.abs(low_1d - np.roll(close_1d, 1))))
+    tr[0] = high_1d[0] - low_1d[0]
+    atr20_1d = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    atr50_1d = pd.Series(tr).ewm(span=50, adjust=False, min_periods=50).mean().values
+    atr20_12h = align_htf_to_ltf(prices, df_1d, atr20_1d)
+    atr50_12h = align_htf_to_ltf(prices, df_1d, atr50_1d)
+    atr_ratio = atr20_12h / (atr50_12h + 1e-10)
+    
+    # Regime: trending if ATR ratio > 1.2, ranging if < 0.8
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, roc_period, 20)  # warmup
+    start_idx = 50  # warmup
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(adx_aligned[i]) or np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or
-            np.isnan(roc[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or np.isnan(r2_12h[i]) or np.isnan(s2_12h[i]) or
+            np.isnan(ema50_12h[i]) or np.isnan(atr_ratio[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Strong trend filter: ADX > 25
-            strong_trend = adx_aligned[i] > 25
+            # Determine regime: trending or ranging
+            is_trending = atr_ratio[i] > 1.2
+            is_ranging = atr_ratio[i] < 0.8
             
-            if strong_trend:
-                # Momentum continuation in strong trend
-                long_cond = (roc[i] > 0.005 and  # positive momentum
-                            close[i] > r3_6h[i] and
+            if is_trending:
+                # Trending regime: breakout continuation
+                long_cond = (close[i] > r2_12h[i] and 
+                            close[i] > ema50_12h[i] and
                             volume[i] > vol_ma20[i])
                 
-                short_cond = (roc[i] < -0.005 and  # negative momentum
-                             close[i] < s3_6h[i] and
+                short_cond = (close[i] < s2_12h[i] and 
+                             close[i] < ema50_12h[i] and
+                             volume[i] > vol_ma20[i])
+            elif is_ranging:
+                # Ranging regime: mean reversion at S1/R1
+                long_cond = (close[i] < s1_12h[i] and 
+                            close[i] > ema50_12h[i] and  # Avoid buying in strong downtrend
+                            volume[i] > vol_ma20[i])
+                
+                short_cond = (close[i] > r1_12h[i] and 
+                             close[i] < ema50_12h[i] and  # Avoid selling in strong uptrend
                              volume[i] > vol_ma20[i])
             else:
-                # Weak trend or ranging: fade at S3/R3
-                long_cond = (roc[i] < -0.002 and  # recent weakness
-                            close[i] < s3_6h[i] and
-                            volume[i] > vol_ma20[i])
-                
-                short_cond = (roc[i] > 0.002 and  # recent strength
-                             close[i] > r3_6h[i] and
-                             volume[i] > vol_ma20[i])
+                # Transition zone: no trades
+                long_cond = False
+                short_cond = False
             
             if long_cond:
                 signals[i] = 0.25
@@ -125,10 +117,14 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: momentum fade or trend weakness
-            exit_cond = (roc[i] < -0.003 or  # negative momentum
-                        adx_aligned[i] < 20 or  # trend weakening
-                        close[i] < s3_6h[i])  # break below S3
+            # Long exit conditions
+            if is_trending:
+                # In trending market, exit on breakdown below S2 or trend reversal
+                exit_cond = (close[i] < s2_12h[i] or 
+                            close[i] < ema50_12h[i])
+            else:
+                # In ranging market, exit at R1 (mean reversion target)
+                exit_cond = close[i] > r1_12h[i]
             
             if exit_cond:
                 signals[i] = 0.0
@@ -136,10 +132,14 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: momentum fade or trend weakness
-            exit_cond = (roc[i] > 0.003 or  # positive momentum
-                        adx_aligned[i] < 20 or  # trend weakening
-                        close[i] > r3_6h[i])  # break above R3
+            # Short exit conditions
+            if is_trending:
+                # In trending market, exit on breakout above R2 or trend reversal
+                exit_cond = (close[i] > r2_12h[i] or 
+                            close[i] > ema50_12h[i])
+            else:
+                # In ranging market, exit at S1 (mean reversion target)
+                exit_cond = close[i] < s1_12h[i]
             
             if exit_cond:
                 signals[i] = 0.0
@@ -149,8 +149,8 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Combines 1d ADX for trend strength with 1d Pivot S3/R3 levels and 6h momentum.
-# In strong trends (ADX>25): momentum breakouts at S3/R3 with volume confirmation.
-# In weak trends: mean reversion fade at S3/R3. Works in bull (trend following) and
-# bear (mean reversion in ranges) markets. Targets 50-150 trades over 4 years.
-# Uses discrete sizing (0.25) to minimize fee churn. ADX filter reduces whipsaws.
+# Hypothesis: 12h adaptive pivot-based strategy that switches between breakout continuation
+# in trending markets (detected by rising ATR) and mean reversion at S1/R1 in ranging markets.
+# Uses 1d EMA50 for trend filter and volume confirmation. Designed to work in both bull (trend following) 
+# and bear (mean reversion in ranges) markets. Targets 50-150 trades over 4 years (12-37/year) to minimize 
+# fee drag. Uses discrete sizing (0.25) to reduce churn. Works on BTC/ETH via institutional pivot levels.
