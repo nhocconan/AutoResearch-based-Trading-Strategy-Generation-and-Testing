@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h momentum strategy with 4h trend filter and 1d volatility regime filter
-# Uses 4h EMA(21) for trend direction and 1d ATR ratio (ATR(7)/ATR(30)) for volatility regime.
-# Enters long when 4h EMA(21) is rising, 1h price > 1h EMA(13), and volatility regime is expanding (ATR ratio > 1.0).
-# Enters short when 4h EMA(21) is falling, 1h price < 1h EMA(13), and volatility regime is expanding.
-# Uses session filter (08-20 UTC) and fixed position size of 0.20 to control trade frequency.
-# Designed to capture momentum bursts during volatile periods while avoiding choppy markets.
-# Target: 15-35 trades/year per symbol.
+# Hypothesis: 12h Camarilla pivot breakout with 1d volume confirmation and chop regime filter
+# Uses daily Camarilla levels (H3, L3) as key support/resistance, with entry when price breaks
+# these levels on 12h timeframe, confirmed by daily volume > 1.5x 20-day average.
+# In choppy markets (Choppiness Index > 61.8), uses mean-reversion at H3/L3 levels.
+# In trending markets (Choppiness Index < 38.2), uses breakout continuation.
+# Designed to work in both bull and bear markets by adapting to regime.
+# Target: 15-30 trades/year (60-120 total over 4 years).
 
-name = "1h_EMA_Momentum_VolatilityRegime_Session"
-timeframe = "1h"
+name = "12h_Camarilla_Pivot_Breakout_Volume_Chop"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,73 +25,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 21:
+    # Get daily data for Camarilla levels, volume, and chop
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 20:
         return np.zeros(n)
     
-    # Get 1d data for volatility regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
+    # Calculate daily Camarilla levels (based on previous day)
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
+    close_daily = df_daily['close'].values
     
-    # Calculate 4h EMA(21) for trend
-    close_4h = df_4h['close'].values
-    ema_4h = np.full(len(close_4h), np.nan)
-    if len(close_4h) >= 21:
-        ema_4h[20] = np.mean(close_4h[:21])
-        for i in range(21, len(close_4h)):
-            ema_4h[i] = (close_4h[i] * 2/22) + (ema_4h[i-1] * 20/22)
+    # Camarilla levels: H3/L3 = close ± (high-low)*1.1/4
+    camarilla_h3 = np.full(len(close_daily), np.nan)
+    camarilla_l3 = np.full(len(close_daily), np.nan)
     
-    # Calculate 1d ATR(7) and ATR(30) for volatility regime
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    for i in range(1, len(close_daily)):  # start from 1 to use previous day
+        high_prev = high_daily[i-1]
+        low_prev = low_daily[i-1]
+        close_prev = close_daily[i-1]
+        camarilla_h3[i] = close_prev + (high_prev - low_prev) * 1.1 / 4
+        camarilla_l3[i] = close_prev - (high_prev - low_prev) * 1.1 / 4
     
-    tr_1d = np.zeros(len(close_1d))
-    atr_7 = np.full(len(close_1d), np.nan)
-    atr_30 = np.full(len(close_1d), np.nan)
+    # Calculate daily volume average (20-period)
+    vol_avg_20 = np.full(len(close_daily), np.nan)
+    vol_sum = 0
+    for i in range(len(close_daily)):
+        vol_sum += volume[i] if i < len(volume) else 0  # align volumes
+        if i >= 19:
+            if i == 19:
+                vol_avg_20[i] = vol_sum / 20
+            else:
+                vol_sum -= volume[i-20] if (i-20) < len(volume) else 0
+                vol_avg_20[i] = vol_sum / 20
     
-    for i in range(len(close_1d)):
+    # Calculate daily Choppiness Index (14-period)
+    # Chop = 100 * log10(sum(TR) / (max(HH) - min(LL))) / log10(14)
+    chop = np.full(len(close_daily), np.nan)
+    tr_daily = np.zeros(len(close_daily))
+    
+    for i in range(len(close_daily)):
         if i == 0:
-            tr_1d[i] = high_1d[i] - low_1d[i]
+            tr_daily[i] = high_daily[i] - low_daily[i]
         else:
-            tr_1d[i] = max(
-                high_1d[i] - low_1d[i],
-                abs(high_1d[i] - close_1d[i-1]),
-                abs(low_1d[i] - close_1d[i-1])
+            tr_daily[i] = max(
+                high_daily[i] - low_daily[i],
+                abs(high_daily[i] - close_daily[i-1]),
+                abs(low_daily[i] - close_daily[i-1])
             )
-        
-        if i >= 6:  # ATR(7)
-            if i == 6:
-                atr_7[i] = np.mean(tr_1d[:7])
+    
+    for i in range(13, len(close_daily)):  # need 14 periods
+        # Sum of TR over last 14 periods
+        tr_sum = np.sum(tr_daily[i-13:i+1])
+        # Highest high and lowest low over last 14 periods
+        hh = np.max(high_daily[i-13:i+1])
+        ll = np.min(low_daily[i-13:i+1])
+        if hh != ll:
+            chop[i] = 100 * (np.log10(tr_sum) - np.log10(hh - ll)) / np.log10(14)
+        else:
+            chop[i] = 50  # neutral when no range
+    
+    # Align daily data to 12h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_daily, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_daily, camarilla_l3)
+    vol_avg_20_aligned = align_htf_to_ltf(prices, df_daily, vol_avg_20)
+    chop_aligned = align_htf_to_ltf(prices, df_daily, chop)
+    
+    # Calculate 12h volume average for confirmation
+    vol_avg_6 = np.full(n, np.nan)  # 6 periods = 3 days worth
+    vol_sum_12h = 0
+    for i in range(n):
+        vol_sum_12h += volume[i]
+        if i >= 5:
+            if i == 5:
+                vol_avg_6[i] = vol_sum_12h / 6
             else:
-                atr_7[i] = (atr_7[i-1] * 6 + tr_1d[i]) / 7
-        
-        if i >= 29:  # ATR(30)
-            if i == 29:
-                atr_30[i] = np.mean(tr_1d[:30])
-            else:
-                atr_30[i] = (atr_30[i-1] * 29 + tr_1d[i]) / 30
-    
-    # Calculate ATR ratio (ATR(7)/ATR(30)) for volatility regime
-    atr_ratio = np.full(len(close_1d), np.nan)
-    for i in range(len(close_1d)):
-        if not np.isnan(atr_7[i]) and not np.isnan(atr_30[i]) and atr_30[i] != 0:
-            atr_ratio[i] = atr_7[i] / atr_30[i]
-    
-    # Align 4h EMA(21) to 1h timeframe
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    
-    # Align 1d ATR ratio to 1h timeframe
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
-    
-    # Calculate 1h EMA(13) for entry timing
-    ema_13 = np.full(n, np.nan)
-    if n >= 13:
-        ema_13[12] = np.mean(close[:13])
-        for i in range(13, n):
-            ema_13[i] = (close[i] * 2/14) + (ema_13[i-1] * 12/14)
+                vol_sum_12h -= volume[i-6]
+                vol_avg_6[i] = vol_sum_12h / 6
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -100,7 +109,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 13)  # warmup for indicators
+    start_idx = max(20, 6)  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if outside trading session
@@ -111,41 +120,100 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(ema_4h_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or 
-            np.isnan(ema_13[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(vol_avg_20_aligned[i]) or np.isnan(chop_aligned[i]) or
+            np.isnan(vol_avg_6[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Check conditions
-        ema_4h_trend_up = ema_4h_aligned[i] > ema_4h_aligned[i-1]
-        ema_4h_trend_down = ema_4h_aligned[i] < ema_4h_aligned[i-1]
-        price_above_ema13 = close[i] > ema_13[i]
-        price_below_ema13 = close[i] < ema_13[i]
-        vol_expanding = atr_ratio_aligned[i] > 1.0
+        # Get current daily bar's data (last completed daily bar)
+        idx_daily = 0
+        while idx_daily < len(df_daily) and df_daily.iloc[idx_daily]['open_time'] <= prices.iloc[i]['open_time']:
+            idx_daily += 1
+        idx_daily -= 1  # last completed daily bar
         
+        if idx_daily < 0:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        camarilla_h3_current = camarilla_h3[idx_daily]
+        camarilla_l3_current = camarilla_l3[idx_daily]
+        vol_avg_20_current = vol_avg_20[idx_daily]
+        chop_current = chop[idx_daily]
+        
+        if np.isnan(camarilla_h3_current) or np.isnan(camarilla_l3_current) or \
+           np.isnan(vol_avg_20_current) or np.isnan(chop_current):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Volume confirmation: current daily volume > 1.5x 20-day average
+        vol_current = 0
+        if idx_daily < len(volume):
+            vol_current = volume[idx_daily]
+        vol_confirmed = vol_current > 1.5 * vol_avg_20_current
+        
+        # Regime detection
+        is_choppy = chop_current > 61.8
+        is_trending = chop_current < 38.2
+        
+        # Trading logic
         if position == 0:
-            # Look for entry: momentum in direction of 4h trend with volatility expansion
-            if ema_4h_trend_up and price_above_ema13 and vol_expanding:
-                signals[i] = 0.20
-                position = 1
-            elif ema_4h_trend_down and price_below_ema13 and vol_expanding:
-                signals[i] = -0.20
-                position = -1
+            # Look for entry
+            if vol_confirmed:
+                if is_choppy:
+                    # In choppy market: mean reversion at H3/L3 levels
+                    if close[i] <= camarilla_l3_current:
+                        signals[i] = 0.25
+                        position = 1
+                    elif close[i] >= camarilla_h3_current:
+                        signals[i] = -0.25
+                        position = -1
+                elif is_trending:
+                    # In trending market: breakout continuation
+                    if close[i] > camarilla_h3_current:
+                        signals[i] = 0.25
+                        position = 1
+                    elif close[i] < camarilla_l3_current:
+                        signals[i] = -0.25
+                        position = -1
+                else:
+                    # Transition zone: wait for clearer signal
+                    pass
         elif position == 1:
-            # Exit long: trend reversal or volatility contraction
-            if (not ema_4h_trend_up) or (not vol_expanding):
+            # Manage long position
+            exit_signal = False
+            if is_choppy and close[i] >= camarilla_h3_current:
+                exit_signal = True  # mean reversion target reached
+            elif is_trending and close[i] < camarilla_l3_current:
+                exit_signal = True  # breakout failed
+            elif not vol_confirmed:
+                exit_signal = True  # volume confirmation lost
+            
+            if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: trend reversal or volatility contraction
-            if (not ema_4h_trend_down) or (not vol_expanding):
+            # Manage short position
+            exit_signal = False
+            if is_choppy and close[i] <= camarilla_l3_current:
+                exit_signal = True  # mean reversion target reached
+            elif is_trending and close[i] > camarilla_h3_current:
+                exit_signal = True  # breakout failed
+            elif not vol_confirmed:
+                exit_signal = True  # volume confirmation lost
+            
+            if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
