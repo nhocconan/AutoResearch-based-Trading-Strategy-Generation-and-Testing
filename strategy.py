@@ -3,16 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using weekly Donchian breakout with 1d trend filter and volume confirmation.
-# Long when price breaks above weekly high in uptrend with volume surge.
-# Short when price breaks below weekly low in downtrend with volume surge.
-# Uses 1d EMA(34) for trend direction and 1d ATR(14) for dynamic breakout levels.
-# Designed for low trade frequency (15-25/year) to minimize fee drag and capture sustained moves.
-# Weekly Donchian provides strong structural breaks, 1d trend filters false breakouts,
-# volume confirms institutional participation.
+# Hypothesis: 12h strategy using 1-day Camarilla pivot levels (R3/S3) for breakouts with 1-day EMA34 trend filter and volume confirmation.
+# Long when price breaks above R3 in uptrend with volume surge; short when price breaks below S3 in downtrend with volume surge.
+# Uses daily EMA(34) for trend direction and daily ATR(14) for dynamic pivot adjustments.
+# Designed for low trade frequency (12-37/year) to minimize fee flood and capture sustained moves in both bull and bear markets.
 
-name = "6h_WeeklyDonchian_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,7 +22,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend and volatility
+    # Get daily data for Camarilla pivots and trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -33,7 +30,14 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    
+    # Calculate Camarilla pivot levels from previous day
+    # Pivot = (H + L + C) / 3
+    # R3 = Pivot + (H - L) * 1.1
+    # S3 = Pivot - (H - L) * 1.1
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r3 = pivot + (high_1d - low_1d) * 1.1
+    s3 = pivot - (high_1d - low_1d) * 1.1
     
     # 1d EMA(34) for trend filter
     close_1d_series = pd.Series(close_1d)
@@ -41,7 +45,7 @@ def generate_signals(prices):
     trend_up = ema_34_1d[1:] > ema_34_1d[:-1]  # Rising EMA = uptrend
     trend_up = np.concatenate([[False], trend_up])  # Align with 1d index
     
-    # 1d ATR(14) for volatility
+    # 1d ATR(14) for volatility (optional dynamic adjustment)
     high_low = high_1d - low_1d
     high_close = np.abs(high_1d - np.roll(close_1d, 1))
     low_close = np.abs(low_1d - np.roll(close_1d, 1))
@@ -50,26 +54,12 @@ def generate_signals(prices):
     tr = np.maximum(high_low, np.maximum(high_close, low_close))
     atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Get weekly data for Donchian channels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    
-    # Weekly Donchian(20): highest high and lowest low of past 20 weekly candles
-    high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    
-    # Align 1d indicators to 6h timeframe
+    # Align daily indicators to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up.astype(float))
     
-    # Align weekly Donchian levels to 6h timeframe
-    high_20_aligned = align_htf_to_ltf(prices, df_1w, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1w, low_20)
-    
-    # Volume confirmation: 6h volume > 2.0x 20-period EMA
+    # Volume confirmation: 12h volume > 2.0x 20-period EMA
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     vol_confirm = volume > (vol_ema * 2.0)
     
@@ -80,36 +70,36 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(trend_up_aligned[i]) or np.isnan(high_20_aligned[i]) or
-            np.isnan(low_20_aligned[i]) or np.isnan(vol_ema[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(trend_up_aligned[i]) or np.isnan(vol_ema[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long setup: break above weekly high in uptrend with volume
+            # Long setup: break above R3 in uptrend with volume
             if (trend_up_aligned[i] > 0.5 and  # 1d uptrend
-                close[i] > high_20_aligned[i] and
+                close[i] > r3_aligned[i] and
                 vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short setup: break below weekly low in downtrend with volume
+            # Short setup: break below S3 in downtrend with volume
             elif (trend_up_aligned[i] <= 0.5 and  # 1d downtrend
-                  close[i] < low_20_aligned[i] and
+                  close[i] < s3_aligned[i] and
                   vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: break below weekly low or trend turns down
-            if close[i] < low_20_aligned[i] or trend_up_aligned[i] <= 0.5:
+            # Long exit: break below S3 or trend turns down
+            if close[i] < s3_aligned[i] or trend_up_aligned[i] <= 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: break above weekly high or trend turns up
-            if close[i] > high_20_aligned[i] or trend_up_aligned[i] > 0.5:
+            # Short exit: break above R3 or trend turns up
+            if close[i] > r3_aligned[i] or trend_up_aligned[i] > 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
