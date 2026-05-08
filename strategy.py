@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Confirm"
-timeframe = "4h"
+name = "1d_Weekly_Champ_Volume_Signal"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,47 +17,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter and Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Weekly data for trend and structure
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate weekly EMA21 for trend
+    close_1w = df_1w['close'].values
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
-    # Calculate Camarilla pivot levels from daily data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly ATR for volatility filter
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    atr_1w = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
     
-    # Pivot = (H + L + C) / 3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    # Range = H - L
-    range_1d = high_1d - low_1d
-    # Resistance and support levels
-    r1_1d = close_1d + (range_1d * 1.1 / 12)
-    s1_1d = close_1d - (range_1d * 1.1 / 12)
-    
-    # Align Camarilla levels and EMA to 4h timeframe
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    
-    # Volume confirmation - 24-period average volume (24h equivalent in 4h: 6 periods)
-    vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
-    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1.0)
+    # Daily volume confirmation - 20-day average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / np.where(vol_ma_20 > 0, vol_ma_20, 1.0)
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or
+        if (np.isnan(ema_21_1w_aligned[i]) or np.isnan(atr_1w_aligned[i]) or
             np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -65,28 +58,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 + above daily EMA34 + volume confirmation
-            if (close[i] > r1_1d_aligned[i] and 
-                close[i] > ema_34_1d_aligned[i] and
-                vol_ratio[i] > 1.5):
+            # Long: price above weekly EMA21 + volatility contraction + volume expansion
+            if (close[i] > ema_21_1w_aligned[i] and
+                atr_1w_aligned[i] < atr_1w_aligned[i-1] * 0.9 and  # Volatility contraction
+                vol_ratio[i] > 1.8):  # Volume expansion
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + below daily EMA34 + volume confirmation
-            elif (close[i] < s1_1d_aligned[i] and 
-                  close[i] < ema_34_1d_aligned[i] and
-                  vol_ratio[i] > 1.5):
+            # Short: price below weekly EMA21 + volatility contraction + volume expansion
+            elif (close[i] < ema_21_1w_aligned[i] and
+                  atr_1w_aligned[i] < atr_1w_aligned[i-1] * 0.9 and  # Volatility contraction
+                  vol_ratio[i] > 1.8):  # Volume expansion
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price falls back below pivot OR below daily EMA34
-            if close[i] < pivot_1d_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            # Exit long: volatility expansion or price below weekly EMA21
+            if (atr_1w_aligned[i] > atr_1w_aligned[i-1] * 1.1 or  # Volatility expansion
+                close[i] < ema_21_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price rises back above pivot OR above daily EMA34
-            if close[i] > pivot_1d_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            # Exit short: volatility expansion or price above weekly EMA21
+            if (atr_1w_aligned[i] > atr_1w_aligned[i-1] * 1.1 or  # Volatility expansion
+                close[i] > ema_21_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
