@@ -1,106 +1,85 @@
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtr_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla Pivot R3/S3 breakout with volume confirmation and 1w trend filter
-# Long when price breaks above R3 with volume > 1.5x 20-period avg and 1w EMA21 upward
-# Short when price breaks below S3 with volume > 1.5x 20-period avg and 1w EMA21 downward
-# Exit when price crosses opposite pivot level (S3 for long, R3 for short) or trend reverses
-# Camarilla provides institutional levels, volume confirms breakout strength, weekly filter avoids counter-trend
-# Targets 25-40 trades per year for optimal fee drag (~100-160 total over 4 years)
+# Hypothesis: 1d CCI(20) mean reversion with weekly trend filter
+# Long when CCI crosses above -100 (oversold recovery) and weekly EMA50 is rising
+# Short when CCI crosses below +100 (overbought rejection) and weekly EMA50 is falling
+# Exit when CCI crosses zero (mean reversion complete) or trend changes
+# Targets 20-40 trades per year to minimize fee drag while capturing mean reversion in ranging markets
+# CCI identifies overextended moves, weekly EMA50 filters counter-trend noise in both bull/bear markets
 
-name = "4h_Camarilla_R3S3_Breakout_1wEMA21_Trend"
-timeframe = "4h"
+name = "1d_CCI20_WeeklyEMA50_Trend"
+timeframe = "1d"
 leverage = 1.0
-
-def calculate_pivot_points(high, low, close):
-    """Calculate Camarilla pivot levels"""
-    pivot = (high + low + close) / 3.0
-    range_val = high - low
-    r3 = pivot + (range_val * 1.1 / 2)
-    s3 = pivot - (range_val * 1.1 / 2)
-    return r3, s3
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Calculate Camarilla levels for each bar using previous day's data
-    # We need to use previous day's HLC for today's levels
-    r3_levels = np.full(n, np.nan)
-    s3_levels = np.full(n, np.nan)
+    # CCI(20) calculation
+    typical_price = (high + low + close) / 3.0
+    tp_ma = pd.Series(typical_price).rolling(window=20, min_periods=20).mean().values
+    tp_std = pd.Series(typical_price).rolling(window=20, min_periods=20).std().values
+    # Avoid division by zero
+    tp_std = np.where(tp_std == 0, 1e-10, tp_std)
+    cci = (typical_price - tp_ma) / (0.015 * tp_std)
     
-    for i in range(1, n):
-        # Use previous bar's data to calculate today's levels
-        r3, s3 = calculate_pivot_points(high[i-1], low[i-1], close[i-1])
-        r3_levels[i] = r3
-        s3_levels[i] = s3
-    
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
+    # Get weekly data for trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 10:
         return np.zeros(n)
     
-    # Calculate EMA21 on 1w close for trend filter
-    close_1w = df_1w['close'].values
-    ema21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema21_1w_slope = ema21_1w[1:] - ema21_1w[:-1]  # slope: positive = uptrend
-    ema21_1w_slope = np.concatenate([[0], ema21_1w_slope])  # align length
-    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
-    ema21_1w_slope_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w_slope)
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_conf = volume > (vol_ma * 1.5)
+    # Calculate EMA50 on weekly close for trend filter
+    close_weekly = df_weekly['close'].values
+    ema50_weekly = pd.Series(close_weekly).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_weekly_slope = ema50_weekly[1:] - ema50_weekly[:-1]  # slope: positive = uptrend
+    ema50_weekly_slope = np.concatenate([[0], ema50_weekly_slope])  # align length
+    ema50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema50_weekly)
+    ema50_weekly_slope_aligned = align_htf_to_ltf(prices, df_weekly, ema50_weekly_slope)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 21  # Need enough data for EMA and volume
+    start_idx = 20  # Need enough data for CCI
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r3_levels[i]) or np.isnan(s3_levels[i]) or 
-            np.isnan(ema21_1w_aligned[i]) or np.isnan(ema21_1w_slope_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(cci[i]) or np.isnan(ema50_weekly_aligned[i]) or 
+            np.isnan(ema50_weekly_slope_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        close_val = close[i]
-        r3_val = r3_levels[i]
-        s3_val = s3_levels[i]
-        ema21_val = ema21_1w_aligned[i]
-        ema21_slope = ema21_1w_slope_aligned[i]
-        vol_conf_val = vol_conf[i]
+        cci_val = cci[i]
+        ema50_slope = ema50_weekly_slope_aligned[i]
         
         if position == 0:
-            # Enter long: break above R3, volume confirmation, 1w uptrend (positive slope)
-            if close_val > r3_val and vol_conf_val and ema21_slope > 0:
+            # Enter long: CCI crosses above -100 from below (oversold recovery) with weekly uptrend
+            if cci_val > -100 and cci[i-1] <= -100 and ema50_slope > 0:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below S3, volume confirmation, 1w downtrend (negative slope)
-            elif close_val < s3_val and vol_conf_val and ema21_slope < 0:
+            # Enter short: CCI crosses below +100 from above (overbought rejection) with weekly downtrend
+            elif cci_val < 100 and cci[i-1] >= 100 and ema50_slope < 0:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: break below S3 or 1w trend turns down
-            if close_val < s3_val or ema21_slope < 0:
+            # Exit long: CCI crosses above zero (mean reversion) or weekly trend turns down
+            if cci_val > 0 and cci[i-1] <= 0 or ema50_slope < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: break above R3 or 1w trend turns up
-            if close_val > r3_val or ema21_slope > 0:
+            # Exit short: CCI crosses below zero (mean reversion) or weekly trend turns up
+            if cci_val < 0 and cci[i-1] >= 0 or ema50_slope > 0:
                 signals[i] = 0.0
                 position = 0
             else:
