@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Trend_With_1d_Volume_And_Trend_Filter"
-timeframe = "12h"
+name = "4h_Volume_Weighted_Trend_With_1d_Regime_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,29 +17,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data once
+    # Get daily data once for regime filters
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
+    # Calculate 1d EMA(34) for trend direction
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Calculate 1d ADX(14) for trend strength
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # EMA(50) on daily close
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Volume ratio: current volume vs 20-day average
-    vol_ma20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume_1d / vol_ma20
-    
-    # ADX(14) for trend strength
     # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.maximum(high_1d[1:] - low_1d[1:], 
+                    np.maximum(np.abs(high_1d[1:] - close_1d[:-1]), 
+                               np.abs(low_1d[1:] - close_1d[:-1])))
     tr = np.concatenate([[np.nan], tr])
     
     # Directional Movement
@@ -59,60 +54,78 @@ def generate_signals(prices):
             result[i] = (result[i-1] * (period-1) + data[i]) / period
         return result
     
-    atr = wilders_smooth(tr, 14)
-    plus_di = 100 * wilders_smooth(plus_dm, 14) / atr
-    minus_di = 100 * wilders_smooth(minus_dm, 14) / atr
-    dx = np.full_like(atr, np.nan)
+    atr_adx = wilders_smooth(tr, 14)
+    plus_di = 100 * wilders_smooth(plus_dm, 14) / atr_adx
+    minus_di = 100 * wilders_smooth(minus_dm, 14) / atr_adx
+    dx = np.full_like(atr_adx, np.nan)
     mask = (plus_di + minus_di) > 0
     dx[mask] = 100 * np.abs(plus_di[mask] - minus_di[mask]) / (plus_di[mask] + minus_di[mask])
     adx = wilders_smooth(dx, 14)
-    
-    # Align all 1d indicators to 12h
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate 4h volume-weighted price momentum
+    # VWAP-like momentum: (close - vwap) / vwap scaled
+    typical_price = (high + low + close) / 3
+    vwap_num = np.cumsum(typical_price * volume)
+    vwap_den = np.cumsum(volume)
+    vwap = np.where(vwap_den > 0, vwap_num / vwap_den, np.nan)
+    
+    # Normalized deviation from VWAP
+    vwap_dev = np.where(vwap > 0, (close - vwap) / vwap, 0)
+    
+    # Smooth the deviation to get momentum signal
+    vwap_dev_smooth = pd.Series(vwap_dev).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # warmup
+    start_idx = 50  # warmup
     
     for i in range(start_idx, n):
-        # Skip if any data is NaN
-        if (np.isnan(ema50_aligned[i]) or np.isnan(vol_ratio_aligned[i]) or 
-            np.isnan(adx_aligned[i])):
+        # Skip if any critical data is NaN
+        if (np.isnan(ema34_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(vwap_dev_smooth[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema50 = ema50_aligned[i]
-        vol_ratio_val = vol_ratio_aligned[i]
+        ema_val = ema34_aligned[i]
         adx_val = adx_aligned[i]
-        price = close[i]
+        mom = vwap_dev_smooth[i]
         
         if position == 0:
-            # Enter long: price above EMA50, strong trend (ADX > 25), high volume
-            if price > ema50 and adx_val > 25 and vol_ratio_val > 1.5:
+            # Enter long: price above EMA34, strong trend (ADX > 25), positive momentum
+            if close[i] > ema_val and adx_val > 25 and mom > 0.001:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price below EMA50, strong trend, high volume
-            elif price < ema50 and adx_val > 25 and vol_ratio_val > 1.5:
+            # Enter short: price below EMA34, strong trend (ADX > 25), negative momentum
+            elif close[i] < ema_val and adx_val > 25 and mom < -0.001:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below EMA50 OR trend weakens
-            if price <= ema50 or adx_val < 20:
+            # Exit long: price below EMA34 OR trend weakens (ADX < 20) OR momentum turns negative
+            if (close[i] <= ema_val or adx_val < 20 or mom < -0.0005):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above EMA50 OR trend weakens
-            if price >= ema50 or adx_val < 20:
+            # Exit short: price above EMA34 OR trend weakens (ADX < 20) OR momentum turns positive
+            if (close[i] >= ema_val or adx_val < 20 or mom > 0.0005):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
+
+# Hypothesis: Combines 4h volume-weighted price momentum with 1d trend filters.
+# - Uses 4h VWAP deviation momentum for entry timing
+# - Uses 1d EMA(34) for trend direction filter
+# - Uses 1d ADX(14) for trend strength filter (ADX>25 to enter, ADX<20 to exit)
+# - Only trades in strong trending conditions to avoid whipsaw in ranging markets
+# - Works in both bull and bear markets by following the established trend
+# - Volume weighting reduces false signals from low-volume moves
+# - Target: 80-150 total trades over 4 years (20-38/year) to minimize fee drag
+# - Position size: 0.25 for balanced risk/return
