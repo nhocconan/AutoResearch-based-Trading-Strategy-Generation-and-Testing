@@ -1,17 +1,15 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla Pivot Breakout + Daily Volume Spike + Choppiness Regime
-# Uses daily Camarilla pivot levels for structure, daily volume spike (>2x 20-day avg) for momentum confirmation,
-# and daily choppiness index to filter choppy markets. Designed to work in both bull and bear markets
-# by following price action around institutional pivot levels while avoiding low-momentum chop.
-# Target: 15-30 trades/year on 12h timeframe.
+# Hypothesis: 4h Donchian breakout with 1d RSI filter and volume confirmation
+# Uses Donchian(20) breakouts for directional entries, filtered by 1d RSI(14) to avoid overextended moves,
+# and confirmed by volume spikes (>1.5x 20-period average). Designed to capture trends in both bull and bear markets
+# while avoiding choppy, low-volume environments. Target: 25-40 trades/year.
 
-name = "12h_Camarilla_Pivot_VolumeSpike_ChopFilter"
-timeframe = "12h"
+name = "4h_Donchian20_1dRSI14_VolumeConfirm"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,85 +22,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots, volume average, and choppiness
+    # Get daily data for RSI filter
     df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 20:
+    if len(df_daily) < 14:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels (based on previous day)
-    high_daily = df_daily['high'].values
-    low_daily = df_daily['low'].values
+    # Calculate daily RSI(14)
     close_daily = df_daily['close'].values
+    delta = np.diff(close_daily)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Previous day's values for pivot calculation
-    prev_high = np.roll(high_daily, 1)
-    prev_low = np.roll(low_daily, 1)
-    prev_close = np.roll(close_daily, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    avg_gain = np.full(len(close_daily), np.nan)
+    avg_loss = np.full(len(close_daily), np.nan)
+    rsi = np.full(len(close_daily), np.nan)
     
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_val = prev_high - prev_low
+    if len(close_daily) >= 14:
+        avg_gain[13] = np.mean(gain[:14])
+        avg_loss[13] = np.mean(loss[:14])
+        for i in range(14, len(close_daily)):
+            avg_gain[i] = (gain[i-1] * 13 + avg_gain[i-1]) / 14
+            avg_loss[i] = (loss[i-1] * 13 + avg_loss[i-1]) / 14
+            if avg_loss[i] != 0:
+                rs = avg_gain[i] / avg_loss[i]
+                rsi[i] = 100 - (100 / (1 + rs))
+            else:
+                rsi[i] = 100
     
-    # Camarilla levels
-    R4 = pivot + range_val * 1.5
-    R3 = pivot + range_val * 1.25
-    R2 = pivot + range_val * 1.166
-    R1 = pivot + range_val * 1.083
-    S1 = pivot - range_val * 1.083
-    S2 = pivot - range_val * 1.166
-    S3 = pivot - range_val * 1.25
-    S4 = pivot - range_val * 1.5
-    
-    # Calculate daily volume average (20-period)
+    # Calculate daily average volume for volume confirmation
     vol_daily = df_daily['volume'].values
     vol_avg_20_daily = np.full(len(vol_daily), np.nan)
     if len(vol_daily) >= 20:
         for i in range(20, len(vol_daily)):
             vol_avg_20_daily[i] = np.mean(vol_daily[i-20:i])
     
-    # Calculate daily choppiness index (14-period)
-    atr_14_daily = np.full(len(close_daily), np.nan)
-    if len(close_daily) >= 14:
-        tr = np.maximum(high_daily[1:] - low_daily[1:], 
-                        np.maximum(np.abs(high_daily[1:] - close_daily[:-1]),
-                                   np.abs(low_daily[1:] - close_daily[:-1])))
-        tr = np.concatenate([[np.nan], tr])
-        for i in range(14, len(tr)):
-            if np.isnan(atr_14_daily[i-1]):
-                atr_14_daily[i] = np.nanmean(tr[i-13:i+1])
-            else:
-                atr_14_daily[i] = (atr_14_daily[i-1] * 13 + tr[i]) / 14
+    # Calculate Donchian channels (20-period) on 4h data
+    highest_high_20 = np.full(n, np.nan)
+    lowest_low_20 = np.full(n, np.nan)
+    if n >= 20:
+        for i in range(20, n):
+            highest_high_20[i] = np.max(high[i-20:i])
+            lowest_low_20[i] = np.min(low[i-20:i])
     
-    highest_high_14 = np.full(len(close_daily), np.nan)
-    lowest_low_14 = np.full(len(close_daily), np.nan)
-    if len(close_daily) >= 14:
-        for i in range(14, len(close_daily)):
-            highest_high_14[i] = np.max(high_daily[i-13:i+1])
-            lowest_low_14[i] = np.min(low_daily[i-13:i+1])
-    
-    chop_daily = np.full(len(close_daily), np.nan)
-    if len(close_daily) >= 14:
-        for i in range(14, len(close_daily)):
-            if (not np.isnan(atr_14_daily[i]) and 
-                not np.isnan(highest_high_14[i]) and 
-                not np.isnan(lowest_low_14[i]) and
-                highest_high_14[i] > lowest_low_14[i]):
-                sum_atr = np.nansum(atr_14_daily[i-13:i+1])
-                chop_daily[i] = 100 * np.log10(sum_atr) / np.log10(14) / np.log10((highest_high_14[i] - lowest_low_14[i]) + 1e-10)
-            else:
-                chop_daily[i] = 50  # neutral when no range
-    
-    # Align daily indicators to 12h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_daily, R1)
-    R2_aligned = align_htf_to_ltf(prices, df_daily, R2)
-    R3_aligned = align_htf_to_ltf(prices, df_daily, R3)
-    S1_aligned = align_htf_to_ltf(prices, df_daily, S1)
-    S2_aligned = align_htf_to_ltf(prices, df_daily, S2)
-    S3_aligned = align_htf_to_ltf(prices, df_daily, S3)
+    # Align daily indicators to 4h timeframe
+    rsi_daily_aligned = align_htf_to_ltf(prices, df_daily, rsi)
     vol_avg_20_daily_aligned = align_htf_to_ltf(prices, df_daily, vol_avg_20_daily)
-    chop_daily_aligned = align_htf_to_ltf(prices, df_daily, chop_daily)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -122,34 +86,35 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or
-            np.isnan(vol_avg_20_daily_aligned[i]) or
-            np.isnan(chop_daily_aligned[i])):
+        if (np.isnan(rsi_daily_aligned[i]) or np.isnan(vol_avg_20_daily_aligned[i]) or
+            np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume spike: current 12h volume > 2x 20-day average of daily volume
-        vol_spike = volume[i] > 2.0 * vol_avg_20_daily_aligned[i]
+        # Volume confirmation: current 4h volume > 1.5x 20-period average of daily volume
+        vol_confirm = False
+        if not np.isnan(vol_avg_20_daily_aligned[i]):
+            vol_confirm = volume[i] > 1.5 * vol_avg_20_daily_aligned[i]
         
         if position == 0:
-            # Look for entry: Camarilla breakout with volume spike in non-choppy market
-            # Choppiness < 38.2 indicates trending market
-            trending_market = chop_daily_aligned[i] < 38.2
+            # Look for entry: Donchian breakout with RSI filter and volume confirmation
+            # Avoid overextended conditions: RSI between 30 and 70
+            rsi_mid = (rsi_daily_aligned[i] >= 30) & (rsi_daily_aligned[i] <= 70)
             
-            # Long when price breaks above R1 with volume spike
+            # Long when price breaks above Donchian upper band
             long_condition = (
-                close[i] > R1_aligned[i] and   # price above R1 pivot
-                trending_market and            # trending market (not choppy)
-                vol_spike                      # volume spike for momentum
+                close[i] > highest_high_20[i] and   # breakout above upper band
+                rsi_mid and                         # not overextended
+                vol_confirm                         # volume confirmation
             )
             
-            # Short when price breaks below S1 with volume spike
+            # Short when price breaks below Donchian lower band
             short_condition = (
-                close[i] < S1_aligned[i] and   # price below S1 pivot
-                trending_market and            # trending market (not choppy)
-                vol_spike                      # volume spike for momentum
+                close[i] < lowest_low_20[i] and     # breakdown below lower band
+                rsi_mid and                         # not overextended
+                vol_confirm                         # volume confirmation
             )
             
             if long_condition:
@@ -159,15 +124,17 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns below R1 or market becomes choppy
-            if close[i] < R1_aligned[i] or chop_daily_aligned[i] > 61.8:
+            # Exit long: price returns below Donchian middle or RSI overextended
+            donchian_mid = (highest_high_20[i] + lowest_low_20[i]) / 2
+            if close[i] < donchian_mid or rsi_daily_aligned[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns above S1 or market becomes choppy
-            if close[i] > S1_aligned[i] or chop_daily_aligned[i] > 61.8:
+            # Exit short: price returns above Donchian middle or RSI overextended
+            donchian_mid = (highest_high_20[i] + lowest_low_20[i]) / 2
+            if close[i] > donchian_mid or rsi_daily_aligned[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
