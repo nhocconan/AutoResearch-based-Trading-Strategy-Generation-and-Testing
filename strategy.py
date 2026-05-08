@@ -1,11 +1,17 @@
-# MERGED STRATEGY v1 - Combined Best Elements
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_Donchian_Trend_Filter"
-timeframe = "4h"
+# Hypothesis: 1d Donchian Breakout with 1w Trend and Volume Spike
+# - Uses Donchian channels from 1w timeframe (20-period high/low)
+# - Breakout above weekly high with 1w uptrend or below weekly low with 1w downtrend
+# - Volume spike confirms breakout strength
+# - Works in bull/bear by using 1w trend filter to avoid counter-trend trades
+# - Target: 15-25 trades/year to minimize fee drag on 1d timeframe
+
+name = "1d_DonchianBreakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -18,87 +24,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla and Donchian levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    # 1w data for Donchian calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Camarilla levels from previous day
-    n1d = len(close_1d)
-    camarilla_S1 = np.full(n1d, np.nan)
-    camarilla_S2 = np.full(n1d, np.nan)
-    camarilla_R1 = np.full(n1d, np.nan)
-    camarilla_R2 = np.full(n1d, np.nan)
+    # Calculate Donchian channels (20-period)
+    n1w = len(close_1w)
+    donchian_high = np.full(n1w, np.nan)
+    donchian_low = np.full(n1w, np.nan)
     
-    for i in range(1, n1d):
-        H = high_1d[i-1]
-        L = low_1d[i-1]
-        C = close_1d[i-1]
-        range_val = H - L
-        camarilla_S1[i] = C - range_val * 1.08
-        camarilla_S2[i] = C - range_val * 1.16
-        camarilla_R1[i] = C + range_val * 1.08
-        camarilla_R2[i] = C + range_val * 1.16
+    for i in range(20, n1w):
+        donchian_high[i] = np.max(high_1w[i-20:i])
+        donchian_low[i] = np.min(low_1w[i-20:i])
     
-    # Calculate Donchian channels from previous day
-    donchian_lower = np.full(n1d, np.nan)
-    donchian_upper = np.full(n1d, np.nan)
-    for i in range(1, n1d):
-        donchian_lower[i] = np.min(low_1d[:i])
-        donchian_upper[i] = np.max(high_1d[:i])
+    # Align Donchian levels to 1d timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
     
-    # Align to 4h timeframe
-    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
-    camarilla_S2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S2)
-    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
-    camarilla_R2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R2)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
+    # 1w EMA20 for trend filter
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # 12h data for trend filter (stronger filter)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    close_12h = df_12h['close'].values
-    ema_20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
-    
-    # Volume spike: current > 1.5x 20-period average (more sensitive)
+    # Volume spike: current volume > 2.0x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma20)
+    volume_spike = volume > (2.0 * vol_ma20)
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short
     
     start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(camarilla_S1_aligned[i]) or np.isnan(camarilla_S2_aligned[i]) or 
-            np.isnan(camarilla_R1_aligned[i]) or np.isnan(camarilla_R2_aligned[i]) or 
-            np.isnan(donchian_lower_aligned[i]) or np.isnan(donchian_upper_aligned[i]) or 
-            np.isnan(ema_20_12h_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(ema_20_1w_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above BOTH Camarilla S1 AND Donchian lower + uptrend + volume
-            long_cond = (close[i] > camarilla_S1_aligned[i] and 
-                        close[i] > donchian_lower_aligned[i] and
-                        ema_20_12h_aligned[i] > ema_20_12h_aligned[i-1] and
+            # Long: price breaks above weekly high with 1w uptrend + volume spike
+            long_cond = (close[i] > donchian_high_aligned[i] and 
+                        ema_20_1w_aligned[i] > ema_20_1w_aligned[i-1] and
                         volume_spike[i])
             
-            # Short: price below BOTH Camarilla R1 AND Donchian upper + downtrend + volume
-            short_cond = (close[i] < camarilla_R1_aligned[i] and 
-                         close[i] < donchian_upper_aligned[i] and
-                         ema_20_12h_aligned[i] < ema_20_12h_aligned[i-1] and
+            # Short: price breaks below weekly low with 1w downtrend + volume spike
+            short_cond = (close[i] < donchian_low_aligned[i] and 
+                         ema_20_1w_aligned[i] < ema_20_1w_aligned[i-1] and
                          volume_spike[i])
             
             if long_cond:
@@ -108,15 +86,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price below Camarilla S2 OR Donchian lower
-            if close[i] < camarilla_S2_aligned[i] or close[i] < donchian_lower_aligned[i]:
+            # Long exit: price breaks below weekly low
+            if close[i] < donchian_low_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price above Camarilla R2 OR Donchian upper
-            if close[i] > camarilla_R2_aligned[i] or close[i] > donchian_upper_aligned[i]:
+            # Short exit: price breaks above weekly high
+            if close[i] > donchian_high_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
