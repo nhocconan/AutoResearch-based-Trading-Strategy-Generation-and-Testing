@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Williams Alligator with daily trend filter and volume confirmation
-# We go long when Jaw (13-period SMA) > Teeth (8-period SMA) > Lips (5-period SMA) with daily EMA(34) uptrend and volume spike.
-# We go short when Jaw < Teeth < Lips with daily EMA(34) downtrend and volume spike.
-# Williams Alligator uses smoothed moving averages to filter noise and identify trends.
-# Daily trend filter ensures we trade with the higher timeframe momentum.
-# Volume spike confirms institutional participation.
-# Target: 12-37 trades/year on 12h timeframe to avoid excessive frequency.
+# Hypothesis: 6-hour Elder Ray (Bull/Bear Power) with weekly trend filter
+# Bull Power = High - EMA(13), Bear Power = EMA(13) - Low
+# Long when Bull Power > 0 and weekly EMA(34) uptrend
+# Short when Bear Power > 0 and weekly EMA(34) downtrend
+# Elder Ray measures bull/bear strength relative to trend.
+# Weekly trend filter ensures we trade with higher timeframe momentum.
+# This combination works in both bull and bear markets by adapting to trend.
 
-name = "12h_WilliamsAlligator_DailyTrend_Volume"
-timeframe = "12h"
+name = "6h_ElderRay_WeeklyTrend"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,36 +23,23 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Get daily data once for Williams Alligator and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:
+    # Get weekly data once for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate Williams Alligator components on daily data
-    # Using smoothed moving averages (SMMA) as per original Alligator
-    daily_close = df_1d['close'].values
+    # Calculate weekly EMA(34) for trend filter
+    weekly_close = df_1w['close'].values
+    ema34_1w = pd.Series(weekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Lips: 5-period SMMA
-    lips = pd.Series(daily_close).rolling(window=5, min_periods=5).mean().values
-    # Teeth: 8-period SMMA
-    teeth = pd.Series(daily_close).rolling(window=8, min_periods=8).mean().values
-    # Jaw: 13-period SMMA
-    jaw = pd.Series(daily_close).rolling(window=13, min_periods=13).mean().values
-    
-    # Align Alligator components to 12h timeframe
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    
-    # Calculate daily EMA(34) for trend filter
-    ema34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Volume spike: current volume > 2.0 * 20-period average on 12h
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # Calculate Elder Ray components: Bull Power and Bear Power
+    # Bull Power = High - EMA(13)
+    # Bear Power = EMA(13) - Low
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = ema13 - low
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -61,41 +48,36 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        jaw_val = jaw_aligned[i]
-        teeth_val = teeth_aligned[i]
-        lips_val = lips_aligned[i]
-        ema34_1d_val = ema34_1d_aligned[i]
-        vol_spike = volume_spike[i]
+        ema34_1w_val = ema34_1w_aligned[i]
+        bp = bull_power[i]
+        br = bear_power[i]
         
         if position == 0:
-            # Enter long: Jaw > Teeth > Lips (Alligator bullish alignment) + daily uptrend + volume spike
-            if (jaw_val > teeth_val > lips_val and 
-                close[i] > ema34_1d_val and vol_spike):
+            # Enter long: Bull Power positive (bulls in control) + weekly uptrend
+            if bp > 0 and close[i] > ema34_1w_val:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Jaw < Teeth < Lips (Alligator bearish alignment) + daily downtrend + volume spike
-            elif (jaw_val < teeth_val < lips_val and 
-                  close[i] < ema34_1d_val and vol_spike):
+            # Enter short: Bear Power positive (bears in control) + weekly downtrend
+            elif br > 0 and close[i] < ema34_1w_val:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Alligator alignment breaks down OR daily trend turns down
-            if not (jaw_val > teeth_val > lips_val) or close[i] < ema34_1d_val:
+            # Exit long: Bear Power becomes positive OR weekly trend turns down
+            if br > 0 or close[i] < ema34_1w_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Alligator alignment breaks down OR daily trend turns up
-            if not (jaw_val < teeth_val < lips_val) or close[i] > ema34_1d_val:
+            # Exit short: Bull Power becomes positive OR weekly trend turns up
+            if bp > 0 or close[i] > ema34_1w_val:
                 signals[i] = 0.0
                 position = 0
             else:
