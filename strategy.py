@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Donchian_Breakout_Volume_Trend_v1"
-timeframe = "4h"
+name = "6h_Weekly_Pivot_Trend_Continuation_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,49 +17,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data once for trend filter
-    df_12h = get_htf_data(prices, '12h')
+    # Get weekly data once
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_12h) < 50:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # === 12h EMA50 for trend filter ===
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # === Weekly pivot levels (from previous week) ===
+    prev_high_1w = np.roll(df_1w['high'].values, 1)
+    prev_low_1w = np.roll(df_1w['low'].values, 1)
+    prev_close_1w = np.roll(df_1w['close'].values, 1)
+    prev_high_1w[0] = df_1w['high'].values[0]
+    prev_low_1w[0] = df_1w['low'].values[0]
+    prev_close_1w[0] = df_1w['close'].values[0]
     
-    # === Donchian(20) on 4h ===
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    pivot_1w = (prev_high_1w + prev_low_1w + prev_close_1w) / 3.0
+    range_1w = prev_high_1w - prev_low_1w
     
-    # === Volume filter: current volume > 1.5 * 20-period average ===
+    # Weekly support/resistance levels (standard pivot)
+    r1_1w = pivot_1w + (range_1w * 1.0 / 3)
+    s1_1w = pivot_1w - (range_1w * 1.0 / 3)
+    r2_1w = pivot_1w + (range_1w * 2.0 / 3)
+    s2_1w = pivot_1w - (range_1w * 2.0 / 3)
+    
+    # Align weekly levels to 6h timeframe
+    r1_6h = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_6h = align_htf_to_ltf(prices, df_1w, s1_1w)
+    r2_6h = align_htf_to_ltf(prices, df_1w, r2_1w)
+    s2_6h = align_htf_to_ltf(prices, df_1w, s2_1w)
+    
+    # === 6h 20-period EMA for trend filter ===
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # === 6h volume filter: current volume > 20-period average ===
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, lookback)  # warmup for EMA50 and Donchian
+    start_idx = 20  # warmup for EMA20 and volume MA
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or np.isnan(r2_6h[i]) or np.isnan(s2_6h[i]) or
+            np.isnan(ema20[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long breakout: price above Donchian upper band + uptrend + volume
-            long_cond = (close[i] > highest_high[i] and 
-                        close[i] > ema50_12h_aligned[i] and
-                        volume[i] > vol_ma20[i] * 1.5)
+            # Long: price breaks above R2 with trend and volume confirmation
+            long_cond = (close[i] > r2_6h[i] and 
+                        close[i] > ema20[i] and
+                        volume[i] > vol_ma20[i])
             
-            # Short breakdown: price below Donchian lower band + downtrend + volume
-            short_cond = (close[i] < lowest_low[i] and 
-                         close[i] < ema50_12h_aligned[i] and
-                         volume[i] > vol_ma20[i] * 1.5)
+            # Short: price breaks below S2 with trend and volume confirmation
+            short_cond = (close[i] < s2_6h[i] and 
+                         close[i] < ema20[i] and
+                         volume[i] > vol_ma20[i])
             
             if long_cond:
                 signals[i] = 0.25
@@ -68,9 +84,9 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below Donchian middle or trend reversal
-            mid = (highest_high[i] + lowest_low[i]) / 2.0
-            exit_cond = (close[i] < mid or close[i] < ema50_12h_aligned[i])
+            # Long exit: price breaks below R1 (mean reversion) or trend fails
+            exit_cond = (close[i] < r1_6h[i] or 
+                        close[i] < ema20[i])
             
             if exit_cond:
                 signals[i] = 0.0
@@ -78,9 +94,9 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above Donchian middle or trend reversal
-            mid = (highest_high[i] + lowest_low[i]) / 2.0
-            exit_cond = (close[i] > mid or close[i] > ema50_12h_aligned[i])
+            # Short exit: price breaks above S1 (mean reversion) or trend fails
+            exit_cond = (close[i] > s1_6h[i] or 
+                        close[i] > ema20[i])
             
             if exit_cond:
                 signals[i] = 0.0
@@ -90,9 +106,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 4h Donchian breakout with 12h EMA50 trend filter and volume confirmation.
-# Enters long when price breaks above 20-period high with uptrend (above 12h EMA50) and high volume.
-# Enters short when price breaks below 20-period low with downtrend (below 12h EMA50) and high volume.
-# Exits when price crosses the Donchian middle or trend reverses.
-# Designed to capture trends in both bull and bear markets with infrequent trades (target: 20-50/year).
-# Uses discrete sizing (0.25) to minimize fee churn. Works on BTC/ETH via institutional price action.
+# Hypothesis: Weekly pivot-based trend continuation strategy for 6H timeframe.
+# Enters long when price breaks above weekly R2 with EMA20 uptrend and volume confirmation.
+# Enters short when price breaks below weekly S2 with EMA20 downtrend and volume confirmation.
+# Exits when price returns to weekly R1/S1 (mean reversion) or trend fails (price crosses EMA20).
+# Uses weekly pivots as institutional reference points - effective in both bull and bear markets.
+# Targets 50-150 trades over 4 years (12-37/year) to minimize fee drag.
+# Uses discrete sizing (0.25) to reduce churn. Weekly timeframe avoids noise from lower TFs.
