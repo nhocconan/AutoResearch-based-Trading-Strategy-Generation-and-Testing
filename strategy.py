@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_RSI2_Recovery_1dTrend_Volume"
-timeframe = "4h"
+name = "1h_Camarilla_R3S3_Breakout_4hTrend_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,72 +17,106 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data once
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 4h data once for trend and volatility
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    # Calculate 1d EMA(50) for trend direction
+    # Get 1d data once for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    # 4h EMA(20) for trend
+    close_4h = df_4h['close'].values
+    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
+    
+    # 4h ATR(14) for volatility filter
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h_prev = np.append([close_4h[0]], close_4h[:-1])
+    tr1 = high_4h - low_4h
+    tr2 = np.abs(high_4h - close_4h_prev)
+    tr3 = np.abs(low_4h - close_4h_prev)
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr14_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr14_4h_aligned = align_htf_to_ltf(prices, df_4h, atr14_4h)
+    
+    # 1d close for Camarilla calculation (previous day)
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_prev = np.append([close_1d[0]], close_1d[:-1])
     
-    # Calculate 2-period RSI on close prices
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
-    avg_loss = loss.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
-    rs = avg_gain / avg_loss
-    rsi2 = 100 - (100 / (1 + rs))
-    rsi2 = rsi2.fillna(100).values  # Handle division by zero
+    # Pivot and ranges
+    pivot_1d = (high_1d + low_1d + close_1d_prev) / 3
+    range_1d = high_1d - low_1d
     
-    # Volume spike detection: current volume > 1.8 * 20-period average
+    # Camarilla levels: R3, S3 (most significant)
+    r3_1d = close_1d_prev + range_1d * 1.1 / 2
+    s3_1d = close_1d_prev - range_1d * 1.1 / 2
+    
+    # Align Camarilla levels to 1h timeframe
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    
+    # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
+    
+    # Session filter: 8-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # warmup for calculations
+    start_idx = 60  # warmup
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(rsi2[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(ema20_4h_aligned[i]) or np.isnan(atr14_4h_aligned[i]) or 
+            np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema_val = ema50_1d_aligned[i]
-        rsi_val = rsi2[i]
+        ema_val = ema20_4h_aligned[i]
+        atr_val = atr14_4h_aligned[i]
+        r3_val = r3_1d_aligned[i]
+        s3_val = s3_1d_aligned[i]
         vol_spike = volume_spike[i]
+        in_session = session_filter[i]
+        
+        # Volatility filter: ATR > 0.5% of price (avoid choppy markets)
+        vol_filter = atr_val > (0.005 * close[i])
         
         if position == 0:
-            # Enter long: RSI2 < 15 (oversold) with volume spike, price above 1d EMA
-            if (rsi_val < 15 and vol_spike and 
-                close[i] > ema_val):
-                signals[i] = 0.25
+            # Enter long: price breaks above R3 with volume spike, above 4h EMA, in session, good volatility
+            if (close[i] > r3_val and vol_spike and 
+                close[i] > ema_val and in_session and vol_filter):
+                signals[i] = 0.20
                 position = 1
-            # Enter short: RSI2 > 85 (overbought) with volume spike, price below 1d EMA
-            elif (rsi_val > 85 and vol_spike and 
-                  close[i] < ema_val):
-                signals[i] = -0.25
+            # Enter short: price breaks below S3 with volume spike, below 4h EMA, in session, good volatility
+            elif (close[i] < s3_val and vol_spike and 
+                  close[i] < ema_val and in_session and vol_filter):
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: RSI2 > 70 (overbought) or price below 1d EMA
-            if (rsi_val > 70 or close[i] < ema_val):
+            # Exit long: price breaks below S3 OR below 4h EMA
+            if (close[i] < s3_val or close[i] < ema_val):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: RSI2 < 30 (oversold) or price above 1d EMA
-            if (rsi_val < 30 or close[i] > ema_val):
+            # Exit short: price breaks above R3 OR above 4h EMA
+            if (close[i] > r3_val or close[i] > ema_val):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
