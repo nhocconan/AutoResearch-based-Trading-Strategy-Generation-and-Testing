@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h1d_Pullback_Strategy_v1"
-timeframe = "1h"
+name = "6h_WeeklyPivot_1dTrend_Filter_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,39 +17,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend direction (primary filter)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    # Get 1d data for trend confirmation (secondary filter)
+    # Get 1d data for trend filter and pivot calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 4h EMA21 for trend direction
-    close_4h = df_4h['close'].values
-    ema_21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
+    # Get weekly data for pivot levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
+        return np.zeros(n)
     
-    # 1d EMA50 for higher timeframe trend confirmation
+    # 1d EMA34 for trend filter
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 1h RSI for entry timing (overbought/oversold)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values
+    # Calculate weekly pivot points (standard formula)
+    # Using previous week's H/L/C to calculate current week's pivot
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Volume confirmation - 20-period average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1.0)
+    # Pivot = (H + L + C) / 3
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    # Support 1 = (2 * Pivot) - High
+    s1_1w = (2 * pivot_1w) - high_1w
+    # Resistance 1 = (2 * Pivot) - Low
+    r1_1w = (2 * pivot_1w) - low_1w
+    # Support 2 = Pivot - (High - Low)
+    s2_1w = pivot_1w - (high_1w - low_1w)
+    # Resistance 2 = Pivot + (High - Low)
+    r2_1w = pivot_1w + (high_1w - low_1w)
+    # Support 3 = Low - 2*(High - Pivot)
+    s3_1w = low_1w - 2.0 * (high_1w - pivot_1w)
+    # Resistance 3 = High + 2*(Pivot - Low)
+    r3_1w = high_1w + 2.0 * (pivot_1w - low_1w)
+    
+    # Align weekly pivots to 6h timeframe (wait for weekly bar to close)
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
+    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
+    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    
+    # Volume confirmation - 60-period average volume
+    vol_ma = pd.Series(volume).rolling(window=60, min_periods=60).mean().values
+    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1.0)  # Avoid division by zero
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
     signals = np.zeros(n)
@@ -59,53 +74,46 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_21_4h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(rsi[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(pivot_1w_aligned[i]) or 
+            np.isnan(r1_1w_aligned[i]) or np.isnan(r2_1w_aligned[i]) or
+            np.isnan(r3_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or
+            np.isnan(s2_1w_aligned[i]) or np.isnan(s3_1w_aligned[i]) or
+            np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Long conditions: 
-        # 1. Price above 4h EMA21 (uptrend)
-        # 2. Price above 1d EMA50 (higher timeframe uptrend)
-        # 3. RSI < 40 (pullback/oversold)
-        # 4. Volume > 1.2x average (confirmation)
-        if (position == 0 and
-            close[i] > ema_21_4h_aligned[i] and
-            close[i] > ema_50_1d_aligned[i] and
-            rsi[i] < 40 and
-            vol_ratio[i] > 1.2):
-            signals[i] = 0.20
-            position = 1
-        
-        # Short conditions:
-        # 1. Price below 4h EMA21 (downtrend)
-        # 2. Price below 1d EMA50 (higher timeframe downtrend)
-        # 3. RSI > 60 (pullback/overbought)
-        # 4. Volume > 1.2x average (confirmation)
-        elif (position == 0 and
-              close[i] < ema_21_4h_aligned[i] and
-              close[i] < ema_50_1d_aligned[i] and
-              rsi[i] > 60 and
-              vol_ratio[i] > 1.2):
-            signals[i] = -0.20
-            position = -1
-        
-        # Long exit: price breaks below 4h EMA21 OR RSI > 60 (overbought)
+        if position == 0:
+            # Long conditions: price above weekly pivot + above 1d EMA34 + volume confirmation
+            if (close[i] > pivot_1w_aligned[i] and 
+                close[i] > ema_34_1d_aligned[i] and
+                vol_ratio[i] > 1.2):
+                # Check if we're not too far above R2 (avoid chasing extreme extension)
+                if close[i] <= r2_1w_aligned[i] * 1.05:  # Within 5% above R2
+                    signals[i] = 0.25
+                    position = 1
+            # Short conditions: price below weekly pivot + below 1d EMA34 + volume confirmation
+            elif (close[i] < pivot_1w_aligned[i] and 
+                  close[i] < ema_34_1d_aligned[i] and
+                  vol_ratio[i] > 1.2):
+                # Check if we're not too far below S2 (avoid chasing extreme extension)
+                if close[i] >= s2_1w_aligned[i] * 0.95:  # Within 5% below S2
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            if close[i] < ema_21_4h_aligned[i] or rsi[i] > 60:
+            # Long exit: price crosses below weekly pivot OR below 1d EMA34
+            if close[i] < pivot_1w_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
-        
-        # Short exit: price breaks above 4h EMA21 OR RSI < 40 (oversold)
+                signals[i] = 0.25
         elif position == -1:
-            if close[i] > ema_21_4h_aligned[i] or rsi[i] < 40:
+            # Short exit: price crosses above weekly pivot OR above 1d EMA34
+            if close[i] > pivot_1w_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
