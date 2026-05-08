@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
-# Long when price breaks above Donchian(20) high, 1d EMA34 rising, volume > 1.5x average
-# Short when price breaks below Donchian(20) low, 1d EMA34 falling, volume > 1.5x average
-# Uses Donchian channel for price structure, EMA34 for trend filter, volume for confirmation
-# Targets 20-50 trades per year (80-200 over 4 years) for low fee drag and high win rate
+# Hypothesis: 1d Camarilla R3/S3 breakout with 1w trend filter and volume confirmation
+# Long when price closes above R3, 1w EMA34 rising, volume > 1.5x average
+# Short when price closes below S3, 1w EMA34 falling, volume > 1.5x average
+# Uses Camarilla pivot levels for institutional support/resistance, EMA34 for trend filter
+# Targets 8-25 trades per year (32-100 over 4 years) to avoid fee drag
 # Works in both bull and bear markets due to trend filter and volume confirmation
 
-name = "4h_Donchian20_1dEMA34_Volume"
-timeframe = "4h"
+name = "1d_Camarilla_R3S3_1wEMA34_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,25 +24,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate Donchian channels from previous bar's data (to avoid look-ahead)
-    high_prev = np.roll(high, 1)
-    low_prev = np.roll(low, 1)
-    high_prev[0] = np.nan  # First bar has no previous
-    low_prev[0] = np.nan
+    # Calculate previous day's typical price for Camarilla (avoid look-ahead)
+    typical_price = (high + low + close) / 3
+    prev_typical = np.roll(typical_price, 1)
+    prev_typical[0] = np.nan
     
-    # Donchian(20) on 4h data (using previous bar's high/low)
-    donchian_high = pd.Series(high_prev).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_prev).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels from previous day
+    # R3 = close + 1.1 * (high - low)  [using previous day's values]
+    # S3 = close - 1.1 * (high - low)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Calculate EMA34 on 1d close for trend filter
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    camarilla_r3 = prev_close + 1.1 * (prev_high - prev_low)
+    camarilla_s3 = prev_close - 1.1 * (prev_high - prev_low)
+    
+    # Calculate EMA34 on 1w close for trend filter
+    close_1w = df_1w['close'].values
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,43 +59,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need at least 20 bars of data for Donchian
+    start_idx = 20  # Need at least 20 days of data
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or 
+            np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        high_val = high[i]
-        low_val = low[i]
-        donchian_high_val = donchian_high[i]
-        donchian_low_val = donchian_low[i]
-        ema34_1d_val = ema34_1d_aligned[i]
+        close_val = close[i]
+        r3_val = camarilla_r3[i]
+        s3_val = camarilla_s3[i]
+        ema34_1w_val = ema34_1w_aligned[i]
         vol_conf_val = vol_conf[i]
         
         if position == 0:
-            # Enter long: price breaks above Donchian high, 1d uptrend, volume confirmation
-            if high_val > donchian_high_val and ema34_1d_val > 0 and vol_conf_val:
+            # Enter long: close above R3, 1w uptrend, volume confirmation
+            if close_val > r3_val and ema34_1w_val > 0 and vol_conf_val:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below Donchian low, 1d downtrend, volume confirmation
-            elif low_val < donchian_low_val and ema34_1d_val < 0 and vol_conf_val:
+            # Enter short: close below S3, 1w downtrend, volume confirmation
+            elif close_val < s3_val and ema34_1w_val < 0 and vol_conf_val:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below Donchian low or 1d trend down
-            if low_val < donchian_low_val or ema34_1d_val < 0:
+            # Exit long: close below S3 or 1w trend down
+            if close_val < s3_val or ema34_1w_val < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above Donchian high or 1d trend up
-            if high_val > donchian_high_val or ema34_1d_val > 0:
+            # Exit short: close above R3 or 1w trend up
+            if close_val > r3_val or ema34_1w_val > 0:
                 signals[i] = 0.0
                 position = 0
             else:
