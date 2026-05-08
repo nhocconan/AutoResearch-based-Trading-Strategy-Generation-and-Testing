@@ -1,17 +1,10 @@
-# 4h_12hEMA34_4hDonchian_Volume_v1
-# Hypothesis: 4h strategy using 12h EMA trend filter and 4h Donchian breakout with volume confirmation.
-# Long when 12h EMA > price (bullish trend), price breaks above 4h Donchian upper band, volume > 1.8x average.
-# Short when 12h EMA < price (bearish trend), price breaks below 4h Donchian lower band, volume > 1.8x average.
-# Exit on trend reversal or Donchian break in opposite direction.
-# Uses position size 0.25 to balance return and drawdown. Target: 80-180 total trades over 4 years (20-45/year).
-# Designed to capture trends in both bull and bear markets by using 12h trend filter, with volume to confirm breakout strength.
-
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12hEMA34_4hDonchian_Volume_v1"
-timeframe = "4h"
+name = "6h_WeeklyPivot_6hDonchian_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,30 +17,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # Get daily data for weekly pivot points
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 7:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Get 4h data for Donchian bands
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get 6h data for Donchian bands
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 20:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
     
-    # 12-hour EMA(34)
-    ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate weekly pivot points from daily data (weekly high/low/close)
+    # Use the last available daily data to compute weekly pivot
+    weekly_high = np.maximum.accumulate(high_1d)
+    weekly_low = np.minimum.accumulate(low_1d)
+    weekly_close = close_1d.copy()
     
-    # 4-hour Donchian(20) bands
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    # Calculate pivot points: P = (H + L + C)/3
+    # R1 = 2*P - L, S1 = 2*P - H
+    # R2 = P + (H - L), S2 = P - (H - L)
+    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
+    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    r1 = 2 * pivot - weekly_low
+    s1 = 2 * pivot - weekly_high
+    r2 = pivot + (weekly_high - weekly_low)
+    s2 = pivot - (weekly_high - weekly_low)
+    r3 = weekly_high + 2 * (pivot - weekly_low)
+    s3 = weekly_low - 2 * (weekly_high - pivot)
+    
+    # Align weekly pivot levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # 6-hour Donchian(20) bands
+    donchian_high = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_6h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_6h, donchian_low)
     
     # Volume average (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -61,39 +75,39 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_12h_aligned[i]) or np.isnan(donchian_high_aligned[i]) or
-            np.isnan(donchian_low_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: 12h EMA bullish (price > EMA), price breaks above 4h Donchian upper band, volume spike
-            if (close[i] > ema_12h_aligned[i] and
+            # Long: price above S3 weekly pivot and breaks above 6h Donchian upper band with volume
+            if (close[i] > s3_aligned[i] and
                 close[i] > donchian_high_aligned[i] and
                 vol_ratio[i] > 1.8):
                 signals[i] = 0.25
                 position = 1
                 entry_bar = i
-            # Short: 12h EMA bearish (price < EMA), price breaks below 4h Donchian lower band, volume spike
-            elif (close[i] < ema_12h_aligned[i] and
+            # Short: price below R3 weekly pivot and breaks below 6h Donchian lower band with volume
+            elif (close[i] < r3_aligned[i] and
                   close[i] < donchian_low_aligned[i] and
                   vol_ratio[i] > 1.8):
                 signals[i] = -0.25
                 position = -1
                 entry_bar = i
         elif position == 1:
-            # Long exit: trend reversal or price breaks below Donchian lower band
-            if (close[i] < ema_12h_aligned[i] or 
+            # Long exit: price breaks below S3 weekly pivot or Donchian lower band
+            if (close[i] < s3_aligned[i] or 
                 close[i] < donchian_low_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend reversal or price breaks above Donchian upper band
-            if (close[i] > ema_12h_aligned[i] or 
+            # Short exit: price breaks above R3 weekly pivot or Donchian upper band
+            if (close[i] > r3_aligned[i] or 
                 close[i] > donchian_high_aligned[i]):
                 signals[i] = 0.0
                 position = 0
