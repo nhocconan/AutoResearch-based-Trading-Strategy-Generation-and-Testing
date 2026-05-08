@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1-day EMA34 trend filter and volume spike.
-# Uses proven price channel (Camarilla) breakouts with trend alignment and volume confirmation.
+# Hypothesis: 4h Donchian(20) breakout with 1-day EMA200 trend filter and volume spike.
+# Uses breakout of price channels with long-term trend alignment and volume confirmation.
 # Designed to work in both bull and bear markets by requiring trend alignment and volume confirmation.
-# Target: 15-30 trades/year to minimize fee drag.
+# Target: 20-50 trades/year to minimize fee drag.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_Volume"
-timeframe = "12h"
+name = "4h_Donchian_20_1dEMA200_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,34 +22,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d trend: EMA34
+    # 1d trend: EMA200
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # 1d high-low range for Camarilla calculation
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # Camarilla levels (based on previous 1d candle)
-    typical_price = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    R4 = typical_price + 1.1 * range_1d / 2
-    R3 = typical_price + 1.1 * range_1d / 4
-    R2 = typical_price + 1.1 * range_1d / 6
-    R1 = typical_price + 1.1 * range_1d / 12
-    S1 = typical_price - 1.1 * range_1d / 12
-    S2 = typical_price - 1.1 * range_1d / 6
-    S3 = typical_price - 1.1 * range_1d / 4
-    S4 = typical_price - 1.1 * range_1d / 2
-    
-    # Align Camarilla levels to 12h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    # Donchian channels: 20-period high/low
+    high_max20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume spike: current volume > 2.0x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -58,25 +42,25 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = 200
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(R3_aligned[i]) or 
-            np.isnan(S3_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(ema_200_1d_aligned[i]) or np.isnan(high_max20[i]) or 
+            np.isnan(low_min20[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above R3 + uptrend (price > 1d EMA34) + volume spike
-            long_cond = (close[i] > R3_aligned[i]) and \
-                        (close[i] > ema_34_1d_aligned[i]) and \
+            # Long: break above 20-period high + uptrend (price > 1d EMA200) + volume spike
+            long_cond = (close[i] > high_max20[i]) and \
+                        (close[i] > ema_200_1d_aligned[i]) and \
                         volume_spike[i]
-            # Short: break below S3 + downtrend (price < 1d EMA34) + volume spike
-            short_cond = (close[i] < S3_aligned[i]) and \
-                         (close[i] < ema_34_1d_aligned[i]) and \
+            # Short: break below 20-period low + downtrend (price < 1d EMA200) + volume spike
+            short_cond = (close[i] < low_min20[i]) and \
+                         (close[i] < ema_200_1d_aligned[i]) and \
                          volume_spike[i]
             
             if long_cond:
@@ -86,15 +70,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: close below S3 (mean reversion to support)
-            if close[i] < S3_aligned[i]:
+            # Long exit: close below 20-period low (mean reversion to support)
+            if close[i] < low_min20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: close above R3 (mean reversion to resistance)
-            if close[i] > R3_aligned[i]:
+            # Short exit: close above 20-period high (mean reversion to resistance)
+            if close[i] > high_max20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
