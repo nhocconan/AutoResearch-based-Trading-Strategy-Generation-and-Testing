@@ -3,81 +3,74 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 1d volume confirmation and 1w trend filter.
-# Long when price breaks above Camarilla R3 level AND 1d volume > 1.5x 24-period average AND 1w EMA50 trend is up.
-# Short when price breaks below Camarilla S3 level AND 1d volume > 1.5x 24-period average AND 1w EMA50 trend is down.
-# Exit when price crosses back inside the Camarilla (S3-R3) range.
-# Uses 4h timeframe as specified, with 1d volume and 1w EMA50 for higher timeframe context.
-# Target: 75-200 total trades over 4 years (19-50/year) with controlled frequency to avoid fee drag.
+# Hypothesis: 12h KAMA trend with 1d RSI mean-reversion filter and volume confirmation.
+# Long when KAMA slope > 0 (up trend), RSI(14) < 40 (oversold), and 1d volume > 1.5x 20-period average.
+# Short when KAMA slope < 0 (down trend), RSI(14) > 60 (overbought), and 1d volume > 1.5x 20-period average.
+# Exit when KAMA slope changes sign or volume filter fails.
+# Uses 12h timeframe with 1d RSI and volume for higher timeframe context.
+# Target: 50-150 total trades over 4 years (12-37/year) with controlled frequency to avoid fee drag.
 
-name = "4h_Camarilla_R3S3_1dVolume_1wEMA50"
-timeframe = "4h"
+name = "12h_KAMA_RSI_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     
-    # Daily data for volume
+    # Daily data for RSI and volume
     df_d = get_htf_data(prices, '1d')
-    if len(df_d) < 2:
+    if len(dfd) < 2:
         return np.zeros(n)
     
-    # Weekly data for EMA50 trend
-    df_w = get_htf_data(prices, '1w')
-    if len(df_w) < 2:
-        return np.zeros(n)
+    # KAMA on 12h data
+    def kama(close, er_period=10, fast=2, slow=30):
+        change = np.abs(close - np.roll(close, er_period))
+        volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0)
+        er = np.where(volatility != 0, change / volatility, 0)
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        kama = np.zeros_like(close)
+        kama[0] = close[0]
+        for i in range(1, len(close)):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
     
-    # Calculate Camarilla levels from previous day's OHLC
-    # Camarilla levels are calculated from previous day's range
-    close_prev = df_d['close'].values
-    high_prev = df_d['high'].values
-    low_prev = df_d['low'].values
+    kama_values = kama(close)
+    kama_slope = np.diff(kama_values, prepend=kama_values[0])
     
-    # Previous day's range
-    range_prev = high_prev - low_prev
+    # Daily RSI(14)
+    close_d = df_d['close'].values
+    delta = np.diff(close_d, prepend=close_d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi[np.isnan(rsi)] = 50  # Neutral when undefined
     
-    # Camarilla levels
-    # R4 = close_prev + range_prev * 1.5
-    # R3 = close_prev + range_prev * 1.25
-    # S3 = close_prev - range_prev * 1.25
-    # S4 = close_prev - range_prev * 1.5
-    # We'll use R3 and S3 as breakout levels
-    camarilla_r3 = close_prev + range_prev * 1.25
-    camarilla_s3 = close_prev - range_prev * 1.25
-    
-    # Align Camarilla levels to 4h timeframe (previous day's levels available at 00:00 UTC daily)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_d, camarilla_s3)
-    
-    # Daily volume filter: current volume > 1.5x 24-period average
+    # Daily volume filter: current volume > 1.5x 20-period average
     volume_d = df_d['volume'].values
-    vol_ma24_d = pd.Series(volume_d).rolling(window=24, min_periods=24).mean().values
-    volume_filter_d = volume_d > (1.5 * vol_ma24_d)
+    vol_ma20_d = pd.Series(volume_d).rolling(window=20, min_periods=20).mean().values
+    volume_filter_d = volume_d > (1.5 * vol_ma20_d)
     volume_filter = align_htf_to_ltf(prices, df_d, volume_filter_d)
     
-    # Weekly EMA50 for trend direction
-    close_w = df_w['close'].values
-    ema50_w = pd.Series(close_w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_w_aligned = align_htf_to_ltf(prices, df_w, ema50_w)
-    
-    # Trend filter: price above/below EMA50
-    trend_up = close > ema50_w_aligned
-    trend_down = close < ema50_w_aligned
+    # Align RSI to 12h timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_d, rsi)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Sufficient warmup for EMA50
+    start_idx = 30  # Sufficient warmup for KAMA and RSI
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+        if (np.isnan(kama_slope[i]) or np.isnan(rsi_aligned[i]) or 
             np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -85,10 +78,10 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: price breaks above Camarilla R3, volume filter, uptrend
-            long_cond = (close[i] > camarilla_r3_aligned[i]) and volume_filter[i] and trend_up[i]
-            # Short conditions: price breaks below Camarilla S3, volume filter, downtrend
-            short_cond = (close[i] < camarilla_s3_aligned[i]) and volume_filter[i] and trend_down[i]
+            # Long conditions: KAMA up, RSI oversold, volume confirmation
+            long_cond = (kama_slope[i] > 0) and (rsi_aligned[i] < 40) and volume_filter[i]
+            # Short conditions: KAMA down, RSI overbought, volume confirmation
+            short_cond = (kama_slope[i] < 0) and (rsi_aligned[i] > 60) and volume_filter[i]
             
             if long_cond:
                 signals[i] = 0.25
@@ -97,15 +90,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses back below Camarilla S3
-            if close[i] < camarilla_s3_aligned[i]:
+            # Long exit: KAMA turns down or volume filter fails
+            if (kama_slope[i] <= 0) or not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses back above Camarilla R3
-            if close[i] > camarilla_r3_aligned[i]:
+            # Short exit: KAMA turns up or volume filter fails
+            if (kama_slope[i] >= 0) or not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
