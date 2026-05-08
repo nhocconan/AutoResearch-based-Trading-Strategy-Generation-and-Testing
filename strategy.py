@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_RSI2_Reversal_12hTrend"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 80:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,79 +17,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data once
+    # Get daily data once for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate daily EMA(34) for trend direction
+    # Calculate daily EMA(20) for trend direction
     close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
     
-    # Calculate daily Camarilla levels from previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_shift = df_1d['close'].shift(1).values
-    high_1d_shift = df_1d['high'].shift(1).values
-    low_1d_shift = df_1d['low'].shift(1).values
-    
-    # Calculate pivot and Camarilla levels using previous day's data
-    pivot = (high_1d_shift + low_1d_shift + close_1d_shift) / 3
-    range_ = high_1d_shift - low_1d_shift
-    r3 = close_1d_shift + (range_ * 1.1 / 4)
-    s3 = close_1d_shift - (range_ * 1.1 / 4)
-    
-    # Align Camarilla levels to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # Volume spike: current volume > 2.0 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # RSI(2) on 4h close
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    gain_ma = pd.Series(gain).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
+    loss_ma = pd.Series(loss).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
+    rs = gain_ma / (loss_ma + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 80  # warmup for calculations
+    start_idx = 20  # warmup
     
     for i in range(start_idx, n):
-        # Skip if any critical data is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(vol_ma[i])):
+        if np.isnan(ema20_1d_aligned[i]) or np.isnan(rsi[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema34_1d_val = ema34_1d_aligned[i]
-        r3_val = r3_aligned[i]
-        s3_val = s3_aligned[i]
-        vol_spike = volume_spike[i]
+        ema20_1d_val = ema20_1d_aligned[i]
+        rsi_val = rsi[i]
         
         if position == 0:
-            # Enter long: price breaks above S3 + uptrend + volume spike
-            if (close[i] > s3_val and 
-                close[i] > ema34_1d_val and 
-                vol_spike):
+            # Enter long: RSI < 10 (oversold) + uptrend
+            if rsi_val < 10 and close[i] > ema20_1d_val:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below R3 + downtrend + volume spike
-            elif (close[i] < r3_val and 
-                  close[i] < ema34_1d_val and 
-                  vol_spike):
+            # Enter short: RSI > 90 (overbought) + downtrend
+            elif rsi_val > 90 and close[i] < ema20_1d_val:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below S3 OR trend turns down
-            if (close[i] < s3_val or close[i] < ema34_1d_val):
+            # Exit long: RSI > 50 (mean reversion) or trend turns down
+            if rsi_val > 50 or close[i] < ema20_1d_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above R3 OR trend turns up
-            if (close[i] > r3_val or close[i] > ema34_1d_val):
+            # Exit short: RSI < 50 (mean reversion) or trend turns up
+            if rsi_val < 50 or close[i] > ema20_1d_val:
                 signals[i] = 0.0
                 position = 0
             else:
