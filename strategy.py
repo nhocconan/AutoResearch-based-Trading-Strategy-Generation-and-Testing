@@ -17,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data once for trend and Donchian levels
+    # Get 1d data once
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -27,17 +27,13 @@ def generate_signals(prices):
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate 1d Donchian(20) breakout levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
+    # Calculate 4h Donchian(20) breakout levels
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume spike: current volume > 2.0 * 20-period average
+    # Volume spike: current volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -46,40 +42,40 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(donch_high_aligned[i]) or 
-            np.isnan(donch_low_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(donch_high[i]) or 
+            np.isnan(donch_low[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         ema34_1d_val = ema34_1d_aligned[i]
-        upper = donch_high_aligned[i]
-        lower = donch_low_aligned[i]
+        upper = donch_high[i]
+        lower = donch_low[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: price breaks above 1d Donchian high + uptrend + volume spike
+            # Enter long: price breaks above 4h Donchian high + uptrend + volume spike
             if (close[i] > upper and 
                 close[i] > ema34_1d_val and 
                 vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below 1d Donchian low + downtrend + volume spike
+            # Enter short: price breaks below 4h Donchian low + downtrend + volume spike
             elif (close[i] < lower and 
                   close[i] < ema34_1d_val and 
                   vol_spike):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below 1d Donchian low OR trend turns down
+            # Exit long: price breaks below 4h Donchian low OR trend turns down
             if (close[i] < lower or close[i] < ema34_1d_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above 1d Donchian high OR trend turns up
+            # Exit short: price breaks above 4h Donchian high OR trend turns up
             if (close[i] > upper or close[i] > ema34_1d_val):
                 signals[i] = 0.0
                 position = 0
