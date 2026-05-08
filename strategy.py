@@ -1,18 +1,16 @@
-# 6h_Camarilla_Pivot_1dTrend_VolumeBreakout
-# Hypothesis: Uses daily Camarilla pivot levels from the previous day to identify
-# key support/resistance zones. Enters long at S3 breakout with volume confirmation
-# when daily trend is bullish, and shorts at R3 breakdown with volume confirmation
-# when daily trend is bearish. The 6h timeframe provides sufficient filtering to
-# avoid overtrading while capturing meaningful breakouts. Works in both bull and
-# bear markets by following the daily trend direction for bias.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Camarilla_Pivot_1dTrend_VolumeBreakout"
-timeframe = "6h"
+# Hypothesis: 12h Weekly EMA50 Trend + Daily Price Action + Volume Spike
+# Uses weekly EMA50 for trend bias, daily price closing above/below weekly EMA for entry,
+# and volume spike (>2x 20-day average) for confirmation. Designed to capture trend
+# continuation in both bull and bear markets by following the weekly trend while avoiding
+# false signals with volume confirmation. Target: 12-37 trades/year.
+
+name = "12h_WeeklyEMA50_DailyPriceAction_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,64 +23,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots and trend filter
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 2:
+    # Get weekly data for EMA trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 50:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend filter
-    close_daily = df_daily['close'].values
-    ema34_daily = np.full(len(close_daily), np.nan)
-    if len(close_daily) >= 34:
-        ema34_daily[33] = np.mean(close_daily[:34])
-        for i in range(34, len(close_daily)):
-            ema34_daily[i] = (close_daily[i] * 2 + ema34_daily[i-1] * 32) / 34
+    # Get daily data for price action and volume
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 20:
+        return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels (based on previous day)
-    # R4 = Close + (High - Low) * 1.5
-    # R3 = Close + (High - Low) * 1.25
-    # R2 = Close + (High - Low) * 1.166
-    # R1 = Close + (High - Low) * 1.083
-    # PP = (High + Low + Close) / 3
-    # S1 = Close - (High - Low) * 1.083
-    # S2 = Close - (High - Low) * 1.166
-    # S3 = Close - (High - Low) * 1.25
-    # S4 = Close - (High - Low) * 1.5
-    high_daily = df_daily['high'].values
-    low_daily = df_daily['low'].values
-    close_daily = df_daily['close'].values
+    # Calculate weekly EMA50 for trend filter
+    close_weekly = df_weekly['close'].values
+    ema50_weekly = np.full(len(close_weekly), np.nan)
+    if len(close_weekly) >= 50:
+        ema50_weekly[49] = np.mean(close_weekly[:50])
+        for i in range(50, len(close_weekly)):
+            ema50_weekly[i] = (close_weekly[i] * 2 + ema50_weekly[i-1] * 48) / 50
     
-    # Previous day's values for pivot calculation
-    high_prev = np.roll(high_daily, 1)
-    low_prev = np.roll(low_daily, 1)
-    close_prev = np.roll(close_daily, 1)
-    # First day has no previous day
-    high_prev[0] = np.nan
-    low_prev[0] = np.nan
-    close_prev[0] = np.nan
-    
-    # Calculate pivot levels
-    r4 = close_prev + (high_prev - low_prev) * 1.5
-    r3 = close_prev + (high_prev - low_prev) * 1.25
-    r2 = close_prev + (high_prev - low_prev) * 1.166
-    r1 = close_prev + (high_prev - low_prev) * 1.083
-    pp = (high_prev + low_prev + close_prev) / 3
-    s1 = close_prev - (high_prev - low_prev) * 1.083
-    s2 = close_prev - (high_prev - low_prev) * 1.166
-    s3 = close_prev - (high_prev - low_prev) * 1.25
-    s4 = close_prev - (high_prev - low_prev) * 1.5
-    
-    # Calculate daily volume average for volume breakout
+    # Calculate daily volume average for volume spike
     vol_daily = df_daily['volume'].values
     vol_avg_20_daily = np.full(len(vol_daily), np.nan)
     if len(vol_daily) >= 20:
         for i in range(20, len(vol_daily)):
             vol_avg_20_daily[i] = np.mean(vol_daily[i-20:i])
     
-    # Align daily indicators to 6h timeframe
-    ema34_daily_aligned = align_htf_to_ltf(prices, df_daily, ema34_daily)
-    r3_aligned = align_htf_to_ltf(prices, df_daily, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_daily, s3)
+    # Align weekly and daily indicators to 12h timeframe
+    ema50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema50_weekly)
     vol_avg_20_daily_aligned = align_htf_to_ltf(prices, df_daily, vol_avg_20_daily)
     
     # Pre-compute session filter (08-20 UTC)
@@ -92,7 +59,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # warmup for indicators
+    start_idx = max(50, 20)  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if outside trading session
@@ -103,55 +70,50 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(ema34_daily_aligned[i]) or np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(vol_avg_20_daily_aligned[i])):
+        if (np.isnan(ema50_weekly_aligned[i]) or np.isnan(vol_avg_20_daily_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume breakout: current 6h volume > 2x 20-period average of daily volume
-        vol_breakout = False
+        # Find current daily bar's volume and price action
+        vol_spike = False
+        price_above_weekly_ema = False
+        price_below_weekly_ema = False
+        
         if not np.isnan(vol_avg_20_daily_aligned[i]):
-            vol_breakout = volume[i] > 2.0 * vol_avg_20_daily_aligned[i]
+            # Find current daily bar's data
+            idx_daily = 0
+            while idx_daily < len(df_daily) and df_daily.iloc[idx_daily]['open_time'] <= prices.iloc[i]['open_time']:
+                idx_daily += 1
+            idx_daily -= 1  # last completed daily bar
+            
+            if idx_daily >= 0:
+                vol_12h_current = volume[i]
+                vol_spike = vol_12h_current > 2.0 * vol_avg_20_daily_aligned[i]
+                
+                # Check if current 12h price is above/below weekly EMA
+                price_above_weekly_ema = close[i] > ema50_weekly_aligned[i]
+                price_below_weekly_ema = close[i] < ema50_weekly_aligned[i]
         
         if position == 0:
-            # Look for entry: follow daily EMA trend with Camarilla breakout and volume confirmation
-            # Bullish trend: price above daily EMA34
-            bullish_trend = close[i] > ema34_daily_aligned[i]
-            # Bearish trend: price below daily EMA34
-            bearish_trend = close[i] < ema34_daily_aligned[i]
-            
-            # Long when price breaks above S3 with volume confirmation in bullish trend
-            long_condition = (
-                bullish_trend and
-                close[i] > s3_aligned[i] and   # price above S3 (breakout)
-                vol_breakout                   # volume breakout for entry
-            )
-            
-            # Short when price breaks below R3 with volume confirmation in bearish trend
-            short_condition = (
-                bearish_trend and
-                close[i] < r3_aligned[i] and   # price below R3 (breakdown)
-                vol_breakout                   # volume breakout for entry
-            )
-            
-            if long_condition:
+            # Look for entry: follow weekly EMA trend with volume spike
+            if price_above_weekly_ema and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            elif short_condition:
+            elif price_below_weekly_ema and vol_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns below S3 or trend turns bearish
-            if close[i] < s3_aligned[i] or close[i] < ema34_daily_aligned[i]:
+            # Exit long: price returns below weekly EMA or volume drops
+            if price_below_weekly_ema or not vol_spike:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns above R3 or trend turns bullish
-            if close[i] > r3_aligned[i] or close[i] > ema34_daily_aligned[i]:
+            # Exit short: price returns above weekly EMA or volume drops
+            if price_above_weekly_ema or not vol_spike:
                 signals[i] = 0.0
                 position = 0
             else:
