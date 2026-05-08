@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator (13,8,5 SMAs) with 1w trend filter and volume confirmation.
-# Long when Jaw > Teeth > Lips (bullish alignment) AND price > 1w EMA50 AND volume > 1.5x 20-period avg.
-# Short when Jaw < Teeth < Lips (bearish alignment) AND price < 1w EMA50 AND volume > 1.5x 20-period avg.
-# Exit when Alligator alignment breaks or price crosses 1w EMA50.
-# Williams Alligator identifies trend phases; 1w EMA50 filters higher-timeframe trend; volume confirms conviction.
-# Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe.
+# Hypothesis: 4h Choppiness Index regime filter combined with 1d RSI mean reversion.
+# Long when CHOP(14) > 61.8 (range) AND RSI(14) < 30 on 1d.
+# Short when CHOP(14) > 61.8 (range) AND RSI(14) > 70 on 1d.
+# Exit when RSI crosses back to neutral (40-60).
+# Chop filter avoids trending markets where mean reversion fails.
+# RSI extremes provide mean-reversion signals in ranging markets.
+# Target: 60-120 total trades over 4 years (15-30/year).
 
-name = "12h_WilliamsAlligator_1wEMA50_Volume"
-timeframe = "12h"
+name = "4h_Chop_RSI_MeanReversion"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,53 +23,48 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Volume filter: current volume > 1.5x 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma20)
+    # 4h Choppiness Index: high/low range vs true range over 14 periods
+    atr = pd.Series(np.sqrt((high - low)**2)).rolling(window=14, min_periods=14).mean().values
+    sum_high_low = pd.Series(high - low).rolling(window=14, min_periods=14).sum().values
+    chop = 100 * np.log10(sum_high_low / (atr * 14)) / np.log10(14)
     
-    # Williams Alligator on 12h data: SMAs of median price
-    median_price = (high + low) / 2
-    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values  # Blue line (13-bar)
-    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values    # Red line (8-bar)
-    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values    # Green line (5-bar)
-    
-    # 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # 1d data for RSI
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # EMA50 on 1w close
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # RSI on 1d close
+    close_1d = df_1d['close'].values
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Align 1w EMA50 to 12h timeframe
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Align 1d RSI to 4h timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Sufficient warmup for EMA50
+    start_idx = 14  # Sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_filter[i])):
+        if np.isnan(chop[i]) or np.isnan(rsi_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Williams Alligator alignment
-        bullish_alignment = (jaw[i] > teeth[i]) and (teeth[i] > lips[i])
-        bearish_alignment = (jaw[i] < teeth[i]) and (teeth[i] < lips[i])
-        
         if position == 0:
-            # Long conditions: bullish alignment, price > 1w EMA50, volume filter
-            long_cond = bullish_alignment and (close[i] > ema_50_1w_aligned[i]) and volume_filter[i]
-            # Short conditions: bearish alignment, price < 1w EMA50, volume filter
-            short_cond = bearish_alignment and (close[i] < ema_50_1w_aligned[i]) and volume_filter[i]
+            # Long: choppy market (range) + RSI oversold
+            long_cond = (chop[i] > 61.8) and (rsi_aligned[i] < 30)
+            # Short: choppy market (range) + RSI overbought
+            short_cond = (chop[i] > 61.8) and (rsi_aligned[i] > 70)
             
             if long_cond:
                 signals[i] = 0.25
@@ -77,15 +73,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: alignment breaks or price < 1w EMA50
-            if not bullish_alignment or (close[i] < ema_50_1w_aligned[i]):
+            # Long exit: RSI returns to neutral (40-60)
+            if rsi_aligned[i] >= 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: alignment breaks or price > 1w EMA50
-            if not bearish_alignment or (close[i] > ema_50_1w_aligned[i]):
+            # Short exit: RSI returns to neutral (40-60)
+            if rsi_aligned[i] <= 60:
                 signals[i] = 0.0
                 position = 0
             else:
