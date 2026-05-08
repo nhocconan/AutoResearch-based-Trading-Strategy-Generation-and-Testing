@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian channel breakout with 1d ADX trend filter and volume confirmation.
-# Long when price breaks above Donchian(20) high AND 1d ADX > 25 (strong trend) AND volume > 1.5x 20-period average.
-# Short when price breaks below Donchian(20) low AND 1d ADX > 25 AND volume > 1.5x 20-period average.
-# Exit when price crosses back below/above Donchian(10) midpoint to avoid whipsaws.
-# Uses Donchian breakouts for trend continuation with ADX filter to avoid ranging markets.
-# Target: 100-200 total trades over 4 years (25-50/year) for balanced frequency.
+# Hypothesis: 6h Supertrend (ATR=10, mult=3) with 1d ADX trend filter and 6h volume confirmation.
+# Long when Supertrend turns green, 1d ADX > 25 (strong trend), and 6h volume > 2.0x 20-period average.
+# Short when Supertrend turns red, 1d ADX > 25, and 6h volume > 2.0x 20-period average.
+# Exit when Supertrend reverses direction.
+# Uses Supertrend for trend following with ADX to filter weak/choppy markets and volume to confirm momentum.
+# Target: 50-150 total trades over 4 years (12-37/year) for low fee drift.
 
-name = "4h_Donchian20_1dADX25_Volume"
-timeframe = "4h"
+name = "6h_Supertrend_1dADX_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,50 +29,80 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Donchian channels (20-period) on 4h data
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (highest_high + lowest_low) / 2
+    # Calculate ATR (10-period) for Supertrend
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0  # First period has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
-    # 4h volume filter: current volume > 1.5x 20-period average
+    # Supertrend calculation
+    hl2 = (high + low) / 2
+    upperband = hl2 + (3 * atr)
+    lowerband = hl2 - (3 * atr)
+    
+    supertrend = np.zeros(n)
+    direction = np.ones(n)  # 1 for uptrend, -1 for downtrend
+    
+    for i in range(10, n):
+        if close[i] > upperband[i-1]:
+            direction[i] = 1
+        elif close[i] < lowerband[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+            if direction[i] == 1 and lowerband[i] < lowerband[i-1]:
+                lowerband[i] = lowerband[i-1]
+            if direction[i] == -1 and upperband[i] > upperband[i-1]:
+                upperband[i] = upperband[i-1]
+        
+        if direction[i] == 1:
+            supertrend[i] = lowerband[i]
+        else:
+            supertrend[i] = upperband[i]
+    
+    # 6h volume filter: current volume > 2.0x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma20)
+    volume_filter = volume > (2.0 * vol_ma20)
     
-    # 1d ADX (14-period) for trend strength
+    # 1d ADX (14-period) for trend strength filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate True Range
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    # True Range
+    tr1_1d = high_1d - low_1d
+    tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1_1d[0] = 0
+    tr2_1d[0] = 0
+    tr3_1d[0] = 0
+    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Directional Movement
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    up_move[0] = 0
+    down_move[0] = 0
     
-    # Smooth with Wilder's smoothing (using EMA as approximation)
-    tr_ma = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
-    dm_plus_ma = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False).mean().values
-    dm_minus_ma = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False).mean().values
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Calculate DI+ and DI-
-    di_plus = 100 * dm_plus_ma / tr_ma
-    di_minus = 100 * dm_minus_ma / tr_ma
+    # Smoothed DM
+    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
+    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
     
-    # Calculate DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
+    # DI and DX
+    plus_di = 100 * (plus_dm_smooth / atr_1d)
+    minus_di = 100 * (minus_dm_smooth / atr_1d)
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Align 1d ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -81,38 +111,38 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(volume_filter[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(supertrend[i]) or np.isnan(direction[i]) or 
+            np.isnan(volume_filter[i]) or np.isnan(adx_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: break above Donchian high, strong trend, volume spike
-            long_cond = (close[i] > highest_high[i]) and (adx_aligned[i] > 25) and volume_filter[i]
-            # Short conditions: break below Donchian low, strong trend, volume spike
-            short_cond = (close[i] < lowest_low[i]) and (adx_aligned[i] > 25) and volume_filter[i]
+            # Long conditions: Supertrend uptrend, ADX > 25, volume spike
+            long_cond = (direction[i] == 1) and (adx_1d_aligned[i] > 25) and volume_filter[i]
+            # Short conditions: Supertrend downtrend, ADX > 25, volume spike
+            short_cond = (direction[i] == -1) and (adx_1d_aligned[i] > 25) and volume_filter[i]
             
             if long_cond:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
             elif short_cond:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below Donchian midpoint
-            if close[i] < donchian_mid[i] and close[i-1] >= donchian_mid[i-1]:
+            # Long exit: Supertrend turns down
+            if direction[i] == -1:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above Donchian midpoint
-            if close[i] > donchian_mid[i] and close[i-1] <= donchian_mid[i-1]:
+            # Short exit: Supertrend turns up
+            if direction[i] == 1:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
