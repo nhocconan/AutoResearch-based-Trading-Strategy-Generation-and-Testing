@@ -3,13 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Ichimoku_TK_Cross_CloudFilter_1d"
-timeframe = "6h"
+# Hypothesis: 4h Bollinger Band breakout with volume confirmation and volume-weighted RSI filter.
+# Works in bull/bear: BB breakout captures momentum, volume confirms institutional interest,
+# VW-RSI filters overextended moves. Low trade frequency via strict BB(20,2.0) and volume spike.
+name = "4h_Bollinger_Band_Breakout_Volume_VWRSI"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,96 +20,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Ichimoku calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:  # Need at least 52 periods for Ichimoku
-        return np.zeros(n)
+    # Bollinger Bands (20, 2.0)
+    close_series = pd.Series(close)
+    bb_mid = close_series.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_series.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_mid + 2.0 * bb_std
+    bb_lower = bb_mid - 2.0 * bb_std
     
-    # Ichimoku components on daily timeframe
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Volume-weighted RSI (14) - less prone to whipsaws
+    # Calculate typical price and volume-weighted gains/losses
+    typical_price = (high + low + close) / 3.0
+    price_change = np.diff(typical_price, prepend=typical_price[0])
     
-    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
-    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2
+    gains = np.where(price_change > 0, price_change, 0.0)
+    losses = np.where(price_change < 0, -price_change, 0.0)
     
-    # Kijun-sen (Base Line): (26-period high + low) / 2
-    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + low) / 2
-    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_b = (period52_high + period52_low) / 2
-    
-    # Align Ichimoku components to 6h timeframe (with proper delay)
-    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan)
-    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b)
-    
-    # Volume spike detection (6h timeframe)
+    # Volume-weighted smoothing
     vol_series = pd.Series(volume)
+    vol_weighted_gains = pd.Series(gains) * vol_series
+    vol_weighted_losses = pd.Series(losses) * vol_series
+    
+    avg_gain = vol_weighted_gains.rolling(window=14, min_periods=14).mean().values / \
+               vol_series.rolling(window=14, min_periods=14).mean().values
+    avg_loss = vol_weighted_losses.rolling(window=14, min_periods=14).mean().values / \
+               vol_series.rolling(window=14, min_periods=14).mean().values
+    
+    # Avoid division by zero
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    vw_rsi = 100 - (100 / (1 + rs))
+    
+    # Volume spike detection (20-period average)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 52  # Wait for Ichimoku to stabilize
+    start_idx = 20  # Wait for BB to stabilize
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
-            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or 
-            np.isnan(vol_ma20[i])):
+        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
+            np.isnan(vw_rsi[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 1.5 * vol_ma20[i]  # Moderate volume spike
-        
-        # Session filter: 08-20 UTC (reduce noise trades)
-        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
-        in_session = 8 <= hour <= 20
+        vol_ok = volume[i] > 2.0 * vol_ma20[i]  # Strong volume spike
+        # VW-RSI filter: avoid overbought/oversold extremes
+        rsi_not_extreme = (vw_rsi[i] > 20) and (vw_rsi[i] < 80)
         
         if position == 0:
-            # Long: TK cross bullish + price above cloud (Senkou A > Senkou B) + volume
-            if (tenkan_aligned[i] > kijun_aligned[i] and 
-                close[i] > senkou_a_aligned[i] and 
-                senkou_a_aligned[i] > senkou_b_aligned[i] and 
-                vol_ok and 
-                in_session):
+            # Long: close breaks above upper BB + volume spike + RSI not extreme
+            if (close[i] > bb_upper[i] and vol_ok and rsi_not_extreme):
                 signals[i] = 0.25
                 position = 1
-            # Short: TK cross bearish + price below cloud (Senkou A < Senkou B) + volume
-            elif (tenkan_aligned[i] < kijun_aligned[i] and 
-                  close[i] < senkou_b_aligned[i] and 
-                  senkou_a_aligned[i] < senkou_b_aligned[i] and 
-                  vol_ok and 
-                  in_session):
+            # Short: close breaks below lower BB + volume spike + RSI not extreme
+            elif (close[i] < bb_lower[i] and vol_ok and rsi_not_extreme):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: TK cross bearish or price drops below cloud
-            if (tenkan_aligned[i] < kijun_aligned[i] or 
-                close[i] < senkou_b_aligned[i]):
+            # Exit long: close crosses below middle BB or volume dries up
+            if (close[i] < bb_mid[i] or volume[i] < 0.5 * vol_ma20[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: TK cross bullish or price rises above cloud
-            if (tenkan_aligned[i] > kijun_aligned[i] or 
-                close[i] > senkou_a_aligned[i]):
+            # Exit short: close crosses above middle BB or volume dries up
+            if (close[i] > bb_mid[i] or volume[i] < 0.5 * vol_ma20[i]):
                 signals[i] = 0.0
                 position = 0
             else:
