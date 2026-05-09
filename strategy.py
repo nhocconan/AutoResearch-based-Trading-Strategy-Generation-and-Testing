@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3S3_Breakout_12hEMA50_VolumeSpike_v2"
-timeframe = "4h"
+name = "1h_Camarilla_R3S3_Breakout_4hTrend_1dVolumeSpike"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,18 +17,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA trend
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 60:
+    # Get 4h data for trend
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
     # Get 1d data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 12h EMA50 for trend
-    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 4h EMA50 for trend
+    ema50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # 1d Camarilla levels (R3, S3)
     high_1d = df_1d['high'].values
@@ -40,57 +40,63 @@ def generate_signals(prices):
     
     # 1d volume average for volume filter
     vol_1d = df_1d['volume'].values
-    vol_avg_1d = pd.Series(vol_1d).rolling(window=30, min_periods=30).mean().values
+    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align all to 4h
-    ema50_12h_4h = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    camarilla_high_4h = align_htf_to_ltf(prices, df_1d, camarilla_high)
-    camarilla_low_4h = align_htf_to_ltf(prices, df_1d, camarilla_low)
-    vol_avg_1d_4h = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    # Align all to 1h
+    ema50_4h_1h = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    camarilla_high_1h = align_htf_to_ltf(prices, df_1d, camarilla_high)
+    camarilla_low_1h = align_htf_to_ltf(prices, df_1d, camarilla_low)
+    vol_avg_1d_1h = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 60
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(ema50_12h_4h[i]) or np.isnan(camarilla_high_4h[i]) or 
-            np.isnan(camarilla_low_4h[i]) or np.isnan(vol_avg_1d_4h[i])):
+        if (np.isnan(ema50_4h_1h[i]) or np.isnan(camarilla_high_1h[i]) or 
+            np.isnan(camarilla_low_1h[i]) or np.isnan(vol_avg_1d_1h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        trend = ema50_12h_4h[i]
-        resistance = camarilla_high_4h[i]
-        support = camarilla_low_4h[i]
-        vol_avg = vol_avg_1d_4h[i]
-        vol_ok = volume[i] > vol_avg * 2.0  # Increased volume threshold
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
         
-        if position == 0:
-            # Long: break above R3 with volume and above 12h EMA50
+        trend = ema50_4h_1h[i]
+        resistance = camarilla_high_1h[i]
+        support = camarilla_low_1h[i]
+        vol_avg = vol_avg_1d_1h[i]
+        vol_ok = volume[i] > vol_avg * 2.0
+        
+        if position == 0 and in_session:
+            # Long: break above R3 with volume and above 4h EMA50
             if close[i] > resistance and vol_ok and close[i] > trend:
-                signals[i] = 0.30
+                signals[i] = 0.20
                 position = 1
-            # Short: break below S3 with volume and below 12h EMA50
+            # Short: break below S3 with volume and below 4h EMA50
             elif close[i] < support and vol_ok and close[i] < trend:
-                signals[i] = -0.30
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit conditions
+            # Exit long: close below S3 or trend reversal
             if close[i] < support or close[i] < trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit conditions
+            # Exit short: close above R3 or trend reversal
             if close[i] > resistance or close[i] > trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.20
     
     return signals
