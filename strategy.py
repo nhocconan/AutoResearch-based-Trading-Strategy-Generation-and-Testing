@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Spike_v2"
-timeframe = "12h"
+name = "1d_KAMA_Trend_RSI25_75_Range_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,78 +17,128 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 50:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate pivot and levels from previous day's OHLC
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # KAMA parameters
+    er_length = 10
+    fast_sc = 2 / (2 + 1)
+    slow_sc = 2 / (30 + 1)
     
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d[0] = np.nan
-    prev_low_1d[0] = np.nan
-    prev_close_1d[0] = np.nan
+    # Calculate Efficiency Ratio
+    change = np.abs(np.diff(close, n=er_length))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0) if hasattr(np.sum, 'axis') else np.sum(np.abs(np.diff(close)))
+    # More efficient calculation
+    er = np.zeros_like(close)
+    for i in range(er_length, len(close)):
+        if i - er_length >= 0:
+            price_change = np.abs(close[i] - close[i - er_length])
+            volatility_sum = np.sum(np.abs(np.diff(close[i - er_length + 1:i + 1])))
+            if volatility_sum > 0:
+                er[i] = price_change / volatility_sum
+            else:
+                er[i] = 0
     
-    prev_daily_range = prev_high_1d - prev_low_1d
-    pivot = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
-    r1 = pivot + 1.1 * prev_daily_range / 6
-    s1 = pivot - 1.1 * prev_daily_range / 6
+    # Calculate Smoothing Constant and KAMA
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    kama = np.full_like(close, np.nan)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
     
-    # Align Camarilla levels to 12h
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
+    # Align KAMA to daily (no additional delay needed for KAMA itself)
+    kama_aligned = align_htf_to_ltf(prices, df_1w, kama)
     
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # RSI(14) for range/extreme detection
+    rsi_length = 14
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Volume spike detection (20-period)
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    avg_gain = np.zeros_like(close)
+    avg_loss = np.zeros_like(close)
+    avg_gain[rsi_length] = np.mean(gain[1:rsi_length+1])
+    avg_loss[rsi_length] = np.mean(loss[1:rsi_length+1])
+    
+    for i in range(rsi_length + 1, len(close)):
+        avg_gain[i] = (avg_gain[i-1] * (rsi_length - 1) + gain[i]) / rsi_length
+        avg_loss[i] = (avg_loss[i-1] * (rsi_length - 1) + loss[i]) / rsi_length
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi[:rsi_length+1] = np.nan  # Mark initial values as NaN
+    
+    # Bollinger Bands for volatility/chop regime (20, 2)
+    bb_length = 20
+    bb_mult = 2
+    sma = np.full_like(close, np.nan)
+    bb_std = np.full_like(close, np.nan)
+    
+    for i in range(bb_length, len(close)):
+        sma[i] = np.mean(close[i-bb_length+1:i+1])
+        bb_std[i] = np.std(close[i-bb_length+1:i+1])
+    
+    upper_band = sma + bb_mult * bb_std
+    lower_band = sma - bb_mult * bb_std
+    
+    # Calculate Bollinger Band Width for chop detection
+    bb_width = (upper_band - lower_band) / sma
+    
+    # Bollinger Band Width percentile for regime (252-day lookback ~1 year)
+    bb_width_percentile = np.full_like(close, np.nan)
+    lookback = 252
+    for i in range(lookback, len(close)):
+        if i - lookback >= 0:
+            window = bb_width[i-lookback+1:i+1]
+            valid_vals = window[~np.isnan(window)]
+            if len(valid_vals) > 0:
+                percentile = np.sum(valid_vals <= bb_width[i]) / len(valid_vals) * 100
+                bb_width_percentile[i] = percentile
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = max(50, er_length, rsi_length+1, bb_length, lookback)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or np.isnan(ema34_12h[i]) or 
-            np.isnan(vol_avg[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(rsi[i]) or 
+            np.isnan(bb_width_percentile[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume condition: current volume > 2.5 x 20-period average
-        vol_spike = volume[i] > vol_avg[i] * 2.5
+        # Range condition: BBWidth percentile < 40 (low volatility = range)
+        is_range = bb_width_percentile[i] < 40
         
         if position == 0:
-            # Long: Break above Camarilla R1 with uptrend and volume spike
-            if close[i] > r1_12h[i] and close[i] > ema34_12h[i] and vol_spike:
+            # Long: Price > KAMA AND RSI < 25 (oversold) AND in range
+            if close[i] > kama_aligned[i] and rsi[i] < 25 and is_range:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below Camarilla S1 with downtrend and volume spike
-            elif close[i] < s1_12h[i] and close[i] < ema34_12h[i] and vol_spike:
+            # Short: Price < KAMA AND RSI > 75 (overbought) AND in range
+            elif close[i] < kama_aligned[i] and rsi[i] > 75 and is_range:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price falls back below Camarilla S1 OR trend turns down
-            if close[i] < s1_12h[i] or close[i] < ema34_12h[i]:
+            # Exit long: Price < KAMA OR RSI > 50 (exiting oversold)
+            if close[i] < kama_aligned[i] or rsi[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price rises back above Camarilla R1 OR trend turns up
-            if close[i] > r1_12h[i] or close[i] > ema34_12h[i]:
+            # Exit short: Price > KAMA OR RSI < 50 (exiting overbought)
+            if close[i] > kama_aligned[i] or rsi[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
