@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-# 12h_12H_382Rule_Breakout_1dTrend_Volume
-# Hypothesis: 38.2% rule breakout from daily range with 1d trend filter and volume confirmation.
-# The 38.2% level (Fibonacci retracement) is a key support/resistance level that often acts as
-# a pivot point for reversals or continuations. In trending markets, price tends to respect
-# this level as support in uptrends and resistance in downtrends. Combines with 1d EMA trend
-# filter to avoid counter-trend trades and volume spike to confirm breakout strength.
-# Designed for low trade frequency (~15-25/year) to minimize fee drag on 12h timeframe.
+# 4h_Camarilla_R2_S2_Breakout_1dEMA34_VolumeSpike_Dyn
+# Hypothesis: Camarilla R2/S2 breakout with daily EMA34 trend filter and volume spike confirmation.
+# R2/S2 levels are tighter than R3/S3, providing higher-probability breakouts with fewer false signals.
+# Works in bull/bear: EMA34 trend filter avoids counter-trend trades, volume confirms breakout strength.
+# Focus on high-probability breakouts to minimize trades and avoid fee drag.
 
-name = "12h_12H_382Rule_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_4H_Camarilla_R2_S2_Breakout_1dEMA34_VolumeSpike_Dyn"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,7 +23,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for 38.2% rule calculation and trend filter
+    # Get daily data for Camarilla calculation and EMA
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -34,21 +32,19 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's values for 38.2% rule calculation
+    # Previous day's values for Camarilla calculation
     ph = np.concatenate([[high_1d[0]], high_1d[:-1]])  # previous high
     pl = np.concatenate([[low_1d[0]], low_1d[:-1]])   # previous low
     pc = np.concatenate([[close_1d[0]], close_1d[:-1]]) # previous close
     
-    # Calculate 38.2% rule levels (key retracement level)
+    # Calculate Camarilla levels (R2, S2 are the key breakout levels)
     rang = ph - pl
-    # In uptrend: resistance at 38.2% retracement from low to high
-    # In downtrend: support at 38.2% retracement from high to low
-    res_382 = pl + 0.382 * rang  # 38.2% level from low
-    sup_382 = ph - 0.382 * rang  # 38.2% level from high
+    r2 = pc + 1.1 * rang * 1.0833  # R2 = Close + 1.1 * (High-Low) * 1.0833
+    s2 = pc - 1.1 * rang * 1.0833  # S2 = Close - 1.1 * (High-Low) * 1.0833
     
-    # Align 38.2% levels to 12h timeframe
-    res_382_aligned = align_htf_to_ltf(prices, df_1d, res_382)
-    sup_382_aligned = align_htf_to_ltf(prices, df_1d, sup_382)
+    # Align Camarilla levels to 4h timeframe
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
     # Calculate 1d EMA34 for trend filter
     ema_34_1d = np.full_like(close_1d, np.nan)
@@ -77,7 +73,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(res_382_aligned[i]) or np.isnan(sup_382_aligned[i]) or 
+        if (np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or 
             np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -85,30 +81,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Enter long: price breaks above 38.2% resistance AND uptrend (price > EMA34) AND volume spike
-            if (close[i] > res_382_aligned[i] and 
+            # Enter long: price breaks above R2 AND uptrend (price > EMA34) AND volume spike
+            if (close[i] > r2_aligned[i] and 
                 close[i] > ema_34_1d_aligned[i] and 
                 volume_ratio[i] > 2.0):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below 38.2% support AND downtrend (price < EMA34) AND volume spike
-            elif (close[i] < sup_382_aligned[i] and 
+            # Enter short: price breaks below S2 AND downtrend (price < EMA34) AND volume spike
+            elif (close[i] < s2_aligned[i] and 
                   close[i] < ema_34_1d_aligned[i] and 
                   volume_ratio[i] > 2.0):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below 38.2% support OR trend reversal (price < EMA34)
-            if close[i] < sup_382_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            # Exit long: price breaks below S2 OR trend reversal (price < EMA34)
+            if close[i] < s2_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above 38.2% resistance OR trend reversal (price > EMA34)
-            if close[i] > res_382_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            # Exit short: price breaks above R2 OR trend reversal (price > EMA34)
+            if close[i] > r2_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
