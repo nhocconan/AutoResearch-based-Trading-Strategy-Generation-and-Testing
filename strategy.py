@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 1d_Donchian_Breakout_1wTrend_Volume
-# Hypothesis: Daily Donchian(20) breakout with weekly trend filter and volume confirmation.
-# Works in bull/bear: Weekly trend filter avoids counter-trend trades, volume confirms momentum.
-# Donchian breakouts capture breakout moves; weekly EMA50 filters direction.
-# Targets 15-25 trades/year on 1d timeframe to minimize fee drag.
+# 12h_ParabolicSAR_Volume_Momentum
+# Hypothesis: Parabolic SAR on 12h with volume momentum filter. Works in bull/bear: SAR adapts to trend, volume confirms momentum.
+# Uses Parabolic SAR (step=0.02, max=0.2) and volume ratio (current/30-period average) for confirmation.
+# 12h timeframe targets 20-50 trades/year to minimize fee drag.
 
-name = "1d_Donchian_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "12h_ParabolicSAR_Volume_Momentum"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,50 +22,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian(20) channels from previous day
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Calculate Parabolic SAR on 12h
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Upper and lower bands from previous 20 days
-    donchian_high = np.full_like(high_1d, np.nan)
-    donchian_low = np.full_like(low_1d, np.nan)
+    # Parabolic SAR calculation
+    psar = np.full(len(high_12h), np.nan)
+    trend = np.full(len(high_12h), np.nan)  # 1 for uptrend, -1 for downtrend
+    af = 0.02
+    max_af = 0.2
+    ep = 0
     
-    for i in range(19, len(high_1d)):
-        donchian_high[i] = np.max(high_1d[i-19:i+1])
-        donchian_low[i] = np.min(low_1d[i-19:i+1])
+    # Initialize
+    if high_12h[1] > high_12h[0]:
+        trend[0] = 1
+        psar[0] = low_12h[0]
+        ep = high_12h[1]
+    else:
+        trend[0] = -1
+        psar[0] = high_12h[0]
+        ep = low_12h[1]
     
-    # Shift by 1 to use previous day's breakout levels
-    donchian_high_prev = np.concatenate([[np.nan], donchian_high[:-1]])
-    donchian_low_prev = np.concatenate([[np.nan], donchian_low[:-1]])
+    for i in range(1, len(high_12h)):
+        if trend[i-1] == 1:  # uptrend
+            psar[i] = psar[i-1] + af * (ep - psar[i-1])
+            if low_12h[i] < psar[i]:  # trend reversal
+                trend[i] = -1
+                psar[i] = ep
+                af = 0.02
+                ep = low_12h[i]
+            else:
+                trend[i] = 1
+                if high_12h[i] > ep:
+                    ep = high_12h[i]
+                    af = min(af + 0.02, max_af)
+        else:  # downtrend
+            psar[i] = psar[i-1] + af * (ep - psar[i-1])
+            if high_12h[i] > psar[i]:  # trend reversal
+                trend[i] = 1
+                psar[i] = ep
+                af = 0.02
+                ep = high_12h[i]
+            else:
+                trend[i] = -1
+                if low_12h[i] < ep:
+                    ep = low_12h[i]
+                    af = min(af + 0.02, max_af)
     
-    # Align Donchian levels to daily timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_prev)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_prev)
+    # Align Parabolic SAR to 12h timeframe (no additional delay needed)
+    psar_aligned = align_htf_to_ltf(prices, df_12h, psar)
     
-    # Calculate weekly EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema_50_1w = np.full_like(close_1w, np.nan)
-    if len(close_1w) >= 50:
-        ema_50_1w[49] = np.mean(close_1w[0:50])
-        for i in range(50, len(close_1w)):
-            ema_50_1w[i] = (ema_50_1w[i-1] * 49 + close_1w[i]) / 50
-    
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Volume spike filter: current volume / 20-day average volume
+    # Volume momentum filter: current volume / 30-period average volume
     vol_ma = np.full_like(volume, np.nan)
-    if len(volume) >= 20:
-        vol_ma[19] = np.mean(volume[0:20])
-        for i in range(20, len(volume)):
-            vol_ma[i] = (vol_ma[i-1] * 19 + volume[i]) / 20
+    if len(volume) >= 30:
+        vol_ma[29] = np.mean(volume[0:30])
+        for i in range(30, len(volume)):
+            vol_ma[i] = (vol_ma[i-1] * 29 + volume[i]) / 30
     
     volume_ratio = np.full_like(volume, np.nan)
     valid = (~np.isnan(vol_ma)) & (vol_ma != 0)
@@ -75,42 +90,37 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 50)  # Ensure Donchian and EMA are ready
+    start_idx = 30  # Ensure volume MA is ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_ratio[i])):
+        if np.isnan(psar_aligned[i]) or np.isnan(volume_ratio[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above Donchian high AND weekly uptrend AND volume spike
-            if (close[i] > donchian_high_aligned[i] and 
-                close[i] > ema_50_1w_aligned[i] and 
-                volume_ratio[i] > 1.5):
+            # Enter long: price above PSAR AND volume momentum
+            if close[i] > psar_aligned[i] and volume_ratio[i] > 1.3:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below Donchian low AND weekly downtrend AND volume spike
-            elif (close[i] < donchian_low_aligned[i] and 
-                  close[i] < ema_50_1w_aligned[i] and 
-                  volume_ratio[i] > 1.5):
+            # Enter short: price below PSAR AND volume momentum
+            elif close[i] < psar_aligned[i] and volume_ratio[i] > 1.3:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below Donchian low OR trend reversal (price < weekly EMA50)
-            if close[i] < donchian_low_aligned[i] or close[i] < ema_50_1w_aligned[i]:
+            # Exit long: price below PSAR
+            if close[i] < psar_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above Donchian high OR trend reversal (price > weekly EMA50)
-            if close[i] > donchian_high_aligned[i] or close[i] > ema_50_1w_aligned[i]:
+            # Exit short: price above PSAR
+            if close[i] > psar_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
