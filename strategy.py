@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 12h_Keltner_Breakout_VolumeSpike_Trend
-# Hypothesis: Keltner breakout with volume spike and trend filter on 12h timeframe. Works in bull/bear by avoiding counter-trend trades.
-# Uses Keltner channel (20-period, 2xATR) breakouts, volume > 1.5x average, and trend filter (price above/below EMA50).
-# Keltner channels adapt to volatility, providing robust breakout signals in both trending and ranging markets.
+# 4h_Engulfing_Candle_With_Volume_Filter
+# Hypothesis: Bullish/bearish engulfing candles on 4h timeframe with volume confirmation (>2x average) and 12h EMA trend filter.
+# Works in bull/bear markets: Engulfing candles signal strong momentum reversals, volume confirms institutional participation,
+# and the 12h EMA filter ensures trades align with higher timeframe trend to avoid counter-trend whipsaws.
+# Designed for low trade frequency (<40/year) to minimize fee drag while capturing high-probability moves.
 
-name = "12h_Keltner_Breakout_VolumeSpike_Trend"
-timeframe = "12h"
+name = "4h_Engulfing_Candle_With_Volume_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,41 +18,27 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
+    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate ATR for Keltner channels
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate 12h EMA50 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
     
-    atr = np.full_like(close, np.nan)
-    if len(tr) >= 20:
-        atr[19] = np.mean(tr[0:20])
-        for i in range(20, len(tr)):
-            atr[i] = (atr[i-1] * 19 + tr[i]) / 20
+    close_12h = df_12h['close'].values
+    ema_50_12h = np.full_like(close_12h, np.nan)
+    if len(close_12h) >= 50:
+        ema_50_12h[49] = np.mean(close_12h[0:50])
+        for i in range(50, len(close_12h)):
+            ema_50_12h[i] = (ema_50_12h[i-1] * 49 + close_12h[i]) / 50
     
-    # Calculate Keltner channels: EMA20 ± 2*ATR
-    ema20 = np.full_like(close, np.nan)
-    if len(close) >= 20:
-        ema20[19] = np.mean(close[0:20])
-        for i in range(20, len(close)):
-            ema20[i] = (ema20[i-1] * 19 + close[i]) / 20
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    upper_keltner = ema20 + 2 * atr
-    lower_keltner = ema20 - 2 * atr
-    
-    # Calculate EMA50 for trend filter
-    ema50 = np.full_like(close, np.nan)
-    if len(close) >= 50:
-        ema50[49] = np.mean(close[0:50])
-        for i in range(50, len(close)):
-            ema50[i] = (ema50[i-1] * 49 + close[i]) / 50
-    
-    # Volume spike filter: current volume / 20-period average volume
+    # Volume filter: current volume / 20-period average volume
     vol_ma = np.full_like(volume, np.nan)
     if len(volume) >= 20:
         vol_ma[19] = np.mean(volume[0:20])
@@ -62,45 +49,63 @@ def generate_signals(prices):
     valid = (~np.isnan(vol_ma)) & (vol_ma != 0)
     volume_ratio[valid] = volume[valid] / vol_ma[valid]
     
+    # Detect bullish and bearish engulfing candles
+    bullish_engulf = np.zeros(n, dtype=bool)
+    bearish_engulf = np.zeros(n, dtype=bool)
+    
+    for i in range(1, n):
+        # Bullish engulf: current green candle engulfs previous red candle
+        if (close[i] > open_price[i] and  # current candle is green
+            open_price[i-1] > close[i-1] and  # previous candle is red
+            open_price[i] <= close[i-1] and  # current open <= previous close
+            close[i] >= open_price[i-1]):  # current close >= previous open
+            bullish_engulf[i] = True
+        
+        # Bearish engulf: current red candle engulfs previous green candle
+        elif (close[i] < open_price[i] and  # current candle is red
+              open_price[i-1] < close[i-1] and  # previous candle is green
+              open_price[i] >= close[i-1] and  # current open >= previous close
+              close[i] <= open_price[i-1]):  # current close <= previous open
+            bearish_engulf[i] = True
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 50)  # Ensure indicators are ready
+    start_idx = max(20, 50)  # Ensure volume MA and EMA are ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(upper_keltner[i]) or np.isnan(lower_keltner[i]) or
-            np.isnan(ema50[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above upper Keltner AND uptrend (price > EMA50) AND volume spike
-            if (close[i] > upper_keltner[i] and 
-                close[i] > ema50[i] and 
-                volume_ratio[i] > 1.5):
+            # Enter long: bullish engulfing candle + uptrend (price > EMA50) + volume spike
+            if (bullish_engulf[i] and 
+                close[i] > ema_50_12h_aligned[i] and 
+                volume_ratio[i] > 2.0):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below lower Keltner AND downtrend (price < EMA50) AND volume spike
-            elif (close[i] < lower_keltner[i] and 
-                  close[i] < ema50[i] and 
-                  volume_ratio[i] > 1.5):
+            # Enter short: bearish engulfing candle + downtrend (price < EMA50) + volume spike
+            elif (bearish_engulf[i] and 
+                  close[i] < ema_50_12h_aligned[i] and 
+                  volume_ratio[i] > 2.0):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below lower Keltner OR trend reversal (price < EMA50)
-            if close[i] < lower_keltner[i] or close[i] < ema50[i]:
+            # Exit long: bearish engulfing candle OR trend reversal (price < EMA50)
+            if bearish_engulf[i] or close[i] < ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above upper Keltner OR trend reversal (price > EMA50)
-            if close[i] > upper_keltner[i] or close[i] > ema50[i]:
+            # Exit short: bullish engulfing candle OR trend reversal (price > EMA50)
+            if bullish_engulf[i] or close[i] > ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
