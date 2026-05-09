@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -37,11 +37,11 @@ def generate_signals(prices):
     vol_1d = df_1d['volume'].values
     vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align all to 6h
-    ema34_1d_6h = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    camarilla_high_6h = align_htf_to_ltf(prices, df_1d, camarilla_high)
-    camarilla_low_6h = align_htf_to_ltf(prices, df_1d, camarilla_low)
-    vol_avg_1d_6h = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    # Align all to 12h
+    ema34_1d_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    camarilla_high_12h = align_htf_to_ltf(prices, df_1d, camarilla_high)
+    camarilla_low_12h = align_htf_to_ltf(prices, df_1d, camarilla_low)
+    vol_avg_1d_12h = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
     signals = np.zeros(n)
     position = 0
@@ -49,17 +49,17 @@ def generate_signals(prices):
     start_idx = 34
     
     for i in range(start_idx, n):
-        if (np.isnan(ema34_1d_6h[i]) or np.isnan(camarilla_high_6h[i]) or 
-            np.isnan(camarilla_low_6h[i]) or np.isnan(vol_avg_1d_6h[i])):
+        if (np.isnan(ema34_1d_12h[i]) or np.isnan(camarilla_high_12h[i]) or 
+            np.isnan(camarilla_low_12h[i]) or np.isnan(vol_avg_1d_12h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        trend = ema34_1d_6h[i]
-        resistance = camarilla_high_6h[i]
-        support = camarilla_low_6h[i]
-        vol_avg = vol_avg_1d_6h[i]
+        trend = ema34_1d_12h[i]
+        resistance = camarilla_high_12h[i]
+        support = camarilla_low_12h[i]
+        vol_avg = vol_avg_1d_12h[i]
         vol_ok = volume[i] > vol_avg * 1.5
         
         if position == 0:
