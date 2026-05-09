@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with 1d EMA34 trend filter and volume spike confirmation.
-# Donchian(20) identifies volatility breakouts; EMA34 on 1d confirms trend direction.
-# Volume > 1.5x average confirms institutional participation. Designed for low trade frequency (<40/year).
-name = "12h_Donchian20_1dEMA34_VolumeSpike"
-timeframe = "12h"
+# Hypothesis: 4h Camarilla R3 level breakout with 1d EMA34 trend filter and volume spike confirmation.
+# R3 level from daily pivot indicates strong resistance; breakout above with volume confirms institutional buying.
+# EMA34 on 1d confirms long-term trend direction. Designed for low trade frequency (<30/year) to minimize fee drag.
+name = "4h_Camarilla_R3_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,31 +30,35 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Donchian(20) channels on 12h timeframe
-    # Use rolling window of 20 periods for high and low
-    high_max = np.full(n, np.nan)
-    low_min = np.full(n, np.nan)
+    # Calculate Camarilla pivot levels from previous 1d bar
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    for i in range(20, n):
-        high_max[i] = np.max(high[i-20:i])
-        low_min[i] = np.min(low[i-20:i])
+    # R3 level: Close + (High - Low) * 1.1 / 4
+    r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    # S3 level: Close - (High - Low) * 1.1 / 4
+    s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Need 34 for EMA34 and 20 for Donchian
+    start_idx = max(34, 1)  # Need 34 for EMA34 and 1 for rolling
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(high_max[i]) or np.isnan(low_min[i]):
+        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3[i]) or np.isnan(s3[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         ema_1d = ema_34_1d_aligned[i]
-        upper_channel = high_max[i]
-        lower_channel = low_min[i]
+        r3_level = r3[i]
+        s3_level = s3[i]
         vol = volume[i]
         
         # Calculate 20-period volume average for spike detection
@@ -64,26 +68,26 @@ def generate_signals(prices):
             vol_ma = np.mean(volume[:i]) if i > 0 else volume[i]
         
         if position == 0:
-            # Enter long: Close > Upper Donchian AND price > 1d EMA34 (uptrend) AND volume > 1.5x average
-            if close[i] > upper_channel and close[i] > ema_1d and vol > 1.5 * vol_ma:
+            # Enter long: Close > R3 AND price > 1d EMA34 (uptrend) AND volume > 2x average
+            if close[i] > r3_level and close[i] > ema_1d and vol > 2.0 * vol_ma:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Close < Lower Donchian AND price < 1d EMA34 (downtrend) AND volume > 1.5x average
-            elif close[i] < lower_channel and close[i] < ema_1d and vol > 1.5 * vol_ma:
+            # Enter short: Close < S3 AND price < 1d EMA34 (downtrend) AND volume > 2x average
+            elif close[i] < s3_level and close[i] < ema_1d and vol > 2.0 * vol_ma:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Close < Lower Donchian OR trend reverses (price < 1d EMA34)
-            if close[i] < lower_channel or close[i] < ema_1d:
+            # Exit long: Close < S3 OR trend reverses (price < 1d EMA34)
+            if close[i] < s3_level or close[i] < ema_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Close > Upper Donchian OR trend reverses (price > 1d EMA34)
-            if close[i] > upper_channel or close[i] > ema_1d:
+            # Exit short: Close > R3 OR trend reverses (price > 1d EMA34)
+            if close[i] > r3_level or close[i] > ema_1d:
                 signals[i] = 0.0
                 position = 0
             else:
