@@ -1,20 +1,21 @@
-# The strategy uses 12h timeframe with weekly trend filter (EMA34) and daily Camarilla pivot levels (R3/S3) for breakouts, plus volume confirmation. 
-# This combination aims to capture strong trending moves while avoiding whipsaws in ranging markets. The weekly trend filter ensures alignment with the higher timeframe trend, 
-# while Camarilla levels provide precise entry points. Volume confirmation adds conviction to breakouts.
-# Target: 50-150 trades over 4 years (12-37/year) to stay within acceptable fee drag limits.
+# 4h Donchian breakout + volume confirmation + volatility filter
+# This strategy captures breakouts from price channels with volume confirmation
+# and avoids whipsaws by requiring low volatility regime. Designed to work
+# in both bull and bear markets by focusing on momentum bursts.
+# Target: 20-50 trades per year to minimize fee drag.
 
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R3_S3_Breakout_1wTrend_Volume"
-timeframe = "12h"
+name = "4h_DonchianBreakout_Volume_VolatilityFilter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,80 +23,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter (EMA34)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
+    # Donchian channel (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Calculate weekly EMA34 for trend
-    ema34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
-    
-    # Get daily data for Camarilla pivot levels (R3, S3)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    # Calculate Camarilla levels from previous day's OHLC
-    # Using typical Camarilla formula: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
-    # But we use the previous day's data to avoid look-ahead
-    prev_close = df_1d['close'].shift(1)
-    prev_high = df_1d['high'].shift(1)
-    prev_low = df_1d['low'].shift(1)
-    
-    camarilla_r3 = prev_close + 1.1 * (prev_high - prev_low) / 2
-    camarilla_s3 = prev_close - 1.1 * (prev_high - prev_low) / 2
-    
-    # Align Camarilla levels to 12h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3.values)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3.values)
-    
-    # Volume filter: current 12h volume > 1.5 * 20-period average
+    # Volume filter: current volume > 1.5 * 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_ma * 1.5)
     
+    # Volatility filter: ATR ratio < 1.2 (low volatility regime)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_ratio = atr / (pd.Series(atr).rolling(window=50, min_periods=50).mean().values + 1e-10)
+    volatility_filter = atr_ratio < 1.2
+    
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(34, 20)  # EMA34 and volume MA
+    start_idx = max(20, 50)  # Donchian and volatility filter
     
     for i in range(start_idx, n):
-        if (np.isnan(ema34_1w_aligned[i]) or
-            np.isnan(camarilla_r3_aligned[i]) or
-            np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(volume_filter[i])):
+        if (np.isnan(donchian_high[i]) or
+            np.isnan(donchian_low[i]) or
+            np.isnan(volume_filter[i]) or
+            np.isnan(volatility_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema34_val = ema34_1w_aligned[i]
-        r3 = camarilla_r3_aligned[i]
-        s3 = camarilla_s3_aligned[i]
-        vol_filter = volume_filter[i]
+        upper = donchian_high[i]
+        lower = donchian_low[i]
+        vol_ok = volume_filter[i]
+        vol_filter = volatility_filter[i]
         
         if position == 0:
-            # Enter long: close above R3 + above weekly EMA34 trend + volume filter
-            if close[i] > r3 and close[i] > ema34_val and vol_filter:
+            # Enter long: break above upper Donchian + volume + low volatility
+            if close[i] > upper and vol_ok and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: close below S3 + below weekly EMA34 trend + volume filter
-            elif close[i] < s3 and close[i] < ema34_val and vol_filter:
+            # Enter short: break below lower Donchian + volume + low volatility
+            elif close[i] < lower and vol_ok and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: close below weekly EMA34 trend
-            if close[i] < ema34_val:
+            # Exit long: close below lower Donchian
+            if close[i] < lower:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: close above weekly EMA34 trend
-            if close[i] > ema34_val:
+            # Exit short: close above upper Donchian
+            if close[i] > upper:
                 signals[i] = 0.0
                 position = 0
             else:
