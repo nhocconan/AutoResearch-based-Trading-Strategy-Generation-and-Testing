@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Price Channel Breakout with Daily ATR Volatility Filter and Volume Spike
-# Uses daily Donchian channel (20) as price channel, daily ATR(20) to measure volatility,
-# and volume spike for confirmation. In high volatility regimes, breakouts are more likely
-# to trend; in low volatility, they often fail. Filters out low-volatility breakouts that
-# lead to whipsaws. Designed for 15-25 trades/year to minimize fee drag.
-name = "6h_PriceChannelBreakout_DailyATR_Volume"
-timeframe = "6h"
+# Hypothesis: 12h Camarilla Pivot Breakout (R1/S1) with Weekly Trend Filter and Volume Spike
+# Uses daily Camarilla pivot levels (R1/S1) for breakout signals, weekly EMA34 for trend alignment,
+# and volume spike for confirmation. Designed for 12h timeframe to target 50-150 trades over 4 years.
+# Works in bull markets (breakouts with trend) and bear markets (breakouts against trend with volume).
+name = "12h_Camarilla_R1S1_WeeklyTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,26 +21,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Donchian bands and ATR
+    # Get daily data for Camarilla pivot calculation
     df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 30:
+    if len(df_daily) < 20:
         return np.zeros(n)
     
-    # Daily Donchian channels (20-period)
-    donchian_high = pd.Series(df_daily['high']).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(df_daily['low']).rolling(window=20, min_periods=20).min().values
+    # Calculate daily Camarilla pivot levels (R1, S1)
+    daily_high = df_daily['high'].values
+    daily_low = df_daily['low'].values
+    daily_close = df_daily['close'].values
     
-    # Daily ATR(20) for volatility filter
-    high_low = df_daily['high'] - df_daily['low']
-    high_close = np.abs(df_daily['high'] - df_daily['close'].shift())
-    low_close = np.abs(df_daily['low'] - df_daily['close'].shift())
-    tr = np.maximum(high_low, np.maximum(high_close, low_close))
-    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    pivot = (daily_high + daily_low + daily_close) / 3
+    range_ = daily_high - daily_low
+    r1 = pivot + range_ * 1.1 / 12
+    s1 = pivot - range_ * 1.1 / 12
     
-    # Align Donchian bands and ATR to 6h
-    donchian_high_6h = align_htf_to_ltf(prices, df_daily, donchian_high)
-    donchian_low_6h = align_htf_to_ltf(prices, df_daily, donchian_low)
-    atr_6h = align_htf_to_ltf(prices, df_daily, atr)
+    # Align daily Camarilla levels to 12h
+    r1_12h = align_htf_to_ltf(prices, df_daily, r1)
+    s1_12h = align_htf_to_ltf(prices, df_daily, s1)
+    
+    # Get weekly data for EMA trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 34:
+        return np.zeros(n)
+    
+    # Weekly EMA34 for trend filter
+    ema34_weekly = pd.Series(df_weekly['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_12h = align_htf_to_ltf(prices, df_weekly, ema34_weekly)
     
     # 20-period volume average for spike detection
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -49,44 +55,40 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20
+    start_idx = 34
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_6h[i]) or np.isnan(donchian_low_6h[i]) or 
-            np.isnan(atr_6h[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or np.isnan(ema34_12h[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volatility condition: current ATR > 1.2 x 20-period average ATR
-        vol_filter = atr_6h[i] > np.nanmean(atr_6h[max(0, i-40):i]) * 1.2 if i >= 40 else False
-        
-        # Volume condition: current volume > 1.5 x 20-period average volume
-        vol_spike = volume[i] > vol_avg[i] * 1.5
+        # Volume condition: current volume > 2.0 x 20-period average
+        vol_spike = volume[i] > vol_avg[i] * 2.0
         
         if position == 0:
-            # Long: Break above daily Donchian high with high volatility and volume spike
-            if close[i] > donchian_high_6h[i] and vol_filter and vol_spike:
+            # Long: Break above daily Camarilla R1 with weekly uptrend and volume spike
+            if close[i] > r1_12h[i] and close[i] > ema34_12h[i] and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below daily Donchian low with high volatility and volume spike
-            elif close[i] < donchian_low_6h[i] and vol_filter and vol_spike:
+            # Short: Break below daily Camarilla S1 with weekly downtrend and volume spike
+            elif close[i] < s1_12h[i] and close[i] < ema34_12h[i] and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price falls back below daily Donchian low
-            if close[i] < donchian_low_6h[i]:
+            # Exit long: Price falls back below daily Camarilla S1 OR weekly trend turns down
+            if close[i] < s1_12h[i] or close[i] < ema34_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price rises back above daily Donchian high
-            if close[i] > donchian_high_6h[i]:
+            # Exit short: Price rises back above daily Camarilla R1 OR weekly trend turns up
+            if close[i] > r1_12h[i] or close[i] > ema34_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
