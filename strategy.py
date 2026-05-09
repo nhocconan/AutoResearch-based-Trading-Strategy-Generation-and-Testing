@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R1S1_Breakout_1wTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Mod"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -33,16 +33,27 @@ def generate_signals(prices):
     r1 = close_prev + range_ * 1.1 / 6
     s1 = close_prev - range_ * 1.1 / 6
     
-    # Weekly trend: EMA34 on 1w
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Daily trend: EMA34 on 1d
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
-    ema34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Volume filter: volume > 1.3x 20-period SMA
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_filter = volume > 1.3 * vol_ma20
+    
+    # Momentum filter: RSI(14) to avoid overbought/oversold extremes
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
+    rsi_filter = (rsi > 30) & (rsi < 70)  # Only trade in neutral RSI range
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -52,7 +63,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if required data unavailable
         if np.isnan(r1[i]) or np.isnan(s1[i]) or \
-           np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma20[i]):
+           np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma20[i]) or np.isnan(rsi[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,35 +72,39 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: breakout above R1 with weekly uptrend and volume
+            # Long: breakout above R1 with daily uptrend, volume, and neutral RSI
             if (price > r1[i] and 
-                price > ema34_1w_aligned[i] and 
-                vol_filter[i]):
+                price > ema34_1d_aligned[i] and 
+                vol_filter[i] and 
+                rsi_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # Short: breakdown below S1 with weekly downtrend and volume
+            # Short: breakdown below S1 with daily downtrend, volume, and neutral RSI
             elif (price < s1[i] and 
-                  price < ema34_1w_aligned[i] and 
-                  vol_filter[i]):
+                  price < ema34_1d_aligned[i] and 
+                  vol_filter[i] and 
+                  rsi_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         elif position == 1:
-            # Exit long: price returns to weekly EMA or loses volume
-            if (price < ema34_1w_aligned[i] or 
-                not vol_filter[i]):
+            # Exit long: price returns to daily EMA or loses volume or RSI overbought
+            if (price < ema34_1d_aligned[i] or 
+                not vol_filter[i] or 
+                rsi[i] >= 70):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to weekly EMA or loses volume
-            if (price > ema34_1w_aligned[i] or 
-                not vol_filter[i]):
+            # Exit short: price returns to daily EMA or loses volume or RSI oversold
+            if (price > ema34_1d_aligned[i] or 
+                not vol_filter[i] or 
+                rsi[i] <= 30):
                 signals[i] = 0.0
                 position = 0
             else:
