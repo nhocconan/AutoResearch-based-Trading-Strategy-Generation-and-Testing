@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d Donchian(20) breakout with weekly EMA50 trend filter and volume confirmation
-# Long when price breaks above 20-day high with weekly EMA50 uptrend and volume > 2x average
-# Short when price breaks below 20-day low with weekly EMA50 downtrend and volume > 2x average
-# Exit when price retraces to 10-day EMA or reverses to opposite Donchian level
-# Uses daily price channels for breakout, weekly trend for direction, volume for conviction
-# Designed to capture significant breakouts in both trending and ranging markets with low frequency
-# Target: 30-100 total trades over 4 years (7-25/year) with size 0.25
+"""
+Hypothesis: 6h Williams Alligator with 1d trend filter and volume confirmation
+Long when price above Alligator teeth (green line) with 1d EMA50 uptrend and volume > 1.5x average
+Short when price below Alligator teeth with 1d EMA50 downtrend and volume > 1.5x average
+Exit when price crosses the Alligator teeth or trend reverses
+Alligator uses smoothed SMAs (Jaw=13, Teeth=8, Lips=5) to avoid whipsaws in ranging markets
+Designed to capture trends while filtering noise, suitable for both bull and bear markets
+Target: 60-120 total trades over 4 years (15-30/year) with size 0.25
+"""
 
-name = "1d_Donchian20_WeeklyEMA50_Volume"
-timeframe = "1d"
+name = "6h_Williams_Alligator_1dEMA50_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -25,64 +27,76 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Williams Alligator (smoothed SMAs)
+    # Jaw: 13-period SMMA, Teeth: 8-period SMMA, Lips: 5-period SMMA
+    def smma(data, period):
+        """Smoothed Moving Average"""
+        if len(data) < period:
+            return np.full_like(data, np.nan, dtype=float)
+        result = np.full_like(data, np.nan, dtype=float)
+        # First value is simple SMA
+        result[period-1] = np.mean(data[:period])
+        # Subsequent values: SMMA = (Prev SMMA * (period-1) + Current Close) / period
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
     
-    # Calculate 10-day EMA for exit
-    ema10 = pd.Series(close).ewm(span=10, adjust=False, min_periods=10).mean().values
+    jaw = smma(close, 13)   # Blue line
+    teeth = smma(close, 8)  # Red line
+    lips = smma(close, 5)   # Green line
     
-    # Calculate weekly EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate 1d EMA50 for trend filter
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Volume confirmation: current volume > 2x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (2.0 * vol_ma)
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    vol_confirm = volume > (1.5 * vol_ma.values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for calculations
+    start_idx = 50  # Need enough data for Alligator calculation
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(ema10[i]) or
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_confirm[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above 20-day high, weekly EMA50 uptrend, volume spike
-            if (close[i] > high_20[i] and 
-                ema50_1w_aligned[i] > ema50_1w_aligned[i-1] and  # EMA rising
+            # Enter long: price above teeth (green line), 1d EMA50 uptrend, volume confirmation
+            if (close[i] > teeth[i] and 
+                ema50_1d_aligned[i] > ema50_1d_aligned[i-1] and  # EMA rising
                 vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below 20-day low, weekly EMA50 downtrend, volume spike
-            elif (close[i] < low_20[i] and 
-                  ema50_1w_aligned[i] < ema50_1w_aligned[i-1] and  # EMA falling
+            # Enter short: price below teeth, 1d EMA50 downtrend, volume confirmation
+            elif (close[i] < teeth[i] and 
+                  ema50_1d_aligned[i] < ema50_1d_aligned[i-1] and  # EMA falling
                   vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price retraces to 10-day EMA or breaks below 10-day low
-            if (close[i] <= ema10[i]) or (close[i] < low_20[i]):
+            # Exit long: price crosses below teeth or trend reverses
+            if (close[i] < teeth[i]) or (ema50_1d_aligned[i] < ema50_1d_aligned[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price retraces to 10-day EMA or breaks above 10-day high
-            if (close[i] >= ema10[i]) or (close[i] > high_20[i]):
+            # Exit short: price crosses above teeth or trend reverses
+            if (close[i] > teeth[i]) or (ema50_1d_aligned[i] > ema50_1d_aligned[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
