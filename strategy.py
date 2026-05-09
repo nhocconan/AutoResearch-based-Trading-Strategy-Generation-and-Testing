@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-# 12h_PriceChannel_Breakout_1dTrend_Volume
-# Hypothesis: Breakout above/below 12h Donchian(20) channels with 1d trend filter (EMA50) and volume confirmation (>1.5x 20-bar avg).
-# Works in bull/bear markets by following the 1d trend while using 12h price channels for entry.
-# Target: 15-25 trades/year on 12h timeframe, focusing on BTC/ETH pairs.
+# 4h_Trix_VolumeSpike_Regime
+# Hypothesis: TRIX (12-period) crossing above/below zero with volume >2x 20-bar average and chop regime filter (Choppiness Index > 61.8 for mean reversion, < 38.2 for trend) to capture momentum in trending markets and reversals in ranging markets. Works in both bull and bear markets by adapting to regime.
 
-name = "12h_PriceChannel_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Trix_VolumeSpike_Regime"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -14,52 +12,77 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Donchian channels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    
-    # Calculate 12h Donchian channels (20-period)
-    high_20 = np.full_like(high_12h, np.nan)
-    low_20 = np.full_like(low_12h, np.nan)
-    for i in range(len(high_12h)):
-        if i >= 19:
-            high_20[i] = np.max(high_12h[i-19:i+1])
-            low_20[i] = np.min(low_12h[i-19:i+1])
-    
-    # Align 12h Donchian to 12h timeframe (same as input)
-    high_20_aligned = align_htf_to_ltf(prices, df_12h, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_12h, low_20)
-    
-    # Get 1d data for trend filter
+    # Get 1d data for Choppiness Index (needs daily OHLC)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA(50)
-    ema_50_1d = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 50:
-        ema_50_1d[49] = np.mean(close_1d[0:50])
-        for i in range(50, len(close_1d)):
-            ema_50_1d[i] = (close_1d[i] * 2 + ema_50_1d[i-1] * 48) / 50
+    # Calculate True Range and ATR(14) for Choppiness Index
+    tr = np.maximum(high_1d - low_1d, np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), np.abs(low_1d - np.roll(close_1d, 1))))
+    tr[0] = high_1d[0] - low_1d[0]  # First TR
+    atr_14 = np.full_like(tr, np.nan)
+    if len(tr) >= 14:
+        atr_14[13] = np.mean(tr[0:14])
+        for i in range(14, len(tr)):
+            atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
     
-    # Align 1d EMA to 12h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate Choppiness Index: 100 * log10(sum(ATR14 over 14 periods) / (max(high) - min(low) over 14 periods)) / log10(14)
+    sum_atr_14 = np.full_like(atr_14, np.nan)
+    max_high_14 = np.full_like(high_1d, np.nan)
+    min_low_14 = np.full_like(low_1d, np.nan)
     
-    # Volume filter: 12h volume / 20-period average volume
+    if len(atr_14) >= 14:
+        for i in range(14, len(atr_14)):
+            sum_atr_14[i] = np.sum(atr_14[i-13:i+1])
+    
+    if len(high_1d) >= 14:
+        for i in range(14, len(high_1d)):
+            max_high_14[i] = np.max(high_1d[i-13:i+1])
+            min_low_14[i] = np.min(low_1d[i-13:i+1])
+    
+    chop = np.full_like(close_1d, np.nan)
+    valid_chop = (~np.isnan(sum_atr_14)) & (~np.isnan(max_high_14)) & (~np.isnan(min_low_14)) & ((max_high_14 - min_low_14) != 0)
+    chop[valid_chop] = 100 * np.log10(sum_atr_14[valid_chop] / (max_high_14[valid_chop] - min_low_14[valid_chop])) / np.log10(14)
+    
+    # Align Choppiness Index to 4h timeframe (needs 2-bar extra delay for confirmation)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop, additional_delay_bars=2)
+    
+    # Get 1d data for TRIX calculation (using close)
+    # TRIX: EMA(EMA(EMA(close, 12), 12), 12) then % change
+    def ema(array, period):
+        result = np.full_like(array, np.nan)
+        if len(array) >= period:
+            multiplier = 2 / (period + 1)
+            result[period-1] = np.mean(array[0:period])
+            for i in range(period, len(array)):
+                result[i] = (array[i] * multiplier) + (result[i-1] * (1 - multiplier))
+        return result
+    
+    close_1d_for_trix = close_1d
+    ema1 = ema(close_1d_for_trix, 12)
+    ema2 = ema(ema1, 12)
+    ema3 = ema(ema2, 12)
+    trix = np.full_like(close_1d, np.nan)
+    valid_trix = ~np.isnan(ema3)
+    trix[valid_trix] = (ema3[valid_trix] - np.roll(ema3, 1)[valid_trix]) / np.roll(ema3, 1)[valid_trix] * 100
+    trix[0] = np.nan  # First value has no previous
+    
+    # Align TRIX to 4h timeframe
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
+    
+    # Volume filter: 4h volume / 20-period average volume
     vol_ma = np.full_like(volume, np.nan)
     if len(volume) >= 20:
         vol_ma[19] = np.mean(volume[0:20])
@@ -77,34 +100,41 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or \
-           np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_ratio[i]):
+        if np.isnan(trix_aligned[i]) or np.isnan(chop_aligned[i]) or np.isnan(volume_ratio[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: Price breaks above 12h Donchian high AND bullish 1d trend AND volume confirmation
-            if close[i] > high_20_aligned[i] and close[i] > ema_50_1d_aligned[i] and volume_ratio[i] > 1.5:
+            # Enter long: TRIX crosses above zero AND volume confirmation AND trending regime (CHOP < 38.2)
+            if i > 0 and trix_aligned[i-1] <= 0 and trix_aligned[i] > 0 and volume_ratio[i] > 2.0 and chop_aligned[i] < 38.2:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Price breaks below 12h Donchian low AND bearish 1d trend AND volume confirmation
-            elif close[i] < low_20_aligned[i] and close[i] < ema_50_1d_aligned[i] and volume_ratio[i] > 1.5:
+            # Enter short: TRIX crosses below zero AND volume confirmation AND trending regime (CHOP < 38.2)
+            elif i > 0 and trix_aligned[i-1] >= 0 and trix_aligned[i] < 0 and volume_ratio[i] > 2.0 and chop_aligned[i] < 38.2:
                 signals[i] = -0.25
                 position = -1
+            # Mean reversion in ranging market: TRIX extreme + volume spike + CHOP > 61.8
+            elif volume_ratio[i] > 2.0 and chop_aligned[i] > 61.8:
+                if trix_aligned[i] < -0.5:  # Oversold
+                    signals[i] = 0.25
+                    position = 1
+                elif trix_aligned[i] > 0.5:  # Overbought
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:
-            # Exit long: Price breaks below 12h Donchian low or trend turns bearish
-            if close[i] < low_20_aligned[i] or close[i] < ema_50_1d_aligned[i]:
+            # Exit long: TRIX crosses below zero OR chop regime shifts to ranging (CHOP > 61.8) for mean reversion exit
+            if trix_aligned[i] < 0 or chop_aligned[i] > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price breaks above 12h Donchian high or trend turns bullish
-            if close[i] > high_20_aligned[i] or close[i] > ema_50_1d_aligned[i]:
+            # Exit short: TRIX crosses above zero OR chop regime shifts to ranging (CHOP > 61.8) for mean reversion exit
+            if trix_aligned[i] > 0 or chop_aligned[i] > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
