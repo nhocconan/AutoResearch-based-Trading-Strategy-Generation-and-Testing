@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h timeframe with 1-day Keltner Channel breakout and 1-week EMA trend filter.
-# In low volatility regimes (ATR-based Keltner width narrow), price tends to break out with momentum.
-# Enters long when price closes above Keltner upper band and price > weekly EMA50.
-# Enters short when price closes below Keltner lower band and price < weekly EMA50.
-# Uses 1-week EMA50 as trend filter to avoid counter-trend trades in strong trends.
-# Exits when price crosses back below/above the Keltner middle line (20 EMA).
-# Target: 75-200 total trades over 4 years (19-50/year) with size 0.25.
+# Hypothesis: 1d timeframe with 1-week Bollinger Band squeeze (low volatility) and 1-week Donchian channel breakout.
+# In low volatility regimes (BB width < 20th percentile), price tends to break out.
+# Enters long when price crosses above the 1w Donchian upper in low-volatility regime, short when below.
+# Exits when volatility regime shifts to high volatility.
+# Target: 30-100 total trades over 4 years (7-25/year) with size 0.25.
 
-name = "4h_Keltner_Breakout_WeeklyEMA_Trend"
-timeframe = "4h"
+name = "1d_BB_Squeeze_Donchian_Breakout"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,89 +23,77 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1-day Keltner Channel (20, 1.5)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    high_1d = df_1d['high']
-    low_1d = df_1d['low']
-    close_1d = df_1d['close']
-    
-    # EMA20 for middle line
-    ema_20 = close_1d.ewm(span=20, adjust=False, min_periods=20).mean()
-    # ATR for band width
-    tr1 = high_1d - low_1d
-    tr2 = abs(high_1d - close_1d.shift(1))
-    tr3 = abs(low_1d - close_1d.shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.ewm(span=20, adjust=False, min_periods=20).mean()
-    
-    kc_upper = ema_20 + 1.5 * atr
-    kc_lower = ema_20 - 1.5 * atr
-    kc_middle = ema_20
-    
-    kc_upper_values = kc_upper.values
-    kc_lower_values = kc_lower.values
-    kc_middle_values = kc_middle.values
-    
-    kc_upper_aligned = align_htf_to_ltf(prices, df_1d, kc_upper_values)
-    kc_lower_aligned = align_htf_to_ltf(prices, df_1d, kc_lower_values)
-    kc_middle_aligned = align_htf_to_ltf(prices, df_1d, kc_middle_values)
-    
-    # Price position relative to Keltner Channel
-    price_above_upper = close > kc_upper_aligned
-    price_below_lower = close < kc_lower_aligned
-    price_above_middle = close > kc_middle_aligned
-    price_below_middle = close < kc_middle_aligned
-    
-    # Calculate 1-week EMA50 for trend filter
+    # Calculate 1-week Bollinger Bands (20, 2)
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
     close_1w = df_1w['close']
-    ema_50 = close_1w.ewm(span=50, adjust=False, min_periods=50).mean()
-    ema_50_values = ema_50.values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_values)
+    sma_20 = close_1w.rolling(window=20, min_periods=20).mean()
+    std_20 = close_1w.rolling(window=20, min_periods=20).std()
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
+    bb_width = upper_bb - lower_bb
+    
+    # Bollinger Band squeeze: low volatility when BB width < 20th percentile
+    bb_width_percentile = bb_width.rolling(window=100, min_periods=100).quantile(0.2)
+    bb_squeeze = bb_width < bb_width_percentile
+    bb_squeeze_values = bb_squeeze.values
+    bb_squeeze_aligned = align_htf_to_ltf(prices, df_1w, bb_squeeze_values)
+    
+    # 1-week Donchian channel (20-period) for breakout
+    high_1w = df_1w['high']
+    low_1w = df_1w['low']
+    donchian_upper = high_1w.rolling(window=20, min_periods=20).max()
+    donchian_lower = low_1w.rolling(window=20, min_periods=20).min()
+    
+    donchian_upper_values = donchian_upper.values
+    donchian_lower_values = donchian_lower.values
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1w, donchian_upper_values)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1w, donchian_lower_values)
+    
+    # Breakout conditions: price > 1w Donchian upper (long), price < 1w Donchian lower (short)
+    price_above_donchian_upper = close > donchian_upper_aligned
+    price_below_donchian_lower = close < donchian_lower_aligned
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for indicators
+    start_idx = 100  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(kc_upper_aligned[i]) or np.isnan(kc_lower_aligned[i]) or
-            np.isnan(kc_middle_aligned[i]) or np.isnan(ema_50_aligned[i]) or
-            np.isnan(price_above_upper[i]) or np.isnan(price_below_lower[i]) or
-            np.isnan(price_above_middle[i]) or np.isnan(price_below_middle[i])):
+        if (np.isnan(bb_squeeze_aligned[i]) or
+            np.isnan(donchian_upper_aligned[i]) or
+            np.isnan(donchian_lower_aligned[i]) or
+            np.isnan(price_above_donchian_upper[i]) or
+            np.isnan(price_below_donchian_lower[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price closes above Keltner upper AND price > weekly EMA50 (uptrend)
-            if price_above_upper[i] and close[i] > ema_50_aligned[i]:
+            # Enter long: low volatility (BB squeeze) + price > 1w Donchian upper
+            if bb_squeeze_aligned[i] and price_above_donchian_upper[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price closes below Keltner lower AND price < weekly EMA50 (downtrend)
-            elif price_below_lower[i] and close[i] < ema_50_aligned[i]:
+            # Enter short: low volatility (BB squeeze) + price < 1w Donchian lower
+            elif bb_squeeze_aligned[i] and price_below_donchian_lower[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below Keltner middle
-            if price_below_middle[i]:
+            # Exit long: volatility regime shifts to high volatility
+            if not bb_squeeze_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above Keltner middle
-            if price_above_middle[i]:
+            # Exit short: volatility regime shifts to high volatility
+            if not bb_squeeze_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
