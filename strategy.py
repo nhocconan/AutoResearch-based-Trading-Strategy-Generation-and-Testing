@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Spike_v2"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Spike_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,13 +17,10 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter (HTF)
+    # Get 1d data for trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
-    
-    # Get 1d data for Camarilla pivot levels (same for levels)
-    df_1d_levels = df_1d.copy()
     
     # Calculate 20-period EMA on 1d close for trend filter
     close_1d = df_1d['close'].values
@@ -31,9 +28,9 @@ def generate_signals(prices):
     ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
     # Calculate Camarilla levels from previous day's OHLC
-    prev_close = df_1d_levels['close'].shift(1).values
-    prev_high = df_1d_levels['high'].shift(1).values
-    prev_low = df_1d_levels['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
     # Camarilla R1, S1, H4, L4 levels
     R1 = prev_close + 0.25 * (prev_high - prev_low)
@@ -42,10 +39,10 @@ def generate_signals(prices):
     L4 = prev_low - 0.5 * (prev_high - prev_low)
     
     # Align Camarilla levels to 4h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d_levels, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d_levels, S1)
-    H4_aligned = align_htf_to_ltf(prices, df_1d_levels, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1d_levels, L4)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
+    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
     
     # Calculate 20-period volume average for spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
