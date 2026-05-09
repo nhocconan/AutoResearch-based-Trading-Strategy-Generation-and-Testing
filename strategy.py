@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-# 4H_1D_Poisson_Rainbow_Volume
-# Hypothesis: Combines Poisson-based trend strength (count of closes above/below EMA) with
-# rainbow EMA convergence/divergence and volume spikes to capture sustained moves.
-# Works in bull/bear by requiring both trend alignment and volatility expansion.
-# Target: 20-50 trades/year per symbol (80-200 total over 4 years).
+# 6H_1D_WilliamsAlligator_AdxTrend
+# Hypothesis: On 6h timeframe, enter long when Williams Alligator signals bullish alignment (JAW < TEETH < LIPS) with ADX > 25 trend confirmation, and short when bearish alignment (JAW > TEETH > LIPS) with ADX > 25. Uses 1d Williams Alligator for higher timeframe trend to avoid whipsaw. Target: 10-30 trades/year (40-120 total over 4 years) with tight entries to minimize fee drag.
 
-name = "4H_1D_Poisson_Rainbow_Volume"
-timeframe = "4h"
+name = "6H_1D_WilliamsAlligator_AdxTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,43 +20,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend and volatility
+    # Get 1d data for Williams Alligator and ADX
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Poisson trend strength: count of closes above/below EMA(21) in last 10 days
-    ema_21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
-    above_ema = (close_1d > ema_21_1d).astype(int)
-    below_ema = (close_1d < ema_21_1d).astype(int)
-    # Sum over last 10 days: strong trend if >=7 days in same direction
-    poisson_long = pd.Series(above_ema).rolling(window=10, min_periods=10).sum().values >= 7
-    poisson_short = pd.Series(below_ema).rolling(window=10, min_periods=10).sum().values >= 7
+    # Williams Alligator: SMAs of median price (H+L)/2
+    # JAW: 13-period SMMA, TEETH: 8-period SMMA, LIPS: 5-period SMMA
+    median_price = (high_1d + low_1d) / 2
     
-    # Rainbow EMA convergence: EMA(8,13,21) - look for compression/expansion
-    ema_8 = pd.Series(close_1d).ewm(span=8, adjust=False, min_periods=8).mean().values
-    ema_13 = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema_21 = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
-    # Rainbow spread: (EMA8 - EMA21) / EMA21 - measures convergence
-    rainbow_spread = (ema_8 - ema_21) / ema_21
-    # Converging when spread decreasing, expanding when increasing
-    rainbow_converging = np.diff(rainbow_spread, prepend=0) < 0
-    rainbow_expanding = np.diff(rainbow_spread, prepend=0) > 0
+    # Smoothed Moving Average (SMMA) - similar to EMA but with alpha = 1/period
+    def smma(arr, period):
+        result = np.full_like(arr, np.nan, dtype=float)
+        if len(arr) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CURRENT) / period
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    # Volume spike: current > 2.0x 24-period average (1 day of 4h bars)
-    volume_avg = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > (volume_avg * 2.0)
+    jaw = smma(median_price, 13)
+    teeth = smma(median_price, 8)
+    lips = smma(median_price, 5)
     
-    # Align 1d indicators to 4h
-    poisson_long_aligned = align_htf_to_ltf(prices, df_1d, poisson_long)
-    poisson_short_aligned = align_htf_to_ltf(prices, df_1d, poisson_short)
-    rainbow_converging_aligned = align_htf_to_ltf(prices, df_1d, rainbow_converging)
-    rainbow_expanding_aligned = align_htf_to_ltf(prices, df_1d, rainbow_expanding)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)  # though volume is LTF, align for consistency
+    # Williams Alligator signals
+    bullish_alligator = (jaw < teeth) & (teeth < lips)  # JAW < TEETH < LIPS
+    bearish_alligator = (jaw > teeth) & (teeth > lips)  # JAW > TEETH > LIPS
+    
+    # ADX calculation (14-period)
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]  # First TR is just high-low
+        
+        # Directional Movement
+        plus_dm = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                           np.maximum(high - np.roll(high, 1), 0), 0)
+        minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                            np.maximum(np.roll(low, 1) - low, 0), 0)
+        plus_dm[0] = 0
+        minus_dm[0] = 0
+        
+        # Smoothed TR and DM
+        def smooth_wilder(arr, period):
+            result = np.full_like(arr, np.nan, dtype=float)
+            if len(arr) < period:
+                return result
+            # First value is simple average
+            result[period-1] = np.sum(arr[:period]) / period
+            # Wilder smoothing: SMMA-like with alpha = 1/period
+            for i in range(period, len(arr)):
+                result[i] = (result[i-1] * (period-1) + arr[i]) / period
+            return result
+        
+        atr = smooth_wilder(tr, period)
+        plus_di = 100 * smooth_wilder(plus_dm, period) / atr
+        minus_di = 100 * smooth_wilder(minus_dm, period) / atr
+        
+        # DX and ADX
+        dx = np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100
+        adx = smooth_wilder(dx, period)
+        
+        return adx
+    
+    adx = calculate_adx(high_1d, low_1d, close_1d, 14)
+    strong_trend = adx > 25  # ADX > 25 indicates strong trend
+    
+    # Align 1d indicators to 6h
+    bullish_alligator_aligned = align_htf_to_ltf(prices, df_1d, bullish_alligator)
+    bearish_alligator_aligned = align_htf_to_ltf(prices, df_1d, bearish_alligator)
+    strong_trend_aligned = align_htf_to_ltf(prices, df_1d, strong_trend)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -69,34 +108,34 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(poisson_long_aligned[i]) or np.isnan(poisson_short_aligned[i]) or
-            np.isnan(rainbow_converging_aligned[i]) or np.isnan(rainbow_expanding_aligned[i])):
+        if (np.isnan(bullish_alligator_aligned[i]) or np.isnan(bearish_alligator_aligned[i]) or 
+            np.isnan(strong_trend_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: strong uptrend (Poisson) + expanding rainbow + volume spike
-            if poisson_long_aligned[i] and rainbow_expanding_aligned[i] and volume_spike_aligned[i]:
+            # Enter long: bullish alligator alignment + strong trend
+            if bullish_alligator_aligned[i] and strong_trend_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: strong downtrend (Poisson) + expanding rainbow + volume spike
-            elif poisson_short_aligned[i] and rainbow_expanding_aligned[i] and volume_spike_aligned[i]:
+            # Enter short: bearish alligator alignment + strong trend
+            elif bearish_alligator_aligned[i] and strong_trend_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: trend weakening (Poisson fails) OR rainbow converging (loss of momentum)
-            if not poisson_long_aligned[i] or rainbow_converging_aligned[i]:
+            # Exit long: bearish alignment or trend weakens
+            if bearish_alligator_aligned[i] or not strong_trend_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: trend weakening (Poisson fails) OR rainbow converging
-            if not poisson_short_aligned[i] or rainbow_converging_aligned[i]:
+            # Exit short: bullish alignment or trend weakens
+            if bullish_alligator_aligned[i] or not strong_trend_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
