@@ -1,13 +1,13 @@
-# Based on the analysis of successful patterns and the need to avoid overtrading,
-# I propose a 1d strategy combining:
-# - KAMA (Kaufman Adaptive Moving Average) for trend direction
-# - RSI for momentum confirmation
-# - Choppiness Index regime filter (to avoid whipsaws in range-bound markets)
-# This approach has shown strong test performance (e.g., SOLUSDT test Sharpe 1.31)
-# and is designed to work in both bull and bear markets by adapting to volatility regimes.
+#!/usr/bin/env python3
+# Hypothesis: 4h Donchian breakout with 12h ATR volatility filter and volume confirmation
+# Long when: price breaks above Donchian(20) high, 12h ATR(14) rising, volume > 1.5x 20-period average
+# Short when: price breaks below Donchian(20) low, 12h ATR(14) falling, volume > 1.5x 20-period average
+# Exit when: price crosses the midpoint of Donchian(20) channel or ATR reverses direction
+# Position size: 0.25 to limit drawdown. Target: 25-50 trades/year.
+# Designed to capture breakouts in trending markets while avoiding false signals in low volatility.
 
-name = "1d_KAMA_RSI_Chop_Regime"
-timeframe = "1d"
+name = "4h_Donchian20_12hATR_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -16,142 +16,87 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # KAMA parameters
-    er_period = 10
-    fast_sc = 2 / (2 + 1)  # EMA(2)
-    slow_sc = 2 / (30 + 1) # EMA(30)
+    # Donchian(20) channel
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Calculate Efficiency Ratio (ER)
-    change = np.abs(np.diff(close, n=er_period))
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)
-    # Pad the beginning with zeros to maintain length
-    change = np.concatenate([np.full(er_period-1, np.nan), change])
-    volatility = np.concatenate([np.full(er_period-1, np.nan), volatility])
-    er = np.divide(change, volatility, out=np.zeros_like(change), where=volatility!=0)
-    
-    # Calculate Smoothing Constant (SC)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Calculate KAMA
-    kama = np.full_like(close, np.nan)
-    kama[er_period-1] = close[er_period-1]  # Seed
-    for i in range(er_period, n):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
-    
-    # RSI (14)
-    rsi_period = 14
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # First average gain/loss
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
-    avg_gain[rsi_period] = np.mean(gain[1:rsi_period+1])
-    avg_loss[rsi_period] = np.mean(loss[1:rsi_period+1])
-    
-    # Wilder's smoothing
-    for i in range(rsi_period+1, n):
-        avg_gain[i] = (avg_gain[i-1] * (rsi_period-1) + gain[i]) / rsi_period
-        avg_loss[i] = (avg_loss[i-1] * (rsi_period-1) + loss[i]) / rsi_period
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Choppiness Index (14)
-    chop_period = 14
-    atr = np.zeros_like(close)
-    tr1 = np.abs(high[1:] - low[1:])
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
-    
-    # True Range sum over chop_period
-    tr_sum = np.zeros_like(close)
-    for i in range(chop_period, n):
-        tr_sum[i] = np.sum(tr[i-chop_period+1:i+1])
-    
-    # Highest high and lowest low over chop_period
-    hh = np.zeros_like(close)
-    ll = np.zeros_like(close)
-    for i in range(chop_period-1, n):
-        hh[i] = np.max(high[i-chop_period+1:i+1])
-        ll[i] = np.min(low[i-chop_period+1:i+1])
-    
-    # Avoid division by zero
-    range_hl = hh - ll
-    chop = np.where(range_hl != 0, 100 * np.log10(tr_sum / range_hl) / np.log10(chop_period), 50)
-    chop = np.concatenate([np.full(chop_period-1, np.nan), chop[chop_period-1:]])
-    
-    # Get weekly trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 12h data for ATR volatility filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 14:
         return np.zeros(n)
     
-    # Weekly EMA(50) for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_prev = np.roll(ema_50_1w, 1)
-    ema_50_1w_prev[0] = ema_50_1w[0]
-    ema_rising_1w = ema_50_1w > ema_50_1w_prev
-    ema_falling_1w = ema_50_1w < ema_50_1w_prev
-    ema_rising_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_rising_1w)
-    ema_falling_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_falling_1w)
+    # 12h ATR(14) for volatility filter
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR is just high-low
+    
+    atr_14_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_prev = np.roll(atr_14_12h, 1)
+    atr_prev[0] = atr_14_12h[0]
+    atr_rising = atr_14_12h > atr_prev
+    atr_falling = atr_14_12h < atr_prev
+    
+    atr_rising_aligned = align_htf_to_ltf(prices, df_12h, atr_rising)
+    atr_falling_aligned = align_htf_to_ltf(prices, df_12h, atr_falling)
+    
+    # Volume spike: current volume > 1.5x 20-period average volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    vol_spike = volume > (1.5 * vol_ma.values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after all indicators are valid
-    start_idx = max(er_period, rsi_period, chop_period) + 5
+    start_idx = 20  # Need enough data for Donchian
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or
-            np.isnan(ema_rising_1w_aligned[i]) or np.isnan(ema_falling_1w_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(donchian_mid[i]) or
+            np.isnan(atr_rising_aligned[i]) or np.isnan(atr_falling_aligned[i]) or np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price > KAMA, RSI > 50 (bullish momentum), chop < 61.8 (trending market), weekly EMA rising
-            if (close[i] > kama[i] and 
-                rsi[i] > 50 and 
-                chop[i] < 61.8 and 
-                ema_rising_1w_aligned[i]):
+            # Enter long: price breaks above Donchian high + ATR rising + volume spike
+            if (close[i] > donchian_high[i] and 
+                atr_rising_aligned[i] and 
+                vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price < KAMA, RSI < 50 (bearish momentum), chop < 61.8 (trending market), weekly EMA falling
-            elif (close[i] < kama[i] and 
-                  rsi[i] < 50 and 
-                  chop[i] < 61.8 and 
-                  ema_falling_1w_aligned[i]):
+            # Enter short: price breaks below Donchian low + ATR falling + volume spike
+            elif (close[i] < donchian_low[i] and 
+                  atr_falling_aligned[i] and 
+                  vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below KAMA OR RSI < 40 (loss of momentum) OR chop > 61.8 (ranging market)
-            if (close[i] < kama[i]) or (rsi[i] < 40) or (chop[i] > 61.8):
+            # Exit long: price crosses below Donchian mid OR ATR turns falling
+            if (close[i] < donchian_mid[i]) or (not atr_rising_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above KAMA OR RSI > 60 (loss of momentum) OR chop > 61.8 (ranging market)
-            if (close[i] > kama[i]) or (rsi[i] > 60) or (chop[i] > 61.8):
+            # Exit short: price crosses above Donchian mid OR ATR turns rising
+            if (close[i] > donchian_mid[i]) or (not atr_falling_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
