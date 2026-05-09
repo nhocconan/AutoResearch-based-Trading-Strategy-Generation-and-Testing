@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_ChandelierExit_Trend_WeeklyTrend_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,79 +17,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot levels (based on previous day)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # Calculate Camarilla levels for each 1d bar (using previous day's OHLC)
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Calculate weekly EMA(10) for trend filter
+    ema10_1w = pd.Series(df_1w['close']).ewm(span=10, adjust=False, min_periods=10).mean().values
+    ema10_1w_aligned = align_htf_to_ltf(prices, df_1w, ema10_1w)
     
-    # Camarilla R3, R4, S3, S4 levels
-    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
-    camarilla_r4 = prev_close + (prev_high - prev_low) * 1.1 / 2
-    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
-    camarilla_s4 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    # Calculate Chandelier Exit on daily data
+    # ATR(22)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    atr = pd.Series(tr).ewm(span=22, adjust=False, min_periods=22).mean().values
     
-    # Align Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    # 22-period high and low for Chandelier Exit
+    highest_high = pd.Series(high).rolling(window=22, min_periods=22).max().values
+    lowest_low = pd.Series(low).rolling(window=22, min_periods=22).min().values
     
-    # Get 1d data for trend filter (34-period EMA)
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Volume filter: current 4h volume > 1.5 * 20-period average
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
+    # Chandelier Exit: Long exit = highest_high - 3*ATR, Short exit = lowest_low + 3*ATR
+    chandelier_long_exit = highest_high - 3.0 * atr
+    chandelier_short_exit = lowest_low + 3.0 * atr
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(20, 20)  # Camarilla needs 1 day, volume MA needs 20
+    start_idx = 22  # Need enough data for ATR and channels
     
     for i in range(start_idx, n):
-        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(ema10_1w_aligned[i]) or
+            np.isnan(chandelier_long_exit[i]) or
+            np.isnan(chandelier_short_exit[i]) or
+            np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        r3 = r3_aligned[i]
-        r4 = r4_aligned[i]
-        s3 = s3_aligned[i]
-        s4 = s4_aligned[i]
-        trend = ema34_1d_aligned[i]
-        vol_filter = volume_filter[i]
+        trend_filter = ema10_1w_aligned[i]
         
         if position == 0:
-            # Enter long: price above R3 + above 1d EMA34 trend + volume filter
-            if close[i] > r3 and close[i] > trend and vol_filter:
+            # Enter long: close above Chandelier long exit AND above weekly EMA trend
+            if close[i] > chandelier_long_exit[i] and close[i] > trend_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price below S3 + below 1d EMA34 trend + volume filter
-            elif close[i] < s3 and close[i] < trend and vol_filter:
+            # Enter short: close below Chandelier short exit AND below weekly EMA trend
+            elif close[i] < chandelier_short_exit[i] and close[i] < trend_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price below S3 (reversal signal)
-            if close[i] < s3:
+            # Exit long: close below Chandelier long exit
+            if close[i] < chandelier_long_exit[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price above R3 (reversal signal)
-            if close[i] > r3:
+            # Exit short: close above Chandelier short exit
+            if close[i] > chandelier_short_exit[i]:
                 signals[i] = 0.0
                 position = 0
             else:
