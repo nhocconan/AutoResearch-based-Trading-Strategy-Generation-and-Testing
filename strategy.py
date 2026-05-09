@@ -1,18 +1,34 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Bollinger Band squeeze breakout with 1d trend filter and volume confirmation
-# Long when: price breaks above upper Bollinger Band (20,2) after squeeze (BBW < 20th percentile), 1d EMA(50) rising, volume spike (>1.5x 20-period average)
-# Short when: price breaks below lower Bollinger Band after squeeze, 1d EMA(50) falling, volume spike
-# Exit when: price crosses Bollinger middle band OR trend reverses
-# Position size: 0.25 to limit drawdown. Target: 20-40 trades/year to minimize fee drag.
-# Bollinger squeeze captures low volatility breakouts which work in both bull (continuation) and bear (mean reversion failures) markets.
+# Hypothesis: 6h Williams Alligator with 1d EMA trend filter and volume confirmation
+# Long when: Alligator jaws < teeth < lips (bullish alignment), 1d EMA(50) rising, volume spike
+# Short when: Alligator jaws > teeth > lips (bearish alignment), 1d EMA(50) falling, volume spike
+# Exit when: Alligator alignment breaks or trend reverses
+# Williams Alligator uses smoothed medians (Jaw=13, Teeth=8, Lips=5) to filter noise.
+# Works in trending markets (bull/bear) by catching sustained moves; avoids whipsaws in ranges.
+# Target: 50-150 total trades over 4 years (12-37/year). Position size: 0.25.
 
-name = "4h_BollingerSqueeze_Breakout_1dEMA_Volume"
-timeframe = "4h"
+name = "6h_WilliamsAlligator_1dEMA_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def _sma(arr, window):
+    """Simple moving average with NaN for insufficient data."""
+    if len(arr) < window:
+        return np.full_like(arr, np.nan, dtype=float)
+    s = pd.Series(arr)
+    return s.rolling(window=window, min_periods=window).mean().values
+
+def _smma(arr, window):
+    """Smoothed moving average (SMMA) = EMA with alpha = 1/window."""
+    if len(arr) < window:
+        return np.full_like(arr, np.nan, dtype=float)
+    alpha = 1.0 / window
+    s = pd.Series(arr)
+    return s.ewm(alpha=alpha, adjust=False).mean().values
 
 def generate_signals(prices):
     n = len(prices)
@@ -24,20 +40,16 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Bollinger Bands (20,2)
-    close_series = pd.Series(close)
-    bb_middle = close_series.rolling(window=20, min_periods=20).mean()
-    bb_std = close_series.rolling(window=20, min_periods=20).std()
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
-    bb_width = bb_upper - bb_lower
+    median = (high + low) / 2
     
-    # Bollinger Width percentile (20-period lookback for squeeze detection)
-    bb_width_series = pd.Series(bb_width.values)
-    bb_width_percentile = bb_width_series.rolling(window=100, min_periods=100).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-    ).values
-    squeeze_condition = bb_width_percentile < 20  # Bollinger Band width in lowest 20%
+    # Williams Alligator: Jaw (13), Teeth (8), Lips (5) - all SMMA of median
+    jaw = _smma(median, 13)
+    teeth = _smma(median, 8)
+    lips = _smma(median, 5)
+    
+    # Bullish: Lips > Teeth > Jaw; Bearish: Jaw > Teeth > Lips
+    bullish_alignment = (lips > teeth) & (teeth > jaw)
+    bearish_alignment = (jaw > teeth) & (teeth > lips)
     
     # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -65,41 +77,39 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(bb_middle[i]) or
-            np.isnan(squeeze_condition[i]) or np.isnan(ema_rising_aligned[i]) or
-            np.isnan(ema_falling_aligned[i]) or np.isnan(vol_spike[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(ema_rising_aligned[i]) or np.isnan(ema_falling_aligned[i]) or
+            np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above upper BB + squeeze + 1d EMA rising + volume spike
-            if (close[i] > bb_upper[i] and 
-                squeeze_condition[i] and 
+            # Enter long: bullish alignment + 1d EMA rising + volume spike
+            if (bullish_alignment[i] and 
                 ema_rising_aligned[i] and 
                 vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below lower BB + squeeze + 1d EMA falling + volume spike
-            elif (close[i] < bb_lower[i] and 
-                  squeeze_condition[i] and 
+            # Enter short: bearish alignment + 1d EMA falling + volume spike
+            elif (bearish_alignment[i] and 
                   ema_falling_aligned[i] and 
                   vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below middle BB OR trend turns down
-            if (close[i] < bb_middle[i]) or (not ema_rising_aligned[i]):
+            # Exit long: alignment breaks or trend turns down
+            if (not bullish_alignment[i]) or (not ema_rising_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above middle BB OR trend turns up
-            if (close[i] > bb_middle[i]) or (not ema_falling_aligned[i]):
+            # Exit short: alignment breaks or trend turns up
+            if (not bearish_alignment[i]) or (not ema_falling_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
