@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_2"
-timeframe = "4h"
+name = "1d_WeeklyPivot_R1_S1_Breakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,34 +17,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter and pivot levels
-    df_d = get_htf_data(prices, '1d')
-    if len(df_d) < 50:
+    # Get weekly data for trend filter and pivot levels
+    df_w = get_htf_data(prices, '1w')
+    if len(df_w) < 50:
         return np.zeros(n)
     
-    # Calculate daily EMA(34) for trend filter
-    close_d = pd.Series(df_d['close'].values)
-    ema34_d = close_d.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_d_aligned = align_htf_to_ltf(prices, df_d, ema34_d)
+    # Calculate weekly EMA(50) for trend filter
+    close_w = pd.Series(df_w['close'].values)
+    ema50_w = close_w.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_w_aligned = align_htf_to_ltf(prices, df_w, ema50_w)
     
-    # Calculate daily pivot levels from previous day OHLC
-    H = df_d['high'].values
-    L = df_d['low'].values
-    C = df_d['close'].values
+    # Calculate weekly pivot levels from previous week OHLC
+    H = df_w['high'].values
+    L = df_w['low'].values
+    C = df_w['close'].values
     
     # Pivot point: P = (H + L + C) / 3
     P = (H + L + C) / 3
     
-    # Daily R1 and S1 levels (breakout levels)
-    # R1 = (2 * P) - L
-    # S1 = (2 * P) - H
-    R1 = (2 * P) - L
-    S1 = (2 * P) - H
+    # Weekly R1 and S1 levels (breakout levels)
+    # R1 = 2*P - L
+    # S1 = 2*P - H
+    R1 = 2 * P - L
+    S1 = 2 * P - H
     
-    # Align daily levels to 4h timeframe (use previous day's levels)
-    R1_aligned = align_htf_to_ltf(prices, df_d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_d, S1)
-    ema34_d_aligned = align_htf_to_ltf(prices, df_d, ema34_d)
+    # Align weekly levels to 1d timeframe (use previous week's levels)
+    R1_aligned = align_htf_to_ltf(prices, df_w, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_w, S1)
+    ema50_w_aligned = align_htf_to_ltf(prices, df_w, ema50_w)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_series = pd.Series(volume)
@@ -57,7 +57,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema34_d_aligned[i]) or np.isnan(R1_aligned[i]) or 
+        if (np.isnan(ema50_w_aligned[i]) or np.isnan(R1_aligned[i]) or 
             np.isnan(S1_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -67,12 +67,12 @@ def generate_signals(prices):
         vol_ok = volume[i] > 1.5 * vol_ma20[i]
         
         if position == 0:
-            # Long: Price breaks above R1 with volume and above daily EMA trend
-            if close[i] > R1_aligned[i] and vol_ok and close[i] > ema34_d_aligned[i]:
+            # Long: Price breaks above R1 with volume and above weekly EMA trend
+            if close[i] > R1_aligned[i] and vol_ok and close[i] > ema50_w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 with volume and below daily EMA trend
-            elif close[i] < S1_aligned[i] and vol_ok and close[i] < ema34_d_aligned[i]:
+            # Short: Price breaks below S1 with volume and below weekly EMA trend
+            elif close[i] < S1_aligned[i] and vol_ok and close[i] < ema50_w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
