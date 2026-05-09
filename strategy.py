@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d price action near weekly pivot levels with volume confirmation and trend filter
-# Long when price is above weekly pivot, above weekly EMA50, and volume > 1.5x 20-period average
-# Short when price is below weekly pivot, below weekly EMA50, and volume > 1.5x 20-period average
-# Exit when price crosses back below/above weekly pivot OR weekly EMA direction contradicts position
-# Position size: 0.25 (25% of capital) to balance return and drawdown
+# Hypothesis: 12h price action near 1d pivot levels with volume confirmation and trend filter
+# Long when price is above daily pivot, above 12h EMA50, and volume > 1.5x 20-period average
+# Short when price is below daily pivot, below 12h EMA50, and volume > 1.5x 20-period average
+# Exit when price crosses back below/above pivot OR EMA direction contradicts position
+# Position size: 0.28 (28% of capital) to balance return and drawdown
 # Designed to work in trending markets via EMA filter and in ranging markets via pivot reversals
 
-name = "1d_WeeklyPivot_EMA_Volume_Filter"
-timeframe = "1d"
+name = "12h_Pivot_EMA_Volume_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,24 +24,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly EMA50 for trend filter
+    # 12h EMA50 for trend filter
     ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Get weekly data for pivot points (weekly high, low, close)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
+    # Get 1d data for pivot points (daily high, low, close)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    # Calculate weekly pivot points: (H + L + C) / 3
-    pivot = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
+    # Calculate daily pivot points: (H + L + C) / 3
+    pivot = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
     # Support and resistance levels
-    R1 = 2 * pivot - df_1w['low']
-    S1 = 2 * pivot - df_1w['high']
+    R1 = 2 * pivot - df_1d['low']
+    S1 = 2 * pivot - df_1d['high']
     
-    # Align weekly pivot levels to daily timeframe (waits for weekly close)
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot.values)
-    R1_aligned = align_htf_to_ltf(prices, df_1w, R1.values)
-    S1_aligned = align_htf_to_ltf(prices, df_1w, S1.values)
+    # Align 1d pivot levels to 12h timeframe (waits for daily close)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot.values)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1.values)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1.values)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
@@ -63,33 +63,33 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Enter long: price above weekly pivot AND above weekly EMA50 (bullish alignment) + volume spike
+            # Enter long: price above pivot AND above EMA50 (bullish alignment) + volume spike
             if (close[i] > pivot_aligned[i] and 
                 close[i] > ema50[i] and 
                 vol_spike[i]):
-                signals[i] = 0.25
+                signals[i] = 0.28
                 position = 1
-            # Enter short: price below weekly pivot AND below weekly EMA50 (bearish alignment) + volume spike
+            # Enter short: price below pivot AND below EMA50 (bearish alignment) + volume spike
             elif (close[i] < pivot_aligned[i] and 
                   close[i] < ema50[i] and 
                   vol_spike[i]):
-                signals[i] = -0.25
+                signals[i] = -0.28
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below weekly pivot OR weekly EMA50 turns bearish
+            # Exit long: price crosses below pivot OR EMA50 turns bearish
             if (close[i] < pivot_aligned[i]) or (close[i] < ema50[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.28
         
         elif position == -1:
-            # Exit short: price crosses above weekly pivot OR weekly EMA50 turns bullish
+            # Exit short: price crosses above pivot OR EMA50 turns bullish
             if (close[i] > pivot_aligned[i]) or (close[i] > ema50[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.28
     
     return signals
