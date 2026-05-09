@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_KAMA_TRIX_Volume"
-timeframe = "1d"
+name = "6h_Camarilla_R3S3_Breakout_12hTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,82 +17,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for TRIX trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get 12h data for Camarilla pivot and trend
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # TRIX on weekly close
-    close_1w = df_1w['close'].values
-    ema1 = pd.Series(close_1w).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
-    trix_raw = 100 * (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1)
-    trix_raw[0] = 0  # First value undefined
-    trix_1w = align_htf_to_ltf(prices, df_1w, trix_raw)
+    # Previous 12h bar's OHLC (for Camarilla calculation)
+    prev_close_12h = df_12h['close'].shift(1).values
+    prev_high_12h = df_12h['high'].shift(1).values
+    prev_low_12h = df_12h['low'].shift(1).values
     
-    # KAMA on daily close
-    def kama(close, period=10, fast=2, slow=30):
-        change = np.abs(np.diff(close, n=period))
-        volatility = np.sum(np.abs(np.diff(close)), axis=1)
-        er = np.zeros_like(close)
-        er[period:] = change[period-1:] / volatility[period-1:]
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        kama_out = np.zeros_like(close)
-        kama_out[0] = close[0]
-        for i in range(1, len(close)):
-            kama_out[i] = kama_out[i-1] + sc[i] * (close[i] - kama_out[i-1])
-        return kama_out
+    # Calculate Camarilla levels
+    camarilla_pivot_12h = (prev_high_12h + prev_low_12h + prev_close_12h) / 3
+    camarilla_range_12h = prev_high_12h - prev_low_12h
+    camarilla_r3_12h = camarilla_pivot_12h + camarilla_range_12h * 1.1 / 4
+    camarilla_s3_12h = camarilla_pivot_12h - camarilla_range_12h * 1.1 / 4
     
-    kama_daily = kama(close, 10, 2, 30)
+    # Align Camarilla levels to 6h
+    camarilla_pivot_6h = align_htf_to_ltf(prices, df_12h, camarilla_pivot_12h)
+    camarilla_r3_6h = align_htf_to_ltf(prices, df_12h, camarilla_r3_12h)
+    camarilla_s3_6h = align_htf_to_ltf(prices, df_12h, camarilla_s3_12h)
     
-    # Volume filter: above 1.5x 20-day average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_6h = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # Volume filter: above 2.0x 12-period average (12*6h = 3 days)
+    vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Wait for volume MA
+    start_idx = 12  # Wait for volume MA
     
     for i in range(start_idx, n):
-        # Skip if TRIX not ready
-        if np.isnan(trix_1w[i]) or np.isnan(vol_ma[i]):
+        # Skip if data not ready
+        if (np.isnan(camarilla_r3_6h[i]) or np.isnan(camarilla_s3_6h[i]) or 
+            np.isnan(ema_50_6h[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 1.5 * vol_ma[i]
+        vol_ok = volume[i] > 2.0 * vol_ma[i]  # Volume confirmation
         
-        # KAMA direction: price above/below KAMA
-        price_above_kama = close[i] > kama_daily[i]
-        price_below_kama = close[i] < kama_daily[i]
-        
-        # TRIX trend filter: rising/falling momentum
-        trix_rising = trix_1w[i] > trix_1w[i-1] if i > 0 else False
-        trix_falling = trix_1w[i] < trix_1w[i-1] if i > 0 else False
+        # Session filter: 08-20 UTC (reduce noise trades)
+        hour = pd.DatetimeIndex(prices['open_time']).hour[i]
+        in_session = 8 <= hour <= 20
         
         if position == 0:
-            # Long: price above KAMA + rising TRIX + volume
-            if price_above_kama and trix_rising and vol_ok:
+            # Long breakout: price breaks above camarilla R3 with 12h uptrend
+            if (close[i] > camarilla_r3_6h[i] and 
+                close[i] > ema_50_6h[i] and  # 12h uptrend
+                vol_ok and 
+                in_session):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA + falling TRIX + volume
-            elif price_below_kama and trix_falling and vol_ok:
+            # Short breakdown: price breaks below camarilla S3 with 12h downtrend
+            elif (close[i] < camarilla_s3_6h[i] and 
+                  close[i] < ema_50_6h[i] and  # 12h downtrend
+                  vol_ok and 
+                  in_session):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below KAMA
-            if close[i] < kama_daily[i]:
+            # Exit long: price falls back below camarilla pivot (mean reversion)
+            if close[i] < camarilla_pivot_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above KAMA
-            if close[i] > kama_daily[i]:
+            # Exit short: price rises back above camarilla pivot (mean reversion)
+            if close[i] > camarilla_pivot_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
