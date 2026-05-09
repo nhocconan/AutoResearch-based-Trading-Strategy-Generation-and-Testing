@@ -1,10 +1,15 @@
+# 12h_Camarilla_R3_S3_Breakout_1dTrend_Volume
+# Hypothesis: Breakouts at R3/S3 levels (major sentiment extremes) with 1d trend filter and volume confirmation.
+# R3/S3 provides stronger breakouts with better risk/reward, fewer false signals. 1d trend ensures alignment with long-term bias.
+# Volume filters low-liquidity breakouts. Designed for 12-37 trades/year in both bull and bear markets.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_WeeklyPivot_R3S3_Breakout_1wTrend"
-timeframe = "1d"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -15,73 +20,74 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get daily data for pivot calculation
+    # Get 1d data for trend filter and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
-    # Previous day's data for daily pivot (R3, S3)
+    # Previous day's close for Camarilla calculation (R3, S3)
     prev_close = df_1d['close'].shift(1).values
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
     
-    # Calculate daily pivot and R3/S3 levels
-    pivot = (prev_high + prev_low + prev_close) / 3
-    r3 = pivot + 2 * (prev_high - prev_low)  # R3 = Pivot + 2*(H-L)
-    s3 = pivot - 2 * (prev_high - prev_low)  # S3 = Pivot - 2*(H-L)
+    # Calculate Camarilla levels (R3, S3)
+    r3 = prev_close + (prev_high - prev_low) * 1.1 / 4  # R3 = C + 1.1*(H-L)/4
+    s3 = prev_close - (prev_high - prev_low) * 1.1 / 4  # S3 = C - 1.1*(H-L)/4
     
-    # Weekly EMA50 trend filter
-    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Trend filter: 1d EMA34
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align to daily timeframe
-    r3_1d = align_htf_to_ltf(prices, df_1d, r3)
-    s3_1d = align_htf_to_ltf(prices, df_1d, s3)
-    ema50_1w_1d = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Volume filter: current 12h volume > 1.5 * 20-period average
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_ma * 1.5)
+    
+    # Align all to 12h (primary timeframe)
+    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
+    ema34_1d_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(50, 30)  # Need enough data for weekly EMA50
+    start_idx = max(34, 20)  # Need enough data for EMA34 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(r3_1d[i]) or np.isnan(s3_1d[i]) or 
-            np.isnan(ema50_1w_1d[i])):
+        if (np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or
+            np.isnan(ema34_1d_12h[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        r3_val = r3_1d[i]
-        s3_val = s3_1d[i]
-        trend = ema50_1w_1d[i]
+        r3_val = r3_12h[i]
+        s3_val = s3_12h[i]
+        trend = ema34_1d_12h[i]
+        vol_filter = volume_filter[i]
         
         if position == 0:
-            # Enter long: break above R3 with weekly uptrend
-            if close[i] > r3_val and close[i] > trend:
+            # Enter long: break above R3 with volume and above trend
+            if close[i] > r3_val and close[i] > trend and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below S3 with weekly downtrend
-            elif close[i] < s3_val and close[i] < trend:
+            # Enter short: break below S3 with volume and below trend
+            elif close[i] < s3_val and close[i] < trend and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: close below pivot (mean reversion)
-            if close[i] < pivot[i]:
+            # Exit long: close below S3 (mean reversion to center)
+            if close[i] < s3_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: close above pivot (mean reversion)
-            if close[i] > pivot[i]:
+            # Exit short: close above R3 (mean reversion to center)
+            if close[i] > r3_val:
                 signals[i] = 0.0
                 position = 0
             else:
