@@ -1,9 +1,8 @@
-#!/usr/bin/env python3
 # 4h_Camarilla_R3_S3_Breakout_1dTrend_Volume
 # Hypothesis: Camarilla R3/S3 breakout on 4h with 1d EMA trend filter and volume confirmation.
 # Long when 1d trend up and price breaks above R3 with volume > 1.5x average.
 # Short when 1d trend down and price breaks below S3 with volume > 1.5x average.
-# Uses 4h timeframe for lower turnover vs 12h, targeting 20-50 trades/year.
+# Uses 4h timeframe to target 20-50 trades/year, reducing fee drag while maintaining edge.
 # Combines pivot-based structure with trend and volume filters to reduce whipsaw and improve edge.
 
 name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
