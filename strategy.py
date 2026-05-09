@@ -3,8 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_R1_S1_Breakout_Trend_Volume"
-timeframe = "12h"
+# Hypothesis: 1d timeframe with weekly trend filter, weekly volatility regime, and daily price action.
+# Uses weekly Bollinger Bands to detect regime (squeeze = range, expansion = trend) and weekly close above/below SMA20 for trend.
+# Entry on daily close crossing weekly Bollinger Bands with volume confirmation.
+# Designed to work in both bull and bear markets by adapting to volatility regime.
+# Target: 20-50 trades over 4 years (5-12/year) to minimize fee drag.
+
+name = "1d_1w_Bollinger_Regime_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,73 +23,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels, trend, and volume filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data for regime and trend filters
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Previous day's close for Camarilla calculation
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Weekly close for trend and Bollinger Bands
+    weekly_close = df_1w['close'].values
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_volume = df_1w['volume'].values
     
-    # Calculate Camarilla levels (R1, S1)
-    r1 = prev_close + 1.1 * (prev_high - prev_low) / 4
-    s1 = prev_close - 1.1 * (prev_high - prev_low) / 4
+    # Weekly SMA20 for trend filter
+    weekly_close_series = pd.Series(weekly_close)
+    sma20_1w = weekly_close_series.rolling(window=20, min_periods=20).mean().values
     
-    # Trend filter: 1d EMA34
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Weekly Bollinger Bands (20, 2.0)
+    sma20_bb = weekly_close_series.rolling(window=20, min_periods=20).mean().values
+    std20_bb = weekly_close_series.rolling(window=20, min_periods=20).std().values
+    upper_bb = sma20_bb + 2 * std20_bb
+    lower_bb = sma20_bb - 2 * std20_bb
     
-    # Volume filter: current 1d volume > 1.5 * 20-day average
-    vol_series = pd.Series(df_1d['volume'].values)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter_1d = df_1d['volume'].values > (vol_ma * 1.5)
+    # Weekly Bollinger Band Width for regime detection (squeeze < 0.05 = low volatility)
+    bb_width = (upper_bb - lower_bb) / sma20_bb
+    # Regime: 1 = trend (expansion), 0 = range (squeeze)
+    regime_trend = (bb_width > 0.05).astype(float)
     
-    # Align all to 12h
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
-    ema34_1d_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    volume_filter_12h = align_htf_to_ltf(prices, df_1d, volume_filter_1d)
+    # Align weekly indicators to daily
+    sma20_1w_daily = align_htf_to_ltf(prices, df_1w, sma20_1w)
+    upper_bb_daily = align_htf_to_ltf(prices, df_1w, upper_bb)
+    lower_bb_daily = align_htf_to_ltf(prices, df_1w, lower_bb)
+    regime_trend_daily = align_htf_to_ltf(prices, df_1w, regime_trend)
+    
+    # Daily volume filter: volume > 1.5 * 20-day average
+    volume_series = pd.Series(volume)
+    vol_ma_20d = volume_series.rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_ma_20d * 1.5)
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Need enough data for EMA34 and volume MA
+    start_idx = 20  # Need enough data for weekly SMA20 and Bollinger Bands
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or
-            np.isnan(ema34_1d_12h[i]) or np.isnan(volume_filter_12h[i])):
+        if (np.isnan(sma20_1w_daily[i]) or np.isnan(upper_bb_daily[i]) or 
+            np.isnan(lower_bb_daily[i]) or np.isnan(regime_trend_daily[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        r1_val = r1_12h[i]
-        s1_val = s1_12h[i]
-        trend = ema34_1d_12h[i]
-        vol_filter = volume_filter_12h[i]
+        sma20 = sma20_1w_daily[i]
+        upper_bb = upper_bb_daily[i]
+        lower_bb = lower_bb_daily[i]
+        regime = regime_trend_daily[i]
+        vol_ok = volume_filter[i]
         
         if position == 0:
-            # Enter long: break above R1 with volume and above trend
-            if close[i] > r1_val and close[i] > trend and vol_filter:
+            # Enter long: price above upper BB, in trend regime, with volume
+            if close[i] > upper_bb and regime > 0.5 and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below S1 with volume and below trend
-            elif close[i] < s1_val and close[i] < trend and vol_filter:
+            # Enter short: price below lower BB, in trend regime, with volume
+            elif close[i] < lower_bb and regime > 0.5 and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: close below S1 (mean reversion to center)
-            if close[i] < s1_val:
+            # Exit long: price crosses below weekly SMA20 (trend reversal)
+            if close[i] < sma20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: close above R1 (mean reversion to center)
-            if close[i] > r1_val:
+            # Exit short: price crosses above weekly SMA20 (trend reversal)
+            if close[i] > sma20:
                 signals[i] = 0.0
                 position = 0
             else:
