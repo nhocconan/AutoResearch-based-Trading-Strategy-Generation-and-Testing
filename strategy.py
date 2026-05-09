@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h timeframe with 1-day ATR-based volatility regime and 1-week volume-weighted average price (VWAP) trend filter.
-# Uses 1-day ATR(14) normalized by 50-period mean to detect low-volatility regimes (mean-reversion favorable).
-# Enters long when price crosses above VWAP(5) in low-volatility regime, short when below.
-# Exits when volatility regime shifts to high volatility or price reverts to VWAP.
-# Weekly VWAP provides stable trend reference that adapts to both bull and bear markets.
-# Target: 50-150 total trades over 4 years (12-37/year) with size 0.25.
+# Hypothesis: 4h Camarilla R1/S1 breakout with 12h EMA trend filter and volume spike confirmation.
+# Uses daily Camarilla pivot levels for precise entry/exit levels.
+# 12h EMA50 determines trend direction (long only above, short only below).
+# Volume spike (current volume > 1.5x 20-period average) confirms breakout strength.
+# Target: 20-50 total trades over 4 years (5-12/year) with size 0.25.
+# Designed to work in both bull and bear markets via trend filter and volatility-sensitive entries.
 
-name = "12h_ATR_VolRegime_VWAP5_Trend"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_12hEMA50_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,38 +24,39 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1-day ATR(14) for volatility regime
+    # Calculate daily Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    # True Range components
-    prev_close = np.roll(df_1d['close'], 1)
-    prev_close[0] = np.nan
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = np.abs(df_1d['high'] - prev_close)
-    tr3 = np.abs(df_1d['low'] - prev_close)
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Previous day's OHLC for Camarilla calculation
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # ATR(14)
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Camarilla levels
+    R1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    S1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     
-    # 50-period mean of ATR for normalization
-    atr_mean_50 = pd.Series(atr_14).rolling(window=50, min_periods=50).mean().values
+    # Align daily levels to 4h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
-    # Volatility regime: low volatility when ATR < 0.8 * mean ATR
-    vol_regime_low = atr_14 < (0.8 * atr_mean_50)
-    vol_regime_low_aligned = align_htf_to_ltf(prices, df_1d, vol_regime_low)
+    # Calculate 12h EMA50 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
     
-    # Calculate 1-week VWAP (5-period VWAP on 12h data approximates 1-week)
-    typical_price = (high + low + close) / 3.0
-    vwap_num = pd.Series(typical_price * volume).rolling(window=5, min_periods=5).sum().values
-    vwap_den = pd.Series(volume).rolling(window=5, min_periods=5).sum().values
-    vwap = vwap_num / vwap_den
+    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Price position relative to VWAP
-    price_above_vwap = close > vwap
-    price_below_vwap = close < vwap
+    # Volume spike: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -64,34 +65,34 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(vol_regime_low_aligned[i]) or
-            np.isnan(price_above_vwap[i]) or np.isnan(price_below_vwap[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: low volatility regime + price above VWAP
-            if vol_regime_low_aligned[i] and price_above_vwap[i]:
+            # Enter long: price breaks above R1, above 12h EMA50, volume spike
+            if (close[i] > R1_aligned[i]) and (close[i] > ema_50_12h_aligned[i]) and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: low volatility regime + price below VWAP
-            elif vol_regime_low_aligned[i] and price_below_vwap[i]:
+            # Enter short: price breaks below S1, below 12h EMA50, volume spike
+            elif (close[i] < S1_aligned[i]) and (close[i] < ema_50_12h_aligned[i]) and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: volatility regime shifts to high OR price crosses below VWAP
-            if (not vol_regime_low_aligned[i]) or (not price_above_vwap[i]):
+            # Exit long: price breaks below S1 or trend changes
+            if (close[i] < S1_aligned[i]) or (close[i] < ema_50_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: volatility regime shifts to high OR price crosses above VWAP
-            if (not vol_regime_low_aligned[i]) or (not price_below_vwap[i]):
+            # Exit short: price breaks above R1 or trend changes
+            if (close[i] > R1_aligned[i]) or (close[i] > ema_50_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
