@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Trix_Volume_Spike_Chop_Regime_v1"
-timeframe = "4h"
+name = "6h_WeeklyPivot_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,85 +17,97 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for TRIX and Chop index
+    # Get 1d data for trend filter and volume calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate TRIX on 1d: EMA12(EMA12(EMA12(close)))
+    # Calculate 1d EMA(34) for trend filter
     close_1d = pd.Series(df_1d['close'].values)
-    ema1 = close_1d.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
-    trix_raw = 100 * (ema3.pct_change()).values
+    ema34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Smooth TRIX with 9-period EMA (signal line)
-    trix_series = pd.Series(trix_raw)
-    trix_signal = trix_series.ewm(span=9, adjust=False, min_periods=9).mean().values
-    trix_signal_aligned = align_htf_to_ltf(prices, df_1d, trix_signal)
+    # Calculate weekly pivot points from previous week's OHLC
+    # We need to get weekly data - use 1d data and resample to weekly manually but correctly
+    # Since we can't use .resample(), we'll compute weekly from daily data by grouping
+    # For simplicity and to avoid look-ahead, we'll use the last complete week's data
+    # We'll calculate weekly pivot every Friday and hold it for the week
     
-    # Chop index on 1d: 100 * log10(sum(atr14) / (max(high,n) - min(low,n))) / log10(n)
-    # ATR(14) on 1d
-    tr1 = np.abs(high[1:] - low[1:])
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with index
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Instead, let's use a simpler approach: calculate pivot from previous 1d but scaled
+    # Actually, let's use the 1d data to get the last 5 trading days (approximate week)
+    # But to keep it simple and avoid look-ahead issues, we'll use a different approach
     
-    # Highest high and lowest low over 14 periods
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    # Let's use the 1d high/low/close but with a longer period for more stability
+    # We'll use 5-day high/low/close for weekly-like pivot
     
-    # Chop calculation
-    sum_atr14 = pd.Series(atr14).rolling(window=14, min_periods=14).sum().values
-    range_hl = max_high - min_low
-    chop = 100 * np.log10(sum_atr14 / range_hl) / np.log10(14)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # For now, let's revert to using 1d but with a different multiplier to make it more like weekly
+    # Actually, let's stick to the original plan but use proper weekly calculation
     
-    # Volume confirmation: current volume > 2x 30-period average (~15-day average for 4h)
+    # Get weekly data by taking every 5th day (approximation) - but this is complex
+    # Let's simplify: use 1d data but with a 5-day lookback for the pivot calculation
+    
+    # Calculate 5-day high, low, close for weekly pivot approximation
+    high_5d = pd.Series(high).rolling(window=5, min_periods=5).max().values
+    low_5d = pd.Series(low).rolling(window=5, min_periods=5).min().values
+    close_5d = pd.Series(close).rolling(window=5, min_periods=5).last().values
+    
+    # Calculate weekly pivot points
+    pp_5d = (high_5d + low_5d + close_5d) / 3
+    r3_5d = close_5d + (high_5d - low_5d) * 1.1  # R3 = Close + 1.1*(High-Low)
+    s3_5d = close_5d - (high_5d - low_5d) * 1.1  # S3 = Close - 1.1*(High-Low)
+    
+    # Since we used 5-day window, we need to align this to 6h timeframe
+    # But we calculated it on the same index as prices, so no alignment needed
+    # However, we want to use the previous period's values to avoid look-ahead
+    pp_5d_prev = np.roll(pp_5d, 1)
+    r3_5d_prev = np.roll(r3_5d, 1)
+    s3_5d_prev = np.roll(s3_5d, 1)
+    pp_5d_prev[0] = np.nan
+    r3_5d_prev[0] = np.nan
+    s3_5d_prev[0] = np.nan
+    
+    # Volume confirmation: current volume > 2.0x 20-period average
     vol_series = pd.Series(volume)
-    vol_ma30 = vol_series.rolling(window=30, min_periods=30).mean().values
+    vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # warmup for all indicators
+    start_idx = max(50, 20)  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(trix_signal_aligned[i]) or np.isnan(chop_aligned[i]) or 
-            np.isnan(vol_ma30[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(pp_5d_prev[i]) or 
+            np.isnan(r3_5d_prev[i]) or np.isnan(s3_5d_prev[i]) or 
+            np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 2.0 * vol_ma30[i]
-        chop_high = chop_aligned[i] > 61.8  # ranging market
-        chop_low = chop_aligned[i] < 38.2   # trending market
+        vol_ok = volume[i] > 2.0 * vol_ma20[i]
         
         if position == 0:
-            # Long: TRIX crosses above signal line in choppy market with volume
-            if trix_signal_aligned[i] > trix_signal_aligned[i-1] and chop_high and vol_ok:
+            # Long: Close breaks above R3 with volume spike and above 1d EMA trend
+            if close[i] > r3_5d_prev[i] and vol_ok and close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX crosses below signal line in choppy market with volume
-            elif trix_signal_aligned[i] < trix_signal_aligned[i-1] and chop_high and vol_ok:
+            # Short: Close breaks below S3 with volume spike and below 1d EMA trend
+            elif close[i] < s3_5d_prev[i] and vol_ok and close[i] < ema34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: TRIX crosses below signal line
-            if trix_signal_aligned[i] < trix_signal_aligned[i-1]:
+            # Exit long: Price crosses back below S3 (mean reversion) or we hit opposite signal
+            if close[i] < s3_5d_prev[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: TRIX crosses above signal line
-            if trix_signal_aligned[i] > trix_signal_aligned[i-1]:
+            # Exit short: Price crosses back above R3
+            if close[i] > r3_5d_prev[i]:
                 signals[i] = 0.0
                 position = 0
             else:
