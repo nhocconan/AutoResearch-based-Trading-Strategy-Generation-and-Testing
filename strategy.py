@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
-4h_4H_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS
-Hypothesis: Tight breakout at Camarilla R1/S1 levels with 12h EMA50 trend filter and volume spike confirmation.
-The 12h EMA50 provides a smoother trend filter than daily EMA, reducing whipsaw while maintaining trend alignment.
-Volume spike (>2x 20-period average) confirms breakout strength. Designed for low trade frequency (<50/year) to minimize
-fee drag in BTC/ETH. Works in both bull and bear markets by following the 12h trend direction.
-Added 5-bar minimum holding period to reduce whipsaw and overtrading.
+1d_WeeklyCVDivergence_Pullback
+Hypothesis: Weekly CVD divergence with daily pullback entry for BTC/ETH.
+- Uses weekly cumulative volume delta to detect smart money accumulation/distribution
+- Enters on daily pullbacks in the direction of weekly CVD trend (buy dips in uptrend, sell rallies in downtrend)
+- Filters with daily ADX > 25 to ensure trending market
+- Weekly timeframe reduces noise, daily pullbacks provide good risk/reward
+- Designed to work in both bull and bear markets by following weekly smart money flow
+- Target: 15-30 trades/year to minimize fee drag
 """
 
-name = "4h_4H_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS"
-timeframe = "4h"
+name = "1d_WeeklyCVDivergence_Pullback"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -26,114 +28,145 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get weekly data for CVD calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    volume_1w = df_1w['volume'].values
     
-    # Calculate 12h EMA50 for trend filter
-    ema_50_12h = np.full_like(close_12h, np.nan)
-    if len(close_12h) >= 50:
-        ema_50_12h[49] = np.mean(close_12h[0:50])
-        for i in range(50, len(close_12h)):
-            ema_50_12h[i] = (ema_50_12h[i-1] * 49 + close_12h[i]) / 50
+    # Calculate weekly CVD (Cumulative Volume Delta)
+    # CVD = sum of (close - low) - (high - close) weighted by volume approximation
+    # Using typical price as proxy for buy/sell pressure
+    typical_price_1w = (high_1w + low_1w + close_1w) / 3.0
+    # Buy pressure: close relative to low, Sell pressure: high relative to close
+    buy_pressure = np.where(close_1w >= low_1w, (close_1w - low_1w) / (high_1w - low_1w + 1e-10), 0)
+    sell_pressure = np.where(high_1w >= close_1w, (high_1w - close_1w) / (high_1w - low_1w + 1e-10), 0)
+    # When high == low, avoid division by zero
+    rng = high_1w - low_1w
+    buy_pressure = np.where(rng == 0, 0.5, buy_pressure)
+    sell_pressure = np.where(rng == 0, 0.5, sell_pressure)
     
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # CVD change per period: (buy - sell) * volume
+    cvd_change = (buy_pressure - sell_pressure) * volume_1w
+    cvd = np.cumsum(cvd_change)
     
-    # Get daily data for Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Weekly CVD trend: slope over 4 weeks
+    cvd_slope = np.full_like(cvd, np.nan)
+    if len(cvd) >= 4:
+        for i in range(3, len(cvd)):
+            cvd_slope[i] = (cvd[i] - cvd[i-3]) / 3.0
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    cvd_slope_aligned = align_htf_to_ltf(prices, df_1w, cvd_slope)
     
-    # Previous day's values for Camarilla calculation
-    ph = np.concatenate([[high_1d[0]], high_1d[:-1]])  # previous high
-    pl = np.concatenate([[low_1d[0]], low_1d[:-1]])   # previous low
-    pc = np.concatenate([[close_1d[0]], close_1d[:-1]]) # previous close
+    # Get daily data for entry signals
+    # ADX for trend strength filter
+    # Calculate +DM, -DM, TR
+    high_low = high - low
+    high_prev_close = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
+    low_prev_close = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
+    tr = np.maximum(high_low, np.maximum(high_prev_close, low_prev_close))
     
-    # Calculate Camarilla levels (R1, S1 are the key breakout levels)
-    rang = ph - pl
-    r1 = pc + 1.1 * rang * 1.0833  # R1 = Close + 1.1 * (High-Low) * 1.0833
-    s1 = pc - 1.1 * rang * 1.0833  # S1 = Close - 1.1 * (High-Low) * 1.0833
+    plus_dm = np.where((high - np.concatenate([[high[0]], high[:-1]])) > 
+                       (np.concatenate([[low[0]], low[:-1]]) - low), 
+                       np.maximum(high - np.concatenate([[high[0]], high[:-1]]), 0), 0)
+    minus_dm = np.where((np.concatenate([[low[0]], low[:-1]]) - low) > 
+                        (high - np.concatenate([[high[0]], high[:-1]])), 
+                        np.maximum(np.concatenate([[low[0]], low[:-1]]) - low, 0), 0)
     
-    # Align Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Smooth with Wilder's smoothing (equivalent to EMA with alpha=1/period)
+    def wilders_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            # First value is simple average
+            result[period-1] = np.mean(data[0:period])
+            # Wilder's smoothing: today's value = (previous * (period-1) + current) / period
+            for i in range(period, len(data)):
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
     
-    # Volume spike filter: current volume / 20-period average volume
-    vol_ma = np.full_like(volume, np.nan)
-    if len(volume) >= 20:
-        vol_ma[19] = np.mean(volume[0:20])
-        for i in range(20, len(volume)):
-            vol_ma[i] = (vol_ma[i-1] * 19 + volume[i]) / 20
+    tr14 = wilders_smooth(tr, 14)
+    plus_dm14 = wilders_smooth(plus_dm, 14)
+    minus_dm14 = wilders_smooth(minus_dm, 14)
     
-    volume_ratio = np.full_like(volume, np.nan)
-    valid = (~np.isnan(vol_ma)) & (vol_ma != 0)
-    volume_ratio[valid] = volume[valid] / vol_ma[valid]
+    # Avoid division by zero
+    plus_di14 = np.where(tr14 != 0, 100 * plus_dm14 / tr14, 0)
+    minus_di14 = np.where(tr14 != 0, 100 * minus_dm14 / tr14, 0)
+    dx = np.where((plus_di14 + minus_di14) != 0, 
+                  100 * np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14), 0)
+    adx = wilders_smooth(dx, 14)
+    
+    # Daily pullback identification: price near recent swing points
+    # For uptrend: look for pullbacks to recent lows
+    # For downtrend: look for bounces to recent highs
+    lookback = 10
+    highest_high = np.full_like(high, np.nan)
+    lowest_low = np.full_like(low, np.nan)
+    
+    for i in range(lookback, n):
+        highest_high[i] = np.max(high[i-lookback:i])
+        lowest_low[i] = np.min(low[i-lookback:i])
+    
+    # Pullback conditions
+    # In uptrend (ADX rising and +DI > -DI): buy near recent lows
+    # In downtrend (ADX rising and -DI > +DI): sell near recent highs
+    pullback_long = np.zeros(n, dtype=bool)
+    pullback_short = np.zeros(n, dtype=bool)
+    
+    for i in range(lookback, n):
+        if not np.isnan(adx[i]) and adx[i] > 25:
+            # Uptrend: +DI > -DI
+            if plus_di14[i] > minus_di14[i]:
+                # Pullback: price near recent low (within 1.5% of lowest low)
+                if low[i] <= lowest_low[i] * 1.015:
+                    pullback_long[i] = True
+            # Downtrend: -DI > +DI
+            elif minus_di14[i] > plus_di14[i]:
+                # Bounce: price near recent high (within 1.5% of highest high)
+                if high[i] >= highest_high[i] * 0.985:
+                    pullback_short[i] = True
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_entry = 0
     
-    start_idx = max(20, 50)  # Ensure volume MA and EMA are ready
+    # Start after indicators are ready
+    start_idx = max(lookback, 30)  # Need ADX and CVD slope ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_ratio[i])):
+        if np.isnan(cvd_slope_aligned[i]) or np.isnan(adx[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             continue
         
-        bars_since_entry += 1
-        
         if position == 0:
-            # Enter long: price breaks above R1 AND uptrend (price > EMA50) AND volume spike
-            if (close[i] > r1_aligned[i] and 
-                close[i] > ema_50_12h_aligned[i] and 
-                volume_ratio[i] > 2.0):
+            # Enter long: weekly CVD bullish (positive slope) AND daily pullback long signal
+            if cvd_slope_aligned[i] > 0 and pullback_long[i]:
                 signals[i] = 0.25
                 position = 1
-                bars_since_entry = 0
-            # Enter short: price breaks below S1 AND downtrend (price < EMA50) AND volume spike
-            elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema_50_12h_aligned[i] and 
-                  volume_ratio[i] > 2.0):
+            # Enter short: weekly CVD bearish (negative slope) AND daily pullback short signal
+            elif cvd_slope_aligned[i] < 0 and pullback_short[i]:
                 signals[i] = -0.25
                 position = -1
-                bars_since_entry = 0
         
         elif position == 1:
-            # Minimum holding period: 5 bars
-            if bars_since_entry < 5:
-                signals[i] = 0.25
+            # Exit long: weekly CVD turns bearish OR price breaks above recent high (momentum exhaustion)
+            if cvd_slope_aligned[i] < 0 or (not np.isnan(highest_high[i]) and high[i] >= highest_high[i]):
+                signals[i] = 0.0
+                position = 0
             else:
-                # Exit long: price breaks below S1 OR trend reversal (price < EMA50)
-                if close[i] < s1_aligned[i] or close[i] < ema_50_12h_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                    bars_since_entry = 0
-                else:
-                    signals[i] = 0.25
+                signals[i] = 0.25
         
         elif position == -1:
-            # Minimum holding period: 5 bars
-            if bars_since_entry < 5:
-                signals[i] = -0.25
+            # Exit short: weekly CVD turns bullish OR price breaks below recent low
+            if cvd_slope_aligned[i] > 0 or (not np.isnan(lowest_low[i]) and low[i] <= lowest_low[i]):
+                signals[i] = 0.0
+                position = 0
             else:
-                # Exit short: price breaks above R1 OR trend reversal (price > EMA50)
-                if close[i] > r1_aligned[i] or close[i] > ema_50_12h_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                    bars_since_entry = 0
-                else:
-                    signals[i] = -0.25
+                signals[i] = -0.25
     
     return signals
