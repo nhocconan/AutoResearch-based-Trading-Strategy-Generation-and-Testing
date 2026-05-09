@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 1D_KAMA_Trend_RSI_Extremes_ChopFilter_v2
-# Hypothesis: Daily KAMA trend direction combined with RSI extremes and Choppiness regime filter.
-# Works in bull/bear: KAMA adapts to trend strength, RSI extremes signal mean reversion opportunities,
-# Choppiness filter avoids whipsaws in ranging markets. Uses 1h timeframe for entry timing.
+# 4h_KAMA_Trend_RSI_Extremes_ChopFilter_v2
+# Hypothesis: KAMA trend direction combined with RSI extremes and Choppiness index regime filter.
+# Works in bull/bear: KAMA adapts to market noise, RSI catches overextended moves, Choppiness filter avoids whipsaws in ranging markets.
+# Uses 1d Choppiness index for regime detection (trending when < 38.2, ranging when > 61.8) and enters only in trending regimes.
+# Position size: 0.25 for clear signals.
 
-name = "1D_KAMA_Trend_RSI_Extremes_ChopFilter_v2"
-timeframe = "1h"
+name = "4h_KAMA_Trend_RSI_Extremes_ChopFilter_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,143 +23,146 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d KAMA for trend direction
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
-    
-    close_1d = df_1d['close'].values
-    kama_1d = np.full_like(close_1d, np.nan)
-    
-    # KAMA parameters
-    er_period = 10
-    fast_sc = 2 / (2 + 1)  # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    
-    if len(close_1d) >= er_period:
-        # Calculate Efficiency Ratio
-        change = np.abs(np.diff(close_1d, n=er_period))
-        volatility = np.sum(np.abs(np.diff(close_1d)), axis=0) if len(close_1d) > 1 else 0
-        er = np.zeros_like(close_1d)
-        for i in range(er_period, len(close_1d)):
-            price_change = np.abs(close_1d[i] - close_1d[i-er_period])
-            price_volatility = np.sum(np.abs(np.diff(close_1d[i-er_period:i+1])))
-            if price_volatility > 0:
-                er[i] = price_change / price_volatility
+    # Calculate KAMA (Kaufman Adaptive Moving Average)
+    def calculate_kama(close_prices, length=10, fast=2, slow=30):
+        # Efficiency Ratio
+        change = np.abs(np.diff(close_prices, prepend=close_prices[0]))
+        volatility = np.sum(np.abs(np.diff(close_prices)), axis=0)
+        # Handle first element
+        er = np.zeros_like(close_prices)
+        er[0] = 0
+        for i in range(1, len(close_prices)):
+            if volatility[i] != 0:
+                er[i] = change[i] / volatility[i]
             else:
                 er[i] = 0
         
-        # Smoothing constant
-        sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+        # Smoothing Constant
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        sc[0] = 0
         
-        # Initialize KAMA
-        kama_1d[er_period] = close_1d[er_period]
-        for i in range(er_period + 1, len(close_1d)):
-            kama_1d[i] = kama_1d[i-1] + sc[i] * (close_1d[i] - kama_1d[i-1])
+        # KAMA
+        kama = np.zeros_like(close_prices)
+        kama[0] = close_prices[0]
+        for i in range(1, len(close_prices)):
+            kama[i] = kama[i-1] + sc[i] * (close_prices[i] - kama[i-1])
+        return kama
     
-    # Align KAMA to 1h timeframe
-    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
+    # Calculate RSI
+    def calculate_rsi(close_prices, length=14):
+        delta = np.diff(close_prices, prepend=close_prices[0])
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.zeros_like(close_prices)
+        avg_loss = np.zeros_like(close_prices)
+        
+        # First average
+        if len(close_prices) >= length:
+            avg_gain[length-1] = np.mean(gain[0:length])
+            avg_loss[length-1] = np.mean(loss[0:length])
+        
+        # Wilder smoothing
+        for i in range(length, len(close_prices)):
+            avg_gain[i] = (avg_gain[i-1] * (length-1) + gain[i]) / length
+            avg_loss[i] = (avg_loss[i-1] * (length-1) + loss[i]) / length
+        
+        rs = np.zeros_like(close_prices)
+        rs[avg_loss != 0] = avg_gain[avg_loss != 0] / avg_loss[avg_loss != 0]
+        rsi = 100 - (100 / (1 + rs))
+        rsi[avg_loss == 0] = 100
+        return rsi
     
-    # Calculate 1h RSI
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate Choppiness Index
+    def calculate_chop(high_prices, low_prices, close_prices, length=14):
+        atr = np.zeros_like(close_prices)
+        tr1 = np.abs(high_prices - low_prices)
+        tr2 = np.abs(high_prices - np.roll(close_prices, 1))
+        tr3 = np.abs(low_prices - np.roll(close_prices, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]  # First true range
+        
+        # ATR calculation
+        atr[length-1] = np.mean(tr[0:length])
+        for i in range(length, len(close_prices)):
+            atr[i] = (atr[i-1] * (length-1) + tr[i]) / length
+        
+        # Highest high and lowest low over period
+        highest_high = np.zeros_like(close_prices)
+        lowest_low = np.zeros_like(close_prices)
+        for i in range(length-1, len(close_prices)):
+            highest_high[i] = np.max(high_prices[i-length+1:i+1])
+            lowest_low[i] = np.min(low_prices[i-length+1:i+1])
+        
+        # Chop calculation
+        chop = np.zeros_like(close_prices)
+        for i in range(length-1, len(close_prices)):
+            if highest_high[i] != lowest_low[i]:
+                log_sum = np.sum(np.log10(atr[i-length+1:i+1] / (highest_high[i] - lowest_low[i])))
+                chop[i] = 100 * log_sum / np.log10(length)
+            else:
+                chop[i] = 50
+        return chop
     
-    rsi_period = 14
-    avg_gain = np.full_like(close, np.nan)
-    avg_loss = np.full_like(close, np.nan)
+    # Calculate indicators
+    kama = calculate_kama(close, length=10, fast=2, slow=30)
+    rsi = calculate_rsi(close, length=14)
     
-    if len(close) >= rsi_period:
-        avg_gain[rsi_period-1] = np.mean(gain[0:rsi_period])
-        avg_loss[rsi_period-1] = np.mean(loss[0:rsi_period])
-        for i in range(rsi_period, len(close)):
-            avg_gain[i] = (avg_gain[i-1] * (rsi_period-1) + gain[i]) / rsi_period
-            avg_loss[i] = (avg_loss[i-1] * (rsi_period-1) + loss[i]) / rsi_period
+    # Get 1d data for Choppiness index
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(close, np.nan), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1d Choppiness Index
-    atr_period = 14
-    high_low = np.maximum(high, np.roll(high, 1))
-    high_low[0] = high[0]
-    low_close = np.minimum(low, np.roll(close, 1))
-    low_close[0] = low[0]
-    tr = np.maximum(high_low - low_close, np.roll(high_low - low_close, 1))
-    tr[0] = high[0] - low[0]
-    
-    atr = np.full_like(close, np.nan)
-    if len(tr) >= atr_period:
-        atr[atr_period-1] = np.mean(tr[0:atr_period])
-        for i in range(atr_period, len(tr)):
-            atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
-    
-    # Calculate rolling max/min for Chop
-    max_high = np.full_like(high, np.nan)
-    min_low = np.full_like(low, np.nan)
-    
-    chop_period = 14
-    if len(high) >= chop_period:
-        for i in range(chop_period-1, len(high)):
-            max_high[i] = np.max(high[i-chop_period+1:i+1])
-            min_low[i] = np.min(low[i-chop_period+1:i+1])
-    
-    # Chop calculation
-    sum_tr = np.full_like(close, np.nan)
-    if len(tr) >= chop_period:
-        sum_tr[chop_period-1] = np.sum(tr[0:chop_period])
-        for i in range(chop_period, len(tr)):
-            sum_tr[i] = sum_tr[i-1] - tr[i-chop_period] + tr[i]
-    
-    chop = np.full_like(close, 50.0)
-    valid = (~np.isnan(sum_tr)) & (~np.isnan(max_high)) & (~np.isnan(min_low)) & ((max_high - min_low) > 0)
-    chop[valid] = 100 * np.log10(sum_tr[valid] / (max_high[valid] - min_low[valid])) / np.log10(chop_period)
-    
-    # Align Chop to 1h timeframe
-    chop_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high, 'low': low, 'close': close}), chop)
+    chop = calculate_chop(high_1d, low_1d, close_1d, length=14)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, rsi_period, chop_period)  # Ensure all indicators are ready
+    start_idx = max(30, 14)  # Ensure KAMA, RSI and Chop are ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(kama_1d_aligned[i]) or np.isnan(rsi[i]) or np.isnan(chop_aligned[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or 
+            np.isnan(chop_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price above KAMA (uptrend) AND RSI oversold AND chop > 61.8 (ranging)
-            if (close[i] > kama_1d_aligned[i] and 
+            # Enter long: price above KAMA AND RSI < 30 (oversold) AND trending market (CHOP < 38.2)
+            if (close[i] > kama[i] and 
                 rsi[i] < 30 and 
-                chop_aligned[i] > 61.8):
+                chop_aligned[i] < 38.2):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price below KAMA (downtrend) AND RSI overbought AND chop > 61.8 (ranging)
-            elif (close[i] < kama_1d_aligned[i] and 
+            # Enter short: price below KAMA AND RSI > 70 (overbought) AND trending market (CHOP < 38.2)
+            elif (close[i] < kama[i] and 
                   rsi[i] > 70 and 
-                  chop_aligned[i] > 61.8):
+                  chop_aligned[i] < 38.2):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: RSI overbought OR chop < 38.2 (trending) OR price crosses below KAMA
-            if (rsi[i] > 70 or 
-                chop_aligned[i] < 38.2 or 
-                close[i] < kama_1d_aligned[i]):
+            # Exit long: price below KAMA OR RSI > 70 (overbought) OR ranging market (CHOP > 61.8)
+            if (close[i] < kama[i] or 
+                rsi[i] > 70 or 
+                chop_aligned[i] > 61.8):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI oversold OR chop < 38.2 (trending) OR price crosses above KAMA
-            if (rsi[i] < 30 or 
-                chop_aligned[i] < 38.2 or 
-                close[i] > kama_1d_aligned[i]):
+            # Exit short: price above KAMA OR RSI < 30 (oversold) OR ranging market (CHOP > 61.8)
+            if (close[i] > kama[i] or 
+                rsi[i] < 30 or 
+                chop_aligned[i] > 61.8):
                 signals[i] = 0.0
                 position = 0
             else:
