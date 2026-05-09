@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike
-# Hypothesis: 12h timeframe with Camarilla R1/S1 breakout, filtered by 1-day EMA34 trend and volume spike.
-# Uses tighter entry (R1/S1 instead of R3/S3) to capture more meaningful breakouts while maintaining low trade frequency.
-# EMA34 trend filter avoids counter-trend trades, volume spike confirms breakout strength.
-# Designed to work in both bull and bear markets by following the higher timeframe trend.
+# 1D_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike
+# Hypothesis: Daily timeframe strategy using weekly Camarilla R3/S3 breakouts with weekly EMA trend filter and volume spike confirmation.
+# Works in bull/bear: Weekly trend filter avoids counter-trend trades, volume confirms breakout strength.
+# Weekly timeframe provides stable levels, reducing whipsaw in ranging markets. Targets 15-25 trades/year.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike"
-timezone = None
-timeframe = "12h"
+name = "1D_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -24,37 +22,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculation and EMA
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for Camarilla calculation and EMA
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Previous day's values for Camarilla calculation
-    ph = np.concatenate([[high_1d[0]], high_1d[:-1]])  # previous high
-    pl = np.concatenate([[low_1d[0]], low_1d[:-1]])   # previous low
-    pc = np.concatenate([[close_1d[0]], close_1d[:-1]]) # previous close
+    # Previous week's values for Camarilla calculation
+    ph = np.concatenate([[high_1w[0]], high_1w[:-1]])  # previous high
+    pl = np.concatenate([[low_1w[0]], low_1w[:-1]])   # previous low
+    pc = np.concatenate([[close_1w[0]], close_1w[:-1]]) # previous close
     
-    # Calculate Camarilla levels (R1, S1 are the key breakout levels)
+    # Calculate Camarilla levels (R3, S3 are the key breakout levels)
     rang = ph - pl
-    r1 = pc + 1.1 * rang * 1.0833  # R1 = Close + 1.1 * (High-Low) * 1.0833
-    s1 = pc - 1.1 * rang * 1.0833  # S1 = Close - 1.1 * (High-Low) * 1.0833
+    r3 = pc + 1.1 * rang * 1.1666  # R3 = Close + 1.1 * (High-Low) * 1.1666
+    s3 = pc - 1.1 * rang * 1.1666  # S3 = Close - 1.1 * (High-Low) * 1.1666
     
-    # Align Camarilla levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Align Camarilla levels to daily timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 34:
-        ema_34_1d[33] = np.mean(close_1d[0:34])
-        for i in range(34, len(close_1d)):
-            ema_34_1d[i] = (ema_34_1d[i-1] * 33 + close_1d[i]) / 34
+    # Calculate weekly EMA34 for trend filter
+    ema_34_1w = np.full_like(close_1w, np.nan)
+    if len(close_1w) >= 34:
+        ema_34_1w[33] = np.mean(close_1w[0:34])
+        for i in range(34, len(close_1w)):
+            ema_34_1w[i] = (ema_34_1w[i-1] * 33 + close_1w[i]) / 34
     
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     # Volume spike filter: current volume / 20-period average volume
     vol_ma = np.full_like(volume, np.nan)
@@ -74,38 +72,38 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_34_1w_aligned[i]) or np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above R1 AND uptrend (price > EMA34) AND volume spike
-            if (close[i] > r1_aligned[i] and 
-                close[i] > ema_34_1d_aligned[i] and 
+            # Enter long: price breaks above R3 AND uptrend (price > EMA34) AND volume spike
+            if (close[i] > r3_aligned[i] and 
+                close[i] > ema_34_1w_aligned[i] and 
                 volume_ratio[i] > 2.0):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S1 AND downtrend (price < EMA34) AND volume spike
-            elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema_34_1d_aligned[i] and 
+            # Enter short: price breaks below S3 AND downtrend (price < EMA34) AND volume spike
+            elif (close[i] < s3_aligned[i] and 
+                  close[i] < ema_34_1w_aligned[i] and 
                   volume_ratio[i] > 2.0):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below S1 OR trend reversal (price < EMA34)
-            if close[i] < s1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            # Exit long: price breaks below S3 OR trend reversal (price < EMA34)
+            if close[i] < s3_aligned[i] or close[i] < ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above R1 OR trend reversal (price > EMA34)
-            if close[i] > r1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            # Exit short: price breaks above R3 OR trend reversal (price > EMA34)
+            if close[i] > r3_aligned[i] or close[i] > ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
