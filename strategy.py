@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h1d_Trend_Follow_With_Volume_Confirmation"
-timeframe = "1h"
+name = "6h_WeeklyPivot_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,39 +17,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Pre-compute hours for session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    # Daily pivot levels (from previous day's OHLC)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
     
-    # 4h trend: EMA20
-    df_4h = get_htf_data(prices, '4h')
-    ema20_4h = pd.Series(df_4h['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
+    pivot = (prev_high + prev_low + prev_close) / 3
+    r1 = 2 * pivot - prev_low
+    s1 = 2 * pivot - prev_high
+    r2 = pivot + (prev_high - prev_low)
+    s2 = pivot - (prev_high - prev_low)
+    r3 = prev_high + 2 * (pivot - prev_low)
+    s3 = prev_low - 2 * (prev_high - pivot)
+    r4 = prev_high + 3 * (pivot - prev_low)
+    s4 = prev_low - 3 * (prev_high - pivot)
     
-    # 1d trend filter: EMA50
-    df_1d = get_htf_data(prices, '1d')
-    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Weekly trend: EMA34 on 1w
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
+        return np.zeros(n)
+    ema34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # 1h volume filter: volume > 1.5 * 20-period SMA of volume
-    vol_sma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > 1.5 * vol_sma20
+    # Volume filter: volume > 1.5x 20-period SMA
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > 1.5 * vol_ma20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # enough for EMA50 on 1d
+    start_idx = 50
     
     for i in range(start_idx, n):
-        # Session filter: only trade 08-20 UTC
-        if not (8 <= hours[i] <= 20):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
         # Skip if required data unavailable
-        if np.isnan(ema20_4h_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or \
-           np.isnan(vol_sma20[i]):
+        if np.isnan(pivot[i]) or np.isnan(r4[i]) or np.isnan(s4[i]) or \
+           np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -58,38 +63,38 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: price above 4h EMA20 and 1d EMA50 + volume confirmation
-            if (price > ema20_4h_aligned[i] and
-                price > ema50_1d_aligned[i] and
+            # Long: breakout above R4 with weekly uptrend and volume
+            if (price > r4[i] and 
+                price > ema34_1w_aligned[i] and 
                 vol_filter[i]):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
                 continue
             
-            # Short: price below 4h EMA20 and 1d EMA50 + volume confirmation
-            elif (price < ema20_4h_aligned[i] and
-                  price < ema50_1d_aligned[i] and
+            # Short: breakdown below S4 with weekly downtrend and volume
+            elif (price < s4[i] and 
+                  price < ema34_1w_aligned[i] and 
                   vol_filter[i]):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
                 continue
         
         elif position == 1:
-            # Exit long: price below 4h EMA20 or 1d EMA50
-            if (price < ema20_4h_aligned[i] or
-                price < ema50_1d_aligned[i]):
+            # Exit long: price returns to pivot or weekly trend fails
+            if (price < pivot[i] or 
+                price < ema34_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price above 4h EMA20 or 1d EMA50
-            if (price > ema20_4h_aligned[i] or
-                price > ema50_1d_aligned[i]):
+            # Exit short: price returns to pivot or weekly trend fails
+            if (price > pivot[i] or 
+                price > ema34_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
