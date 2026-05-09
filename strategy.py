@@ -1,17 +1,9 @@
-# 4h_Combined_Pattern_Plus_Volume_20250524
-# Hypothesis: Combines volume spike, price action near support/resistance, and trend alignment.
-# Uses 4h timeframe with 1d HTF for trend filter. Designed for low trade frequency and robustness in both bull and bear markets.
-# Entry: Long when price is near support, volume spikes, and above 1d EMA50 trend.
-# Exit: Short when price is near resistance, volume spikes, and below 1d EMA50 trend.
-# Position sizing: 0.25 for clear signals, 0.0 otherwise.
-# Risk managed by holding period and mean-reversion logic.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
-from mtd_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Combined_Pattern_Plus_Volume_20250524"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,65 +17,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 1d EMA50 for trend filter
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_4h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Previous day's close for Camarilla calculation
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Volume filter: current 4h volume > 2.0 * 20-period average
+    # Calculate Camarilla levels (R3, S3)
+    r3 = prev_close + 1.1 * (prev_high - prev_low) / 2
+    s3 = prev_close - 1.1 * (prev_high - prev_low) / 2
+    
+    # Align to 4h
+    r3_4h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_4h = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Trend filter: 1d EMA34
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_4h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Volume filter: current 4h volume > 1.8 * 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 2.0)
-    
-    # Support and resistance: 20-period high and low
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    resistance = high_series.rolling(window=20, min_periods=20).max().values
-    support = low_series.rolling(window=20, min_periods=20).min().values
+    volume_filter = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 20  # Need enough data for support/resistance and volume MA
+    start_idx = max(20, 34)  # Need enough data for volume MA and EMA34
     
     for i in range(start_idx, n):
-        if (np.isnan(ema50_1d_4h[i]) or np.isnan(volume_filter[i]) or
-            np.isnan(resistance[i]) or np.isnan(support[i])):
+        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or
+            np.isnan(ema34_1d_4h[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        trend = ema50_1d_4h[i]
+        r3_val = r3_4h[i]
+        s3_val = s3_4h[i]
+        trend = ema34_1d_4h[i]
         vol_filter = volume_filter[i]
-        res = resistance[i]
-        sup = support[i]
         
         if position == 0:
-            # Enter long: price near support, volume spike, above trend
-            if close[i] <= sup * 1.02 and close[i] >= sup * 0.98 and vol_filter and close[i] > trend:
+            # Enter long: break above R3 with volume and above trend
+            if close[i] > r3_val and close[i] > trend and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price near resistance, volume spike, below trend
-            elif close[i] >= res * 0.98 and close[i] <= res * 1.02 and vol_filter and close[i] < trend:
+            # Enter short: break below S3 with volume and below trend
+            elif close[i] < s3_val and close[i] < trend and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price near resistance or trend breaks down
-            if close[i] >= res * 0.98:
+            # Exit long: close below S3 (mean reversion to center)
+            if close[i] < s3_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price near support or trend breaks up
-            if close[i] <= sup * 1.02:
+            # Exit short: close above R3 (mean reversion to center)
+            if close[i] > r3_val:
                 signals[i] = 0.0
                 position = 0
             else:
