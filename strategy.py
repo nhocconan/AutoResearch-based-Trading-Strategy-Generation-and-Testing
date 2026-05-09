@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h timeframe with weekly Donchian breakout and daily trend filter.
-# Uses weekly Donchian channel (20-period) for breakout entries and daily EMA34 for trend filter.
-# Weekly Donchian provides robust breakout levels that capture momentum in both bull and bear markets.
-# Daily trend filter reduces whipsaw by only allowing trades in direction of higher timeframe trend.
-# Volume confirmation ensures breakouts are supported by participation.
-# Target: 50-150 total trades over 4 years (12-37/year) with size 0.25.
+# Hypothesis: 4h timeframe with daily Bollinger Band breakout and 1w trend filter.
+# Uses daily Bollinger Bands (20,2) for mean-reversion entries and weekly EMA50 for trend filter.
+# In bull markets, buy dips below lower BB in uptrend; in bear markets, sell rallies above upper BB in downtrend.
+# Weekly trend filter reduces whipsaw by aligning with higher timeframe direction.
+# Target: 80-180 total trades over 4 years (20-45/year) with size 0.25.
 
-name = "6h_Donchian_20_1wTrend_DailyEMA34_Volume"
-timeframe = "6h"
+name = "4h_Bollinger_MeanReversion_1wEMA50_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,51 +23,41 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Donchian channel (20-period)
+    # Calculate daily Bollinger Bands (20,2)
+    close_series = pd.Series(close)
+    bb_middle = close_series.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_series.rolling(window=20, min_periods=20).std().values
+    bb_lower = bb_middle - 2 * bb_std
+    bb_upper = bb_middle + 2 * bb_std
+    
+    # Mean-reversion conditions: price touches or crosses Bollinger Bands
+    bb_lower_touch = close <= bb_lower
+    bb_upper_touch = close >= bb_upper
+    
+    # Get weekly data for EMA50 trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate weekly Donchian channel (20-period high/low)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Calculate 1w EMA50 trend filter
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # 20-period rolling max/min for Donchian
-    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    trend_up = close > ema_50_1w_aligned
+    trend_down = close < ema_50_1w_aligned
     
-    # Align to 6h timeframe (wait for weekly bar to close)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
-    
-    # Breakout conditions: price must close beyond the weekly Donchian levels
-    breakout_up = close > donchian_high_aligned
-    breakout_down = close < donchian_low_aligned
-    
-    # Get daily data for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
-        return np.zeros(n)
-    
-    # Calculate 1d EMA34 trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    trend_up = close > ema_34_1d_aligned
-    trend_down = close < ema_34_1d_aligned
-    
-    # Volume filter: current volume > 1.5x 20-period average volume
+    # Volume filter: current volume > 1.5x 20-period average volume (moderate to avoid overtrading)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * avg_volume)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Need enough data for indicators
+    start_idx = 50  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(breakout_up[i]) or np.isnan(breakout_down[i]) or
+        if (np.isnan(bb_lower_touch[i]) or np.isnan(bb_upper_touch[i]) or
             np.isnan(trend_up[i]) or np.isnan(trend_down[i]) or
             np.isnan(volume_filter[i])):
             if position != 0:
@@ -77,26 +66,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: breakout above weekly Donchian high + daily uptrend + volume filter
-            if breakout_up[i] and trend_up[i] and volume_filter[i]:
+            # Long: price touches/below lower BB + weekly uptrend + volume filter
+            if bb_lower_touch[i] and trend_up[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below weekly Donchian low + daily downtrend + volume filter
-            elif breakout_down[i] and trend_down[i] and volume_filter[i]:
+            # Short: price touches/above upper BB + weekly downtrend + volume filter
+            elif bb_upper_touch[i] and trend_down[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to weekly Donchian low or trend reversal
-            if close[i] <= donchian_low_aligned[i] or not trend_up[i]:
+            # Exit long: price returns to middle BB or trend reversal
+            if close[i] >= bb_middle[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to weekly Donchian high or trend reversal
-            if close[i] >= donchian_high_aligned[i] or not trend_down[i]:
+            # Exit short: price returns to middle BB or trend reversal
+            if close[i] <= bb_middle[i] or not trend_down[i]:
                 signals[i] = 0.0
                 position = 0
             else:
