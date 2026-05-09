@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12H_Daily_Camarilla_R3S3_Breakout_Trend_Volume"
-timeframe = "12h"
+name = "4H_Daily_Camarilla_R3S3_Breakout_Trend_Volume_v4"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -35,7 +35,7 @@ def generate_signals(prices):
     r3_1d = pivot_1d + (range_1d * 1.1 / 2)
     s3_1d = pivot_1d - (range_1d * 1.1 / 2)
     
-    # Align to 12h
+    # Align to 4h
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
@@ -64,11 +64,11 @@ def generate_signals(prices):
         if position == 0:
             # Enter long: price breaks above R3 + above daily EMA34 + volume confirmation
             if close[i] > r3_aligned[i] and close[i] > ema34_aligned[i] and volume_confirm[i]:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             # Enter short: price breaks below S3 + below daily EMA34 + volume confirmation
             elif close[i] < s3_aligned[i] and close[i] < ema34_aligned[i] and volume_confirm[i]:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         
         elif position == 1:
@@ -77,7 +77,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
             # Exit short: price above daily EMA34 (trend change)
@@ -85,6 +85,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
