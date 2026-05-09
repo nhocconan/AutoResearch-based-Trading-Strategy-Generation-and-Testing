@@ -3,16 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI mean reversion with 4h trend filter and volume confirmation.
-# Uses 1h RSI for entry timing (overbought/oversold) in direction of 4h EMA trend.
-# Long when RSI < 30 and price > 4h EMA200 with volume confirmation.
-# Short when RSI > 70 and price < 4h EMA200 with volume confirmation.
-# Designed to capture mean reversion in ranging markets while respecting higher timeframe trend.
-# Session filter (08-20 UTC) reduces noise and improves win rate.
-# Target: 15-37 trades/year per symbol to avoid fee drag.
-
-name = "1h_RSI_4hEMA_Trend_Volume_Session"
-timeframe = "1h"
+# Hypothesis: 6h Camarilla pivot breakout from daily levels with volume confirmation.
+# Uses daily Camarilla levels (R3/S3 breakout for continuation, R4/S4 for reversal)
+# to capture intraday momentum in both trending and ranging markets.
+# Volume filter ensures breakouts have conviction. Designed for 60-100 trades/year.
+name = "6h_Camarilla_R3S4_Breakout_DailyTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,79 +21,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Daily data for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 1h RSI (14-period)
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate daily Camarilla levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
+    # Camarilla formulas
+    R4 = close_1d + ((high_1d - low_1d) * 1.1 / 2)
+    R3 = close_1d + ((high_1d - low_1d) * 1.1 / 4)
+    S3 = close_1d - ((high_1d - low_1d) * 1.1 / 4)
+    S4 = close_1d - ((high_1d - low_1d) * 1.1 / 2)
     
-    for i in range(14, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # Align to 6t
+    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
     
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # 4h EMA200 trend filter
-    ema_4h = pd.Series(df_4h['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Daily trend filter: EMA34
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume confirmation: volume > 1.5x 20-period EMA
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     vol_confirm = volume > (1.5 * vol_ema20)
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 200)  # Ensure enough data for indicators
+    start_idx = max(34, 20)  # Ensure enough data
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if (np.isnan(rsi[i]) or np.isnan(ema_4h_aligned[i]) or np.isnan(vol_ema20[i])):
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
+            np.isnan(R4_aligned[i]) or np.isnan(S4_aligned[i]) or
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ema20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        price = close[i]
+        
         if position == 0:
-            # Long: RSI oversold (<30) + price above 4h EMA200 + volume + session
-            if (rsi[i] < 30 and close[i] > ema_4h_aligned[i] and 
-                vol_confirm[i] and session_filter[i]):
-                signals[i] = 0.20
-                position = 1
-            # Short: RSI overbought (>70) + price below 4h EMA200 + volume + session
-            elif (rsi[i] > 70 and close[i] < ema_4h_aligned[i] and 
-                  vol_confirm[i] and session_filter[i]):
-                signals[i] = -0.20
-                position = -1
+            # Long breakout: price > R3 with volume and above daily EMA34
+            if price > R3_aligned[i] and vol_confirm[i] and price > ema_34_aligned[i]:
+                # Strong breakout: reverse at R4
+                if price >= R4_aligned[i]:
+                    signals[i] = -0.25  # short reversal at R4
+                    position = -1
+                else:
+                    signals[i] = 0.25   # continue long
+                    position = 1
+            # Short breakdown: price < S3 with volume and below daily EMA34
+            elif price < S3_aligned[i] and vol_confirm[i] and price < ema_34_aligned[i]:
+                # Strong breakdown: reverse at S4
+                if price <= S4_aligned[i]:
+                    signals[i] = 0.25   # long reversal at S4
+                    position = 1
+                else:
+                    signals[i] = -0.25  # continue short
+                    position = -1
         
         elif position == 1:
-            # Exit long: RSI > 50 (mean reversion complete) or price below 4h EMA200
-            if rsi[i] > 50 or close[i] < ema_4h_aligned[i]:
+            # Exit long: price < R3 or strong reversal at R4
+            if price < R3_aligned[i] or price >= R4_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI < 50 (mean reversion complete) or price above 4h EMA200
-            if rsi[i] < 50 or close[i] > ema_4h_aligned[i]:
+            # Exit short: price > S3 or strong reversal at S4
+            if price > S3_aligned[i] or price <= S4_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
