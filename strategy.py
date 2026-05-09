@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
-"""
-6h_LongTermTrend_WeeklyPivot_Breakout
-Hypothesis: Use weekly pivot points (from 1w data) to define major support/resistance zones.
-            Enter long when price breaks above weekly R3 with 6h EMA(20) uptrend and volume spike.
-            Enter short when price breaks below weekly S3 with 6h EMA(20) downtrend and volume spike.
-            Exit when price crosses weekly pivot point (mean of R3/S3) or EMA trend flips.
-            Weekly pivot provides structural levels that work in both trending and ranging markets.
-            EMA(20) filters for trend alignment, volume spike confirms breakout strength.
-            Designed for 6h timeframe to capture multi-day moves with low frequency (~15-30 trades/year).
-"""
-name = "6h_LongTermTrend_WeeklyPivot_Breakout"
-timeframe = "6h"
+# Hypothesis: 12h 1-week Bollinger Band breakout with daily volume confirmation and 1-day trend filter
+# Long when: price > upper Bollinger Band (1-week, 20-period, 2 std dev), volume > 1.5x daily average, daily EMA(50) rising
+# Short when: price < lower Bollinger Band (1-week, 20-period, 2 std dev), volume > 1.5x daily average, daily EMA(50) falling
+# Exit when: price crosses back inside Bollinger Bands OR daily trend reverses
+# Position size: 0.25 (25% of capital) to limit drawdown
+# Target: 15-30 trades/year on 12h timeframe (60-120 total over 4 years)
+# Designed to capture strong momentum moves with volatility confirmation in both bull and bear markets
+
+name = "12h_BollingerBreakout_1wVolTrend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -27,79 +25,91 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation
+    # Get weekly data for Bollinger Bands
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate weekly pivot points (using prior week's HLC)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Calculate 1-week Bollinger Bands (20-period, 2 std dev)
     close_1w = df_1w['close'].values
+    bb_period = 20
+    bb_std = 2
     
-    # Weekly R3, S3, and pivot (central) levels
-    # Classic formula: R3 = Close + 1.1*(High - Low), S3 = Close - 1.1*(High - Low)
-    weekly_range = high_1w - low_1w
-    weekly_r3 = close_1w + (weekly_range * 1.1)
-    weekly_s3 = close_1w - (weekly_range * 1.1)
-    weekly_pivot = (weekly_r3 + weekly_s3) * 0.5  # midpoint
+    # Calculate rolling mean and std
+    bb_mean = pd.Series(close_1w).rolling(window=bb_period, min_periods=bb_period).mean().values
+    bb_std_dev = pd.Series(close_1w).rolling(window=bb_period, min_periods=bb_period).std().values
     
-    # Align weekly levels to 6h timeframe (use prior week's levels)
-    weekly_r3_aligned = align_htf_to_ltf(prices, df_1w, weekly_r3)
-    weekly_s3_aligned = align_htf_to_ltf(prices, df_1w, weekly_s3)
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    # Upper and lower bands
+    bb_upper = bb_mean + (bb_std * bb_std_dev)
+    bb_lower = bb_mean - (bb_std * bb_std_dev)
     
-    # 6h EMA(20) for trend filter
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_prev = np.roll(ema_20, 1)
-    ema_20_prev[0] = ema_20[0]
-    ema_rising = ema_20 > ema_20_prev
-    ema_falling = ema_20 < ema_20_prev
+    # Align weekly Bollinger Bands to 12h timeframe
+    bb_upper_aligned = align_htf_to_ltf(prices, df_1w, bb_upper)
+    bb_lower_aligned = align_htf_to_ltf(prices, df_1w, bb_lower)
     
-    # Volume spike: current volume > 2.0x 20-period average (strict to reduce trades)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    vol_spike = volume > (2.0 * vol_ma.values)
+    # Get daily data for volume and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    # Daily volume average (20-period)
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = vol_1d > (1.5 * vol_ma_1d)
+    
+    # Daily EMA(50) for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_prev = np.roll(ema_50_1d, 1)
+    ema_50_1d_prev[0] = ema_50_1d[0]
+    ema_rising_1d = ema_50_1d > ema_50_1d_prev
+    ema_falling_1d = ema_50_1d < ema_50_1d_prev
+    
+    # Align daily indicators to 12h timeframe
+    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
+    ema_rising_aligned = align_htf_to_ltf(prices, df_1d, ema_rising_1d)
+    ema_falling_aligned = align_htf_to_ltf(prices, df_1d, ema_falling_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for EMA and volume MA
+    start_idx = 50  # Need enough data for indicators
     
     for i in range(start_idx, n):
-        # Skip if any data not ready
-        if (np.isnan(weekly_r3_aligned[i]) or np.isnan(weekly_s3_aligned[i]) or
-            np.isnan(weekly_pivot_aligned[i]) or np.isnan(ema_rising[i]) or
-            np.isnan(ema_falling[i]) or np.isnan(vol_spike[i])):
+        # Skip if data not ready
+        if (np.isnan(bb_upper_aligned[i]) or np.isnan(bb_lower_aligned[i]) or
+            np.isnan(vol_spike_aligned[i]) or np.isnan(ema_rising_aligned[i]) or
+            np.isnan(ema_falling_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price > weekly R3 + EMA uptrend + volume spike
-            if (close[i] > weekly_r3_aligned[i] and 
-                ema_rising[i] and 
-                vol_spike[i]):
+            # Enter long: price > upper Bollinger Band + volume spike + daily EMA rising
+            if (close[i] > bb_upper_aligned[i] and 
+                vol_spike_aligned[i] and 
+                ema_rising_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price < weekly S3 + EMA downtrend + volume spike
-            elif (close[i] < weekly_s3_aligned[i] and 
-                  ema_falling[i] and 
-                  vol_spike[i]):
+            # Enter short: price < lower Bollinger Band + volume spike + daily EMA falling
+            elif (close[i] < bb_lower_aligned[i] and 
+                  vol_spike_aligned[i] and 
+                  ema_falling_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below weekly pivot OR EMA turns down
-            if (close[i] < weekly_pivot_aligned[i]) or (not ema_rising[i]):
+            # Exit long: price crosses below upper Bollinger Band OR daily trend turns down
+            if (close[i] < bb_upper_aligned[i]) or (not ema_rising_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above weekly pivot OR EMA turns up
-            if (close[i] > weekly_pivot_aligned[i]) or (not ema_falling[i]):
+            # Exit short: price crosses above lower Bollinger Band OR daily trend turns up
+            if (close[i] > bb_lower_aligned[i]) or (not ema_falling_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
