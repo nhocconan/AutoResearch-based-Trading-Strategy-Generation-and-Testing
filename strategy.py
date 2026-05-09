@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ElderRay_BullBearPower_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_1w_1d_PivotBreakout_VolumeTrend_v3"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,36 +17,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Elder Ray and trend filter
+    # Get weekly data for trend filter and pivot points
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # Get daily data for pivot calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Elder Ray (Bull/Bear Power) on daily
-    ema_13_1d = pd.Series(df_1d['close'].values).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power_1d = df_1d['high'].values - ema_13_1d
-    bear_power_1d = df_1d['low'].values - ema_13_1d
+    # Previous weekly bar's OHLC (for pivot calculation)
+    prev_high_1w = df_1w['high'].shift(1).values
+    prev_low_1w = df_1w['low'].shift(1).values
+    prev_close_1w = df_1w['close'].shift(1).values
     
-    # Align Elder Ray to 6h
-    bull_power_6h = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_6h = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    # Calculate weekly pivot and R1/S1 levels (inner bounds)
+    pivot_1w = (prev_high_1w + prev_low_1w + prev_close_1w) / 3
+    range_1w = prev_high_1w - prev_low_1w
+    r1_1w = pivot_1w + range_1w * 1.1 / 12
+    s1_1w = pivot_1w - range_1w * 1.1 / 12
     
-    # Daily EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_6h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align weekly levels to 12h
+    pivot_12h = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_12h = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_12h = align_htf_to_ltf(prices, df_1w, s1_1w)
     
-    # Volume filter: above 1.5x 12-period average (12*6h = 3 days)
-    vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
+    # Daily EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume filter: above 1.5x 24-period average (24*12h = 12 days)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 12  # Wait for volume MA
+    start_idx = 24  # Wait for volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(bull_power_6h[i]) or np.isnan(bear_power_6h[i]) or 
-            np.isnan(ema_34_6h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or 
+            np.isnan(ema_50_12h[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -59,32 +71,32 @@ def generate_signals(prices):
         in_session = 8 <= hour <= 20
         
         if position == 0:
-            # Long: Bull Power > 0 (bullish) AND price above EMA34 (uptrend)
-            if (bull_power_6h[i] > 0 and 
-                close[i] > ema_34_6h[i] and 
+            # Long breakout: price breaks above weekly R1 with daily uptrend
+            if (close[i] > r1_12h[i] and 
+                close[i] > ema_50_12h[i] and  # daily uptrend
                 vol_ok and 
                 in_session):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 (bearish) AND price below EMA34 (downtrend)
-            elif (bear_power_6h[i] < 0 and 
-                  close[i] < ema_34_6h[i] and 
+            # Short breakdown: price breaks below weekly S1 with daily downtrend
+            elif (close[i] < s1_12h[i] and 
+                  close[i] < ema_50_12h[i] and  # daily downtrend
                   vol_ok and 
                   in_session):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Bull Power turns negative (momentum shift)
-            if bull_power_6h[i] <= 0:
+            # Exit long: price falls back below weekly pivot (mean reversion)
+            if close[i] < pivot_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Bear Power turns positive (momentum shift)
-            if bear_power_6h[i] >= 0:
+            # Exit short: price rises back above weekly pivot (mean reversion)
+            if close[i] > pivot_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
