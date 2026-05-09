@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_Pivot_R3S3_Breakout_1dEMA34_VolumeSpike_v2"
-timeframe = "4h"
+name = "1d_Weekly_Channel_Breakout_With_Volume_Confirmation"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,69 +17,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot levels and EMA
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get weekly data for channel calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels (based on previous day's OHLC)
-    # Using previous day's data for current day's levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly Donchian channels (20-period)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Pivot point and Camarilla levels
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_hl = high_1d - low_1d
+    # Weekly upper/lower channels
+    upper_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    lower_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    # Camarilla levels: R3 = close + (high-low)*1.1/4, S3 = close - (high-low)*1.1/4
-    r3 = close_1d + range_hl * 1.1 / 4
-    s3 = close_1d - range_hl * 1.1 / 4
+    # Align weekly channels to daily timeframe
+    upper_20_aligned = align_htf_to_ltf(prices, df_1w, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_1w, lower_20)
     
-    # Calculate 34-period EMA on daily close for trend filter
-    close_ser = pd.Series(close_1d)
-    ema_34 = close_ser.ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Weekly ATR for volatility filter
+    tr_1w = np.maximum(
+        high_1w[1:] - low_1w[1:],
+        np.maximum(
+            np.abs(high_1w[1:] - high_1w[:-1]),
+            np.abs(low_1w[1:] - low_1w[:-1])
+        )
+    )
+    tr_1w = np.concatenate([[np.nan], tr_1w])
+    atr_1w = pd.Series(tr_1w).rolling(window=14, min_periods=14).mean().values
+    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
     
-    # Align all 1d indicators to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
-    
-    # Get 1d volume average for spike detection
-    vol_1d = pd.Series(df_1d['volume'].values)
-    vol_ma20_1d = vol_1d.rolling(window=20, min_periods=20).mean().values
-    vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
-    
-    # Current 4h volume for confirmation (20-period MA)
+    # Daily volume spike filter (20-period)
     vol_series = pd.Series(volume)
-    vol_ma20_current = vol_series.rolling(window=20, min_periods=20).mean().values
-    
-    # Add 4h ADX filter for trend strength (14-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    close_series = pd.Series(close)
-    
-    # True Range
-    tr1 = high_series - low_series
-    tr2 = abs(high_series - close_series.shift())
-    tr3 = abs(low_series - close_series.shift())
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    
-    # Directional Movement
-    dm_plus = np.where((high_series.diff() > low_series.diff().abs()) & (high_series.diff() > 0), high_series.diff(), 0)
-    dm_minus = np.where((low_series.diff().abs() > high_series.diff()) & (low_series.diff() < 0), low_series.diff().abs(), 0)
-    
-    # Smoothed values
-    tr_ma = pd.Series(tr).rolling(window=14, min_periods=14).mean()
-    dm_plus_ma = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean()
-    dm_minus_ma = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean()
-    
-    # DI and DX
-    di_plus = 100 * dm_plus_ma / tr_ma
-    di_minus = 100 * dm_minus_ma / tr_ma
-    dx = 100 * abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = dx.rolling(window=14, min_periods=14).mean()
-    adx_values = adx.values
+    vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -88,38 +57,36 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma20_1d_aligned[i]) or 
-            np.isnan(vol_ma20_current[i]) or np.isnan(adx_values[i])):
+        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or 
+            np.isnan(atr_1w_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 2.0 * vol_ma20_current[i]  # Volume spike filter
-        adx_ok = adx_values[i] > 25  # Strong trend filter
+        vol_ok = volume[i] > 1.5 * vol_ma20[i]  # Volume spike filter
         
         if position == 0:
-            # Long: Price breaks above R3 with volume spike, above EMA34, and strong ADX
-            if close[i] > r3_aligned[i] and vol_ok and close[i] > ema_34_aligned[i] and adx_ok:
+            # Long: Price breaks above weekly upper channel with volume
+            if close[i] > upper_20_aligned[i] and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S3 with volume spike, below EMA34, and strong ADX
-            elif close[i] < s3_aligned[i] and vol_ok and close[i] < ema_34_aligned[i] and adx_ok:
+            # Short: Price breaks below weekly lower channel with volume
+            elif close[i] < lower_20_aligned[i] and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price falls back below R3 OR ADX weakens
-            if close[i] < r3_aligned[i] or adx_values[i] < 20:
+            # Exit long: Price falls back below weekly upper channel
+            if close[i] < upper_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price rises back above S3 OR ADX weakens
-            if close[i] > s3_aligned[i] or adx_values[i] < 20:
+            # Exit short: Price rises back above weekly lower channel
+            if close[i] > lower_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
