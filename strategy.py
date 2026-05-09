@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1D Price Action with 1W Trend Filter
-# Uses daily close > weekly SMA50 for uptrend, < for downtrend.
-# Enters on daily close crossing above/below 20-day high/low with volume confirmation.
-# Designed to work in both bull and bear markets by aligning with weekly trend.
-# Target: 20-60 trades over 4 years (5-15/year) with position size 0.25.
-name = "1D_20DayBreakout_1WTrend_Volume"
-timeframe = "1d"
+# Hypothesis: 6h Williams %R mean reversion with 1d trend filter and volume confirmation
+# Williams %R identifies overbought/oversold conditions. Works in both bull/bear markets by
+# requiring alignment with daily trend and high-volume to confirm reversals.
+# Target: 50-150 trades over 4 years (12-37/year) with position size 0.25.
+name = "6h_WilliamsR_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,66 +21,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate weekly SMA50 trend filter
-    sma_50_1w = pd.Series(df_1w['close'].values).rolling(window=50, min_periods=50).mean().values
-    sma_50_1d = align_htf_to_ltf(prices, df_1w, sma_50_1w)
+    # Calculate 1d EMA20 trend filter
+    ema_20_1d = pd.Series(df_1d['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_6h = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
-    # Calculate daily 20-day high/low for breakout levels
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Williams %R on 6h timeframe (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
     
-    # Volume filter: current volume > 1.5x 20-day average volume
+    # Volume filter: current volume > 1.5x 20-period average volume
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * avg_volume)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for weekly SMA and daily calculations
+    start_idx = 20  # Need enough data for calculations
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(sma_50_1d[i]) or np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
+        if (np.isnan(ema_20_6h[i]) or np.isnan(williams_r[i]) or 
             np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend conditions
-        trend_up = close[i] > sma_50_1d[i]
-        trend_down = close[i] < sma_50_1d[i]
+        # Williams %R conditions
+        oversold = williams_r[i] < -80  # Oversold condition
+        overbought = williams_r[i] > -20  # Overbought condition
         
-        # Breakout conditions
-        breakout_up = close[i] > highest_20[i-1]  # Close above prior 20-day high
-        breakout_down = close[i] < lowest_20[i-1]  # Close below prior 20-day low
+        trend_up = close[i] > ema_20_6h[i]
+        trend_down = close[i] < ema_20_6h[i]
         
         if position == 0:
-            # Long: breakout above 20-day high + weekly uptrend + volume confirmation
-            if breakout_up and trend_up and volume_filter[i]:
+            # Long: oversold + uptrend + volume confirmation
+            if oversold and trend_up and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below 20-day low + weekly downtrend + volume confirmation
-            elif breakout_down and trend_down and volume_filter[i]:
+            # Short: overbought + downtrend + volume confirmation
+            elif overbought and trend_down and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: close below 20-day low or trend reversal
-            if close[i] < lowest_20[i] or not trend_up:
+            # Exit long: overbought or trend reversal
+            if overbought or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: close above 20-day high or trend reversal
-            if close[i] > highest_20[i] or not trend_down:
+            # Exit short: oversold or trend reversal
+            if oversold or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
