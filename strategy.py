@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Chandelier_Exit_Trend_Confirm"
-timeframe = "4h"
+name = "6h_Camarilla_R1S1_Breakout_1wTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,82 +17,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Chandelier Exit and trend
+    # Get 1d data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # ATR(3) calculation for Chandelier Exit
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
-    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=3, adjust=False, min_periods=3).mean().values
+    # Previous day's close for Camarilla calculation
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Chandelier Exit: 3 * ATR below highest high (long) / above lowest low (short)
-    highest_high = pd.Series(high_1d).rolling(window=22, min_periods=22).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=22, min_periods=22).min().values
+    # Calculate Camarilla levels (R1, S1)
+    r1 = prev_close + 1.1 * (prev_high - prev_low) / 4
+    s1 = prev_close - 1.1 * (prev_high - prev_low) / 4
     
-    long_stop = highest_high - 3.0 * atr
-    short_stop = lowest_low + 3.0 * atr
+    # Trend filter: 1w EMA50
+    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Trend filter: 50 EMA on 1d
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Volume filter: current volume > 1.3 * 20-day average
-    vol_series = pd.Series(volume)
+    # Volume filter: current 1d volume > 1.5 * 20-day average
+    vol_series = pd.Series(df_1d['volume'].values)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.3)
+    volume_filter_1d = df_1d['volume'].values > (vol_ma * 1.5)
     
-    # Align all to 4h
-    long_stop_4h = align_htf_to_ltf(prices, df_1d, long_stop)
-    short_stop_4h = align_htf_to_ltf(prices, df_1d, short_stop)
-    ema50_1d_4h = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    volume_filter_4h = align_htf_to_ltf(prices, df_1d, volume_filter)
+    # Align all to 6h
+    r1_6h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_6h = align_htf_to_ltf(prices, df_1d, s1)
+    ema50_1w_6h = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    volume_filter_6h = align_htf_to_ltf(prices, df_1d, volume_filter_1d)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(50, 22)
+    start_idx = max(50, 20)  # Need enough data for EMA50 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(long_stop_4h[i]) or np.isnan(short_stop_4h[i]) or
-            np.isnan(ema50_1d_4h[i]) or np.isnan(volume_filter_4h[i])):
+        if (np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or
+            np.isnan(ema50_1w_6h[i]) or np.isnan(volume_filter_6h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        long_stop_val = long_stop_4h[i]
-        short_stop_val = short_stop_4h[i]
-        trend = ema50_1d_4h[i]
-        vol_filter = volume_filter_4h[i]
+        r1_val = r1_6h[i]
+        s1_val = s1_6h[i]
+        trend = ema50_1w_6h[i]
+        vol_filter = volume_filter_6h[i]
         
         if position == 0:
-            # Enter long: price above long stop AND above trend AND volume confirmation
-            if close[i] > long_stop_val and close[i] > trend and vol_filter:
+            # Enter long: break above R1 with volume and above weekly trend
+            if close[i] > r1_val and close[i] > trend and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price below short stop AND below trend AND volume confirmation
-            elif close[i] < short_stop_val and close[i] < trend and vol_filter:
+            # Enter short: break below S1 with volume and below weekly trend
+            elif close[i] < s1_val and close[i] < trend and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price hits long stop (trailing stop)
-            if close[i] <= long_stop_val:
+            # Exit long: close below S1 (mean reversion to center)
+            if close[i] < s1_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price hits short stop (trailing stop)
-            if close[i] >= short_stop_val:
+            # Exit short: close above R1 (mean reversion to center)
+            if close[i] > r1_val:
                 signals[i] = 0.0
                 position = 0
             else:
