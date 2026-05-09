@@ -1,22 +1,18 @@
-# State your hypothesis in a comment at the top
-# Hypothesis: 12-hour timeframe strategy combining Camarilla pivot levels (from 1-day timeframe) with volume confirmation and trend filter (1-week EMA).
-# The strategy enters long when price breaks above Camarilla R3 level with volume confirmation and price above weekly EMA.
-# Enters short when price breaks below Camarilla S3 level with volume confirmation and price below weekly EMA.
-# Uses discrete position sizing (0.25) to limit trade frequency and manage risk. Designed for low trade frequency (~12-37 trades/year) to avoid fee drag.
-# Works in both bull and bear markets by using the weekly EMA as a trend filter and Camarilla levels for mean reversion/breakout structure.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R3S3_Volume_Trend"
-timeframe = "12h"
+# Hypothesis: 4h Donchian channel breakout with 12h EMA trend filter and volume confirmation.
+# Breakouts capture momentum in trending markets; EMA filter ensures alignment with higher-timeframe trend.
+# Volume confirmation reduces false breakouts. Works in both bull and bear markets by following the trend.
+name = "4h_DonchianBreakout_12hEMA_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,48 +20,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-day data for Camarilla pivot levels (HIGH, LOW, CLOSE from previous day)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Donchian channel (20-period) on 4h
+    donch_period = 20
+    upper_channel = pd.Series(high).rolling(window=donch_period, min_periods=donch_period).max().values
+    lower_channel = pd.Series(low).rolling(window=donch_period, min_periods=donch_period).min().values
     
-    # Calculate Camarilla levels for each day using previous day's HLC
-    # R3 = Close + 1.1*(High - Low)
-    # S3 = Close - 1.1*(High - Low)
-    # We shift by 1 to use previous day's levels for current day's trading
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d)
-    camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d)
-    
-    # Align Camarilla levels to 12-hour timeframe (use previous day's levels)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Get 1-week data for trend filter (EMA 10)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema_10_1w = pd.Series(close_1w).ewm(span=10, adjust=False, min_periods=10).mean().values
-    ema_10_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_10_1w)
-    
-    # Volume confirmation: volume > 1.5x 20-period EMA (on 12h timeframe)
+    # Volume confirmation: volume > 1.5x 20-period EMA
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     vol_confirm = volume > (1.5 * vol_ema20)
+    
+    # 12h EMA(50) for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
+    
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure enough data for volume EMA
+    start_idx = 50  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema_10_1w_aligned[i]) or np.isnan(vol_ema20[i])):
+        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
+            np.isnan(vol_ema20[i]) or np.isnan(ema_50_12h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,26 +55,26 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: price > Camarilla R3 + volume confirmation + price > weekly EMA
-            if (price > camarilla_r3_aligned[i] and vol_confirm[i] and price > ema_10_1w_aligned[i]):
+            # Long: price breaks above upper channel + above 12h EMA50 + volume confirmation
+            if (price > upper_channel[i] and price > ema_50_12h_aligned[i] and vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price < Camarilla S3 + volume confirmation + price < weekly EMA
-            elif (price < camarilla_s3_aligned[i] and vol_confirm[i] and price < ema_10_1w_aligned[i]):
+            # Short: price breaks below lower channel + below 12h EMA50 + volume confirmation
+            elif (price < lower_channel[i] and price < ema_50_12h_aligned[i] and vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses back below Camarilla R3
-            if price < camarilla_r3_aligned[i]:
+            # Exit long: price crosses back below lower channel
+            if price < lower_channel[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses back above Camarilla S3
-            if price > camarilla_s3_aligned[i]:
+            # Exit short: price crosses back above upper channel
+            if price > upper_channel[i]:
                 signals[i] = 0.0
                 position = 0
             else:
