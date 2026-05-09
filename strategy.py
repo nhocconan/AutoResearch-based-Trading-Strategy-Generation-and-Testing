@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12H_Weekly_Camarilla_R1S1_Breakout_Trend_Volume"
-timeframe = "12h"
+name = "1D_Weekly_Camarilla_R1S1_Breakout_VolumeTrend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -19,7 +19,7 @@ def generate_signals(prices):
     
     # Get weekly data for Camarilla levels and trend
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 40:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
     # Calculate weekly Camarilla pivot levels
@@ -35,16 +35,16 @@ def generate_signals(prices):
     r1_1w = pivot_1w + (range_1w * 1.1 / 4)
     s1_1w = pivot_1w - (range_1w * 1.1 / 4)
     
-    # Align to 12h
+    # Align to daily
     r1_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
     s1_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
     
-    # Weekly EMA34 for trend filter
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Weekly EMA10 for trend filter
+    ema10_1w = pd.Series(close_1w).ewm(span=10, adjust=False, min_periods=10).mean().values
+    ema10_aligned = align_htf_to_ltf(prices, df_1w, ema10_1w)
     
-    # Volume confirmation: current volume > 2.0x 40-period average (higher threshold to reduce trades)
-    volume_avg = pd.Series(volume).rolling(window=40, min_periods=40).mean().values
+    # Volume confirmation: current volume > 2.0x 20-period average (high threshold to reduce trades)
+    volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (volume_avg * 2.0)
     
     signals = np.zeros(n)
@@ -55,33 +55,33 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema34_aligned[i]):
+        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema10_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above R1 + above weekly EMA34 + volume confirmation
-            if close[i] > r1_aligned[i] and close[i] > ema34_aligned[i] and volume_confirm[i]:
+            # Enter long: price breaks above R1 + above weekly EMA10 + volume confirmation
+            if close[i] > r1_aligned[i] and close[i] > ema10_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S1 + below weekly EMA34 + volume confirmation
-            elif close[i] < s1_aligned[i] and close[i] < ema34_aligned[i] and volume_confirm[i]:
+            # Enter short: price breaks below S1 + below weekly EMA10 + volume confirmation
+            elif close[i] < s1_aligned[i] and close[i] < ema10_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price below weekly EMA34 (trend change)
-            if close[i] < ema34_aligned[i]:
+            # Exit long: price below weekly EMA10 (trend change)
+            if close[i] < ema10_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price above weekly EMA34 (trend change)
-            if close[i] > ema34_aligned[i]:
+            # Exit short: price above weekly EMA10 (trend change)
+            if close[i] > ema10_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
