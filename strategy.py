@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1D_WeeklyCamarilla_R1_S1_Breakout_Trend_Volume"
-timeframe = "1d"
+name = "6H_RSI_Stochastic_OverboughtOversold_1dTrend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,70 +17,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla levels and trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 40:
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate weekly pivot and ranges
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate 6h RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    pivot_1w = (high_1w + low_1w + close_1w) / 3
-    range_1w = high_1w - low_1w
+    # Calculate 6h Stochastic(14,3)
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    k_percent = 100 * (close - lowest_low) / (highest_high - lowest_low + 1e-10)
+    d_percent = pd.Series(k_percent).rolling(window=3, min_periods=3).mean().values
     
-    # Camarilla R1 and S1 levels from weekly
-    r1_1w = pivot_1w + (range_1w * 1.1 / 12)
-    s1_1w = pivot_1w - (range_1w * 1.1 / 12)
-    
-    # Align weekly levels to daily
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    
-    # Weekly EMA34 for trend filter
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
-    
-    # Volume confirmation: current volume > 1.8x 20-day average
-    volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_avg * 1.8)
+    # Daily EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data
-    start_idx = 60
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema34_aligned[i]):
+        if np.isnan(rsi[i]) or np.isnan(d_percent[i]) or np.isnan(ema50_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above R1 + above weekly EMA34 + volume confirmation
-            if close[i] > r1_aligned[i] and close[i] > ema34_aligned[i] and volume_confirm[i]:
+            # Enter long: RSI < 30 (oversold) AND Stochastic < 20 (oversold) AND price above daily EMA50 (uptrend)
+            if rsi[i] < 30 and d_percent[i] < 20 and close[i] > ema50_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S1 + below weekly EMA34 + volume confirmation
-            elif close[i] < s1_aligned[i] and close[i] < ema34_aligned[i] and volume_confirm[i]:
+            # Enter short: RSI > 70 (overbought) AND Stochastic > 80 (overbought) AND price below daily EMA50 (downtrend)
+            elif rsi[i] > 70 and d_percent[i] > 80 and close[i] < ema50_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price below weekly EMA34 (trend change)
-            if close[i] < ema34_aligned[i]:
+            # Exit long: RSI > 70 (overbought) OR price below daily EMA50 (trend change)
+            if rsi[i] > 70 or close[i] < ema50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price above weekly EMA34 (trend change)
-            if close[i] > ema34_aligned[i]:
+            # Exit short: RSI < 30 (oversold) OR price above daily EMA50 (trend change)
+            if rsi[i] < 30 or close[i] > ema50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
