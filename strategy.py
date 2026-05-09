@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "1h_4h1d_Trend_Volume_SessionFilter"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,83 +17,110 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 4h data for trend direction
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate 1d high/low/close for Camarilla
+    # Calculate 4h EMA(20) for trend
+    close_4h = df_4h['close'].values
+    ema_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    
+    # Get 1d data for regime filter (ADX-like)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
+    
+    # Calculate 14-period ATR for volatility regime
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla pivot: P = (H + L + C)/3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    # R3 and S3 levels (most significant)
-    r3_1d = high_1d + 1.1 * (high_1d - low_1d)
-    s3_1d = low_1d - 1.1 * (high_1d - low_1d)
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
+    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Align Camarilla levels to 12h timeframe
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    # Calculate 1d EMA(50) for trend
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # 1d EMA34 for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align 1d indicators
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Volume filter: current volume > 1.5 * 20-period average (12h)
+    # 1h volume filter
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_ma * 1.5)
     
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    session_filter = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Need enough data for EMA and volume MA
+    start_idx = max(50, 20)  # Need enough data for all indicators
     
     for i in range(start_idx, n):
-        # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(pivot_1d_aligned[i]) or 
-            np.isnan(r3_1d_aligned[i]) or
-            np.isnan(s3_1d_aligned[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or
-            np.isnan(volume_filter[i])):
+        # Skip if required data unavailable
+        if (np.isnan(ema_4h_aligned[i]) or 
+            np.isnan(ema_1d_aligned[i]) or
+            np.isnan(atr_1d_aligned[i]) or
+            np.isnan(volume_filter[i]) or
+            np.isnan(session_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        r3_val = r3_1d_aligned[i]
-        s3_val = s3_1d_aligned[i]
-        ema_val = ema_34_1d_aligned[i]
+        ema_4h_val = ema_4h_aligned[i]
+        ema_1d_val = ema_1d_aligned[i]
+        atr_1d_val = atr_1d_aligned[i]
         vol_filter = volume_filter[i]
+        sess_filter = session_filter[i]
+        
+        # Only trade during session
+        if not sess_filter:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Trend alignment: 4h EMA > 1d EMA for uptrend, < for downtrend
+        trend_up = ema_4h_val > ema_1d_val
+        trend_down = ema_4h_val < ema_1d_val
+        
+        # Volatility filter: only trade when ATR is elevated (avoid chop)
+        vol_condition = atr_1d_val > np.nanmedian(atr_1d_aligned[max(0, i-50):i+1])
         
         if position == 0:
-            # Enter long: Price breaks above R3 + above EMA34 + volume filter
-            if close[i] > r3_val and close[i] > ema_val and vol_filter:
-                signals[i] = 0.25
+            # Enter long: 4h above 1d EMA + volume + volatility
+            if trend_up and vol_filter and vol_condition:
+                signals[i] = 0.20
                 position = 1
-            # Enter short: Price breaks below S3 + below EMA34 + volume filter
-            elif close[i] < s3_val and close[i] < ema_val and vol_filter:
-                signals[i] = -0.25
+            # Enter short: 4h below 1d EMA + volume + volatility
+            elif trend_down and vol_filter and vol_condition:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long: Price falls below EMA34
-            if close[i] < ema_val:
+            # Exit long: trend breaks or volume dries up
+            if not (trend_up and vol_filter and vol_condition):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: Price rises above EMA34
-            if close[i] > ema_val:
+            # Exit short: trend breaks or volume dries up
+            if not (trend_down and vol_filter and vol_condition):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
