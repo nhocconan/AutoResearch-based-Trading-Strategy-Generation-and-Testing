@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Keltner_RSI_Trend_4h"
-timeframe = "4h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Volume_Filter"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,91 +17,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1h data for trend filter (more responsive than 12h)
-    df_1h = get_htf_data(prices, '1h')
-    if len(df_1h) < 50:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Get 1d data for Keltner calculation
+    # Get 1d data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Previous day's data for Keltner calculation
-    prev_high = df_1h['high'].shift(1).values
-    prev_low = df_1h['low'].shift(1).values
-    prev_close = df_1h['close'].shift(1).values
+    # Previous day's close for Camarilla calculation (R1, S1)
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Calculate ATR for Keltner (14-period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.concatenate([[np.nan], close[:-1]]))
-    tr3 = np.abs(low - np.concatenate([[np.nan], close[:-1]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate Camarilla levels (R1, S1)
+    r1 = prev_close + (prev_high - prev_low) * 1.1 / 12  # R1 = C + 1.1*(H-L)/12
+    s1 = prev_close - (prev_high - prev_low) * 1.1 / 12  # S1 = C - 1.1*(H-L)/12
     
-    # Keltner Channels (14-period ATR, multiplier 2.0)
-    keltner_upper = prev_close + (atr * 2.0)
-    keltner_lower = prev_close - (atr * 2.0)
+    # Trend filter: 4h EMA34
+    ema34_4h = pd.Series(df_4h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Trend filter: 1h EMA50
-    ema50_1h = pd.Series(df_1h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Volume filter: current 1h volume > 1.3 * 20-period average
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_ma * 1.3)
     
-    # RSI (14-period)
-    delta = np.diff(close, prepend=np.nan)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / np.where(avg_loss == 0, np.nan, avg_loss)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Align all to 4h (primary timeframe)
-    keltner_upper_4h = align_htf_to_ltf(prices, df_1h, keltner_upper)
-    keltner_lower_4h = align_htf_to_ltf(prices, df_1h, keltner_lower)
-    ema50_1h_4h = align_htf_to_ltf(prices, df_1h, ema50_1h)
+    # Align all to 1h (primary timeframe)
+    r1_1h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_1h = align_htf_to_ltf(prices, df_1d, s1)
+    ema34_4h_1h = align_htf_to_ltf(prices, df_4h, ema34_4h)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(50, 14)  # Need enough data for EMA50 and RSI
+    start_idx = max(34, 20)  # Need enough data for EMA34 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(keltner_upper_4h[i]) or np.isnan(keltner_lower_4h[i]) or
-            np.isnan(ema50_1h_4h[i]) or np.isnan(rsi[i])):
+        if (np.isnan(r1_1h[i]) or np.isnan(s1_1h[i]) or
+            np.isnan(ema34_4h_1h[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        upper = keltner_upper_4h[i]
-        lower = keltner_lower_4h[i]
-        trend = ema50_1h_4h[i]
-        rsi_val = rsi[i]
+        r1_val = r1_1h[i]
+        s1_val = s1_1h[i]
+        trend = ema34_4h_1h[i]
+        vol_filter = volume_filter[i]
         
         if position == 0:
-            # Enter long: price above upper Keltner with bullish trend and RSI > 50
-            if close[i] > upper and close[i] > trend and rsi_val > 50:
-                signals[i] = 0.25
+            # Enter long: break above R1 with volume and above trend
+            if close[i] > r1_val and close[i] > trend and vol_filter:
+                signals[i] = 0.20
                 position = 1
-            # Enter short: price below lower Keltner with bearish trend and RSI < 50
-            elif close[i] < lower and close[i] < trend and rsi_val < 50:
-                signals[i] = -0.25
+            # Enter short: break below S1 with volume and below trend
+            elif close[i] < s1_val and close[i] < trend and vol_filter:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long: price below lower Keltner or RSI < 40
-            if close[i] < lower or rsi_val < 40:
+            # Exit long: close below S1 (mean reversion to center)
+            if close[i] < s1_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: price above upper Keltner or RSI > 60
-            if close[i] > upper or rsi_val > 60:
+            # Exit short: close above R1 (mean reversion to center)
+            if close[i] > r1_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
