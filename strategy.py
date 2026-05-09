@@ -3,58 +3,61 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Vortex_Trend_Volume_Confirm"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_1wTrend"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Get 4h data for price and volume
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Vortex indicator (HTF)
-    df_d = get_htf_data(prices, '1d')
-    if len(df_d) < 2:
+    # Get 1d data for Camarilla pivot calculation and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate Vortex indicator on daily data
-    high_d = df_d['high'].values
-    low_d = df_d['low'].values
-    close_d = df_d['close'].values
+    # Calculate 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # True Range
-    tr1 = np.abs(high_d[1:] - low_d[1:])
-    tr2 = np.abs(high_d[1:] - close_d[:-1])
-    tr3 = np.abs(low_d[1:] - close_d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value is NaN
+    # Calculate Camarilla levels from 1d OHLC
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Vortex Indicator components
-    vm_plus = np.abs(high_d[1:] - low_d[:-1])  # |High - Prev Low|
-    vm_minus = np.abs(low_d[1:] - high_d[:-1])  # |Low - Prev High|
-    vm_plus = np.concatenate([[np.nan], vm_plus])
-    vm_minus = np.concatenate([[np.nan], vm_minus])
+    # Camarilla formula: Range = High - Low
+    range_1d = high_1d - low_1d
+    # Resistance levels
+    r3_1d = close_1d + (range_1d * 1.1 / 4)
+    r4_1d = close_1d + (range_1d * 1.1 / 2)
+    # Support levels
+    s3_1d = close_1d - (range_1d * 1.1 / 4)
+    s4_1d = close_1d - (range_1d * 1.1 / 2)
     
-    # Sum over 14 periods
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    vm_plus_sum = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values
-    vm_minus_sum = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values
+    # Align Camarilla levels to 12h timeframe
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     
-    # Vortex values
-    vi_plus = vm_plus_sum / (tr_sum + 1e-10)
-    vi_minus = vm_minus_sum / (tr_sum + 1e-10)
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
+        return np.zeros(n)
     
-    # Align Vortex to 4h timeframe
-    vi_plus_aligned = align_htf_to_ltf(prices, df_d, vi_plus)
-    vi_minus_aligned = align_htf_to_ltf(prices, df_d, vi_minus)
+    # Calculate 1w EMA34 for trend filter
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Volume filter on 4h: volume > 1.5 * 20-period average
+    # Volume filter: current volume > 1.5 * 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_ma * 1.5)
@@ -62,43 +65,51 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 14)  # Need enough data for volume MA and Vortex
+    start_idx = max(20, 34)  # Need enough data for volume MA and EMA
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(vi_plus_aligned[i]) or 
-            np.isnan(vi_minus_aligned[i]) or
+        if (np.isnan(r3_1d_aligned[i]) or 
+            np.isnan(r4_1d_aligned[i]) or
+            np.isnan(s3_1d_aligned[i]) or
+            np.isnan(s4_1d_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or
+            np.isnan(ema_34_1w_aligned[i]) or
             np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vi_plus_val = vi_plus_aligned[i]
-        vi_minus_val = vi_minus_aligned[i]
+        r3_val = r3_1d_aligned[i]
+        r4_val = r4_1d_aligned[i]
+        s3_val = s3_1d_aligned[i]
+        s4_val = s4_1d_aligned[i]
+        ema_1d_val = ema_34_1d_aligned[i]
+        ema_1w_val = ema_34_1w_aligned[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Enter long: VI+ > VI- + volume filter
-            if vi_plus_val > vi_minus_val and vol_filter:
+            # Enter long: Price above R3 + 1d trend up + 1w trend up + volume spike
+            if close[i] > r3_val and close[i] > ema_1d_val and close[i] > ema_1w_val and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: VI- > VI+ + volume filter
-            elif vi_minus_val > vi_plus_val and vol_filter:
+            # Enter short: Price below S3 + 1d trend down + 1w trend down + volume spike
+            elif close[i] < s3_val and close[i] < ema_1d_val and close[i] < ema_1w_val and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: VI- crosses above VI+
-            if vi_minus_val > vi_plus_val:
+            # Exit long: Price falls below S3 or trend changes
+            if close[i] < s3_val or close[i] < ema_1d_val or close[i] < ema_1w_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: VI+ crosses above VI-
-            if vi_plus_val > vi_minus_val:
+            # Exit short: Price rises above R3 or trend changes
+            if close[i] > r3_val or close[i] > ema_1d_val or close[i] > ema_1w_val:
                 signals[i] = 0.0
                 position = 0
             else:
