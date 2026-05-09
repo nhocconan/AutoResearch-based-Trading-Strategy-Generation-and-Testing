@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_Weekly_Channel_Breakout_With_Volume_Confirmation"
-timeframe = "1d"
+name = "4h_KAMA_Trend_With_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,76 +17,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for channel calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate weekly Donchian channels (20-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Calculate KAMA on daily close for trend filter
+    close_ser = pd.Series(df_1d['close'].values)
+    change = abs(close_ser.diff(10))
+    volatility = close_ser.diff(1).abs().rolling(10).sum()
+    er = change / volatility.replace(0, np.nan)
+    er = er.fillna(0)
+    sc = (er * 0.59 + 0.01) ** 2
+    kama = [close_ser.iloc[0]]
+    for i in range(1, len(close_ser)):
+        kama.append(kama[-1] + sc.iloc[i] * (close_ser.iloc[i] - kama[-1]))
+    kama = np.array(kama)
     
-    # Weekly upper/lower channels
-    upper_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # Align KAMA to 4h
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
     
-    # Align weekly channels to daily timeframe
-    upper_20_aligned = align_htf_to_ltf(prices, df_1w, upper_20)
-    lower_20_aligned = align_htf_to_ltf(prices, df_1w, lower_20)
-    
-    # Weekly ATR for volatility filter
-    tr_1w = np.maximum(
-        high_1w[1:] - low_1w[1:],
-        np.maximum(
-            np.abs(high_1w[1:] - high_1w[:-1]),
-            np.abs(low_1w[1:] - low_1w[:-1])
-        )
-    )
-    tr_1w = np.concatenate([[np.nan], tr_1w])
-    atr_1w = pd.Series(tr_1w).rolling(window=14, min_periods=14).mean().values
-    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
-    
-    # Daily volume spike filter (20-period)
+    # Volume spike detection on 4h (20-period MA)
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for indicators
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or 
-            np.isnan(atr_1w_aligned[i]) or np.isnan(vol_ma20[i])):
+        if np.isnan(kama_aligned[i]) or np.isnan(vol_ma20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 1.5 * vol_ma20[i]  # Volume spike filter
+        vol_ok = volume[i] > 1.5 * vol_ma20[i]
         
         if position == 0:
-            # Long: Price breaks above weekly upper channel with volume
-            if close[i] > upper_20_aligned[i] and vol_ok:
+            # Long: Price above KAMA with volume spike
+            if close[i] > kama_aligned[i] and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below weekly lower channel with volume
-            elif close[i] < lower_20_aligned[i] and vol_ok:
+            # Short: Price below KAMA with volume spike
+            elif close[i] < kama_aligned[i] and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price falls back below weekly upper channel
-            if close[i] < upper_20_aligned[i]:
+            # Exit long: Price falls below KAMA
+            if close[i] < kama_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price rises back above weekly lower channel
-            if close[i] > lower_20_aligned[i]:
+            # Exit short: Price rises above KAMA
+            if close[i] > kama_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
