@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "1d_Weekly_Champaign_Channel_v2"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     """
-    4h Camarilla R1/S1 breakout with 12h trend filter and volume confirmation.
-    - Uses 12h EMA50 for trend direction
-    - R1/S1 breakouts for momentum entries
+    Weekly Champaign Channel with 1d EMA trend and volume confirmation.
+    - Uses weekly EMA20 for trend direction
+    - Champaign Channel (20-period high/low) for breakouts
     - Volume spike filter to avoid false breakouts
-    - Target: 20-50 trades/year on 4h timeframe
+    - Target: 10-25 trades/year on 1d timeframe
     """
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,80 +24,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Camarilla pivots and trend
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get weekly data for Champaign Channel and trend
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla R1 and S1 from previous period's OHLC
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Calculate weekly Champaign Channel (20-period high/low)
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
     
-    prev_high_12h = np.roll(high_12h, 1)
-    prev_low_12h = np.roll(low_12h, 1)
-    prev_close_12h = np.roll(close_12h, 1)
-    prev_high_12h[0] = np.nan
-    prev_low_12h[0] = np.nan
-    prev_close_12h[0] = np.nan
+    # 20-period rolling high and low
+    high_roll = pd.Series(high_weekly).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low_weekly).rolling(window=20, min_periods=20).min().values
     
-    prev_range = prev_high_12h - prev_low_12h
-    pivot = (prev_high_12h + prev_low_12h + prev_close_12h) / 3
-    r1 = pivot + 1.1 * prev_range * 1.05  # R1 = pivot + 1.1 * range * 1.05
-    s1 = pivot - 1.1 * prev_range * 1.05  # S1 = pivot - 1.1 * range * 1.05
+    # Champaign Channel levels
+    upper_channel = high_roll
+    lower_channel = low_roll
     
-    # Align Camarilla levels to 4h
-    r1_4h = align_htf_to_ltf(prices, df_12h, r1)
-    s1_4h = align_htf_to_ltf(prices, df_12h, s1)
+    # Align Champaign Channel to daily
+    upper_channel_daily = align_htf_to_ltf(prices, df_weekly, upper_channel)
+    lower_channel_daily = align_htf_to_ltf(prices, df_weekly, lower_channel)
     
-    # 12h EMA50 for trend filter
-    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Weekly EMA20 for trend filter
+    ema20_weekly = pd.Series(df_weekly['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_daily = align_htf_to_ltf(prices, df_weekly, ema20_weekly)
     
-    # Volume spike detection (10-period for 4h)
-    vol_avg = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    # Volume spike detection (20-period for daily)
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 40  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or np.isnan(ema50_4h[i]) or 
-            np.isnan(vol_avg[i])):
+        if (np.isnan(upper_channel_daily[i]) or np.isnan(lower_channel_daily[i]) or 
+            np.isnan(ema20_daily[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume condition: current volume > 1.8 x 10-period average
-        vol_spike = volume[i] > vol_avg[i] * 1.8
+        # Volume condition: current volume > 2.0 x 20-period average
+        vol_spike = volume[i] > vol_avg[i] * 2.0
         
         if position == 0:
-            # Long: Break above Camarilla R1 with uptrend on 12h, volume spike
-            if (close[i] > r1_4h[i] and close[i] > ema50_4h[i] and vol_spike):
-                signals[i] = 0.30
+            # Long: Break above upper channel with uptrend on weekly, volume spike
+            if (close[i] > upper_channel_daily[i] and close[i] > ema20_daily[i] and vol_spike):
+                signals[i] = 0.25
                 position = 1
-            # Short: Break below Camarilla S1 with downtrend on 12h, volume spike
-            elif (close[i] < s1_4h[i] and close[i] < ema50_4h[i] and vol_spike):
-                signals[i] = -0.30
+            # Short: Break below lower channel with downtrend on weekly, volume spike
+            elif (close[i] < lower_channel_daily[i] and close[i] < ema20_daily[i] and vol_spike):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price falls back below EMA50
-            if close[i] < ema50_4h[i]:
+            # Exit long: Price falls back below weekly EMA20
+            if close[i] < ema20_daily[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price rises back above EMA50
-            if close[i] > ema50_4h[i]:
+            # Exit short: Price rises back above weekly EMA20
+            if close[i] > ema20_daily[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
