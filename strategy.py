@@ -1,12 +1,12 @@
-#!/usr/bin/env python3
-# Hypothesis: 12h timeframe with daily Williams Alligator (3 SMAs) for trend direction and 1d volume spike for confirmation.
-# Uses Williams Alligator (Jaw=13, Teeth=8, Lips=5) to identify trends: Lips > Teeth > Jaw = uptrend, reverse for downtrend.
-# Volume spike (>2x 20-period average) confirms momentum. Williams Alligator works in both bull and bear markets by
-# clearly defining trend direction and avoiding whipsaws during sideways periods.
-# Target: 50-150 total trades over 4 years (12-37/year) with size 0.25.
+#/usr/bin/env python3
+# Hypothesis: 4h timeframe with monthly pivot structure and weekly trend filter.
+# Uses monthly Camarilla levels (R1/S1) for breakout entries and weekly EMA34 for trend filter.
+# Monthly pivot provides robust structural support/resistance that works in both bull and bear markets.
+# Weekly trend filter reduces whipsaw by only allowing trades in direction of higher timeframe trend.
+# Target: 75-200 total trades over 4 years (19-50/year) with size 0.25.
 
-name = "12h_WilliamsAlligator_1dVolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_1wEMA34_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,38 +23,45 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Williams Alligator components from daily data
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:
+    # Calculate monthly Camarilla levels (R1, S1) from previous month
+    prev_close = np.roll(close, 112)  # 112 bars = 28 days * 4 bars per day (approx 1 month)
+    prev_high = np.roll(high, 112)
+    prev_low = np.roll(low, 112)
+    prev_close[:112] = np.nan  # First values invalid
+    
+    camarilla_range = prev_high - prev_low
+    r1 = prev_close + 1.1 * camarilla_range / 4
+    s1 = prev_close - 1.1 * camarilla_range / 4
+    
+    # Breakout conditions: price must close beyond the level (not just touch)
+    breakout_up = close > r1
+    breakout_down = close < s1
+    
+    # Get weekly data for EMA34 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Jaw (13-period SMMA), Teeth (8-period SMMA), Lips (5-period SMMA)
-    close_1d = df_1d['close'].values
-    jaw = pd.Series(close_1d).rolling(window=13, min_periods=13).mean().values
-    teeth = pd.Series(close_1d).rolling(window=8, min_periods=8).mean().values
-    lips = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().values
+    # Calculate 1w EMA34 trend filter
+    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Align to 12h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    trend_up = close > ema_34_1w_aligned
+    trend_down = close < ema_34_1w_aligned
     
-    # Trend conditions: Lips > Teeth > Jaw = uptrend, Lips < Teeth < Jaw = downtrend
-    trend_up = (lips_aligned > teeth_aligned) & (teeth_aligned > jaw_aligned)
-    trend_down = (lips_aligned < teeth_aligned) & (teeth_aligned < jaw_aligned)
-    
-    # Volume filter: current volume > 2.0x 20-period average volume
+    # Volume filter: current volume > 2.0x 20-period average volume (balanced to avoid overtrading)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (2.0 * avg_volume)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for indicators
+    start_idx = 112  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(trend_up[i]) or np.isnan(trend_down[i]) or
+        if (np.isnan(breakout_up[i]) or np.isnan(breakout_down[i]) or
+            np.isnan(trend_up[i]) or np.isnan(trend_down[i]) or
             np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -62,26 +69,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Williams Alligator uptrend + volume spike
-            if trend_up[i] and volume_filter[i]:
+            # Long: breakout above R1 + 1w uptrend + volume spike
+            if breakout_up[i] and trend_up[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams Alligator downtrend + volume spike
-            elif trend_down[i] and volume_filter[i]:
+            # Short: breakout below S1 + 1w downtrend + volume spike
+            elif breakout_down[i] and trend_down[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: trend reversal (Lips cross below Teeth)
-            if lips_aligned[i] < teeth_aligned[i]:
+            # Exit long: price returns to previous month's close or trend reversal
+            if close[i] <= prev_close[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: trend reversal (Lips cross above Teeth)
-            if lips_aligned[i] > teeth_aligned[i]:
+            # Exit short: price returns to previous month's close or trend reversal
+            if close[i] >= prev_close[i] or not trend_down[i]:
                 signals[i] = 0.0
                 position = 0
             else:
