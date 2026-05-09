@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike
-# Hypothesis: Tighter Camarilla R1/S1 breakout with daily EMA34 trend filter and volume spike confirmation.
-# R1/S1 levels provide high-probability breakouts with fewer false signals than R2/S2.
-# Works in bull/bear: EMA34 trend filter avoids counter-trend trades, volume confirms breakout strength.
-# Focus on high-probability breakouts to minimize trades and avoid fee drag.
+# 4h_4H_KAMA_Trend_1dATR_Filter_VolumeSpike
+# Hypothesis: KAMA adapts to market noise, providing reliable trend direction in both bull and bear markets.
+# Combined with 1d ATR filter to avoid whipsaws in low volatility and volume spike for breakout confirmation.
+# Targets 20-40 trades/year to minimize fee drag while capturing strong trends.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike"
+name = "4h_4H_KAMA_Trend_1dATR_Filter_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,7 +22,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculation and EMA
+    # Get daily data for ATR calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -32,28 +31,40 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's values for Camarilla calculation
-    ph = np.concatenate([[high_1d[0]], high_1d[:-1]])  # previous high
-    pl = np.concatenate([[low_1d[0]], low_1d[:-1]])   # previous low
-    pc = np.concatenate([[close_1d[0]], close_1d[:-1]]) # previous close
+    # Calculate 14-period ATR on daily
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Calculate Camarilla levels (R1, S1 are the key breakout levels)
-    rang = ph - pl
-    r1 = pc + 1.1 * rang * 1.0833  # R1 = Close + 1.1 * (High-Low) * 1.0833
-    s1 = pc - 1.1 * rang * 1.0833  # S1 = Close - 1.1 * (High-Low) * 1.0833
+    atr_14_1d = np.full_like(tr, np.nan)
+    if len(tr) >= 14:
+        atr_14_1d[13] = np.mean(tr[0:14])
+        for i in range(14, len(tr)):
+            atr_14_1d[i] = (atr_14_1d[i-1] * 13 + tr[i]) / 14
     
-    # Align Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 34:
-        ema_34_1d[33] = np.mean(close_1d[0:34])
-        for i in range(34, len(close_1d)):
-            ema_34_1d[i] = (ema_34_1d[i-1] * 33 + close_1d[i]) / 34
+    # Calculate KAMA on 4h close
+    def calculate_kama(close, length=10, fast=2, slow=30):
+        # Efficiency ratio
+        change = np.abs(np.diff(close, n=length))
+        volatility = np.sum(np.abs(np.diff(close)), axis=0)
+        er = np.zeros_like(close)
+        er[length:] = change[length-1:] / volatility[length-1:]
+        er[length:] = np.where(volatility[length-1:] == 0, 0, er[length:])
+        
+        # Smoothing constants
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        
+        # KAMA calculation
+        kama = np.zeros_like(close)
+        kama[0] = close[0]
+        for i in range(1, len(close)):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
     
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    kama = calculate_kama(close, length=10, fast=2, slow=30)
     
     # Volume spike filter: current volume / 20-period average volume
     vol_ma = np.full_like(volume, np.nan)
@@ -69,42 +80,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)  # Ensure volume MA and EMA are ready
+    start_idx = max(20, 14, 10)  # Ensure volume MA, ATR, and KAMA are ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(kama[i]) or np.isnan(atr_14_1d_aligned[i]) or 
+            np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above R1 AND uptrend (price > EMA34) AND volume spike
-            if (close[i] > r1_aligned[i] and 
-                close[i] > ema_34_1d_aligned[i] and 
+            # Enter long: price above KAMA AND ATR filter (volatility not too low) AND volume spike
+            if (close[i] > kama[i] and 
+                atr_14_1d_aligned[i] > 0 and  # Ensure ATR is valid
                 volume_ratio[i] > 2.0):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S1 AND downtrend (price < EMA34) AND volume spike
-            elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema_34_1d_aligned[i] and 
+            # Enter short: price below KAMA AND ATR filter AND volume spike
+            elif (close[i] < kama[i] and 
+                  atr_14_1d_aligned[i] > 0 and
                   volume_ratio[i] > 2.0):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below S1 OR trend reversal (price < EMA34)
-            if close[i] < s1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            # Exit long: price crosses below KAMA
+            if close[i] < kama[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above R1 OR trend reversal (price > EMA34)
-            if close[i] > r1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            # Exit short: price crosses above KAMA
+            if close[i] > kama[i]:
                 signals[i] = 0.0
                 position = 0
             else:
