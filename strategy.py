@@ -3,81 +3,89 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_WeeklyDonchian_Trend_Filter"
-timeframe = "1d"
+name = "6h_RSI_Tick_Filter_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for Donchian channels and trend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get 1d data for RSI and trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Weekly Donchian channels (20-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # 1d RSI(14) - mean reversion signal
+    delta = pd.Series(df_1d['close']).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
-    # Weekly EMA34 for trend filter
-    ema34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Daily volume average for confirmation
-    volume = prices['volume'].values
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align both to 6h
+    rsi_6h = align_htf_to_ltf(prices, df_1d, rsi_values)
+    ema50_1d_6h = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Align weekly data to daily
-    donchian_high_d = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_d = align_htf_to_ltf(prices, df_1w, donchian_low)
-    ema34_1w_d = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # 6h RSI(2) for entry timing - short-term mean reversion
+    rsi_fast = pd.Series(close).diff()
+    gain_fast = rsi_fast.clip(lower=0)
+    loss_fast = -rsi_fast.clip(upper=0)
+    avg_gain_fast = gain_fast.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
+    avg_loss_fast = loss_fast.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
+    rs_fast = avg_gain_fast / (avg_loss_fast + 1e-10)
+    rsi_fast_values = 100 - (100 / (1 + rs_fast))
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 30
+    start_idx = 60
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_high_d[i]) or np.isnan(donchian_low_d[i]) or 
-            np.isnan(ema34_1w_d[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(rsi_6h[i]) or np.isnan(ema50_1d_6h[i]) or 
+            np.isnan(rsi_fast_values[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        upper = donchian_high_d[i]
-        lower = donchian_low_d[i]
-        trend = ema34_1w_d[i]
-        vol_ok = volume[i] > vol_avg[i] * 1.5
+        rsi_1d = rsi_6h[i]
+        ema50 = ema50_1d_6h[i]
+        rsi_fast = rsi_fast_values[i]
         
         if position == 0:
-            # Long: break above weekly Donchian high with volume and above weekly EMA34
-            if close[i] > upper and vol_ok and close[i] > trend:
+            # Long: 1d RSI oversold (<30) + 6s RSI extremely oversold (<10) + above 1d EMA50
+            if rsi_1d < 30 and rsi_fast < 10 and close[i] > ema50:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below weekly Donchian low with volume and below weekly EMA34
-            elif close[i] < lower and vol_ok and close[i] < trend:
+            # Short: 1d RSI overbought (>70) + 6s RSI extremely overbought (>90) + below 1d EMA50
+            elif rsi_1d > 70 and rsi_fast > 90 and close[i] < ema50:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: close below weekly Donchian low or trend reversal
-            if close[i] < lower or close[i] < trend:
+            # Exit long: 1d RSI overbought or price below EMA50
+            if rsi_1d > 70 or close[i] < ema50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: close above weekly Donchian high or trend reversal
-            if close[i] > upper or close[i] > trend:
+            # Exit short: 1d RSI oversold or price above EMA50
+            if rsi_1d < 30 or close[i] > ema50:
                 signals[i] = 0.0
                 position = 0
             else:
