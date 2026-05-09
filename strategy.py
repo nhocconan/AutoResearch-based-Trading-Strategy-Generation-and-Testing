@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h timeframe with daily KAMA trend filter and weekly volume confirmation.
-# Uses KAMA (adaptive moving average) for trend detection that adapts to market conditions,
-# weekly volume spike for institutional participation confirmation, and price position relative
-# to KAMA for entry/exit. Designed to work in both bull and bear markets by following adaptive trend.
-# Target: 50-150 total trades over 4 years (12-37/year) with size 0.25.
+# Hypothesis: 4h timeframe with daily ATR-based breakout and 12h trend filter.
+# Uses daily ATR(14) to define breakout channels (upper/lower bands) and 12h EMA50 for trend direction.
+# ATR-based breakouts adapt to volatility, reducing false signals in low-volatility periods.
+# 12h trend filter ensures trades align with higher timeframe momentum, improving win rate in both bull and bear markets.
+# Target: 80-150 total trades over 4 years (20-38/year) with size 0.25.
 
-name = "12h_KAMA_Trend_WeeklyVolume_Confirmation"
-timeframe = "12h"
+name = "4h_ATR_Breakout_12hEMA50_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,40 +23,49 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average) - trend filter
-    def calculate_kama(close_prices, length=10, fast=2, slow=30):
-        # Efficiency ratio
-        change = np.abs(np.diff(close_prices, prepend=close_prices[0]))
-        volatility = np.sum(np.abs(np.diff(close_prices)), axis=0)
-        # For simplicity, use rolling calculation
-        change_series = pd.Series(change)
-        volatility_series = pd.Series(volatility)
-        er = change_series.rolling(window=length, min_periods=1).sum() / \
-             volatility_series.rolling(window=length, min_periods=1).sum().replace(0, 1)
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        kama = np.zeros_like(close_prices)
-        kama[0] = close_prices[0]
-        for i in range(1, len(close_prices)):
-            kama[i] = kama[i-1] + sc[i] * (close_prices[i] - kama[i-1])
-        return kama
-    
-    # Calculate KAMA for trend
-    kama = calculate_kama(close, length=10, fast=2, slow=30)
-    trend_up = close > kama
-    trend_down = close < kama
-    
-    # Get weekly data for volume confirmation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Calculate daily ATR(14) for volatility-based breakout channels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate weekly average volume (20-week average)
-    weekly_vol = df_1w['volume'].values
-    avg_weekly_volume = pd.Series(weekly_vol).rolling(window=20, min_periods=20).mean().values
-    # Align to 12h timeframe
-    avg_weekly_volume_aligned = align_htf_to_ltf(prices, df_1w, avg_weekly_volume)
-    # Current volume > 1.5x average weekly volume
-    volume_confirmation = volume > (1.5 * avg_weekly_volume_aligned)
+    # True Range calculation
+    prev_close = np.roll(df_1d['close'], 1)
+    prev_close[0] = df_1d['close'].iloc[0]  # First value
+    tr1 = np.abs(df_1d['high'] - df_1d['low'])
+    tr2 = np.abs(df_1d['high'] - prev_close)
+    tr3 = np.abs(df_1d['low'] - prev_close)
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Calculate breakout channels: upper/lower bands based on ATR
+    # Using 20-period lookback for channel calculation (adaptive to recent volatility)
+    atr_ma = pd.Series(atr_14).rolling(window=20, min_periods=20).mean().values
+    upper_band = df_1d['close'].values + 1.5 * atr_ma
+    lower_band = df_1d['close'].values - 1.5 * atr_ma
+    
+    # Align daily bands to 4h timeframe
+    upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
+    lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
+    
+    # Breakout conditions: price breaks above upper band or below lower band
+    breakout_up = close > upper_band_aligned
+    breakout_down = close < lower_band_aligned
+    
+    # Get 12h data for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
+    
+    # Calculate 12h EMA50 trend filter
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    trend_up = close > ema_50_12h_aligned
+    trend_down = close < ema_50_12h_aligned
+    
+    # Volume filter: current volume > 1.5x 20-period average volume (balanced to avoid overtrading)
+    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * avg_volume)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -65,34 +74,37 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(kama[i]) or np.isnan(trend_up[i]) or np.isnan(trend_down[i]) or
-            np.isnan(volume_confirmation[i])):
+        if (np.isnan(breakout_up[i]) or np.isnan(breakout_down[i]) or
+            np.isnan(trend_up[i]) or np.isnan(trend_down[i]) or
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above KAMA (uptrend) + volume confirmation
-            if trend_up[i] and volume_confirmation[i]:
+            # Long: breakout above upper band + 12h uptrend + volume filter
+            if breakout_up[i] and trend_up[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA (downtrend) + volume confirmation
-            elif trend_down[i] and volume_confirmation[i]:
+            # Short: breakout below lower band + 12h downtrend + volume filter
+            elif breakout_down[i] and trend_down[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below KAMA (trend change)
-            if not trend_up[i]:
+            # Exit long: price returns to mid-band or trend reversal
+            mid_band = (upper_band_aligned[i] + lower_band_aligned[i]) / 2
+            if close[i] <= mid_band or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above KAMA (trend change)
-            if not trend_down[i]:
+            # Exit short: price returns to mid-band or trend reversal
+            mid_band = (upper_band_aligned[i] + lower_band_aligned[i]) / 2
+            if close[i] >= mid_band or not trend_down[i]:
                 signals[i] = 0.0
                 position = 0
             else:
