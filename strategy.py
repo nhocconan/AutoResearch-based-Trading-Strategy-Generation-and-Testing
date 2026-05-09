@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Keltner_Breakout_1wTrend_Volume"
-timeframe = "12h"
+name = "4h_TRIX_ZeroCross_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,86 +17,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Calculate 50-period EMA on 1w close for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Get 1d data for ATR (used in Keltner channels)
+    # Get 1d data for TRIX calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 20-period ATR on 1d high/low/close
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate TRIX (12-period triple EMA) on 1d close
     close_1d = df_1d['close'].values
+    ema1 = pd.Series(close_1d).ewm(span=12, adjust=False, min_periods=12).mean()
+    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
+    trix = ((ema3 - ema3.shift(1)) / ema3.shift(1)) * 100  # Percentage change
+    trix_values = trix.fillna(0).values
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix_values)
     
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
+    # Calculate 34-period EMA on 1d close for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    atr_20_1d = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
-    atr_20_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_20_1d)
-    
-    # Calculate 20-period EMA on 12h close for Keltner middle line
-    ema_20_12h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Keltner Channel: upper = EMA + 2*ATR, lower = EMA - 2*ATR
-    keltner_upper = ema_20_12h + 2.0 * atr_20_1d_aligned
-    keltner_lower = ema_20_12h - 2.0 * atr_20_1d_aligned
-    
-    # Calculate 20-period volume average for spike detection
+    # Calculate 20-period volume average for spike detection (4h timeframe)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)  # Need 20 for EMA and ATR
+    start_idx = max(34, 20)  # Need 34 for EMA, 20 for volume average
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(keltner_upper[i]) or 
-            np.isnan(keltner_lower[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(trix_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema_1w = ema_50_1w_aligned[i]
-        upper = keltner_upper[i]
-        lower = keltner_lower[i]
+        trix_val = trix_aligned[i]
+        ema_1d = ema_34_1d_aligned[i]
         vol = volume[i]
         vol_ma_val = vol_ma[i]
         
         if position == 0:
-            # Enter long: Close > Upper Keltner AND price > 1w EMA50 (uptrend) AND volume > 2.0x average
-            if close[i] > upper and close[i] > ema_1w and vol > 2.0 * vol_ma_val:
+            # Enter long: TRIX crosses above zero AND price > 1d EMA34 (uptrend) AND volume > 2.0x average
+            if trix_val > 0 and trix_aligned[i-1] <= 0 and close[i] > ema_1d and vol > 2.0 * vol_ma_val:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Close < Lower Keltner AND price < 1w EMA50 (downtrend) AND volume > 2.0x average
-            elif close[i] < lower and close[i] < ema_1w and vol > 2.0 * vol_ma_val:
+            # Enter short: TRIX crosses below zero AND price < 1d EMA34 (downtrend) AND volume > 2.0x average
+            elif trix_val < 0 and trix_aligned[i-1] >= 0 and close[i] < ema_1d and vol > 2.0 * vol_ma_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Close < Lower Keltner OR trend reverses (price < 1w EMA50)
-            if close[i] < lower or close[i] < ema_1w:
+            # Exit long: TRIX crosses below zero OR trend reverses (price < 1d EMA34)
+            if trix_val < 0 and trix_aligned[i-1] >= 0 or close[i] < ema_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Close > Upper Keltner OR trend reverses (price > 1w EMA50)
-            if close[i] > upper or close[i] > ema_1w:
+            # Exit short: TRIX crosses above zero OR trend reverses (price > 1d EMA34)
+            if trix_val > 0 and trix_aligned[i-1] <= 0 or close[i] > ema_1d:
                 signals[i] = 0.0
                 position = 0
             else:
