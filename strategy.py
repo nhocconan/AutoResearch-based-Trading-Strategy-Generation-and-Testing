@@ -3,63 +3,58 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_WeeklyTrend_DailyBreakout_Volume"
-timeframe = "1d"
+name = "6h_WeeklyDonchian20_BullishPhase_ExitOnClose"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Weekly data for trend filter (1w)
+    # Weekly data for Donchian channel (trend filter)
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 1:
         return np.zeros(n)
     
-    # Daily data for breakout levels
+    # Daily data for bullish phase confirmation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 1:
         return np.zeros(n)
     
-    # Weekly EMA50 trend filter (long-term trend)
-    weekly_close = df_1w['close'].values
-    ema_50_1w = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Weekly Donchian(20): high/low of last 20 weekly candles
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Daily high/low for breakout levels (previous day)
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    # Calculate weekly rolling high/low with period=20
+    high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    # Breakout levels: previous day high/low
-    prev_high = np.roll(daily_high, 1)
-    prev_low = np.roll(daily_low, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
+    # Bullish phase: price above weekly Donchian middle (mean of 20-period high/low)
+    donchian_mid = (high_20 + low_20) / 2.0
+    bullish_phase = high_1w > donchian_mid  # Weekly close above midpoint = bullish
     
-    # Align breakout levels to daily timeframe (no additional delay needed as we use previous day's data)
-    breakout_high = align_htf_to_ltf(prices, df_1d, prev_high)
-    breakout_low = align_htf_to_ltf(prices, df_1d, prev_low)
+    # Align weekly bullish phase to 6h timeframe
+    bullish_phase_aligned = align_htf_to_ltf(prices, df_1w, bullish_phase)
     
-    # Volume spike filter: volume > 2.0x 20-day EMA
-    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike = volume > (2.0 * vol_ema20)
+    # Daily close price for trend alignment (optional filter)
+    close_1d = df_1d['close'].values
+    sma_50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
+    sma_50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_50_1d)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0  # 0: flat, 1: long
     
-    start_idx = 50  # Warmup period
+    start_idx = 100  # Ensure sufficient warmup for all indicators
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(breakout_high[i]) or np.isnan(breakout_low[i]) or
-            np.isnan(vol_ema20[i])):
+        if (np.isnan(bullish_phase_aligned[i]) or 
+            np.isnan(sma_50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,29 +63,18 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: price breaks above previous day's high with volume spike and above weekly EMA50
-            if (price > breakout_high[i] and vol_spike[i] and price > ema_50_1w_aligned[i]):
+            # Enter long: weekly bullish phase AND price above daily SMA50
+            if bullish_phase_aligned[i] and price > sma_50_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below previous day's low with volume spike and below weekly EMA50
-            elif (price < breakout_low[i] and vol_spike[i] and price < ema_50_1w_aligned[i]):
-                signals[i] = -0.25
-                position = -1
         
         elif position == 1:
-            # Exit long: price falls back below previous day's low (mean reversion)
-            if price < breakout_low[i]:
+            # Exit long: weekly bullish phase ends (weekly close below Donchian midpoint)
+            # OR price closes below daily SMA50 (defensive exit)
+            if not bullish_phase_aligned[i] or price < sma_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        
-        elif position == -1:
-            # Exit short: price rises back above previous day's high (mean reversion)
-            if price > breakout_high[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
     
     return signals
