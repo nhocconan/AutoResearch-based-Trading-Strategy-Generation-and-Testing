@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 2025-06-22 | 4h_Trix_Signal_Line_Cross_12hTrend_VolumeSpike
-# Hypothesis: TRIX crossing its signal line (EMA of TRIX) with 12h EMA50 trend filter and volume spike confirmation.
-# TRIX is a momentum oscillator that filters out insignificant price movements; its signal line cross indicates momentum shifts.
-# Combining with 12h trend ensures trades align with higher timeframe momentum, reducing whipsaw.
-# Volume spike (>2x 24-period average) confirms breakout strength. Designed for low trade frequency (20-50/year).
+# 2025-06-22 | 1h_SMMA_Trend_Filter_v1
+# Hypothesis: Use 4h Smoothed Moving Average (SMMA) for trend direction and 1h for precise entry timing.
+# SMMA (Smoothed Moving Average) is less reactive than EMA/SMA, reducing whipsaws in sideways markets.
+# Long when price > SMMA(50) and short when price < SMMA(50) on 4h timeframe.
+# Entry on 1h only when price crosses SMMA with volume confirmation (>1.5x 20-period average).
+# Designed for low trade frequency (15-35/year) to minimize fee drag in both bull and bear markets.
 
-name = "4h_Trix_Signal_Line_Cross_12hTrend_VolumeSpike"
-timeframe = "4h"
+name = "1h_SMMA_Trend_Filter_v1"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -23,66 +24,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 4h data for SMMA trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate 12h EMA50 for trend filter
-    ema_50_12h = np.full_like(close_12h, np.nan)
-    if len(close_12h) >= 50:
-        ema_50_12h[49] = np.mean(close_12h[0:50])
-        for i in range(50, len(close_12h)):
-            ema_50_12h[i] = (ema_50_12h[i-1] * 49 + close_12h[i]) / 50
+    # Calculate 4h SMMA(50) - Smoothed Moving Average
+    smma_4h = np.full_like(close_4h, np.nan)
+    if len(close_4h) >= 50:
+        # First value is simple average
+        smma_4h[49] = np.mean(close_4h[0:50])
+        # Subsequent values: SMMA = (PREV_SMMA * (N-1) + CLOSE) / N
+        for i in range(50, len(close_4h)):
+            smma_4h[i] = (smma_4h[i-1] * 49 + close_4h[i]) / 50
     
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Align 4h SMMA to 1h timeframe
+    smma_4h_aligned = align_htf_to_ltf(prices, df_4h, smma_4h)
     
-    # Calculate TRIX: triple EMA of ROC, then signal line (EMA of TRIX)
-    # ROC period = 12
-    roc = np.full_like(close, np.nan)
-    if len(close) >= 13:
-        roc[12:] = (close[12:] - close[:-12]) / close[:-12] * 100
-    
-    # EMA1 of ROC
-    ema1 = np.full_like(roc, np.nan)
-    if len(roc) >= 12:
-        ema1[11] = np.mean(roc[0:12])
-        for i in range(12, len(roc)):
-            if not np.isnan(roc[i]):
-                ema1[i] = (roc[i] * 2 + ema1[i-1] * (12-1)) / (12+1)
-    
-    # EMA2 of EMA1
-    ema2 = np.full_like(ema1, np.nan)
-    if len(ema1) >= 12:
-        ema2[11] = np.mean(ema1[0:12])
-        for i in range(12, len(ema1)):
-            if not np.isnan(ema1[i]):
-                ema2[i] = (ema1[i] * 2 + ema2[i-1] * (12-1)) / (12+1)
-    
-    # EMA3 of EMA2 = TRIX
-    trix = np.full_like(ema2, np.nan)
-    if len(ema2) >= 12:
-        trix[11] = np.mean(ema2[0:12])
-        for i in range(12, len(ema2)):
-            if not np.isnan(ema2[i]):
-                trix[i] = (ema2[i] * 2 + ema2[i-1] * (12-1)) / (12+1)
-    
-    # Signal line = EMA of TRIX (period=9)
-    signal_line = np.full_like(trix, np.nan)
-    if len(trix) >= 9:
-        signal_line[8] = np.mean(trix[0:9])
-        for i in range(9, len(trix)):
-            if not np.isnan(trix[i]):
-                signal_line[i] = (trix[i] * 2 + signal_line[i-1] * (9-1)) / (9+1)
-    
-    # Volume spike filter: current volume / 24-period average volume (24*4h = 4 days)
+    # Volume filter: 1h volume / 20-period average volume
     vol_ma = np.full_like(volume, np.nan)
-    if len(volume) >= 24:
-        vol_ma[23] = np.mean(volume[0:24])
-        for i in range(24, len(volume)):
-            vol_ma[i] = (vol_ma[i-1] * 23 + volume[i]) / 24
+    if len(volume) >= 20:
+        vol_ma[19] = np.mean(volume[0:20])
+        for i in range(20, len(volume)):
+            vol_ma[i] = (vol_ma[i-1] * 19 + volume[i]) / 20
     
     volume_ratio = np.full_like(volume, np.nan)
     valid = (~np.isnan(vol_ma)) & (vol_ma != 0)
@@ -90,52 +56,41 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_entry = 0
     
-    start_idx = max(24, 12+12+12+9)  # Ensure TRIX, signal line, volume MA are ready
+    start_idx = max(50, 20)  # Ensure SMMA and volume MA are ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(trix[i]) or np.isnan(signal_line[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_ratio[i])):
+        if np.isnan(smma_4h_aligned[i]) or np.isnan(volume_ratio[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             continue
         
-        bars_since_entry += 1
-        
         if position == 0:
-            # Enter long: TRIX crosses above signal line AND uptrend (price > EMA50) AND volume spike
-            if (trix[i] > signal_line[i] and trix[i-1] <= signal_line[i-1] and 
-                close[i] > ema_50_12h_aligned[i] and volume_ratio[i] > 2.0):
-                signals[i] = 0.25
+            # Enter long: price crosses above SMMA AND volume confirmation
+            if close[i] > smma_4h_aligned[i] and volume_ratio[i] > 1.5:
+                signals[i] = 0.20
                 position = 1
-                bars_since_entry = 0
-            # Enter short: TRIX crosses below signal line AND downtrend (price < EMA50) AND volume spike
-            elif (trix[i] < signal_line[i] and trix[i-1] >= signal_line[i-1] and 
-                  close[i] < ema_50_12h_aligned[i] and volume_ratio[i] > 2.0):
-                signals[i] = -0.25
+            # Enter short: price crosses below SMMA AND volume confirmation
+            elif close[i] < smma_4h_aligned[i] and volume_ratio[i] > 1.5:
+                signals[i] = -0.20
                 position = -1
-                bars_since_entry = 0
         
         elif position == 1:
-            # Exit long: TRIX crosses below signal line OR trend reversal (price < EMA50)
-            if (trix[i] < signal_line[i] and trix[i-1] >= signal_line[i-1]) or close[i] < ema_50_12h_aligned[i]:
+            # Exit long: price crosses below SMMA
+            if close[i] < smma_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: TRIX crosses above signal line OR trend reversal (price > EMA50)
-            if (trix[i] > signal_line[i] and trix[i-1] <= signal_line[i-1]) or close[i] > ema_50_12h_aligned[i]:
+            # Exit short: price crosses above SMMA
+            if close[i] > smma_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
