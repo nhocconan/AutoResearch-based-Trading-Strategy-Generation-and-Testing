@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Donchian20_RSI200_Tight"
-timeframe = "4h"
+name = "1d_1w_Camarilla_R1_S1_Breakout_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,70 +17,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Get daily data for Camarilla levels (uses previous day)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # RSI(14) for mean reversion filter
-    delta = pd.Series(close).diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=14).mean()
-    rs = gain / loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # Previous day's close for Camarilla calculation
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # 200 EMA trend filter on 1d
-    ema200_1d = pd.Series(df_1d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # Calculate Camarilla levels (R1, S1)
+    r1 = prev_close + 1.1 * (prev_high - prev_low) / 4
+    s1 = prev_close - 1.1 * (prev_high - prev_low) / 4
     
-    # Volume filter: current volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
+    # Trend filter: weekly EMA50
+    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Volume filter: current weekly volume > 1.5 * 20-week average
+    vol_series = pd.Series(df_1w['volume'].values)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    volume_filter_1w = df_1w['volume'].values > (vol_ma * 1.5)
+    
+    # Align all to daily
+    r1_1d = align_htf_to_ltf(prices, df_1d, r1)
+    s1_1d = align_htf_to_ltf(prices, df_1d, s1)
+    ema50_1w_1d = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    volume_filter_1d = align_htf_to_ltf(prices, df_1w, volume_filter_1w)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0
     
-    start_idx = 50  # Need enough data for indicators
+    start_idx = max(50, 20)  # Need enough data for EMA50 and volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(rsi[i]) or np.isnan(ema200_1d_aligned[i]) or np.isnan(volume_filter[i]):
+        if (np.isnan(r1_1d[i]) or np.isnan(s1_1d[i]) or
+            np.isnan(ema50_1w_1d[i]) or np.isnan(volume_filter_1d[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: price above/below 200 EMA on 1d
-        trend_up = close[i] > ema200_1d_aligned[i]
-        trend_down = close[i] < ema200_1d_aligned[i]
+        r1_val = r1_1d[i]
+        s1_val = s1_1d[i]
+        trend = ema50_1w_1d[i]
+        vol_filter = volume_filter_1d[i]
         
         if position == 0:
-            # Enter long: break above upper Donchian + uptrend + RSI not overbought + volume
-            if (close[i] > high_20[i] and trend_up and 
-                rsi[i] < 70 and volume_filter[i]):
+            # Enter long: break above R1 with volume and above trend
+            if close[i] > r1_val and close[i] > trend and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below lower Donchian + downtrend + RSI not oversold + volume
-            elif (close[i] < low_20[i] and trend_down and 
-                  rsi[i] > 30 and volume_filter[i]):
+            # Enter short: break below S1 with volume and below trend
+            elif close[i] < s1_val and close[i] < trend and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: break below lower Donchian or RSI overbought
-            if close[i] < low_20[i] or rsi[i] > 70:
+            # Exit long: close below S1 (mean reversion to center)
+            if close[i] < s1_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: break above upper Donchian or RSI oversold
-            if close[i] > high_20[i] or rsi[i] < 30:
+            # Exit short: close above R1 (mean reversion to center)
+            if close[i] > r1_val:
                 signals[i] = 0.0
                 position = 0
             else:
