@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Supertrend_With_ATR_Stop"
-timeframe = "4h"
+name = "12h_Camarilla_R1S1_1dTrend_VolumeSpike_v3"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,101 +22,75 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate ATR for Supertrend (using 1d data for longer-term volatility)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 30-period EMA on 1d close for trend filter
     close_1d = df_1d['close'].values
+    ema_30_1d = pd.Series(close_1d).ewm(span=30, adjust=False, min_periods=30).mean().values
+    ema_30_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_30_1d)
     
-    # True Range calculation
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.inf], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Get 12h data for pivot calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
+        return np.zeros(n)
     
-    # ATR calculation
-    atr_period = 10
-    atr = np.zeros_like(tr)
-    atr[atr_period] = np.mean(tr[1:atr_period+1])
-    for i in range(atr_period + 1, len(tr)):
-        atr[i] = (atr[i-1] * (atr_period - 1) + tr[i]) / atr_period
+    # Calculate 12h CAMARILLA pivot levels from previous 12h bar's OHLC
+    prev_12h_high = df_12h['high'].shift(1).values
+    prev_12h_low = df_12h['low'].shift(1).values
+    prev_12h_close = df_12h['close'].shift(1).values
     
-    # Supertrend calculation
-    multiplier = 3.0
-    upper_band = (high_1d + low_1d) / 2 + multiplier * atr
-    lower_band = (high_1d + low_1d) / 2 - multiplier * atr
+    # Camarilla formula for R1 and S1
+    range_12h = prev_12h_high - prev_12h_low
+    camarilla_mult = 1.1 / 12  # ~0.0916667
+    r1_12h = prev_12h_close + range_12h * camarilla_mult * 1
+    s1_12h = prev_12h_close - range_12h * camarilla_mult * 1
     
-    # Initialize Supertrend
-    supertrend = np.zeros_like(close_1d)
-    direction = np.ones_like(close_1d)  # 1 for uptrend, -1 for downtrend
+    # Align Camarilla levels to 12h timeframe
+    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
+    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
     
-    supertrend[0] = upper_band[0]
-    direction[0] = 1
-    
-    for i in range(1, len(close_1d)):
-        if close_1d[i] > supertrend[i-1]:
-            supertrend[i] = lower_band[i]
-            direction[i] = 1
-        else:
-            supertrend[i] = upper_band[i]
-            direction[i] = -1
-            
-        # Adjust bands
-        if direction[i] == 1:
-            if lower_band[i] < lower_band[i-1]:
-                lower_band[i] = lower_band[i-1]
-            supertrend[i] = lower_band[i]
-        else:
-            if upper_band[i] > upper_band[i-1]:
-                upper_band[i] = upper_band[i-1]
-            supertrend[i] = upper_band[i]
-    
-    # Align Supertrend and direction to 4h timeframe
-    supertrend_aligned = align_htf_to_ltf(prices, df_1d, supertrend)
-    direction_aligned = align_htf_to_ltf(prices, df_1d, direction)
-    
-    # Calculate volume moving average for confirmation
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 12-period volume average for spike detection
+    vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Need enough data for indicators
+    start_idx = max(30, 12)  # Need 30 for 1d EMA and 12 for volume average
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(supertrend_aligned[i]) or np.isnan(direction_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema_30_1d_aligned[i]) or np.isnan(r1_12h_aligned[i]) or 
+            np.isnan(s1_12h_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        st = supertrend_aligned[i]
-        dir_signal = direction_aligned[i]
+        ema_1d = ema_30_1d_aligned[i]
+        r1_level = r1_12h_aligned[i]
+        s1_level = s1_12h_aligned[i]
         vol = volume[i]
         vol_ma_val = vol_ma[i]
         
         if position == 0:
-            # Enter long: Supertrend uptrend + price above Supertrend + volume confirmation
-            if dir_signal == 1 and close[i] > st and vol > 1.5 * vol_ma_val:
+            # Enter long: Price breaks above R1 with volume AND price > 1d EMA30 (uptrend)
+            if close[i] > r1_level and vol > 2.0 * vol_ma_val and close[i] > ema_1d:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Supertrend downtrend + price below Supertrend + volume confirmation
-            elif dir_signal == -1 and close[i] < st and vol > 1.5 * vol_ma_val:
+            # Enter short: Price breaks below S1 with volume AND price < 1d EMA30 (downtrend)
+            elif close[i] < s1_level and vol > 2.0 * vol_ma_val and close[i] < ema_1d:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Supertrend turns down OR price falls below Supertrend
-            if dir_signal == -1 or close[i] < st:
+            # Exit long: Price breaks below R1 OR trend reverses (price < 1d EMA30)
+            if close[i] < r1_level or close[i] < ema_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Supertrend turns up OR price rises above Supertrend
-            if dir_signal == 1 or close[i] > st:
+            # Exit short: Price breaks above S1 OR trend reverses (price > 1d EMA30)
+            if close[i] > s1_level or close[i] > ema_1d:
                 signals[i] = 0.0
                 position = 0
             else:
