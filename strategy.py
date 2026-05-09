@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d timeframe with weekly trend filter and volume confirmation.
-# Uses weekly EMA34 to filter trades in direction of higher timeframe trend.
-# Enters on daily price breakouts above/below previous day's high/low with volume confirmation.
-# Aims for low trade frequency (15-30/year) to minimize fee drag and improve generalization.
-# Works in both bull and bear markets by aligning with weekly trend.
+# Hypothesis: 12h timeframe with 1-day structure. Uses daily ATR for volatility filter and daily EMA50 for trend.
+# Trades breakouts of previous day's high/low with volatility-adjusted position sizing.
+# Trend filter ensures trades align with higher timeframe direction.
+# Volatility filter avoids low-volatility chop where breakouts fail.
+# Target: 50-150 total trades over 4 years (12-37/year) with size 0.25.
 
-name = "1d_Breakout_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "12h_DailyBreakout_ATRFilter_EMA50"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,69 +23,94 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Entry signals: breakout above previous day's high or below previous day's low
+    # Previous day's high/low for breakout levels
     prev_high = np.roll(high, 1)
     prev_low = np.roll(low, 1)
-    prev_high[0] = np.nan  # First value invalid
+    prev_close = np.roll(close, 1)
+    prev_high[0] = np.nan
     prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
+    # Daily ATR for volatility filter (14-period)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
+    
+    # Calculate True Range for 1d
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_14_1d = tr.rolling(window=14, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    
+    # Daily EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # 12h ATR for position sizing (volatility-adjusted)
+    tr_12h = pd.Series(np.maximum(
+        high - low,
+        np.maximum(
+            abs(high - np.roll(close, 1)),
+            abs(low - np.roll(close, 1))
+        )
+    )).rolling(window=14, min_periods=14).mean().values
+    atr_norm = tr_12h / (atr_14_1d_aligned + 1e-10)  # Normalize by daily ATR
+    
+    # Breakout conditions
     breakout_up = close > prev_high
     breakout_down = close < prev_low
     
-    # Weekly trend filter: EMA34 on weekly timeframe
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
+    # Trend filter
+    trend_up = close > ema_50_1d_aligned
+    trend_down = close < ema_50_1d_aligned
     
-    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    trend_up = close > ema_34_1w_aligned
-    trend_down = close < ema_34_1w_aligned
-    
-    # Volume filter: current volume > 1.5x 20-day average volume
-    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * avg_volume)
+    # Volatility filter: avoid low volatility (ATR ratio < 0.5) and extreme volatility (> 3.0)
+    vol_filter = (atr_norm >= 0.5) & (atr_norm <= 3.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Need enough data for indicators
+    start_idx = 50  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(breakout_up[i]) or np.isnan(breakout_down[i]) or
             np.isnan(trend_up[i]) or np.isnan(trend_down[i]) or
-            np.isnan(volume_filter[i])):
+            np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: breakout above previous day's high + weekly uptrend + volume filter
-            if breakout_up[i] and trend_up[i] and volume_filter[i]:
-                signals[i] = 0.25
+            # Long: breakout above prev day high + uptrend + adequate volatility
+            if breakout_up[i] and trend_up[i] and vol_filter[i]:
+                # Size inversely to volatility (but capped)
+                size = 0.25 * min(1.0, 0.5 / max(atr_norm[i], 0.1))
+                signals[i] = size
                 position = 1
-            # Short: breakout below previous day's low + weekly downtrend + volume filter
-            elif breakout_down[i] and trend_down[i] and volume_filter[i]:
-                signals[i] = -0.25
+            # Short: breakout below prev day low + downtrend + adequate volatility
+            elif breakout_down[i] and trend_down[i] and vol_filter[i]:
+                size = 0.25 * min(1.0, 0.5 / max(atr_norm[i], 0.1))
+                signals[i] = -size
                 position = -1
         
         elif position == 1:
-            # Exit long: close below previous day's low or trend reversal
-            if close[i] < prev_low[i] or not trend_up[i]:
+            # Exit long: price returns to prev day close or trend reversal
+            if close[i] <= prev_close[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.25 * min(1.0, 0.5 / max(atr_norm[i], 0.1))
         
         elif position == -1:
-            # Exit short: close above previous day's high or trend reversal
-            if close[i] > prev_high[i] or not trend_down[i]:
+            # Exit short: price returns to prev day close or trend reversal
+            if close[i] >= prev_close[i] or not trend_down[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.25 * min(1.0, 0.5 / max(atr_norm[i], 0.1))
     
     return signals
