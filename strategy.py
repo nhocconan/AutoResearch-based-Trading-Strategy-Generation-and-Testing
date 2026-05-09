@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Camarilla pivot range breakout with 1d trend filter and volume confirmation
-# Long when: price breaks above Camarilla R3 (1d), 1d EMA(34) rising, volume spike (>1.5x 20-period avg)
-# Short when: price breaks below Camarilla S3 (1d), 1d EMA(34) falling, volume spike
-# Exit when: price crosses Camarilla pivot point (PP) or trend reverses
-# Position size: 0.25 (25% of capital) to limit drawdown. Target: 25-50 trades/year.
+# Hypothesis: 6h Camarilla R3/S3 Breakout with 1d EMA34 Trend Filter and Volume Spike
+# Long when: close > Camarilla R3 (1d high-low range), 1d EMA(34) rising, volume > 1.5x 20-period average
+# Short when: close < Camarilla S3 (1d high-low range), 1d EMA(34) falling, volume > 1.5x 20-period average
+# Exit when: price crosses Camarilla pivot point (PP) OR trend reverses
+# Position size: 0.25 (25% of capital) to limit drawdown. Target: 15-35 trades/year.
 # Designed to work in both bull (breakouts) and bear (mean-reversion at extremes) markets.
 
-name = "4h_Camarilla_R3S3_1dEMA34_VolumeSpike"
-timeframe = "4h"
+name = "6h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,32 +24,43 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels from previous day
-    # Using high, low, close of previous day (requires 1d data)
+    # Calculate Camarilla levels from 1d data
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_high = df_1d['high'].values
-    prev_low = df_1d['low'].values
-    prev_close = df_1d['close'].values
+    # Use previous day's high-low range for today's Camarilla calculation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels: H-L range
-    rang = prev_high - prev_low
+    # Calculate Camarilla levels: based on previous day's range
+    # H-L = high_1d[i-1] - low_1d[i-1]
+    # R4 = close_1d[i-1] + 1.5 * (high_1d[i-1] - low_1d[i-1])
+    # R3 = close_1d[i-1] + 1.125 * (high_1d[i-1] - low_1d[i-1])
+    # S3 = close_1d[i-1] - 1.125 * (high_1d[i-1] - low_1d[i-1])
+    # PP = (high_1d[i-1] + low_1d[i-1] + close_1d[i-1]) / 3
     
-    # Camarilla levels
-    camarilla_pp = (prev_high + prev_low + prev_close) / 3
-    camarilla_r3 = camarilla_pp + (1.1 * rang / 2)
-    camarilla_s3 = camarilla_pp - (1.1 * rang / 2)
+    hl_range = high_1d - low_1d
+    r3 = close_1d + 1.125 * hl_range
+    s3 = close_1d - 1.125 * hl_range
+    pp = (high_1d + low_1d + close_1d) / 3.0
     
-    # Align Camarilla levels to 4h timeframe
-    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Shift by 1 to use previous day's levels (avoid look-ahead)
+    r3 = np.roll(r3, 1)
+    s3 = np.roll(s3, 1)
+    pp = np.roll(pp, 1)
+    r3[0] = r3[1] if len(r3) > 1 else 0
+    s3[0] = s3[1] if len(s3) > 1 else 0
+    pp[0] = pp[1] if len(pp) > 1 else 0
+    
+    # Align Camarilla levels to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
     
     # 1d EMA(34) for trend filter
-    ema_34_1d = prev_close.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_prev = np.roll(ema_34_1d, 1)
     ema_34_1d_prev[0] = ema_34_1d[0]
     ema_rising = ema_34_1d > ema_34_1d_prev
@@ -68,39 +79,38 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(camarilla_pp_aligned[i]) or np.isnan(ema_rising_aligned[i]) or
-            np.isnan(ema_falling_aligned[i]) or np.isnan(vol_spike[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(pp_aligned[i]) or
+            np.isnan(ema_rising_aligned[i]) or np.isnan(ema_falling_aligned[i]) or np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above R3 + 1d EMA rising + volume spike
-            if (close[i] > camarilla_r3_aligned[i] and 
+            # Enter long: price > R3 + 1d EMA rising + volume spike
+            if (close[i] > r3_aligned[i] and 
                 ema_rising_aligned[i] and 
                 vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S3 + 1d EMA falling + volume spike
-            elif (close[i] < camarilla_s3_aligned[i] and 
+            # Enter short: price < S3 + 1d EMA falling + volume spike
+            elif (close[i] < s3_aligned[i] and 
                   ema_falling_aligned[i] and 
                   vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below pivot point OR trend turns down
-            if (close[i] < camarilla_pp_aligned[i]) or (not ema_rising_aligned[i]):
+            # Exit long: price crosses below PP OR trend turns down
+            if (close[i] < pp_aligned[i]) or (not ema_rising_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above pivot point OR trend turns up
-            if (close[i] > camarilla_pp_aligned[i]) or (not ema_falling_aligned[i]):
+            # Exit short: price crosses above PP OR trend turns up
+            if (close[i] > pp_aligned[i]) or (not ema_falling_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
