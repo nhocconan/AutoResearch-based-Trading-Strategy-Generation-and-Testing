@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 1h_4hDonchianBreakout_1dTrend_20Vol
-# Hypothesis: 4h Donchian breakout (20-period) with 1d EMA200 trend filter and 20-period volume spike.
-# 1h used only for entry timing. Works in bull markets by buying breakouts in uptrends, in bear markets by selling breakdowns in downtrends.
-# Volume filter ensures only high-conviction moves trigger entries. Designed for 15-35 trades/year on 1h timeframe.
+# 6h_WeeklyPivot_Breakout_1dTrend_Volume
+# Hypothesis: Breakout above/below weekly pivot levels (R2/S2) with volume >1.8x 30-bar average and trend filter from 1d EMA50.
+# Uses weekly pivot levels as strong support/resistance. In uptrend (price > EMA50), buy breakout above R2; in downtrend (price < EMA50), sell breakdown below S2.
+# Volume filter ensures only high-conviction moves trigger entries. Designed for 15-30 trades/year on 6h timeframe.
 
-name = "1h_4hDonchianBreakout_1dTrend_20Vol"
-timeframe = "1h"
+name = "6h_WeeklyPivot_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,51 +22,47 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Donchian breakout levels
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
-    
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    
-    # Calculate 4h Donchian channels (20-period high/low)
-    donchian_high = np.full_like(high_4h, np.nan)
-    donchian_low = np.full_like(low_4h, np.nan)
-    
-    if len(high_4h) >= 20:
-        for i in range(len(high_4h)):
-            if i >= 19:
-                donchian_high[i] = np.max(high_4h[i-19:i+1])
-                donchian_low[i] = np.min(low_4h[i-19:i+1])
-    
-    # Align Donchian levels to 1h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
-    
     # Get 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
+    # Calculate 1d EMA(50) with proper initialization
+    ema_50_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 50:
+        ema_50_1d[49] = np.mean(close_1d[0:50])
+        for i in range(50, len(close_1d)):
+            ema_50_1d[i] = (close_1d[i] * 2 + ema_50_1d[i-1] * 48) / 50
     
-    # Calculate 1d EMA(200) with proper initialization
-    ema_200_1d = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 200:
-        ema_200_1d[199] = np.mean(close_1d[0:200])
-        for i in range(200, len(close_1d)):
-            ema_200_1d[i] = (close_1d[i] * 2 + ema_200_1d[i-1] * 198) / 200
+    # Align 1d EMA to 6h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align 1d EMA to 1h timeframe
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Get weekly data for pivot levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
+        return np.zeros(n)
     
-    # Volume filter: 1h volume / 20-period average volume
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate weekly pivot points: P = (H+L+C)/3, S1 = 2P-H, R1 = 2P-L, S2 = P-(H-L), R2 = P+(H-L)
+    pivot = (high_1w + low_1w + close_1w) / 3
+    weekly_range = high_1w - low_1w
+    weekly_R2 = pivot + weekly_range  # R2 = P + (H-L)
+    weekly_S2 = pivot - weekly_range  # S2 = P - (H-L)
+    
+    # Align weekly pivot levels to 6h timeframe
+    weekly_R2_aligned = align_htf_to_ltf(prices, df_1w, weekly_R2)
+    weekly_S2_aligned = align_htf_to_ltf(prices, df_1w, weekly_S2)
+    
+    # Volume filter: 6h volume / 30-period average volume
     vol_ma = np.full_like(volume, np.nan)
-    if len(volume) >= 20:
-        vol_ma[19] = np.mean(volume[0:20])
-        for i in range(20, len(volume)):
-            vol_ma[i] = (vol_ma[i-1] * 19 + volume[i]) / 20
+    if len(volume) >= 30:
+        vol_ma[29] = np.mean(volume[0:30])
+        for i in range(30, len(volume)):
+            vol_ma[i] = (vol_ma[i-1] * 29 + volume[i]) / 30
     
     volume_ratio = np.full_like(volume, np.nan)
     valid_vol = (~np.isnan(vol_ma)) & (vol_ma != 0)
@@ -75,41 +71,41 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 1)
+    start_idx = max(30, 1)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or \
-           np.isnan(ema_200_1d_aligned[i]) or np.isnan(volume_ratio[i]):
+        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(weekly_R2_aligned[i]) or \
+           np.isnan(weekly_S2_aligned[i]) or np.isnan(volume_ratio[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: Price breaks above 4h Donchian high AND volume confirmation AND bullish trend (price > EMA200)
-            if close[i] > donchian_high_aligned[i] and volume_ratio[i] > 2.0 and close[i] > ema_200_1d_aligned[i]:
-                signals[i] = 0.20
+            # Enter long: Price breaks above weekly R2 AND volume confirmation AND bullish trend (price > EMA50)
+            if close[i] > weekly_R2_aligned[i] and volume_ratio[i] > 1.8 and close[i] > ema_50_1d_aligned[i]:
+                signals[i] = 0.25
                 position = 1
-            # Enter short: Price breaks below 4h Donchian low AND volume confirmation AND bearish trend (price < EMA200)
-            elif close[i] < donchian_low_aligned[i] and volume_ratio[i] > 2.0 and close[i] < ema_200_1d_aligned[i]:
-                signals[i] = -0.20
+            # Enter short: Price breaks below weekly S2 AND volume confirmation AND bearish trend (price < EMA50)
+            elif close[i] < weekly_S2_aligned[i] and volume_ratio[i] > 1.8 and close[i] < ema_50_1d_aligned[i]:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price breaks below 4h Donchian low (reversal signal) or trend turns bearish
-            if close[i] < donchian_low_aligned[i] or close[i] < ema_200_1d_aligned[i]:
+            # Exit long: Price breaks below weekly S2 (reversal signal) or trend turns bearish
+            if close[i] < weekly_S2_aligned[i] or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price breaks above 4h Donchian high (reversal signal) or trend turns bullish
-            if close[i] > donchian_high_aligned[i] or close[i] > ema_200_1d_aligned[i]:
+            # Exit short: Price breaks above weekly R2 (reversal signal) or trend turns bullish
+            if close[i] > weekly_R2_aligned[i] or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
