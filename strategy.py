@@ -3,17 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Bollinger Band breakout with volume confirmation and 1d trend filter.
-# Uses Bollinger Bands (20, 2) for mean reversion in ranging markets and breakouts in trending markets.
-# Volume confirmation ensures institutional participation. Works in both bull and bear markets by
-# adapting to volatility regime via Bollinger Band width.
-name = "4h_Bollinger_Band_Breakout_Volume_Trend"
-timeframe = "4h"
+name = "6h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,65 +17,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
     # Calculate 1d EMA34 for trend filter
     close_1d = pd.Series(df_1d['close'].values)
-    ema_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    ema_34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Bollinger Bands (20, 2) on 4h
-    close_series = pd.Series(close)
-    bb_middle = close_series.rolling(window=20, min_periods=20).mean()
-    bb_std = close_series.rolling(window=20, min_periods=20).std()
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
-    bb_upper = bb_upper.values
-    bb_lower = bb_lower.values
+    # Calculate Camarilla levels from previous 1d
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_vals = df_1d['close'].values
     
-    # Volume spike detection (20-period MA)
-    volume_series = pd.Series(volume)
-    vol_ma20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    # Camarilla formulas (based on previous day's range)
+    # R4 = close + (high - low) * 1.5
+    # R3 = close + (high - low) * 1.25
+    # R2 = close + (high - low) * 1.1666
+    # R1 = close + (high - low) * 1.0833
+    # S1 = close - (high - low) * 1.0833
+    # S2 = close - (high - low) * 1.1666
+    # S3 = close - (high - low) * 1.25
+    # S4 = close - (high - low) * 1.5
+    
+    range_1d = high_1d - low_1d
+    r3 = close_1d_vals + range_1d * 1.25
+    s3 = close_1d_vals - range_1d * 1.25
+    r4 = close_1d_vals + range_1d * 1.5
+    s4 = close_1d_vals - range_1d * 1.5
+    
+    # Align Camarilla levels to 6h
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Volume spike detection on 6h (20-period MA)
+    vol_series = pd.Series(volume)
+    vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60
+    start_idx = 200
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma20[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(r4_aligned[i]) or 
+            np.isnan(s4_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 1.5 * vol_ma20[i]
+        vol_ok = volume[i] > 2.0 * vol_ma20[i]
         
         if position == 0:
-            # Long: Price breaks above upper BB with volume and 1d uptrend
-            if close[i] > bb_upper[i] and vol_ok and close[i] > ema_1d_aligned[i]:
+            # Long: Price breaks above R3 with volume, in uptrend
+            if (close[i] > r3_aligned[i] and vol_ok and 
+                close[i] > ema_34_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below lower BB with volume and 1d downtrend
-            elif close[i] < bb_lower[i] and vol_ok and close[i] < ema_1d_aligned[i]:
+            # Short: Price breaks below S3 with volume, in downtrend
+            elif (close[i] < s3_aligned[i] and vol_ok and 
+                  close[i] < ema_34_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price falls below middle BB
-            if close[i] < bb_middle.iloc[i]:
+            # Exit long: Price falls below R3
+            if close[i] < r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price rises above middle BB
-            if close[i] > bb_middle.iloc[i]:
+            # Exit short: Price rises above S3
+            if close[i] > s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
