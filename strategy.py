@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Ehlers Fisher Transform on price with 1d trend filter and volume spike.
-# Fisher Transform identifies extreme price reversals with high precision.
-# Long when Fisher crosses above -1.5 in 1d uptrend with volume spike.
-# Short when Fisher crosses below +1.5 in 1d downtrend with volume spike.
-# Works in both bull (follow 1d uptrend) and bear (follow 1d downtrend) by catching reversals.
-# Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
-name = "6h_EhlersFisher_1dTrend_VolumeSpike"
-timeframe = "6h"
+# Hypothesis: 12h Williams %R reversal with 1d trend filter and volume confirmation.
+# Williams %R identifies overbought/oversold conditions. In strong trends, pullbacks to
+# extreme %R levels offer high-probability entries. Long when %R crosses above -80 from oversold
+# with 1d uptrend and volume spike; short when crosses below -20 from overbought with 1d downtrend.
+# Uses Williams %R(14) on 12h chart, filtered by 1d EMA(34) trend and volume > 1.5x 20-period EMA.
+# Designed for fewer trades (target: 15-30/year) to avoid fee drag in ranging markets.
+name = "12h_WilliamsR_Reversal_1dEMA_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,9 +23,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Fisher Transform calculation
+    # Get 12h data for Williams %R calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 14:
+        return np.zeros(n)
+    
+    # Calculate Williams %R on 12h: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(df_12h['high'].values).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(df_12h['low'].values).rolling(window=14, min_periods=14).min().values
+    close_12h = df_12h['close'].values
+    williams_r = (highest_high - close_12h) / (highest_high - lowest_low) * -100
+    
+    # Align Williams %R to 12h timeframe (no additional delay needed as it's based on current bar)
+    williams_r_aligned = align_htf_to_ltf(prices, df_12h, williams_r)
+    
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     # 1d EMA(34) for trend filter
@@ -33,93 +47,51 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: volume > 2.0x 20-period EMA (high threshold for fewer trades)
+    # Volume confirmation: volume > 1.5x 20-period EMA
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_confirm = volume > (2.0 * vol_ema20)
-    
-    # Ehlers Fisher Transform on 6h prices (length=10)
-    # Fisher Transform = 0.5 * ln((1+X)/(1-X)) where X is normalized price
-    def fish(price_array, length=10):
-        if len(price_array) < length:
-            return np.full_like(price_array, np.nan)
-        highest = np.max(price_array[-length:])
-        lowest = np.min(price_array[-length:])
-        range_val = highest - lowest
-        if range_val == 0:
-            return 0.0
-        # Avoid division by zero and clamp X to [-0.999, 0.999]
-        X = 2 * (price_array[-1] - lowest) / range_val - 1
-        X = max(min(X, 0.999), -0.999)
-        if X == 1 or X == -1:
-            X = 0.999 * np.sign(X) if X != 0 else 0
-        fish_val = 0.5 * np.log((1 + X) / (1 - X))
-        # Recursive smoothing: fish[t] = 0.5 * fish_val[t] + 0.5 * fish[t-1]
-        return fish_val  # We'll handle smoothing in loop
-    
-    # Precompute Fisher values for all points
-    fish_raw = np.full(n, np.nan)
-    for i in range(9, n):  # Need 10 bars for length=10
-        highest = np.max(high[i-9:i+1])
-        lowest = np.min(low[i-9:i+1])
-        range_val = highest - lowest
-        if range_val == 0:
-            fish_raw[i] = 0.0
-        else:
-            X = 2 * (close[i] - lowest) / range_val - 1
-            X = max(min(X, 0.999), -0.999)
-            if abs(X) >= 1.0:
-                X = 0.999 * np.sign(X)
-            fish_raw[i] = 0.5 * np.log((1 + X) / (1 - X))
-    
-    # Apply IIR smoothing: fish[t] = 0.5 * fish_raw[t] + 0.5 * fish[t-1]
-    fish = np.full(n, np.nan)
-    for i in range(n):
-        if np.isnan(fish_raw[i]):
-            fish[i] = np.nan
-        elif i == 0:
-            fish[i] = fish_raw[i]
-        else:
-            fish[i] = 0.5 * fish_raw[i] + 0.5 * fish[i-1]
+    vol_confirm = volume > (1.5 * vol_ema20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 10  # Need enough data for Fisher Transform
+    start_idx = 14  # Need 14 periods for Williams %R
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(fish[i]) or 
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(vol_ema20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Williams %R values
+        wr = williams_r_aligned[i]
+        wr_prev = williams_r_aligned[i-1] if i > 0 else wr
+        
         price = close[i]
         
         if position == 0:
-            # Enter long: Fisher crosses above -1.5 + 1d uptrend + volume spike
-            if (fish[i] > -1.5 and fish[i-1] <= -1.5 and 
-                price > ema_34_1d_aligned[i] and vol_confirm[i]):
+            # Enter long: Williams %R crosses above -80 from oversold + 1d uptrend + volume spike
+            if (wr > -80 and wr_prev <= -80 and price > ema_34_1d_aligned[i] and vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Fisher crosses below +1.5 + 1d downtrend + volume spike
-            elif (fish[i] < 1.5 and fish[i-1] >= 1.5 and 
-                  price < ema_34_1d_aligned[i] and vol_confirm[i]):
+            # Enter short: Williams %R crosses below -20 from overbought + 1d downtrend + volume spike
+            elif (wr < -20 and wr_prev >= -20 and price < ema_34_1d_aligned[i] and vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Fisher crosses below -1.5 or trend reverses
-            if fish[i] < -1.5 or price < ema_34_1d_aligned[i]:
+            # Exit long: Williams %R rises above -20 (overbought) or trend reverses
+            if wr > -20 or price < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Fisher crosses above +1.5 or trend reverses
-            if fish[i] > 1.5 or price > ema_34_1d_aligned[i]:
+            # Exit short: Williams %R falls below -80 (oversold) or trend reverses
+            if wr < -80 or price > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
