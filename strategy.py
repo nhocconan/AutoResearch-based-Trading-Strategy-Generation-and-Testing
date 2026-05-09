@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Choppiness_Index_Breakout_1dTrend"
-timeframe = "4h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,78 +17,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend and choppiness
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
-    
-    # Get 4h data for Donchian breakout
+    # Get 4h data for trend and volume filter
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate 1d choppiness index (14-period)
-    high_14 = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
-    low_14 = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
-    atr_14 = pd.Series(df_1d['high'] - df_1d['low']).rolling(window=14, min_periods=14).sum().values
-    chop = 100 * np.log10(atr_14 / (high_14 - low_14)) / np.log10(14)
+    # Get 1d data for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Previous day's close for Camarilla calculation
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Calculate 4h Donchian channels (20-period)
-    high_20_4h = pd.Series(df_4h['high']).rolling(window=20, min_periods=20).max().values
-    low_20_4h = pd.Series(df_4h['low']).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels (R1, S1)
+    r1 = prev_close + 1.1 * (prev_high - prev_low) / 4
+    s1 = prev_close - 1.1 * (prev_high - prev_low) / 4
     
-    # Align all to 4h
-    chop_4h = align_htf_to_ltf(prices, df_1d, chop)
-    ema50_1d_4h = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    high_20_4h_aligned = align_htf_to_ltf(prices, df_4h, high_20_4h)
-    low_20_4h_aligned = align_htf_to_ltf(prices, df_4h, low_20_4h)
+    # Trend filter: 4h EMA50
+    ema50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Volume filter: current 4h volume > 1.5 * 20-day average
+    vol_series = pd.Series(df_4h['volume'].values)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    volume_filter_4h = df_4h['volume'].values > (vol_ma * 1.5)
+    
+    # Align all to 1h
+    r1_1h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_1h = align_htf_to_ltf(prices, df_1d, s1)
+    ema50_4h_1h = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    volume_filter_1h = align_htf_to_ltf(prices, df_4h, volume_filter_4h)
+    
+    # Session filter: 08:00-20:00 UTC
+    hours = prices.index.hour
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(50, 20)  # Need enough data
+    start_idx = max(50, 20)  # Need enough data for EMA50 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(chop_4h[i]) or np.isnan(ema50_1d_4h[i]) or
-            np.isnan(high_20_4h_aligned[i]) or np.isnan(low_20_4h_aligned[i])):
+        if (np.isnan(r1_1h[i]) or np.isnan(s1_1h[i]) or
+            np.isnan(ema50_4h_1h[i]) or np.isnan(volume_filter_1h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        chop_val = chop_4h[i]
-        trend = ema50_1d_4h[i]
-        upper_donchian = high_20_4h_aligned[i]
-        lower_donchian = low_20_4h_aligned[i]
+        # Skip outside trading session
+        if not (8 <= hours[i] <= 20):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
         
-        # Chop > 61.8 = ranging (mean revert), Chop < 38.2 = trending (breakout)
+        r1_val = r1_1h[i]
+        s1_val = s1_1h[i]
+        trend = ema50_4h_1h[i]
+        vol_filter = volume_filter_1h[i]
+        
         if position == 0:
-            # Enter long: break above upper Donchian in trending market
-            if chop_val < 38.2 and close[i] > upper_donchian and close[i] > trend:
-                signals[i] = 0.25
+            # Enter long: break above R1 with volume and above trend
+            if close[i] > r1_val and close[i] > trend and vol_filter:
+                signals[i] = 0.20
                 position = 1
-            # Enter short: break below lower Donchian in trending market
-            elif chop_val < 38.2 and close[i] < lower_donchian and close[i] < trend:
-                signals[i] = -0.25
+            # Enter short: break below S1 with volume and below trend
+            elif close[i] < s1_val and close[i] < trend and vol_filter:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long: chop > 61.8 (ranging) or close below lower Donchian
-            if chop_val > 61.8 or close[i] < lower_donchian:
+            # Exit long: close below S1 (mean reversion to center)
+            if close[i] < s1_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: chop > 61.8 (ranging) or close above upper Donchian
-            if chop_val > 61.8 or close[i] > upper_donchian:
+            # Exit short: close above R1 (mean reversion to center)
+            if close[i] > r1_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
