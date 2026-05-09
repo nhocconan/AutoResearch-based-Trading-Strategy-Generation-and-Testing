@@ -1,15 +1,21 @@
+# 12h_PremiumDiscount_Equilibrium_1dTrend_Volume
+# Hypothesis: Premium/discount to 1d VWAP with volume confirmation and 1d trend filter
+# Works in bull/bear: mean reversion in range, trend continuation in trends
+# Targets 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# Uses 1d VWAP for mean reversion signals, 1d EMA for trend filter, volume for confirmation
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Volume_Filter"
-timeframe = "1h"
+name = "12h_PremiumDiscount_Equilibrium_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,79 +23,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter and daily for Camarilla pivot
-    df_4h = get_htf_data(prices, '4h')
+    # Get 1d data for VWAP, EMA trend, and volume average
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_4h) < 30 or len(df_1d) < 30:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 4h EMA(50) for trend filter
-    close_4h = pd.Series(df_4h['close'].values)
-    ema50_4h = close_4h.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Calculate 1d VWAP (volume-weighted average price)
+    typical_price = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3
+    vwap_numerator = (typical_price * df_1d['volume'].values).cumsum()
+    vwap_denominator = df_1d['volume'].values.cumsum()
+    vwap = vwap_numerator / vwap_denominator
+    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap)
     
-    # Calculate daily Camarilla pivot levels (R1, S1) from previous day
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    # Calculate 1d EMA(34) for trend filter
+    close_1d = pd.Series(df_1d['close'].values)
+    ema34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    pivot = (daily_high + daily_low + daily_close) / 3
-    r1 = pivot + (daily_high - daily_low) * 1.1 / 12
-    s1 = pivot - (daily_high - daily_low) * 1.1 / 12
+    # Calculate 1d volume average (20-period)
+    vol_1d = pd.Series(df_1d['volume'].values)
+    vol_ma20_1d = vol_1d.rolling(window=20, min_periods=20).mean().values
+    vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
     
-    # Align Camarilla levels to 1h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Current volume for confirmation
     vol_series = pd.Series(volume)
-    vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
+    vol_ma20_current = vol_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # warmup for indicators
+    start_idx = 50  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema50_4h_aligned[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(vwap_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(vol_ma20_1d_aligned[i]) or np.isnan(vol_ma20_current[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 1.5 * vol_ma20[i]
-        in_session = 8 <= hours[i] <= 20
+        vol_ok = volume[i] > 1.5 * vol_ma20_current[i]
         
         if position == 0:
-            # Long: Price breaks above R1 with volume, trend, and session
-            if close[i] > r1_aligned[i] and vol_ok and close[i] > ema50_4h_aligned[i] and in_session:
-                signals[i] = 0.20
+            # Long: Discount to VWAP (< -0.5%) with volume and above EMA trend
+            if (close[i] < vwap_aligned[i] * 0.995) and vol_ok and (close[i] > ema34_1d_aligned[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 with volume, trend, and session
-            elif close[i] < s1_aligned[i] and vol_ok and close[i] < ema50_4h_aligned[i] and in_session:
-                signals[i] = -0.20
+            # Short: Premium to VWAP (> +0.5%) with volume and below EMA trend
+            elif (close[i] > vwap_aligned[i] * 1.005) and vol_ok and (close[i] < ema34_1d_aligned[i]):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price crosses below S1 (reversion to mean)
-            if close[i] < s1_aligned[i]:
+            # Exit long: Return to VWAP or trend reversal
+            if (close[i] > vwap_aligned[i]) or (close[i] < ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price crosses above R1 (reversion to mean)
-            if close[i] > r1_aligned[i]:
+            # Exit short: Return to VWAP or trend reversal
+            if (close[i] < vwap_aligned[i]) or (close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
