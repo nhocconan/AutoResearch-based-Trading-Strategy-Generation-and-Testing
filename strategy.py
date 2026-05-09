@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Slow
+# 4h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Slow_Plus
 # Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
-# Uses a higher volume threshold (2.0x average) and only enters when price is near 1d VWAP to reduce trades.
-# Designed to generate ~20-30 trades/year on 4h to avoid fee drag while maintaining edge in bull/bear markets.
-# Long when 1d trend up (close > EMA34), price breaks above R3, volume > 2x average, and close > 1d VWAP.
-# Short when 1d trend down (close < EMA34), price breaks below S3, volume > 2x average, and close < 1d VWAP.
+# Enhancements: Added ADX(14) trend strength filter to avoid whipsaws in sideways markets.
+# Uses higher volume threshold (2.0x average) and only enters when price is near 1d VWAP.
+# Designed to generate ~15-25 trades/year on 4h to avoid fee drag while maintaining edge.
+# Long when 1d trend up (close > EMA34), ADX > 25, price breaks above R3, volume > 2x average, and close > 1d VWAP.
+# Short when 1d trend down (close < EMA34), ADX > 25, price breaks below S3, volume > 2x average, and close < 1d VWAP.
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Slow"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Slow_Plus"
 timeframe = "4h"
 leverage = 1.0
 
@@ -43,6 +44,68 @@ def generate_signals(prices):
     
     # Align 1d EMA34 to 4h timeframe
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Calculate 1d ADX(14) for trend strength filter
+    # Calculate +DM, -DM, TR
+    plus_dm = np.zeros(len(df_1d))
+    minus_dm = np.zeros(len(df_1d))
+    tr = np.zeros(len(df_1d))
+    
+    for i in range(1, len(df_1d)):
+        high_diff = high_1d[i] - high_1d[i-1]
+        low_diff = low_1d[i-1] - low_1d[i]
+        
+        plus_dm[i] = max(high_diff, 0) if high_diff > low_diff and high_diff > 0 else 0
+        minus_dm[i] = max(low_diff, 0) if low_diff > high_diff and low_diff > 0 else 0
+        tr[i] = max(high_1d[i] - low_1d[i], 
+                   abs(high_1d[i] - close_1d[i-1]), 
+                   abs(low_1d[i] - close_1d[i-1]))
+    
+    # Smooth using Wilder's smoothing (alpha = 1/period)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(data[1:period])
+        # Subsequent values: smoothed = prev * (1 - 1/period) + current * (1/period)
+        for i in range(period, len(data)):
+            result[i] = result[i-1] * (1 - 1/period) + data[i] * (1/period)
+        return result
+    
+    # Calculate smoothed +DM, -DM, TR
+    smoothed_plus_dm = wilders_smoothing(plus_dm, 14)
+    smoothed_minus_dm = wilders_smoothing(minus_dm, 14)
+    smoothed_tr = wilders_smoothing(tr, 14)
+    
+    # Calculate DI+ and DI-
+    di_plus = np.full_like(close_1d, np.nan)
+    di_minus = np.full_like(close_1d, np.nan)
+    valid = (~np.isnan(smoothed_plus_dm)) & (~np.isnan(smoothed_minus_dm)) & (smoothed_tr != 0)
+    di_plus[valid] = (smoothed_plus_dm[valid] / smoothed_tr[valid]) * 100
+    di_minus[valid] = (smoothed_minus_dm[valid] / smoothed_tr[valid]) * 100
+    
+    # Calculate DX and ADX
+    dx = np.full_like(close_1d, np.nan)
+    dx_valid = (~np.isnan(di_plus)) & (~np.isnan(di_minus)) & ((di_plus + di_minus) != 0)
+    dx[dx_valid] = (np.abs(di_plus[dx_valid] - di_minus[dx_valid]) / (di_plus[dx_valid] + di_minus[dx_valid])) * 100
+    
+    adx_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 27:  # Need 14 for DX + 14 for ADX smoothing
+        # First ADX is average of first 14 DX values
+        first_adx_idx = 27  # 14 (for DX) + 13 (for smoothing to get first smoothed value)
+        if first_adx_idx < len(dx):
+            valid_dx = dx[14:first_adx_idx+1]  # DX values from index 14 to 27
+            if len(valid_dx) > 0:
+                adx_1d[first_adx_idx] = np.nanmean(valid_dx)
+                # Subsequent ADX values: smoothed = prev * (13/14) + current * (1/14)
+                for i in range(first_adx_idx + 1, len(dx)):
+                    if not np.isnan(dx[i]):
+                        adx_1d[i] = adx_1d[i-1] * (13/14) + dx[i] * (1/14)
+    
+    # Align 1d EMA34 and ADX to 4h timeframe
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     # Calculate Camarilla levels for each 1d bar: R3, S3
     camarilla_r3_1d = np.full_like(close_1d, np.nan)
@@ -106,40 +169,41 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(camarilla_r3_1d_aligned[i]) or 
-            np.isnan(camarilla_s3_1d_aligned[i]) or np.isnan(volume_ratio[i]) or
-            np.isnan(vwap_1d_aligned[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(adx_1d_aligned[i]) or 
+            np.isnan(camarilla_r3_1d_aligned[i]) or np.isnan(camarilla_s3_1d_aligned[i]) or
+            np.isnan(volume_ratio[i]) or np.isnan(vwap_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine 1d trend and price relative to VWAP
+        # Determine 1d trend, trend strength, and price relative to VWAP
         trend_up = close[i] > ema34_1d_aligned[i]
+        strong_trend = adx_1d_aligned[i] > 25
         price_above_vwap = close[i] > vwap_1d_aligned[i]
         price_below_vwap = close[i] < vwap_1d_aligned[i]
         
         if position == 0:
-            # Enter long: 1d trend up + price breaks above R3 + volume confirmation + price above VWAP
-            if trend_up and close[i] > camarilla_r3_1d_aligned[i] and volume_ratio[i] > 2.0 and price_above_vwap:
+            # Enter long: 1d trend up + strong trend + price breaks above R3 + volume confirmation + price above VWAP
+            if trend_up and strong_trend and close[i] > camarilla_r3_1d_aligned[i] and volume_ratio[i] > 2.0 and price_above_vwap:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: 1d trend down + price breaks below S3 + volume confirmation + price below VWAP
-            elif not trend_up and close[i] < camarilla_s3_1d_aligned[i] and volume_ratio[i] > 2.0 and price_below_vwap:
+            # Enter short: 1d trend down + strong trend + price breaks below S3 + volume confirmation + price below VWAP
+            elif not trend_up and strong_trend and close[i] < camarilla_s3_1d_aligned[i] and volume_ratio[i] > 2.0 and price_below_vwap:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: 1d trend turns down or price breaks below S3 or price falls below VWAP
-            if not trend_up or close[i] < camarilla_s3_1d_aligned[i] or not price_above_vwap:
+            # Exit long: 1d trend turns down or weak trend or price breaks below S3 or price falls below VWAP
+            if not trend_up or not strong_trend or close[i] < camarilla_s3_1d_aligned[i] or not price_above_vwap:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: 1d trend turns up or price breaks above R3 or price rises above VWAP
-            if trend_up or close[i] > camarilla_r3_1d_aligned[i] or not price_below_vwap:
+            # Exit short: 1d trend turns up or weak trend or price breaks above R3 or price rises above VWAP
+            if trend_up or not strong_trend or close[i] > camarilla_r3_1d_aligned[i] or not price_below_vwap:
                 signals[i] = 0.0
                 position = 0
             else:
